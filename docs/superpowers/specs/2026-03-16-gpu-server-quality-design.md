@@ -47,6 +47,8 @@ inputs = self.tokenizer(...).to(self.device)
 
 **Quantization constraint**: `torch.quantization.quantize_dynamic` is CPU-only. Skip on GPU (GPU doesn't need INT8 quantization for speed).
 
+**MPS (Apple Silicon)**: Best-effort support. `torch.compile` has limited MPS backend support — the existing try/except in `TransformersModel.__init__` handles this gracefully (falls back to eager mode on compile failure).
+
 **Files modified**: `narro/tts.py`, `narro/backends/transformers.py`, `narro/backends/base.py`, `narro/decode_only.py`
 
 ### 2. Server Architecture (`narro serve`)
@@ -80,23 +82,27 @@ Request body (OpenAI-compatible):
 ```
 
 - `model`, `voice` — accepted but ignored (single model, single voice). For client compatibility.
-- `response_format` — `"wav"` or `"opus"` (default `"opus"`). Opus requires ffmpeg on the server.
+- `response_format` — `"wav"` or `"opus"` (default `"wav"`). Opus requires ffmpeg on the server; if opus is requested and ffmpeg is unavailable, return HTTP 422 with an error message.
 - `stream` — if `true`, returns SSE stream using `infer_stream()`.
-- `align` — if `true`, include paragraph alignment data in response.
+- `align` — if `true`, include paragraph alignment data in response. For this to work, the server receives paragraphs (newline-separated in `input`, or as a JSON array in `input`), runs `encode_batch()`, and returns paragraph-indexed alignment data alongside the audio.
 
-**Non-streaming response**: Raw audio bytes with appropriate `Content-Type`. If `align: true`, alignment JSON in `X-Alignment` header.
+**Non-streaming response**: Raw audio bytes with appropriate `Content-Type`. If `align: true`, alignment JSON in `X-Alignment` header as `[{"paragraph": 0, "start": 0.0, "end": 2.1}, ...]`.
 
-**Streaming response** (SSE):
+**Streaming response** (SSE). Chunks are raw 32kHz 16-bit mono PCM bytes (base64-encoded), not WAV files — WAV headers specify total length which is unknown during streaming. The client reconstructs audio from the PCM stream using the known format (32kHz, int16, mono):
 
 ```
-data: {"audio": "<base64-wav-chunk>", "type": "speech.audio.delta"}
+data: {"audio": "<base64-pcm>", "format": {"sample_rate": 32000, "dtype": "int16", "channels": 1}, "type": "speech.audio.delta"}
 
-data: {"audio": "<base64-wav-chunk>", "type": "speech.audio.done", "alignment": [...]}
+data: {"type": "speech.audio.done", "alignment": [...]}
 ```
+
+The first `delta` event includes `format` metadata. Subsequent `delta` events may omit it.
 
 **Additional endpoints**:
 
 - `GET /health` — `{"status": "ok", "device": "cuda", "model": "ekwek/Soprano-1.1-80M"}`
+
+**Concurrency model**: Single-request processing with a mutex/asyncio lock. Torch inference holds the GIL and GPU memory is not safely shared across concurrent calls. Requests that arrive during inference are queued. This is simple and correct; a worker pool can be added later if needed.
 
 **Dependencies**: `fastapi` and `uvicorn` as optional extras:
 
@@ -124,10 +130,20 @@ class NarroClient:
         """Send text to server, return audio bytes or stream chunks."""
         ...
 
+    def generate_with_alignment(self, paragraphs, out_path, response_format='wav'):
+        """Send paragraphs to server with align=true, write audio and return alignment.
+
+        This is the Hugo integration path. Paragraphs are sent as a JSON array
+        in the `input` field. Returns the paragraph alignment list.
+        """
+        ...
+
     def health(self):
         """Check server availability. Returns dict or raises."""
         ...
 ```
+
+The `generate_with_alignment` method is the key interface for Hugo: it sends paragraphs, receives audio + alignment JSON, and returns both. This avoids exposing the `encode`/`decode` split over HTTP.
 
 **Discovery order**:
 
@@ -206,7 +222,7 @@ narro bench --no-compile       # compare compiled vs not
 
 Primary metric: **Real-Time Factor (RTF)** = `inference_time / audio_duration`. RTF < 1.0 means faster than real-time.
 
-**Files modified**: `narro/cli.py` (add `bench` subcommand)
+**Files modified**: `narro/cli.py` (add `bench` subcommand, update `_subcommands` set to include `serve` and `bench`)
 **Files created**: `narro/bench.py` (replaces `benchmarks/bench.py`)
 
 ### 5. CPU Micro-optimizations
@@ -217,11 +233,11 @@ No new dependencies. Measured via benchmark framework — only keep changes that
 
 **5b. `torch.inference_mode()`**: Normalize from `torch.no_grad()` to `torch.inference_mode()` everywhere. Faster because it disables more tracking.
 
-**5c. KV-cache prefix reuse**: All sentences share `[STOP][TEXT]` prefix tokens. Pre-compute prefix KV cache once, reuse across sentences in a batch. Modest savings (prefix is ~10 tokens) but free.
+**5c. KV-cache prefix reuse**: All sentences share `[STOP][TEXT]` prefix (~3-4 tokens). HuggingFace's `model.generate()` does not natively support prefix KV-cache sharing across batch items. This would require manually pre-computing the prefix and modifying the generation loop. **Investigate feasibility** via benchmark framework — only implement if the savings justify the complexity. May not be worth it given the short prefix.
 
-**5d. Tighter `max_new_tokens`**: Estimate bound from input length: `max_new_tokens = min(512, len(input_tokens) * 8)`. Garbled sentences fail faster instead of generating 512 garbage tokens.
+**5d. Tighter `max_new_tokens`**: Estimate bound from the tokenized prompt length (the token count of the full `[STOP][TEXT]...[START]` string, available as `inputs['input_ids'].shape[1]` in `BaseModel.infer`): `max_new_tokens = min(512, prompt_token_count * 8)`. For a typical 20-token prompt, this limits generation to 160 tokens instead of 512. Garbled sentences hit the limit and trigger retry faster.
 
-**5e. `torch.compile` mode tuning**: Compare `reduce-overhead` vs `max-autotune` on CPU via benchmark framework. Use whichever is faster.
+**5e. `torch.compile` mode tuning**: Compare `reduce-overhead` vs `max-autotune` via benchmark framework. Note that compile behavior differs between CPU (C++/OpenMP backend) and CUDA (Triton backend) — the optimal mode may differ per device. On MPS, `torch.compile` has limited support; the existing try/except handles this gracefully (falls back to eager mode).
 
 **Files modified**: `narro/tts.py`, `narro/backends/base.py`
 
@@ -283,7 +299,9 @@ def quality_check(self, response, input_text):
 - **`finish_reason='length'`**: Currently logged as a warning but output is kept. Should trigger retry.
 - **Token/input length ratio**: Normal speech has a predictable output-to-input ratio. Extreme outliers (50-char input producing 400 tokens, or 3 tokens) indicate garbage.
 
-**Default retries**: Change from `retries=0` to `retries=1`. With better detection, retry is more likely to help.
+**Call site update**: In `encode_batch`, replace the current `self.hallucination_detector(hidden_state)` call (line 167 of `tts.py`) with `self.quality_check(response, original_text)`, passing the full response dict and the original sentence text from `sentence_data[pending_indices[idx]][3]`.
+
+**Default retries**: Change from `retries=0` to `retries=1`. This is a deliberate behavioral change: every inference call now runs the quality check and may regenerate a sentence. This doubles worst-case latency for sentences that fail quality checks, but avoids silently producing garbage audio. The server endpoint also defaults to `retries=1`.
 
 **Threshold calibration**: Run benchmark corpus, collect entropy distributions and length ratios for good vs bad output. Set thresholds at the boundary. The benchmark framework enables this.
 
@@ -303,7 +321,7 @@ No code changes to narro. When Claude Code orchestrates narration:
 
 Paragraph index alignment preserved because rewrite is 1:1 per paragraph. This is a workflow pattern, not a code feature.
 
-Helper function `extract_paragraphs(body)` provided for convenience — returns the list of paragraphs ready for rewriting.
+Helper function `extract_paragraphs(body)` provided for convenience — calls `extract_prose(body)` internally, then splits on `\n\n` and strips. Replaces the inline `prose = extract_prose(body); paragraphs = [p.strip() for p in prose.split('\n\n') if p.strip()]` pattern currently in `hugo/cli.py` (line 264-269).
 
 **Tier 2: Built-in endpoint rewriting (`narro hugo generate --rewrite`)**
 
