@@ -63,7 +63,7 @@ def extract_prose(text: str) -> str:
     5. Strip Hugo shortcodes (paired and self-closing)
     6. Strip HTML tags
     7. Convert markdown links [text](url) -> text
-    8. Strip heading markers
+    8. Strip heading lines entirely
     9. Strip horizontal rules (---, ***, ___)
     10. Strip blockquote markers >
     11. Strip list markers (-, *, 1.)
@@ -112,8 +112,8 @@ def extract_prose(text: str) -> str:
     # 7. Convert markdown links [text](url) -> text
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
 
-    # 8. Strip heading markers (## Foo -> Foo)
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # 8. Strip heading lines entirely (not speakable prose)
+    text = re.sub(r"^#{1,6}\s+.*$", "", text, flags=re.MULTILINE)
 
     # 9. Strip horizontal rules (---, ***, ___ on their own line)
     text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
@@ -145,3 +145,17 @@ def extract_prose(text: str) -> str:
     text = text.strip()
 
     return text
+
+
+def extract_paragraphs(body: str) -> list[str]:
+    """Extract speakable paragraphs from a markdown body.
+
+    Calls extract_prose() then splits on paragraph boundaries (double newlines).
+
+    Returns:
+        List of non-empty stripped paragraph strings.
+    """
+    prose = extract_prose(body)
+    if not prose.strip():
+        return []
+    return [p.strip() for p in prose.split('\n\n') if p.strip()]

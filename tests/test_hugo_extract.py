@@ -1,6 +1,6 @@
 """Tests for narro.hugo.extract — markdown to speakable plain text."""
 
-from narro.hugo.extract import parse_frontmatter, extract_prose
+from narro.hugo.extract import extract_paragraphs, parse_frontmatter, extract_prose
 
 
 class TestParseFrontmatter:
@@ -56,7 +56,7 @@ class TestExtractProse:
     def test_strips_headings(self):
         text = "## Intro\n\nText"
         result = extract_prose(text)
-        assert result == "Intro\n\nText"
+        assert result == "Text"
 
     def test_strips_fenced_code(self):
         text = "Before code.\n\n```python\nprint('hello')\n```\n\nAfter code."
@@ -235,7 +235,7 @@ class TestExtractProse:
         text = "## Heading\r\n\r\nParagraph."
         result = extract_prose(text)
         assert "##" not in result
-        assert "Heading" in result
+        assert "Heading" not in result
         assert "Paragraph." in result
 
     def test_dollar_signs_in_prose_preserved(self):
@@ -310,8 +310,9 @@ That concludes the tutorial.
 """
         result = extract_prose(md)
 
-        # Readable content should be present
-        assert "Introduction" in result
+        # Readable content should be present (headings stripped entirely)
+        assert "Introduction" not in result
+        assert "Steps" not in result
         assert "gradient descent" in result
         assert "machine learning" in result
         assert "Initialize parameters" in result
@@ -342,3 +343,28 @@ That concludes the tutorial.
         assert "`Adam`" not in result  # backticks stripped, text preserved
         assert "Hidden implementation details" not in result
         assert "should_be_removed" not in result
+
+
+class TestExtractParagraphs:
+    """Tests for extract_paragraphs helper."""
+
+    def test_splits_on_double_newline(self):
+        body = "First paragraph.\n\nSecond paragraph."
+        result = extract_paragraphs(body)
+        assert len(result) == 2
+        assert result[0] == "First paragraph."
+        assert result[1] == "Second paragraph."
+
+    def test_strips_markdown(self):
+        body = "## Heading\n\nParagraph text.\n\n```python\ncode\n```\n\nMore text."
+        result = extract_paragraphs(body)
+        assert all("##" not in p for p in result)
+        assert all("```" not in p for p in result)
+
+    def test_empty_body(self):
+        assert extract_paragraphs("") == []
+
+    def test_skips_empty_paragraphs(self):
+        body = "Para one.\n\n\n\nPara two."
+        result = extract_paragraphs(body)
+        assert len(result) == 2
