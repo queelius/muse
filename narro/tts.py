@@ -58,8 +58,7 @@ class Narro:
         if num_threads is not None:
             torch.set_num_threads(num_threads)
         else:
-            import os as _os
-            torch.set_num_threads(min(_os.cpu_count() or 4, 8))
+            torch.set_num_threads(min(os.cpu_count() or 4, 8))
         try:
             torch.set_num_interop_threads(2)
         except RuntimeError:
@@ -116,22 +115,6 @@ class Narro:
                 res.append((f'[STOP][TEXT]{sentence}[START]', text_idx, sentence_idx, sentence))
         return res
 
-    def hallucination_detector(self, hidden_state):
-        if len(hidden_state) <= MAX_RUNLENGTH:
-            return False
-        stacked = torch.stack(list(hidden_state))
-        total_diffs = torch.diff(stacked, dim=0).abs().sum(dim=1)
-        is_similar = (total_diffs < DIFF_THRESHOLD).numpy()
-        aah_runlength = 0
-        for similar in is_similar:
-            if similar:
-                aah_runlength += 1
-            elif aah_runlength > 0:
-                aah_runlength -= 1
-            if aah_runlength > MAX_RUNLENGTH:
-                return True
-        return False
-
     def quality_check(self, response, input_text):
         """Check for repetition, garbled output, or degenerate generation.
         Returns failure type string, or None if passed."""
@@ -160,7 +143,7 @@ class Narro:
             return False
         stacked = hidden_states if isinstance(hidden_states, torch.Tensor) else torch.stack(list(hidden_states))
         total_diffs = torch.diff(stacked, dim=0).abs().sum(dim=1)
-        is_similar = (total_diffs < DIFF_THRESHOLD).numpy()
+        is_similar = (total_diffs < DIFF_THRESHOLD).cpu().numpy()
         runlength = 0
         for similar in is_similar:
             if similar:
@@ -233,6 +216,10 @@ class Narro:
             if tries_left > 0:
                 logger.warning("%d sentence(s) will be regenerated.", len(pending_indices))
 
+        if pending_indices:
+            logger.warning("Retries exhausted: %d sentence(s) still failing quality checks.",
+                           len(pending_indices))
+
         logger.info("LLM inference: %.1f ms", (time.perf_counter() - t_llm) * 1000)
 
         # Build SentenceEncoding objects (convert to numpy at the boundary)
@@ -242,12 +229,12 @@ class Narro:
 
             attention = None
             if response['attention'] is not None:
-                attention = response['attention'].numpy()
+                attention = response['attention'].cpu().numpy()
 
             sentence_encodings.append(SentenceEncoding(
-                hidden_states=response['hidden_state'].numpy(),
-                token_ids=response['token_ids'].numpy(),
-                token_entropy=response['token_entropy'].numpy(),
+                hidden_states=response['hidden_state'].cpu().numpy(),
+                token_ids=response['token_ids'].cpu().numpy(),
+                token_entropy=response['token_entropy'].cpu().numpy(),
                 finish_reason=response['finish_reason'],
                 text=original_text,
                 text_index=text_idx,

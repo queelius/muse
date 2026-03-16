@@ -188,7 +188,7 @@ class TestHallucinationDetectorEdgeCases:
         base = torch.zeros(HIDDEN_DIM)
         # MAX_RUNLENGTH identical states => MAX_RUNLENGTH-1 diffs, not enough
         hidden_state = [base.clone() for _ in range(MAX_RUNLENGTH)]
-        assert tts.hallucination_detector(hidden_state) is False
+        assert tts._detect_repetition(hidden_state) is False
 
     def test_runlength_counter_decrements(self):
         """The detector decrements the counter on varied states."""
@@ -204,24 +204,24 @@ class TestHallucinationDetectorEdgeCases:
             # 10 varied states (high magnitude diffs)
             for _ in range(10):
                 hidden_state.append(torch.randn(HIDDEN_DIM) * 10000)
-        assert tts.hallucination_detector(hidden_state) is False
+        assert tts._detect_repetition(hidden_state) is False
 
     def test_single_element_sequence(self):
         """Single element sequence should return False."""
         tts = _make_tts_stub()
-        assert tts.hallucination_detector([torch.randn(HIDDEN_DIM)]) is False
+        assert tts._detect_repetition([torch.randn(HIDDEN_DIM)]) is False
 
     def test_empty_sequence(self):
         """Empty sequence should return False."""
         tts = _make_tts_stub()
-        assert tts.hallucination_detector([]) is False
+        assert tts._detect_repetition([]) is False
 
     def test_all_identical_long_sequence(self):
         """Long sequence of all-identical states should trigger."""
         tts = _make_tts_stub()
         base = torch.zeros(HIDDEN_DIM)
         hidden_state = [base.clone() for _ in range(100)]
-        assert tts.hallucination_detector(hidden_state) is True
+        assert tts._detect_repetition(hidden_state) is True
 
     def test_diffs_just_above_threshold_no_trigger(self):
         """States with L1 diffs just above DIFF_THRESHOLD should not trigger."""
@@ -237,7 +237,7 @@ class TestHallucinationDetectorEdgeCases:
                 hidden_state.append(state.clone())
             else:
                 hidden_state.append((state + delta).clone())
-        assert tts.hallucination_detector(hidden_state) is False
+        assert tts._detect_repetition(hidden_state) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1528,12 +1528,17 @@ class TestBaseModelStreamInfer:
         assert tokens[1]['finish_reason'] == 'stop'
 
     def test_stream_infer_max_tokens_limit(self):
-        """stream_infer should stop after max_new_tokens if no EOS."""
+        """stream_infer should stop after max_new_tokens if no EOS.
+
+        max_new_tokens = min(512, input_ids.shape[1] * 8).
+        With a 10-token input, max_new_tokens = min(512, 80) = 80.
+        """
         bm = self._make_base_model()
         eos_token_id = 2
         bm.model.config.eos_token_id = eos_token_id
 
-        bm.tokenizer.return_value = {'input_ids': torch.tensor([[1]])}
+        # Use 10 input tokens so max_new_tokens = min(512, 80) = 80
+        bm.tokenizer.return_value = {'input_ids': torch.tensor([[1] * 10])}
 
         prefill = MagicMock()
         prefill.past_key_values = "pkv"
@@ -1545,12 +1550,12 @@ class TestBaseModelStreamInfer:
         step.logits = torch.randn(1, 1, 100)
         step.hidden_states = (torch.randn(1, 1, 512),)
 
-        bm.model.side_effect = [prefill] + [step] * 520
+        bm.model.side_effect = [prefill] + [step] * 100
 
         with patch('torch.multinomial', return_value=torch.tensor([[10]])):
             tokens = list(bm.stream_infer("Test"))
 
-        assert len(tokens) == 512
+        assert len(tokens) == 80
         assert tokens[-1]['finish_reason'] == 'length'
 
     def test_stream_infer_no_repetition_penalty_when_1(self):

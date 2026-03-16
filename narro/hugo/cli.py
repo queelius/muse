@@ -38,18 +38,19 @@ def _lazy_import() -> None:
 
     When NARRO_SERVER is set, imports the HTTP client instead of the
     local model, allowing the generate flow to offload to a server.
+    Always imports Narro as fallback for empty-string NARRO_SERVER.
     """
     global Narro, NarroClient, extract_paragraph_alignment, save_alignment
     if Narro is not None or NarroClient is not None:
         return
 
+    from narro.tts import Narro as _Narro
+    Narro = _Narro
+
     server_url = os.environ.get('NARRO_SERVER')
     if server_url:
         from narro.client import NarroClient as _Client
         NarroClient = _Client
-    else:
-        from narro.tts import Narro as _Narro
-        Narro = _Narro
 
     from narro.alignment import (
         extract_paragraph_alignment as _extract,
@@ -256,7 +257,7 @@ def cmd_hugo_generate(
         print("Nothing to generate.")
         return {"generated": 0, "skipped": len(skipped), "errors": 0}
 
-    # Lazy imports — only when actually generating.
+    # Lazy imports -- only when actually generating.
     # Import into module globals so tests can monkeypatch
     # narro.hugo.cli.Narro, .extract_alignment_from_encoded, .save_alignment.
     _lazy_import()

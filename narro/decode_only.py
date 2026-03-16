@@ -85,7 +85,7 @@ def decode(encoded, decoder=None, decoder_batch_size=4):
     if num_texts == 0:
         return []
 
-    # Filter out 0-token sentences — they produce no audio and would crash
+    # Filter out 0-token sentences -- they produce no audio and would crash
     # the decoder (interpolate to negative size).
     items = []
     for s in encoded.sentences:
@@ -143,7 +143,7 @@ def write_wav(audio_tensor, out_path):
         audio_tensor: 1D float32 tensor in [-1, 1] range.
         out_path: Output WAV file path.
     """
-    pcm = (np.clip(audio_tensor.numpy(), -1.0, 1.0) * INT16_MAX).astype(np.int16)
+    pcm = (np.clip(audio_tensor.cpu().numpy(), -1.0, 1.0) * INT16_MAX).astype(np.int16)
     wavfile.write(out_path, SAMPLE_RATE, pcm)
 
 

@@ -2,8 +2,8 @@
 
 Exposes two endpoints:
 
-  GET  /health              — liveness probe
-  POST /v1/audio/speech     — synthesize speech (non-streaming or SSE streaming)
+  GET  /health              -- liveness probe
+  POST /v1/audio/speech     -- synthesize speech (non-streaming or SSE streaming)
 
 Usage (programmatic):
     from narro.server import create_app
@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -36,11 +37,10 @@ from .tts import INT16_MAX, SAMPLE_RATE, Narro
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Global TTS instance — lazy, created once at first request (or by create_app)
+# Global TTS instance -- lazy, created once at first request (or by create_app)
 # ---------------------------------------------------------------------------
 
 _tts: Optional[Narro] = None
-_tts_lock = asyncio.Lock()
 
 
 def _get_tts() -> Narro:
@@ -72,7 +72,7 @@ class SpeechRequest(BaseModel):
 
 def _tensor_to_wav_bytes(audio: torch.Tensor) -> bytes:
     """Convert a float32 audio tensor to raw WAV bytes (in-memory)."""
-    pcm = (np.clip(audio.numpy(), -1.0, 1.0) * INT16_MAX).astype(np.int16)
+    pcm = (np.clip(audio.cpu().numpy(), -1.0, 1.0) * INT16_MAX).astype(np.int16)
     buf = io.BytesIO()
     wavfile.write(buf, SAMPLE_RATE, pcm)
     return buf.getvalue()
@@ -80,15 +80,12 @@ def _tensor_to_wav_bytes(audio: torch.Tensor) -> bytes:
 
 def _wav_bytes_to_opus(wav_bytes: bytes) -> bytes:
     """Transcode WAV bytes to Opus/OGG via ffmpeg subprocess."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_in, \
-         tempfile.NamedTemporaryFile(suffix=".opus", delete=False) as tmp_out:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_in:
+        tmp_in.write(wav_bytes)
         in_path = tmp_in.name
-        out_path = tmp_out.name
+    out_path = in_path.replace(".wav", ".opus")
 
     try:
-        with open(in_path, "wb") as f:
-            f.write(wav_bytes)
-
         subprocess.run(
             ["ffmpeg", "-y", "-i", in_path, "-c:a", "libopus", out_path],
             check=True,
@@ -98,7 +95,6 @@ def _wav_bytes_to_opus(wav_bytes: bytes) -> bytes:
         with open(out_path, "rb") as f:
             return f.read()
     finally:
-        import os
         for p in (in_path, out_path):
             try:
                 os.unlink(p)
@@ -135,22 +131,16 @@ def create_app(
 
 
 # ---------------------------------------------------------------------------
-# Request handler for asyncio.Lock concurrency control
-# ---------------------------------------------------------------------------
-
-_inference_lock = asyncio.Lock()
-
-
-# ---------------------------------------------------------------------------
 # FastAPI app (module-level, importable for testing)
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Narro TTS Server", version="1.0.0")
+_inference_lock = asyncio.Lock()
 
 
 @app.get("/health")
 async def health():
-    """Liveness probe — returns model info if loaded."""
+    """Liveness probe -- returns model info if loaded."""
     tts = _get_tts()
     return {
         "status": "ok",
@@ -170,7 +160,7 @@ async def speech(req: SpeechRequest):
 
     Returns HTTP 400 for empty input, HTTP 422 if Opus requested without ffmpeg.
     """
-    if not req.input or not req.input.strip():
+    if not req.input.strip():
         raise HTTPException(status_code=400, detail="'input' must be non-empty text.")
 
     if req.response_format == "opus" and shutil.which("ffmpeg") is None:
@@ -233,10 +223,10 @@ def _streaming_response(tts: Narro, req: SpeechRequest) -> StreamingResponse:
         })
         yield f"data: {meta}\n\n"
 
-        # Stream inference chunks — held under lock to protect Torch GIL
+        # Stream inference chunks -- held under lock to protect Torch GIL
         async with _inference_lock:
             for chunk in tts.infer_stream(req.input):
-                pcm = (np.clip(chunk.numpy(), -1.0, 1.0) * INT16_MAX).astype(np.int16)
+                pcm = (np.clip(chunk.cpu().numpy(), -1.0, 1.0) * INT16_MAX).astype(np.int16)
                 encoded = base64.b64encode(pcm.tobytes()).decode("ascii")
                 payload = json.dumps({"type": "speech.audio.delta", "audio": encoded})
                 yield f"data: {payload}\n\n"

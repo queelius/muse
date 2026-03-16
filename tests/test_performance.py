@@ -37,7 +37,7 @@ class TestHallucinationDetector:
         tts = self._make_tts_stub()
         # 30 distinct hidden states (random => large L1 diffs)
         hidden_state = [torch.randn(512) * 1000 for _ in range(30)]
-        assert tts.hallucination_detector(hidden_state) is False
+        assert tts._detect_repetition(hidden_state) is False
 
     def test_hallucination_detected(self):
         """Repeated identical hidden states should trigger detection."""
@@ -45,14 +45,14 @@ class TestHallucinationDetector:
         base = torch.randn(512)
         # 50 near-identical states => long run of small diffs
         hidden_state = [base + torch.randn(512) * 1e-6 for _ in range(50)]
-        assert tts.hallucination_detector(hidden_state) is True
+        assert tts._detect_repetition(hidden_state) is True
 
     def test_short_sequence_skipped(self):
         """Sequences shorter than MAX_RUNLENGTH should return False immediately."""
         from narro.tts import MAX_RUNLENGTH
         tts = self._make_tts_stub()
         hidden_state = [torch.randn(512) for _ in range(MAX_RUNLENGTH)]
-        assert tts.hallucination_detector(hidden_state) is False
+        assert tts._detect_repetition(hidden_state) is False
 
     def test_mixed_sequence(self):
         """A sequence with some similar and some different states."""
@@ -66,7 +66,7 @@ class TestHallucinationDetector:
             hidden_state.append(base + torch.randn(512) * 1e-6)
         for _ in range(10):
             hidden_state.append(torch.randn(512) * 1000)
-        assert tts.hallucination_detector(hidden_state) is False
+        assert tts._detect_repetition(hidden_state) is False
 
     def test_edge_just_above_threshold(self):
         """Exactly MAX_RUNLENGTH+1 similar states should trigger."""
@@ -81,7 +81,7 @@ class TestHallucinationDetector:
         # MAX_RUNLENGTH + 2 identical states => MAX_RUNLENGTH + 1 diffs below threshold
         for _ in range(MAX_RUNLENGTH + 2):
             hidden_state.append(base.clone())
-        assert tts.hallucination_detector(hidden_state) is True
+        assert tts._detect_repetition(hidden_state) is True
 
 
 # ---------------------------------------------------------------------------

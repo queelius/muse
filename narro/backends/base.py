@@ -226,7 +226,7 @@ class BaseModel:
             generated_ids = input_ids
             next_token = get_next_token(next_token_logits, generated_ids)
 
-            max_new_tokens = 512
+            max_new_tokens = min(512, input_ids.shape[1] * 8)
             eos_token_id = self.model.config.eos_token_id
             stream_t0 = time.perf_counter()
 
