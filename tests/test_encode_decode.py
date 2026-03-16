@@ -8,6 +8,20 @@ import numpy as np
 import pytest
 import torch
 
+
+def _make_batch_encoding(d):
+    """Wrap a plain dict in a MagicMock that behaves like HuggingFace BatchEncoding.
+
+    Supports dict-style access and has a .to() method that returns itself, so tests
+    using BaseModel (which calls .to(self.device) on tokenizer output) don't break.
+    """
+    m = MagicMock()
+    m.__getitem__ = MagicMock(side_effect=lambda k: d[k])
+    m.__contains__ = MagicMock(side_effect=lambda k: k in d)
+    m.get = MagicMock(side_effect=lambda k, default=None: d.get(k, default))
+    m.to.return_value = m
+    return m
+
 from narro.tts import (
     Narro,
     SAMPLE_RATE,
@@ -572,6 +586,7 @@ class TestBaseModelEnrichedOutput:
         bm = BaseModel()
         bm.model = MagicMock()
         bm.tokenizer = MagicMock()
+        bm.device = 'cpu'
         return bm
 
     def test_infer_returns_token_ids(self):
@@ -580,10 +595,10 @@ class TestBaseModelEnrichedOutput:
         bm.model.config.eos_token_id = eos_token_id
         bm.model.config.hidden_size = 512
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1, 5, 6]]),
             'attention_mask': torch.tensor([[1, 1, 1]]),
-        }
+        })
 
         mock_outputs = MagicMock()
         mock_outputs.sequences = torch.tensor([[1, 5, 6, 10, 11, eos_token_id]])
@@ -613,10 +628,10 @@ class TestBaseModelEnrichedOutput:
         bm.model.config.eos_token_id = eos_token_id
         bm.model.config.hidden_size = 512
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1]]),
             'attention_mask': torch.tensor([[1]]),
-        }
+        })
 
         mock_outputs = MagicMock()
         mock_outputs.sequences = torch.tensor([[1, 10, eos_token_id]])

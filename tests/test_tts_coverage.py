@@ -26,6 +26,20 @@ from narro.tts import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _make_batch_encoding(d):
+    """Wrap a plain dict in a MagicMock that behaves like HuggingFace BatchEncoding.
+
+    Supports dict-style access and has a .to() method that returns itself, so tests
+    using BaseModel (which calls .to(self.device) on tokenizer output) don't break.
+    """
+    m = MagicMock()
+    m.__getitem__ = MagicMock(side_effect=lambda k: d[k])
+    m.__contains__ = MagicMock(side_effect=lambda k: k in d)
+    m.get = MagicMock(side_effect=lambda k, default=None: d.get(k, default))
+    m.to.return_value = m
+    return m
+
+
 def _make_tts_stub():
     """Create a Narro stub without triggering __init__ (warmup inference)."""
     obj = object.__new__(Narro)
@@ -540,6 +554,110 @@ class TestInferStream:
 
         chunks = list(tts.infer_stream("Hello world."))
         assert len(chunks) >= 1
+
+
+# ---------------------------------------------------------------------------
+# BaseModel.infer device placement tests
+# ---------------------------------------------------------------------------
+
+class TestBaseModelDeviceInfer:
+    """Test that BaseModel.infer and stream_infer move inputs to self.device."""
+
+    def _make_model_stub(self):
+        """Create a TransformersModel stub via __new__ (skip __init__)."""
+        from narro.backends.transformers import TransformersModel
+        model = object.__new__(TransformersModel)
+        model.device = 'cpu'
+        return model
+
+    def test_infer_moves_inputs_to_device(self):
+        """infer() must call .to(self.device) on tokenizer outputs."""
+        model = self._make_model_stub()
+
+        # Build a mock tokenizer output that tracks .to() calls
+        mock_inputs = MagicMock()
+        mock_inputs.__getitem__ = MagicMock(side_effect=lambda key: MagicMock(
+            shape=(1, 3) if key == 'input_ids' else (1, 3)
+        ))
+
+        mock_tokenizer = MagicMock(return_value=mock_inputs)
+        model.tokenizer = mock_tokenizer
+        model.tokenizer.pad_token_id = 0
+
+        # Mock model.generate with minimal valid outputs
+        eos_token_id = 1
+        mock_model_config = MagicMock()
+        mock_model_config.eos_token_id = eos_token_id
+        mock_model_config.hidden_size = 512
+
+        # outputs.hidden_states: list of tuples, outputs.sequences, outputs.scores, outputs.attentions
+        fake_seq = torch.tensor([[0, 5, 6, eos_token_id]])  # 1 batch
+        fake_hidden = torch.zeros(1, 1, 512)  # (batch, seq, hidden)
+        fake_scores = torch.zeros(1, 8192)    # (batch, vocab)
+
+        mock_outputs = MagicMock()
+        mock_outputs.sequences = fake_seq
+        mock_outputs.hidden_states = [
+            (fake_hidden,),   # step 0
+            (fake_hidden,),   # step 1
+            (fake_hidden,),   # step 2 (eos)
+        ]
+        mock_outputs.scores = [fake_scores, fake_scores, fake_scores]
+        mock_outputs.attentions = None
+
+        mock_generate = MagicMock(return_value=mock_outputs)
+        mock_model = MagicMock()
+        mock_model.config = mock_model_config
+        mock_model.generate = mock_generate
+        model.model = mock_model
+
+        model.infer(['[STOP][TEXT]hello[START]'])
+
+        # The tokenizer return value should have had .to('cpu') called on it
+        mock_inputs.to.assert_called_once_with('cpu')
+
+    def test_stream_infer_moves_input_ids_to_device(self):
+        """stream_infer() must move input_ids to self.device."""
+        model = self._make_model_stub()
+
+        mock_input_ids = MagicMock()
+        mock_input_ids.to.return_value = mock_input_ids
+        # Make it behave as a tensor for cat/item calls
+        mock_input_ids.__class__ = torch.Tensor
+        real_ids = torch.zeros(1, 3, dtype=torch.long)
+        mock_input_ids.to.return_value = real_ids
+
+        mock_inputs = MagicMock()
+        mock_inputs.__getitem__ = MagicMock(return_value=mock_input_ids)
+        mock_tokenizer = MagicMock(return_value=mock_inputs)
+        model.tokenizer = mock_tokenizer
+
+        mock_input_ids.to.assert_not_called()  # precondition
+
+        # We only need to verify .to() is called; we don't need to run the full stream.
+        # Patch the model so we can check and immediately raise to stop iteration.
+        eos_token_id = 0
+        mock_model_config = MagicMock()
+        mock_model_config.eos_token_id = eos_token_id
+
+        step_output = MagicMock()
+        step_output.past_key_values = None
+        step_output.logits = torch.zeros(1, 1, 8192)
+        step_output.hidden_states = [torch.zeros(1, 1, 512)]
+
+        mock_model = MagicMock()
+        mock_model.config = mock_model_config
+        mock_model.return_value = step_output
+        model.model = mock_model
+
+        # Consume the first token from the generator to trigger the tokenizer path
+        try:
+            gen = model.stream_infer('[STOP][TEXT]hi[START]')
+            next(gen)
+        except (StopIteration, RuntimeError, AttributeError):
+            pass
+
+        mock_input_ids.to.assert_called_once_with('cpu')
 
 
 # ---------------------------------------------------------------------------
@@ -1197,6 +1315,7 @@ class TestBaseModelInfer:
         bm = BaseModel()
         bm.model = MagicMock()
         bm.tokenizer = MagicMock()
+        bm.device = 'cpu'
         return bm
 
     def test_infer_single_prompt_stop(self):
@@ -1208,10 +1327,10 @@ class TestBaseModelInfer:
         bm.tokenizer.pad_token_id = 0
 
         # Simulated tokenizer output
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1, 5, 6]]),
             'attention_mask': torch.tensor([[1, 1, 1]]),
-        }
+        })
 
         # Simulated generate output
         mock_outputs = MagicMock()
@@ -1245,10 +1364,10 @@ class TestBaseModelInfer:
 
         bm.model.config.eos_token_id = eos_token_id
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1, 5]]),
             'attention_mask': torch.tensor([[1, 1]]),
-        }
+        })
 
         mock_outputs = MagicMock()
         # No EOS at end
@@ -1271,10 +1390,10 @@ class TestBaseModelInfer:
         eos_token_id = 2
         bm.model.config.eos_token_id = eos_token_id
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1]]),
             'attention_mask': torch.tensor([[1]]),
-        }
+        })
         mock_outputs = MagicMock()
         mock_outputs.sequences = torch.tensor([[1, 10, eos_token_id]])
         mock_outputs.hidden_states = [
@@ -1294,10 +1413,10 @@ class TestBaseModelInfer:
         eos_token_id = 2
         bm.model.config.eos_token_id = eos_token_id
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1]]),
             'attention_mask': torch.tensor([[1]]),
-        }
+        })
 
         mock_outputs = MagicMock()
         # Sequence: [1, 10, EOS] -- 2 generated tokens, EOS excluded
@@ -1322,6 +1441,7 @@ class TestBaseModelStreamInfer:
         bm = BaseModel()
         bm.model = MagicMock()
         bm.tokenizer = MagicMock()
+        bm.device = 'cpu'
         return bm
 
     def test_stream_infer_yields_tokens(self):
@@ -1599,6 +1719,7 @@ class TestBaseModelMultiPromptBatch:
         bm = BaseModel()
         bm.model = MagicMock()
         bm.tokenizer = MagicMock()
+        bm.device = 'cpu'
         return bm
 
     def test_infer_multiple_prompts(self):
@@ -1607,10 +1728,10 @@ class TestBaseModelMultiPromptBatch:
         eos_token_id = 2
         bm.model.config.eos_token_id = eos_token_id
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1, 5], [1, 6]]),
             'attention_mask': torch.tensor([[1, 1], [1, 1]]),
-        }
+        })
 
         mock_outputs = MagicMock()
         mock_outputs.sequences = torch.tensor([
@@ -1637,10 +1758,10 @@ class TestBaseModelMultiPromptBatch:
         bm.model.config.eos_token_id = eos_token_id
         bm.model.config.hidden_size = 512
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1]]),
             'attention_mask': torch.tensor([[1]]),
-        }
+        })
         mock_outputs = MagicMock()
         # Only generated token is EOS
         mock_outputs.sequences = torch.tensor([[1, eos_token_id]])
@@ -1752,6 +1873,7 @@ class TestBaseModelAttention:
         bm = BaseModel()
         bm.model = MagicMock()
         bm.tokenizer = MagicMock()
+        bm.device = 'cpu'
         return bm
 
     def test_infer_with_attention_extracts_weights(self):
@@ -1762,10 +1884,10 @@ class TestBaseModelAttention:
         bm.tokenizer.pad_token_id = 0
 
         input_len = 3
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1, 5, 6]]),
             'attention_mask': torch.tensor([[1, 1, 1]]),
-        }
+        })
 
         mock_outputs = MagicMock()
         # 2 generated tokens + EOS
@@ -1810,10 +1932,10 @@ class TestBaseModelAttention:
         eos_token_id = 2
         bm.model.config.eos_token_id = eos_token_id
         bm.tokenizer.pad_token_id = 0
-        bm.tokenizer.return_value = {
+        bm.tokenizer.return_value = _make_batch_encoding({
             'input_ids': torch.tensor([[1]]),
             'attention_mask': torch.tensor([[1]]),
-        }
+        })
         mock_outputs = MagicMock()
         mock_outputs.sequences = torch.tensor([[1, 10, eos_token_id]])
         mock_outputs.hidden_states = [(torch.randn(1, 1, 512),), (torch.randn(1, 1, 512),)]

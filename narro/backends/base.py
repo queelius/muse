@@ -20,6 +20,26 @@ def _token_entropy(logits):
     return -(probs * torch.log(probs + 1e-10)).sum()
 
 
+_PROMPT_PREFIX = '[STOP][TEXT]'
+_PROMPT_SUFFIX = '[START]'
+
+
+def _extract_sentence_bounds(prompt):
+    """Find character boundaries of sentence text in a '[STOP][TEXT]...[START]' prompt.
+
+    Returns:
+        (text_start, text_end) character indices, or None if prompt is malformed.
+    """
+    pfx_pos = prompt.find(_PROMPT_PREFIX)
+    sfx_pos = prompt.rfind(_PROMPT_SUFFIX)
+    if pfx_pos < 0 or sfx_pos < 0:
+        return None
+    text_start = pfx_pos + len(_PROMPT_PREFIX)
+    if sfx_pos <= text_start:
+        return None
+    return text_start, sfx_pos
+
+
 class BaseModel:
 
     def _build_token_word_map(self, prompt, sentence_text):
@@ -44,13 +64,10 @@ class BaseModel:
         if offsets is None:
             return None
 
-        # Character range of the sentence text within the prompt
-        prefix = '[STOP][TEXT]'
-        suffix = '[START]'
-        text_start = prompt.find(prefix) + len(prefix)
-        text_end = prompt.rfind(suffix)
-        if text_start < 0 or text_end < 0 or text_end <= text_start:
+        bounds = _extract_sentence_bounds(prompt)
+        if bounds is None:
             return None
+        text_start, text_end = bounds
 
         # Build character ranges for each word
         words = sentence_text.split()
@@ -87,7 +104,7 @@ class BaseModel:
             padding=True,
             truncation=True,
             max_length=512,
-        )
+        ).to(self.device)
 
         t0 = time.perf_counter()
         with torch.inference_mode():
@@ -117,12 +134,9 @@ class BaseModel:
         token_word_maps = [None] * len(prompts)
         if include_attention:
             for idx, prompt in enumerate(prompts):
-                # Extract sentence text from wrapped prompt
-                pfx, sfx = '[STOP][TEXT]', '[START]'
-                pfx_pos = prompt.find(pfx)
-                sfx_pos = prompt.rfind(sfx)
-                if pfx_pos >= 0 and sfx_pos > pfx_pos:
-                    sentence_text = prompt[pfx_pos + len(pfx):sfx_pos]
+                bounds = _extract_sentence_bounds(prompt)
+                if bounds is not None:
+                    sentence_text = prompt[bounds[0]:bounds[1]]
                     twm = self._build_token_word_map(prompt, sentence_text)
                     if twm is not None:
                         # Adjust for left-padding: shift positions by pad offset
@@ -134,25 +148,30 @@ class BaseModel:
 
         res = []
         eos_token_id = self.model.config.eos_token_id
+        num_output_tokens = len(outputs.hidden_states)
+        has_attentions = (include_attention
+                         and hasattr(outputs, 'attentions')
+                         and outputs.attentions)
+
         for i in range(len(prompts)):
             seq = outputs.sequences[i]
             hidden_states = []
             token_ids = []
             token_entropies = []
             attention_weights = []
-            num_output_tokens = len(outputs.hidden_states)
             for j in range(num_output_tokens):
                 token = seq[j + seq.size(0) - num_output_tokens]
-                if token != eos_token_id:
-                    hidden_states.append(outputs.hidden_states[j][-1][i, -1, :])
-                    token_ids.append(token.item())
-                    token_entropies.append(_token_entropy(outputs.scores[j][i]))
+                if token == eos_token_id:
+                    continue
 
-                    if include_attention and hasattr(outputs, 'attentions') and outputs.attentions:
-                        # Last layer attention, average over heads, slice to input positions
-                        attn = outputs.attentions[j][-1][i]  # (num_heads, seq_len, seq_len)
-                        attn_avg = attn.mean(dim=0)[-1, :input_len]  # (input_len,)
-                        attention_weights.append(attn_avg)
+                hidden_states.append(outputs.hidden_states[j][-1][i, -1, :])
+                token_ids.append(token.item())
+                token_entropies.append(_token_entropy(outputs.scores[j][i]))
+
+                if has_attentions:
+                    attn = outputs.attentions[j][-1][i]  # (num_heads, seq_len, seq_len)
+                    attn_avg = attn.mean(dim=0)[-1, :input_len]  # (input_len,)
+                    attention_weights.append(attn_avg)
 
             if not hidden_states:
                 last_hidden_state = torch.zeros(0, self.model.config.hidden_size)
@@ -165,28 +184,21 @@ class BaseModel:
 
             finish_reason = 'stop' if seq[-1].item() == eos_token_id else 'length'
 
-            result = {
+            res.append({
                 'finish_reason': finish_reason,
                 'hidden_state': last_hidden_state,
                 'token_ids': token_ids_tensor,
                 'token_entropy': entropy_tensor,
-            }
-
-            if include_attention and attention_weights:
-                result['attention'] = torch.stack(attention_weights)
-            else:
-                result['attention'] = None
-
-            result['input_token_offsets'] = token_word_maps[i]
-
-            res.append(result)
+                'attention': torch.stack(attention_weights) if attention_weights else None,
+                'input_token_offsets': token_word_maps[i],
+            })
         return res
 
     def stream_infer(self, prompt, top_p=0.95, temperature=0.3, repetition_penalty=1.2):
         temperature = max(temperature, 0.001)
 
         inputs = self.tokenizer(prompt, return_tensors='pt')
-        input_ids = inputs['input_ids']
+        input_ids = inputs['input_ids'].to(self.device)
 
         logits_processor = LogitsProcessorList()
         if repetition_penalty != 1.0:
