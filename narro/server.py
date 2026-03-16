@@ -58,6 +58,8 @@ def _get_tts() -> Narro:
 # ---------------------------------------------------------------------------
 
 
+_MAX_INPUT_LENGTH = 50_000  # characters
+
 class SpeechRequest(BaseModel):
     input: str
     response_format: str = "wav"
@@ -162,6 +164,18 @@ async def speech(req: SpeechRequest):
     """
     if not req.input.strip():
         raise HTTPException(status_code=400, detail="'input' must be non-empty text.")
+
+    if len(req.input) > _MAX_INPUT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'input' exceeds maximum length of {_MAX_INPUT_LENGTH} characters.",
+        )
+
+    if req.response_format not in ("wav", "opus"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported response_format '{req.response_format}'. Use 'wav' or 'opus'.",
+        )
 
     if req.response_format == "opus" and shutil.which("ffmpeg") is None:
         raise HTTPException(
