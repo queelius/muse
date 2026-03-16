@@ -26,6 +26,11 @@ HIDDEN_DIM = 512
 DIFF_THRESHOLD = 300
 MAX_RUNLENGTH = 16
 
+# Quality check thresholds
+ENTROPY_THRESHOLD = 8.0
+MAX_TOKEN_RATIO = 15.0
+MIN_TOKEN_RATIO = 0.05
+
 
 class Narro:
     """
@@ -124,6 +129,45 @@ class Narro:
                 return True
         return False
 
+    def quality_check(self, response, input_text):
+        """Check for repetition, garbled output, or degenerate generation.
+        Returns failure type string, or None if passed."""
+        hidden_states = response['hidden_state']
+        entropy = response['token_entropy']
+
+        if self._detect_repetition(hidden_states):
+            return 'repetition'
+
+        if len(entropy) > 0 and entropy.mean() > ENTROPY_THRESHOLD:
+            return 'garbled'
+
+        input_len = max(len(input_text), 1)
+        ratio = len(hidden_states) / input_len
+        if ratio > MAX_TOKEN_RATIO or (input_len > 10 and ratio < MIN_TOKEN_RATIO):
+            return 'length_anomaly'
+
+        if response['finish_reason'] == 'length':
+            return 'truncated'
+
+        return None
+
+    def _detect_repetition(self, hidden_states):
+        """Check for consecutive similar hidden states."""
+        if len(hidden_states) <= MAX_RUNLENGTH:
+            return False
+        stacked = hidden_states if isinstance(hidden_states, torch.Tensor) else torch.stack(list(hidden_states))
+        total_diffs = torch.diff(stacked, dim=0).abs().sum(dim=1)
+        is_similar = (total_diffs < DIFF_THRESHOLD).numpy()
+        runlength = 0
+        for similar in is_similar:
+            if similar:
+                runlength += 1
+            elif runlength > 0:
+                runlength -= 1
+            if runlength > MAX_RUNLENGTH:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Encode: text -> EncodedSpeech (intermediate representation)
     # ------------------------------------------------------------------
@@ -133,7 +177,7 @@ class Narro:
         return self.encode_batch([text], **kwargs)
 
     def encode_batch(self, texts, top_p=0.95, temperature=0.0, repetition_penalty=1.2,
-                     retries=0, include_attention=False):
+                     retries=1, include_attention=False):
         """Encode multiple texts into an EncodedSpeech.
 
         Runs text preprocessing, LLM inference with enriched output (token IDs,
@@ -173,13 +217,12 @@ class Narro:
             )
             bad_indices = []
             for idx, response in enumerate(batch_responses):
-                hidden_state = response['hidden_state']
                 responses[pending_indices[idx]] = response
-                if response['finish_reason'] != 'stop':
-                    logger.warning("A sentence did not complete generation, likely due to hallucination.")
-                if retries > 0 and self.hallucination_detector(hidden_state):
-                    logger.warning("A sentence contained a hallucination.")
-                    bad_indices.append(pending_indices[idx])
+                if retries > 0:
+                    failure = self.quality_check(response, sentence_data[pending_indices[idx]][3])
+                    if failure:
+                        logger.warning("Sentence failed quality check: %s", failure)
+                        bad_indices.append(pending_indices[idx])
             if not bad_indices:
                 break
             pending_indices = bad_indices
@@ -253,7 +296,7 @@ class Narro:
     # Convenience methods
     # ------------------------------------------------------------------
 
-    def infer(self, text, out_path=None, top_p=0.95, temperature=0.0, repetition_penalty=1.2, retries=0):
+    def infer(self, text, out_path=None, top_p=0.95, temperature=0.0, repetition_penalty=1.2, retries=1):
         """Encode + decode a single text. Optionally write WAV."""
         encoded = self.encode(text, top_p=top_p, temperature=temperature,
                               repetition_penalty=repetition_penalty, retries=retries)
@@ -264,7 +307,7 @@ class Narro:
         return results
 
     def infer_batch(self, texts, out_dir=None, top_p=0.95, temperature=0.0,
-                    repetition_penalty=1.2, retries=0):
+                    repetition_penalty=1.2, retries=1):
         """Encode + decode multiple texts. Optionally write WAVs to out_dir."""
         encoded = self.encode_batch(texts, top_p=top_p, temperature=temperature,
                                     repetition_penalty=repetition_penalty, retries=retries)
