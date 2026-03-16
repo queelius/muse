@@ -851,7 +851,10 @@ class TestTextNormalizer:
     def test_normalize_newlines(self):
         from narro.utils.text_normalizer import normalize_newlines
         result = normalize_newlines("Hello\nworld")
-        assert "Hello." in result
+        assert "Hello" in result
+        assert "world" in result
+        # No periods should be inserted
+        assert result.count('.') == 0
 
     def test_normalize_newlines_preserves_terminal_punctuation(self):
         from narro.utils.text_normalizer import normalize_newlines
@@ -862,8 +865,9 @@ class TestTextNormalizer:
     def test_normalize_newlines_skips_empty_lines(self):
         from narro.utils.text_normalizer import normalize_newlines
         result = normalize_newlines("Hello\n\nworld")
-        # Empty line between should just collapse
-        assert "Hello." in result
+        # Empty line between should just collapse; no period insertion
+        assert "Hello" in result
+        assert "world" in result
 
     def test_remove_unknown_characters(self):
         from narro.utils.text_normalizer import remove_unknown_characters
@@ -1025,6 +1029,41 @@ class TestTextNormalizer:
         assert result == result.lower()
         # No dollar sign
         assert "$" not in result
+
+
+# ---------------------------------------------------------------------------
+# clean_text fix tests
+# ---------------------------------------------------------------------------
+
+class TestCleanTextFixes:
+    def test_colons_not_converted_to_periods(self):
+        """Colons should not create artificial sentence boundaries."""
+        from narro.utils.text_normalizer import clean_text
+        result = clean_text("Note: this is important")
+        # The old code converted ':' to '.' creating "note. this is important"
+        assert ". this" not in result
+        assert "note" in result
+        assert "important" in result
+
+    def test_urls_dropped_entirely(self):
+        """URLs should be removed, not spelled out."""
+        from narro.utils.text_normalizer import clean_text
+        result = clean_text("Visit https://example.com for details")
+        assert "h t t p" not in result
+        assert "colon" not in result
+        assert "slash" not in result
+
+    def test_email_dropped(self):
+        """Email addresses should be removed."""
+        from narro.utils.text_normalizer import clean_text
+        result = clean_text("Contact user@example.com for help")
+        assert "example" not in result
+
+    def test_normalize_newlines_no_period_insertion(self):
+        """Newlines should not get periods added."""
+        from narro.utils.text_normalizer import normalize_newlines
+        result = normalize_newlines("first line\nsecond line")
+        assert result.count('.') == 0
 
 
 # ---------------------------------------------------------------------------

@@ -249,7 +249,7 @@ _special_characters = [(re.compile(x[0]), x[1]) for x in [
     ('@', ' at '),
     ('&', ' and '),
     ('%', ' percent '),
-    (':', '.'),
+    (':', ','),
     (';', ','),
     (r'\+', ' plus '),
     (r'\\', ' backslash '),
@@ -329,15 +329,15 @@ def lowercase(text):
 def convert_to_ascii(text):
     return unidecode(text)
 
+def remove_urls(text):
+    """Remove URLs and email addresses entirely."""
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'\S+@\S+\.\S+', '', text)
+    return text
+
 def normalize_newlines(text):
-    text = text.split('\n')
-    for i in range(len(text)):
-        text[i] = text[i].strip()
-        if not text[i]:
-            continue
-        if text[i][-1] not in '.!?':
-            text[i] = f"{text[i]}."
-    return ' '.join(text)
+    lines = text.split('\n')
+    return ' '.join(line.strip() for line in lines if line.strip())
 
 def remove_unknown_characters(text):
     text = re.sub(r"[^A-Za-z !\$%&'\*\+,-./0123456789<>\?_]", "", text)
@@ -365,11 +365,11 @@ def collapse_triple_letters(text):
 def clean_text(text):
     text = expand_preunicode_special_characters(text)
     text = convert_to_ascii(text)
+    text = remove_urls(text)
     text = normalize_newlines(text)
     text = normalize_numbers(text)
     text = normalize_special(text)
     text = expand_abbreviations(text)
-    text = normalize_mixedcase(text)
     text = expand_special_characters(text)
     text = lowercase(text)
     text = remove_unknown_characters(text)
