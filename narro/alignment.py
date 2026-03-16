@@ -1,12 +1,8 @@
-"""Word-level alignment extraction.
+"""Sentence-level alignment extraction.
 
-Provides two alignment strategies:
-1. Proportional timing: distributes sentence duration across words by
-   character length. Sentence boundaries are exact (derived from known
-   token counts). This is the default and most reliable method.
-2. Attention-based: uses center-of-mass over generated tokens weighted
-   by attention. Requires accurate token-to-word mapping and a model
-   whose attention patterns correlate with speech timing.
+Each sentence in an EncodedSpeech has a known token count, giving exact
+duration (tokens * TOKEN_SIZE / SAMPLE_RATE). Sentences are emitted as
+alignment entries with cumulative timestamps. No approximation needed.
 """
 
 import json
@@ -94,18 +90,16 @@ def save_alignment(alignment, path):
 
 
 def extract_alignment_from_encoded(encoded):
-    """Extract word-level alignment from an EncodedSpeech.
+    """Extract sentence-level alignment from an EncodedSpeech.
 
-    Uses proportional timing within each sentence: sentence duration is
-    exact (from token count), and words are distributed proportionally
-    by character length. This produces clean, non-overlapping timestamps
-    suitable for karaoke-style word highlighting.
+    Each sentence has an exact duration derived from its token count.
+    Timestamps are cumulative across sentences.
 
     Args:
         encoded: EncodedSpeech instance.
 
     Returns:
-        List of {"word": str, "start": float, "end": float} with cumulative
+        List of {"text": str, "start": float, "end": float} with cumulative
         timestamps across all sentences, ordered chronologically.
     """
     from .tts import TOKEN_SIZE, SAMPLE_RATE
@@ -118,30 +112,57 @@ def extract_alignment_from_encoded(encoded):
         T = len(sentence.hidden_states)
         sentence_duration = T * token_duration
 
-        words = sentence.text.split()
-        if not words:
+        text = sentence.text.strip()
+        if not text:
             cumulative_offset += sentence_duration
             continue
 
-        # Proportional timing: distribute sentence duration by character length
-        char_lengths = [len(w) for w in words]
-        total_chars = sum(char_lengths)
-        if total_chars == 0:
-            cumulative_offset += sentence_duration
-            continue
-
-        char_pos = 0
-        for word, char_len in zip(words, char_lengths):
-            start = cumulative_offset + sentence_duration * char_pos / total_chars
-            char_pos += char_len
-            end = cumulative_offset + sentence_duration * char_pos / total_chars
-
-            all_alignment.append({
-                'word': word,
-                'start': round(start, 3),
-                'end': round(end, 3),
-            })
+        all_alignment.append({
+            'text': text,
+            'start': round(cumulative_offset, 3),
+            'end': round(cumulative_offset + sentence_duration, 3),
+        })
 
         cumulative_offset += sentence_duration
 
     return all_alignment
+
+
+def extract_paragraph_alignment(encoded):
+    """Extract paragraph-level alignment from an EncodedSpeech.
+
+    Groups sentences by text_index (paragraph), computing cumulative
+    timestamps across all sentences. Each paragraph gets one entry with
+    the combined duration of its sentences.
+
+    Args:
+        encoded: EncodedSpeech instance where text_index identifies the
+            source paragraph for each sentence.
+
+    Returns:
+        List of {"paragraph": int, "start": float, "end": float} with
+        one entry per paragraph that has non-empty text, ordered
+        chronologically.
+    """
+    from .tts import TOKEN_SIZE, SAMPLE_RATE
+
+    token_duration = TOKEN_SIZE / SAMPLE_RATE
+    cumulative_offset = 0.0
+    paragraphs = {}  # text_index -> {"start": float, "end": float}
+
+    for sentence in encoded.sentences:
+        T = len(sentence.hidden_states)
+        sentence_duration = T * token_duration
+        ti = sentence.text_index
+
+        if ti not in paragraphs:
+            paragraphs[ti] = {
+                'paragraph': ti,
+                'start': round(cumulative_offset, 3),
+                'end': None,
+            }
+
+        cumulative_offset += sentence_duration
+        paragraphs[ti]['end'] = round(cumulative_offset, 3)
+
+    return list(paragraphs.values())

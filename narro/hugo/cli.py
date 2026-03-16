@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .extract import extract_prose, parse_frontmatter
+from .extract import extract_paragraphs, parse_frontmatter
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
@@ -28,22 +28,34 @@ _HUGO_CONFIG_FILES = (
 # Lazy-loaded references (populated by _lazy_import on first generate).
 # Tests can monkeypatch these at narro.hugo.cli.Narro etc.
 Narro = None
-extract_alignment_from_encoded = None
+NarroClient = None
+extract_paragraph_alignment = None
 save_alignment = None
 
 
 def _lazy_import() -> None:
-    """Import heavy dependencies into module globals on first use."""
-    global Narro, extract_alignment_from_encoded, save_alignment
-    if Narro is not None:
+    """Import heavy dependencies into module globals on first use.
+
+    When NARRO_SERVER is set, imports the HTTP client instead of the
+    local model, allowing the generate flow to offload to a server.
+    """
+    global Narro, NarroClient, extract_paragraph_alignment, save_alignment
+    if Narro is not None or NarroClient is not None:
         return
-    from narro.tts import Narro as _Narro
+
+    server_url = os.environ.get('NARRO_SERVER')
+    if server_url:
+        from narro.client import NarroClient as _Client
+        NarroClient = _Client
+    else:
+        from narro.tts import Narro as _Narro
+        Narro = _Narro
+
     from narro.alignment import (
-        extract_alignment_from_encoded as _extract,
+        extract_paragraph_alignment as _extract,
         save_alignment as _save,
     )
-    Narro = _Narro
-    extract_alignment_from_encoded = _extract
+    extract_paragraph_alignment = _extract
     save_alignment = _save
 
 
@@ -195,6 +207,7 @@ def cmd_hugo_generate(
     force: bool = False,
     dry_run: bool = False,
     post_slug: str | None = None,
+    rewrite: bool = False,
 ) -> dict[str, int]:
     """Generate narration for Hugo posts with tts: true.
 
@@ -203,6 +216,7 @@ def cmd_hugo_generate(
         force: Regenerate even if narration.opus already exists.
         dry_run: Print pending posts without generating.
         post_slug: Only generate for this specific post slug.
+        rewrite: Rewrite paragraphs via LLM before TTS.
 
     Returns:
         Dict with keys: generated, skipped, errors (and pending for dry_run).
@@ -247,7 +261,9 @@ def cmd_hugo_generate(
     # narro.hugo.cli.Narro, .extract_alignment_from_encoded, .save_alignment.
     _lazy_import()
 
-    tts = Narro()
+    server_url = os.environ.get('NARRO_SERVER')
+    use_client = server_url and NarroClient is not None
+    tts = NarroClient(server_url) if use_client else Narro()
     generated = 0
     errors = 0
 
@@ -260,24 +276,41 @@ def cmd_hugo_generate(
         print(f"Generating: {p['slug']} ({p['title']})")
 
         try:
-            # Extract speakable prose
-            prose = extract_prose(p["body"])
-            if not prose.strip():
+            # Extract speakable prose and split into paragraphs
+            paragraphs = extract_paragraphs(p["body"])
+            if not paragraphs:
                 print(f"  Skipped: no speakable text in {p['slug']}", file=sys.stderr)
                 continue
 
-            # Count sentences for progress
-            sentence_count = len(tts._preprocess_text([prose]))
-            print(f"  Encoding {sentence_count} sentences...", flush=True)
-            encoded = tts.encode(prose, include_attention=True)
-            est_duration = encoded.estimated_duration
-            print(f"  Encoding done ({est_duration:.1f}s audio). Decoding...", flush=True)
+            if rewrite:
+                llm_url = os.environ.get('NARRO_LLM_URL')
+                if llm_url:
+                    from narro.rewrite import rewrite_paragraphs
+                    llm_key = os.environ.get('NARRO_LLM_KEY')
+                    llm_model = os.environ.get('NARRO_LLM_MODEL')
+                    print(f"  Rewriting {len(paragraphs)} paragraphs via LLM...", flush=True)
+                    paragraphs = rewrite_paragraphs(paragraphs, llm_url, llm_key, llm_model)
+                else:
+                    print("  Warning: --rewrite requires NARRO_LLM_URL env var", file=sys.stderr)
 
-            tts.decode_to_wav(encoded, wav_path)
-            print(f"  Extracting alignment...", flush=True)
+            if use_client:
+                # Server handles encode + decode + alignment in one call
+                print(f"  Sending {len(paragraphs)} paragraphs to server...", flush=True)
+                _audio, alignment = tts.generate_with_alignment(paragraphs, wav_path)
+                save_alignment(alignment, json_path)
+            else:
+                # Local inference: encode, decode, extract alignment
+                sentence_count = len(tts._preprocess_text(paragraphs))
+                print(f"  Encoding {sentence_count} sentences across {len(paragraphs)} paragraphs...", flush=True)
+                encoded = tts.encode_batch(paragraphs)
+                est_duration = encoded.estimated_duration
+                print(f"  Encoding done ({est_duration:.1f}s audio). Decoding...", flush=True)
 
-            alignment = extract_alignment_from_encoded(encoded)
-            save_alignment(alignment, json_path)
+                tts.decode_to_wav(encoded, wav_path)
+                print(f"  Extracting alignment...", flush=True)
+
+                alignment = extract_paragraph_alignment(encoded)
+                save_alignment(alignment, json_path)
 
             print(f"  Converting to Opus...", flush=True)
             subprocess.run(

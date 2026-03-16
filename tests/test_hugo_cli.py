@@ -218,7 +218,7 @@ class TestHugoGenerate:
         ])
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/ffmpeg")
 
-        # Track what encode was called with
+        # Track what encode_batch was called with
         encode_calls = []
         fake_encoded = MagicMock(estimated_duration=1.0)
 
@@ -229,8 +229,8 @@ class TestHugoGenerate:
             def _preprocess_text(self, texts):
                 return [(t, 0, 0, t) for t in texts]
 
-            def encode(self, text, **kwargs):
-                encode_calls.append(text)
+            def encode_batch(self, texts):
+                encode_calls.append(texts)
                 return fake_encoded
 
             def decode_to_wav(self, encoded, out_path):
@@ -251,9 +251,9 @@ class TestHugoGenerate:
 
         monkeypatch.setattr("narro.hugo.cli.subprocess.run", fake_subprocess_run)
 
-        fake_alignment = [{"word": "hello", "start": 0.0, "end": 0.5}]
+        fake_alignment = [{"paragraph": 0, "start": 0.0, "end": 0.5}]
         monkeypatch.setattr(
-            "narro.hugo.cli.extract_alignment_from_encoded",
+            "narro.hugo.cli.extract_paragraph_alignment",
             lambda enc: fake_alignment,
         )
         monkeypatch.setattr(
@@ -265,10 +265,12 @@ class TestHugoGenerate:
         assert result["generated"] == 1
         assert result["errors"] == 0
 
-        # Verify encode was called with clean text (no code blocks)
+        # Verify encode_batch was called with paragraphs (no code blocks)
         assert len(encode_calls) == 1
-        assert "print" not in encode_calls[0]
-        assert "speakable" in encode_calls[0]
+        paragraphs = encode_calls[0]
+        combined = " ".join(paragraphs)
+        assert "print" not in combined
+        assert "speakable" in combined
 
         # Verify opus file was created
         assert (post_dir / "narration.opus").exists()
@@ -293,8 +295,8 @@ class TestHugoGenerate:
             def _preprocess_text(self, texts):
                 return [(t, 0, 0, t) for t in texts]
 
-            def encode(self, text, **kwargs):
-                encode_calls.append(text)
+            def encode_batch(self, texts):
+                encode_calls.append(texts)
                 return fake_encoded
 
             def decode_to_wav(self, encoded, out_path):
@@ -309,7 +311,7 @@ class TestHugoGenerate:
 
         monkeypatch.setattr("narro.hugo.cli.subprocess.run", fake_subprocess_run)
         monkeypatch.setattr(
-            "narro.hugo.cli.extract_alignment_from_encoded",
+            "narro.hugo.cli.extract_paragraph_alignment",
             lambda enc: [],
         )
         monkeypatch.setattr(
@@ -340,7 +342,7 @@ class TestHugoGenerate:
             def _preprocess_text(self, texts):
                 return [(t, 0, 0, t) for t in texts]
 
-            def encode(self, text, **kwargs):
+            def encode_batch(self, texts):
                 return fake_encoded
 
             def decode_to_wav(self, encoded, out_path):
@@ -355,7 +357,7 @@ class TestHugoGenerate:
 
         monkeypatch.setattr("narro.hugo.cli.subprocess.run", fake_subprocess_run)
         monkeypatch.setattr(
-            "narro.hugo.cli.extract_alignment_from_encoded",
+            "narro.hugo.cli.extract_paragraph_alignment",
             lambda enc: [],
         )
         monkeypatch.setattr(
@@ -378,7 +380,7 @@ class TestHugoGenerate:
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/ffmpeg")
 
         # Track which slugs were attempted
-        encode_slugs = []
+        encode_calls = []
         fake_encoded = MagicMock(estimated_duration=1.0)
 
         class FakeNarro:
@@ -388,10 +390,10 @@ class TestHugoGenerate:
             def _preprocess_text(self, texts):
                 return [(t, 0, 0, t) for t in texts]
 
-            def encode(self, text, **kwargs):
+            def encode_batch(self, texts):
                 # First call always fails (aaa-fail sorts first via os.walk)
-                encode_slugs.append(text)
-                if len(encode_slugs) == 1:
+                encode_calls.append(texts)
+                if len(encode_calls) == 1:
                     raise RuntimeError("TTS failed")
                 return fake_encoded
 
@@ -407,7 +409,7 @@ class TestHugoGenerate:
 
         monkeypatch.setattr("narro.hugo.cli.subprocess.run", fake_subprocess_run)
         monkeypatch.setattr(
-            "narro.hugo.cli.extract_alignment_from_encoded",
+            "narro.hugo.cli.extract_paragraph_alignment",
             lambda enc: [],
         )
         monkeypatch.setattr(

@@ -1,4 +1,4 @@
-"""Tests for narro/alignment.py — word-level alignment from attention weights."""
+"""Tests for narro/alignment.py — sentence-level alignment from hidden-state counts."""
 
 import json
 import os
@@ -7,7 +7,11 @@ import tempfile
 import numpy as np
 import pytest
 
-from narro.alignment import extract_alignment, save_alignment, extract_alignment_from_encoded
+from narro.alignment import (
+    save_alignment,
+    extract_alignment_from_encoded,
+    extract_paragraph_alignment,
+)
 from narro.encoded import SentenceEncoding, EncodedSpeech
 
 
@@ -15,10 +19,8 @@ from narro.encoded import SentenceEncoding, EncodedSpeech
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_sentence_with_attention(text, seq_len, input_len,
-                                   text_index=0, sentence_index=0):
-    """Create a SentenceEncoding with random attention weights."""
-    attention = np.random.rand(seq_len, input_len).astype(np.float32)
+def _make_sentence(text, seq_len, text_index=0, sentence_index=0):
+    """Create a SentenceEncoding with random hidden states (no attention)."""
     return SentenceEncoding(
         hidden_states=np.random.randn(seq_len, 512).astype(np.float32),
         token_ids=np.random.randint(0, 8192, size=seq_len, dtype=np.int32),
@@ -27,171 +29,8 @@ def _make_sentence_with_attention(text, seq_len, input_len,
         text=text,
         text_index=text_index,
         sentence_index=sentence_index,
-        attention_weights=attention,
+        attention_weights=None,
     )
-
-
-# ---------------------------------------------------------------------------
-# extract_alignment tests
-# ---------------------------------------------------------------------------
-
-class TestExtractAlignment:
-
-    def test_basic_alignment_two_words(self):
-        """Two words should produce two alignment entries in order."""
-        T = 10  # generated tokens
-        input_len = 4  # e.g. [STOP][TEXT] word1 word2
-
-        # Create attention where first half attends to token 2 (word1),
-        # second half attends to token 3 (word2)
-        attention = np.zeros((T, input_len), dtype=np.float32)
-        attention[:5, 2] = 1.0   # first 5 generated tokens attend to word1
-        attention[5:, 3] = 1.0   # last 5 generated tokens attend to word2
-
-        token_to_word = {2: "hello", 3: "world"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        assert len(result) == 2
-        assert result[0]['word'] == 'hello'
-        assert result[1]['word'] == 'world'
-        # hello should start before world
-        assert result[0]['start'] < result[1]['start']
-
-    def test_empty_attention(self):
-        """Zero-size attention should return empty list."""
-        attention = np.zeros((0, 5), dtype=np.float32)
-        token_to_word = {}
-        result = extract_alignment(attention, token_to_word, 0.064)
-        assert result == []
-
-    def test_single_word(self):
-        """Single word should span a reasonable portion of the total duration."""
-        T = 10
-        input_len = 3  # [STOP][TEXT] word
-
-        attention = np.zeros((T, input_len), dtype=np.float32)
-        attention[:, 2] = 1.0  # all generated tokens attend to the single word
-
-        token_to_word = {2: "hello"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        assert len(result) == 1
-        assert result[0]['word'] == 'hello'
-        # With uniform attention, center-of-mass is at the middle and spread
-        # covers a symmetric region. Start should be >= 0, end <= total.
-        total_duration = T * token_duration
-        assert result[0]['start'] >= 0.0
-        assert result[0]['end'] <= total_duration + 0.001
-        # The span should be non-trivial (word covers some time range)
-        assert result[0]['end'] > result[0]['start']
-
-    def test_timestamps_are_rounded(self):
-        """All timestamps should be rounded to 3 decimal places."""
-        T = 7
-        input_len = 4
-        attention = np.random.rand(T, input_len).astype(np.float32)
-        token_to_word = {2: "hello", 3: "world"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        for entry in result:
-            # Check 3 decimal places: multiply by 1000 and verify it's an integer
-            assert entry['start'] == round(entry['start'], 3)
-            assert entry['end'] == round(entry['end'], 3)
-
-    def test_word_ordering_by_start_time(self):
-        """Words should be ordered by start time, not by input token position."""
-        T = 10
-        input_len = 4
-
-        # Reverse the attention: word2 (token 3) is attended to first
-        attention = np.zeros((T, input_len), dtype=np.float32)
-        attention[:5, 3] = 1.0   # first 5 tokens attend to word2
-        attention[5:, 2] = 1.0   # last 5 tokens attend to word1
-
-        token_to_word = {2: "world", 3: "hello"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        assert len(result) == 2
-        # Should be ordered by start time
-        assert result[0]['start'] <= result[1]['start']
-
-    def test_no_word_tokens_returns_empty(self):
-        """If token_to_word is empty, return empty list."""
-        T = 10
-        input_len = 4
-        attention = np.random.rand(T, input_len).astype(np.float32)
-        token_to_word = {}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-        assert result == []
-
-    def test_duplicate_words_produce_separate_entries(self):
-        """Repeated words (e.g., 'the ... the') should each get their own entry."""
-        T = 12
-        input_len = 6  # e.g. [STOP][TEXT] the cat the mat
-
-        attention = np.zeros((T, input_len), dtype=np.float32)
-        attention[:3, 2] = 1.0   # first "the"
-        attention[3:6, 3] = 1.0  # "cat"
-        attention[6:9, 4] = 1.0  # second "the"
-        attention[9:, 5] = 1.0   # "mat"
-
-        token_to_word = {2: "the", 3: "cat", 4: "the", 5: "mat"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        assert len(result) == 4
-        words = [r['word'] for r in result]
-        assert words.count('the') == 2
-        # The two "the" entries should have different start times
-        the_entries = [r for r in result if r['word'] == 'the']
-        assert the_entries[0]['start'] != the_entries[1]['start']
-
-    def test_zero_spread_has_minimum_width(self):
-        """When all attention is on a single token, the entry should still have non-zero width."""
-        T = 10
-        input_len = 3
-
-        attention = np.zeros((T, input_len), dtype=np.float32)
-        # All attention on a single generated token
-        attention[5, 2] = 1.0
-
-        token_to_word = {2: "hello"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        assert len(result) == 1
-        assert result[0]['end'] > result[0]['start']
-
-    def test_zero_attention_word(self):
-        """A word with zero attention should appear with zero duration."""
-        T = 5
-        input_len = 4
-
-        attention = np.zeros((T, input_len), dtype=np.float32)
-        attention[:, 2] = 1.0  # only "hello" gets attention
-
-        token_to_word = {2: "hello", 3: "ghost"}
-        token_duration = 0.064
-
-        result = extract_alignment(attention, token_to_word, token_duration)
-
-        assert len(result) == 2
-        ghost = [r for r in result if r['word'] == 'ghost']
-        assert len(ghost) == 1
-        assert ghost[0]['start'] == 0.0
-        assert ghost[0]['end'] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +42,8 @@ class TestSaveAlignment:
     def test_save_alignment_writes_json(self):
         """save_alignment should write valid JSON with indent=2."""
         alignment = [
-            {"word": "hello", "start": 0.0, "end": 0.32},
-            {"word": "world", "start": 0.32, "end": 0.64},
+            {"text": "Hello world.", "start": 0.0, "end": 0.64},
+            {"text": "Goodbye.", "start": 0.64, "end": 1.28},
         ]
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -240,93 +79,71 @@ class TestSaveAlignment:
 # extract_alignment_from_encoded tests
 # ---------------------------------------------------------------------------
 
+TOKEN_DURATION = 2048 / 32000  # 0.064 seconds
+
+
 class TestExtractAlignmentFromEncoded:
-    """Tests for proportional word timing within sentence boundaries."""
 
-    def _make_sentence(self, text, T, **kwargs):
-        """Helper to create a SentenceEncoding with given text and token count."""
-        defaults = dict(
-            hidden_states=np.random.randn(T, 512).astype(np.float32),
-            token_ids=np.random.randint(0, 8192, size=T, dtype=np.int32),
-            token_entropy=np.random.rand(T).astype(np.float32),
-            finish_reason='stop',
-            text=text,
-            text_index=0,
-            sentence_index=0,
-        )
-        defaults.update(kwargs)
-        return SentenceEncoding(**defaults)
-
-    def test_single_sentence_two_words(self):
-        """Two equal-length words should each get half the sentence duration."""
-        sentence = self._make_sentence("hello world", T=10)
+    def test_single_sentence(self):
+        """Single sentence should produce one entry with exact timestamps."""
+        T = 10
+        sentence = _make_sentence("Hello world.", T)
         encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
+
         result = extract_alignment_from_encoded(encoded)
 
-        assert len(result) == 2
-        assert result[0]['word'] == 'hello'
-        assert result[1]['word'] == 'world'
-        # Non-overlapping, sequential
+        assert len(result) == 1
+        assert result[0]['text'] == 'Hello world.'
         assert result[0]['start'] == 0.0
-        assert result[0]['end'] == result[1]['start']
-        # Both have positive duration
-        assert result[0]['end'] > result[0]['start']
-        assert result[1]['end'] > result[1]['start']
+        assert result[0]['end'] == round(T * TOKEN_DURATION, 3)
 
-    def test_proportional_by_character_length(self):
-        """Longer words should get proportionally more time."""
-        sentence = self._make_sentence("I unbelievable", T=10)
-        encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
-        result = extract_alignment_from_encoded(encoded)
-
-        assert len(result) == 2
-        # "unbelievable" (12 chars) should get 12/13 of the duration
-        # "I" (1 char) should get 1/13
-        duration_i = result[0]['end'] - result[0]['start']
-        duration_unbelievable = result[1]['end'] - result[1]['start']
-        assert duration_unbelievable > duration_i * 5  # much longer
-
-    def test_cumulative_timestamps_across_sentences(self):
+    def test_multiple_sentences_cumulative_timestamps(self):
         """Timestamps should be cumulative across sentences."""
-        sent1 = self._make_sentence("hello world", T=10, sentence_index=0)
-        sent2 = self._make_sentence("foo bar", T=10, sentence_index=1)
+        T1, T2 = 10, 15
+        sent1 = _make_sentence("Hello world.", T1, sentence_index=0)
+        sent2 = _make_sentence("Goodbye moon.", T2, sentence_index=1)
         encoded = EncodedSpeech(sentences=[sent1, sent2], model_id='test/model')
+
         result = extract_alignment_from_encoded(encoded)
 
-        assert len(result) == 4
-        assert result[0]['word'] == 'hello'
-        assert result[1]['word'] == 'world'
-        assert result[2]['word'] == 'foo'
-        assert result[3]['word'] == 'bar'
-        # Second sentence starts after first ends
-        sentence1_duration = 10 * 2048 / 32000
-        assert result[2]['start'] >= sentence1_duration - 0.001
+        assert len(result) == 2
+        assert result[0]['text'] == 'Hello world.'
+        assert result[1]['text'] == 'Goodbye moon.'
 
-    def test_no_overlap_between_words(self):
-        """Word timestamps should never overlap."""
-        sentence = self._make_sentence("the quick brown fox jumps", T=20)
-        encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
-        result = extract_alignment_from_encoded(encoded)
-
-        assert len(result) == 5
-        for i in range(len(result) - 1):
-            assert result[i]['end'] <= result[i + 1]['start'] + 0.001
-
-    def test_total_duration_matches_sentence(self):
-        """Word timestamps should cover the full sentence duration."""
-        T = 15
-        sentence = self._make_sentence("hello beautiful world", T=T)
-        encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
-        result = extract_alignment_from_encoded(encoded)
-
-        expected_duration = T * 2048 / 32000
+        # First sentence: [0, T1 * token_duration]
         assert result[0]['start'] == 0.0
-        assert abs(result[-1]['end'] - expected_duration) < 0.002
+        s1_end = round(T1 * TOKEN_DURATION, 3)
+        assert result[0]['end'] == s1_end
 
-    def test_empty_text_produces_no_words(self):
-        """Sentence with empty text should produce no alignment entries."""
-        sentence = self._make_sentence("", T=10)
+        # Second sentence starts where first ends
+        assert result[1]['start'] == s1_end
+        assert result[1]['end'] == round(s1_end + T2 * TOKEN_DURATION, 3)
+
+    def test_empty_text_skipped_but_offset_advances(self):
+        """Sentences with empty text should be skipped, but offset still advances."""
+        T1, T2, T3 = 10, 5, 10
+        sent1 = _make_sentence("Hello.", T1, sentence_index=0)
+        sent_empty = _make_sentence("", T2, sentence_index=1)
+        sent3 = _make_sentence("World.", T3, sentence_index=2)
+        encoded = EncodedSpeech(
+            sentences=[sent1, sent_empty, sent3], model_id='test/model',
+        )
+
+        result = extract_alignment_from_encoded(encoded)
+
+        assert len(result) == 2
+        assert result[0]['text'] == 'Hello.'
+        assert result[1]['text'] == 'World.'
+
+        # World should start after both Hello and the empty sentence
+        expected_start = round((T1 + T2) * TOKEN_DURATION, 3)
+        assert result[1]['start'] == expected_start
+
+    def test_whitespace_only_text_skipped(self):
+        """Sentences with only whitespace should be treated as empty."""
+        sentence = _make_sentence("   \n\t  ", 10)
         encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
+
         result = extract_alignment_from_encoded(encoded)
         assert result == []
 
@@ -338,103 +155,139 @@ class TestExtractAlignmentFromEncoded:
 
     def test_timestamps_are_rounded(self):
         """All timestamps should be rounded to 3 decimal places."""
-        sentence = self._make_sentence("hello world foo bar", T=17)
+        T = 7  # 7 * 0.064 = 0.448 — clean, but tests rounding path
+        sentence = _make_sentence("Test sentence.", T)
         encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
+
         result = extract_alignment_from_encoded(encoded)
 
         for entry in result:
             assert entry['start'] == round(entry['start'], 3)
             assert entry['end'] == round(entry['end'], 3)
 
+    def test_text_is_stripped(self):
+        """Leading/trailing whitespace in sentence text should be stripped."""
+        sentence = _make_sentence("  Hello world.  ", 10)
+        encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
+
+        result = extract_alignment_from_encoded(encoded)
+
+        assert len(result) == 1
+        assert result[0]['text'] == 'Hello world.'
+
+    def test_duration_is_exact(self):
+        """Sentence duration should be exactly T * token_duration."""
+        T = 42
+        sentence = _make_sentence("A fairly long test sentence for exactness.", T)
+        encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
+
+        result = extract_alignment_from_encoded(encoded)
+
+        duration = result[0]['end'] - result[0]['start']
+        expected = round(T * TOKEN_DURATION, 3)
+        assert abs(duration - expected) < 1e-9
+
+    def test_no_attention_weights_still_works(self):
+        """Sentence-level alignment does not require attention weights."""
+        sentence = _make_sentence("No attention needed.", 10)
+        assert sentence.attention_weights is None  # sanity check
+
+        encoded = EncodedSpeech(sentences=[sentence], model_id='test/model')
+        result = extract_alignment_from_encoded(encoded)
+
+        assert len(result) == 1
+        assert result[0]['text'] == 'No attention needed.'
+
 
 # ---------------------------------------------------------------------------
-# _build_token_word_map tests
+# extract_paragraph_alignment tests
 # ---------------------------------------------------------------------------
 
-class TestBuildTokenWordMap:
+class TestExtractParagraphAlignment:
 
-    def test_basic_mapping(self):
-        """Should map token positions to words using offset_mapping."""
-        from unittest.mock import MagicMock
-        from narro.backends.base import BaseModel
+    def test_single_paragraph_single_sentence(self):
+        """One paragraph with one sentence produces one entry."""
+        sent = _make_sentence("Hello world.", 10, text_index=0, sentence_index=0)
+        encoded = EncodedSpeech(sentences=[sent], model_id='test/model')
 
-        model = BaseModel()
-        # Mock tokenizer that returns offset_mapping
-        model.tokenizer = MagicMock()
-        # Prompt: [STOP][TEXT]hello world[START]
-        #          0123456789012345678901234567
-        #          [STOP] = 0-6, [TEXT] = 6-12, hello = 12-17, " " = 17-18, world = 18-23, [START] = 23-30
-        prompt = "[STOP][TEXT]hello world[START]"
-        model.tokenizer.return_value = {
-            'offset_mapping': [
-                (0, 1),    # [
-                (1, 5),    # STOP
-                (5, 6),    # ]
-                (6, 7),    # [
-                (7, 11),   # TEXT
-                (11, 12),  # ]
-                (12, 17),  # hello
-                (17, 18),  # (space - between words)
-                (18, 23),  # world
-                (23, 24),  # [
-                (24, 29),  # START
-                (29, 30),  # ]
-            ]
-        }
+        result = extract_paragraph_alignment(encoded)
 
-        result = model._build_token_word_map(prompt, "hello world")
+        assert len(result) == 1
+        assert result[0]['paragraph'] == 0
+        assert result[0]['start'] == 0.0
+        assert result[0]['end'] == round(10 * TOKEN_DURATION, 3)
 
-        assert result is not None
-        # Token 6 (chars 12-17) -> "hello"
-        assert result[6] == "hello"
-        # Token 8 (chars 18-23) -> "world"
-        assert result[8] == "world"
-        # Prefix/suffix tokens should not be mapped
-        assert 0 not in result
-        assert 1 not in result
-        assert 10 not in result
-        assert 11 not in result
+    def test_single_paragraph_multiple_sentences(self):
+        """Multiple sentences in one paragraph produce one entry spanning all."""
+        T1, T2 = 10, 15
+        sent1 = _make_sentence("Hello.", T1, text_index=0, sentence_index=0)
+        sent2 = _make_sentence("World.", T2, text_index=0, sentence_index=1)
+        encoded = EncodedSpeech(sentences=[sent1, sent2], model_id='test/model')
 
-    def test_returns_none_without_offset_mapping(self):
-        """Should return None if tokenizer doesn't support offset_mapping."""
-        from unittest.mock import MagicMock
-        from narro.backends.base import BaseModel
+        result = extract_paragraph_alignment(encoded)
 
-        model = BaseModel()
-        model.tokenizer = MagicMock()
-        model.tokenizer.side_effect = TypeError("no offset_mapping")
+        assert len(result) == 1
+        assert result[0]['paragraph'] == 0
+        assert result[0]['start'] == 0.0
+        assert result[0]['end'] == round((T1 + T2) * TOKEN_DURATION, 3)
 
-        result = model._build_token_word_map("[STOP][TEXT]hello[START]", "hello")
-        assert result is None
+    def test_multiple_paragraphs(self):
+        """Each text_index becomes one paragraph entry with correct timing."""
+        T1, T2, T3 = 10, 15, 20
+        sent1 = _make_sentence("Para one.", T1, text_index=0, sentence_index=0)
+        sent2 = _make_sentence("Para two A.", T2, text_index=1, sentence_index=0)
+        sent3 = _make_sentence("Para two B.", T3, text_index=1, sentence_index=1)
+        encoded = EncodedSpeech(sentences=[sent1, sent2, sent3], model_id='test/model')
 
-    def test_multi_token_words(self):
-        """Words split into multiple subword tokens should all map to the same word."""
-        from unittest.mock import MagicMock
-        from narro.backends.base import BaseModel
+        result = extract_paragraph_alignment(encoded)
 
-        model = BaseModel()
-        model.tokenizer = MagicMock()
-        # "unbelievable" split into "un" + "believ" + "able"
-        prompt = "[STOP][TEXT]unbelievable[START]"
-        #          0          1          2
-        #          0123456789012345678901234567890
-        model.tokenizer.return_value = {
-            'offset_mapping': [
-                (0, 6),    # [STOP]
-                (6, 12),   # [TEXT]
-                (12, 14),  # un
-                (14, 20),  # believ
-                (20, 24),  # able
-                (24, 31),  # [START]
-            ]
-        }
+        assert len(result) == 2
+        assert result[0]['paragraph'] == 0
+        assert result[1]['paragraph'] == 1
 
-        result = model._build_token_word_map(prompt, "unbelievable")
+        # Paragraph 0: just sent1
+        assert result[0]['start'] == 0.0
+        p0_end = round(T1 * TOKEN_DURATION, 3)
+        assert result[0]['end'] == p0_end
 
-        assert result is not None
-        assert result[2] == "unbelievable"
-        assert result[3] == "unbelievable"
-        assert result[4] == "unbelievable"
+        # Paragraph 1: sent2 + sent3
+        assert result[1]['start'] == p0_end
+        assert result[1]['end'] == round(p0_end + (T2 + T3) * TOKEN_DURATION, 3)
+
+    def test_empty_sentences_list(self):
+        """No sentences produces empty alignment."""
+        encoded = EncodedSpeech(sentences=[], model_id='test/model')
+        result = extract_paragraph_alignment(encoded)
+        assert result == []
+
+    def test_empty_text_advances_offset(self):
+        """Sentences with empty text still advance the cumulative offset."""
+        T1, T2, T3 = 10, 5, 10
+        sent1 = _make_sentence("Para one.", T1, text_index=0, sentence_index=0)
+        sent_empty = _make_sentence("", T2, text_index=0, sentence_index=1)
+        sent3 = _make_sentence("Para two.", T3, text_index=1, sentence_index=0)
+        encoded = EncodedSpeech(
+            sentences=[sent1, sent_empty, sent3], model_id='test/model',
+        )
+
+        result = extract_paragraph_alignment(encoded)
+
+        # Paragraph 0 includes the empty sentence's duration
+        assert result[0]['end'] == round((T1 + T2) * TOKEN_DURATION, 3)
+        # Paragraph 1 starts after both
+        assert result[1]['start'] == round((T1 + T2) * TOKEN_DURATION, 3)
+
+    def test_timestamps_are_rounded(self):
+        """All timestamps should be rounded to 3 decimal places."""
+        T = 7
+        sent = _make_sentence("Test.", T, text_index=0)
+        encoded = EncodedSpeech(sentences=[sent], model_id='test/model')
+
+        result = extract_paragraph_alignment(encoded)
+
+        for entry in result:
+            assert entry['start'] == round(entry['start'], 3)
+            assert entry['end'] == round(entry['end'], 3)
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 
 def _add_common_args(parser):
     """Add model/compile/quantize args shared across subcommands."""
+    parser.add_argument('--server', '-s',
+                        help='Narro server URL (or set NARRO_SERVER env var)')
     parser.add_argument('--model-path', '-m',
                         help='Path to local model directory (optional)')
     parser.add_argument('--no-compile', action='store_true',
@@ -23,6 +25,15 @@ def _add_common_args(parser):
 
 def cmd_speak(args):
     """Default command: encode + decode text to WAV."""
+    import os
+    server_url = getattr(args, 'server', None) or os.environ.get('NARRO_SERVER')
+    if server_url:
+        from narro.client import NarroClient
+        client = NarroClient(server_url)
+        client.infer(args.text, out_path=args.output)
+        logger.info("Audio saved to: %s", args.output)
+        return
+
     from narro import Narro
     tts = Narro(
         model_path=args.model_path,
@@ -101,6 +112,7 @@ def cmd_hugo(args):
             force=args.force,
             dry_run=args.dry_run,
             post_slug=args.post,
+            rewrite=getattr(args, 'rewrite', False),
         )
     elif args.hugo_command == 'install':
         cmd_hugo_install(args.site_root)
@@ -198,6 +210,8 @@ def main():
     gen_parser.add_argument('--dry-run', action='store_true',
                             help='Show what would be generated')
     gen_parser.add_argument('--post', help='Generate for a single post slug')
+    gen_parser.add_argument('--rewrite', action='store_true',
+                            help='Rewrite paragraphs via LLM before TTS')
 
     # hugo install
     inst_parser = hugo_subparsers.add_parser('install', help='Install player assets')
