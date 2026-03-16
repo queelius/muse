@@ -576,6 +576,7 @@ class TestBaseModelDeviceInfer:
 
         # Build a mock tokenizer output that tracks .to() calls
         mock_inputs = MagicMock()
+        mock_inputs.to.return_value = mock_inputs  # .to() is chainable
         mock_inputs.__getitem__ = MagicMock(side_effect=lambda key: MagicMock(
             shape=(1, 3) if key == 'input_ids' else (1, 3)
         ))

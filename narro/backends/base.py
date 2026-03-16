@@ -106,12 +106,15 @@ class BaseModel:
             max_length=512,
         ).to(self.device)
 
+        prompt_token_count = inputs['input_ids'].shape[1]
+        max_new_tokens = min(512, prompt_token_count * 8)
+
         t0 = time.perf_counter()
         with torch.inference_mode():
             outputs = self.model.generate(
                 input_ids=inputs['input_ids'],
                 attention_mask=inputs['attention_mask'],
-                max_new_tokens=512,
+                max_new_tokens=max_new_tokens,
                 do_sample=True,
                 top_p=top_p,
                 temperature=temperature,

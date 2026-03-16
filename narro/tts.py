@@ -57,6 +57,9 @@ class Narro:
         # Configure threading before model load
         if num_threads is not None:
             torch.set_num_threads(num_threads)
+        else:
+            import os as _os
+            torch.set_num_threads(min(_os.cpu_count() or 4, 8))
         try:
             torch.set_num_interop_threads(2)
         except RuntimeError:
