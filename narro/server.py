@@ -197,15 +197,17 @@ async def speech(req: SpeechRequest):
 
 
 async def _non_streaming_response(model: TTSModel, req: SpeechRequest) -> Response:
-    """Synthesize the full input and return a WAV or Opus response."""
-    loop = asyncio.get_event_loop()
+    """Synthesize the full input and return a WAV or Opus response.
+
+    Inference runs synchronously under the lock.  Using run_in_executor
+    would be preferable, but torch.compile with CUDA graph trees uses
+    thread-local state that breaks in worker threads.
+    """
     kwargs = {"align": req.align}
     if req.voice:
         kwargs["voice"] = req.voice
     async with _inference_lock:
-        result = await loop.run_in_executor(
-            None, lambda: model.synthesize(req.input, **kwargs)
-        )
+        result = model.synthesize(req.input, **kwargs)
 
     wav_bytes = _audio_to_wav_bytes(result.audio, result.sample_rate)
 
@@ -233,18 +235,11 @@ def _streaming_response(model: TTSModel, req: SpeechRequest) -> StreamingRespons
         })
         yield f"data: {meta}\n\n"
 
-        # Run the synchronous generator in a thread so we don't block
-        # the event loop during inference.  We collect one chunk at a
-        # time via asyncio.to_thread to keep memory bounded.
         async with _inference_lock:
             stream_kwargs = {}
             if req.voice:
                 stream_kwargs["voice"] = req.voice
-            stream_iter = iter(model.synthesize_stream(req.input, **stream_kwargs))
-            while True:
-                chunk = await asyncio.to_thread(next, stream_iter, None)
-                if chunk is None:
-                    break
+            for chunk in model.synthesize_stream(req.input, **stream_kwargs):
                 pcm = (np.clip(chunk.audio, -1.0, 1.0) * INT16_MAX).astype(np.int16)
                 encoded = base64.b64encode(pcm.tobytes()).decode("ascii")
                 payload = json.dumps({"type": "speech.audio.delta", "audio": encoded})
