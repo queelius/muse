@@ -223,15 +223,24 @@ class BaseModel:
             outputs = self.model(input_ids, use_cache=True, output_hidden_states=True)
             past_key_values = outputs.past_key_values
             next_token_logits = outputs.logits[:, -1, :]
-            generated_ids = input_ids
-            next_token = get_next_token(next_token_logits, generated_ids)
-
             max_new_tokens = min(512, input_ids.shape[1] * 8)
+
+            # Pre-allocate buffer for generated IDs (avoids O(n^2) torch.cat per token).
+            generated_ids = torch.zeros(
+                (1, input_ids.shape[1] + max_new_tokens),
+                dtype=input_ids.dtype, device=input_ids.device,
+            )
+            generated_ids[:, :input_ids.shape[1]] = input_ids
+            gen_len = input_ids.shape[1]
+
+            next_token = get_next_token(next_token_logits, generated_ids[:, :gen_len])
+
             eos_token_id = self.model.config.eos_token_id
             stream_t0 = time.perf_counter()
 
             for i in range(max_new_tokens):
-                generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+                generated_ids[:, gen_len] = next_token.squeeze()
+                gen_len += 1
                 outputs = self.model(
                     next_token,
                     past_key_values=past_key_values,
@@ -266,4 +275,4 @@ class BaseModel:
                     break
 
                 next_token_logits = outputs.logits[:, -1, :]
-                next_token = get_next_token(next_token_logits, generated_ids)
+                next_token = get_next_token(next_token_logits, generated_ids[:, :gen_len])
