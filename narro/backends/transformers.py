@@ -8,9 +8,12 @@ class TransformersModel(BaseModel):
         model_name_or_path = model_path if model_path else 'ekwek/Soprano-1.1-80M'
         self.device = device
 
+        # float16 on CUDA for ~2x throughput; float32 on CPU where fp16 is slow.
+        dtype = torch.float16 if device not in ('cpu',) else torch.float32
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            torch_dtype=torch.float32,
+            torch_dtype=dtype,
             attn_implementation="eager",
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
