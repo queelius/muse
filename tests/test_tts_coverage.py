@@ -253,6 +253,7 @@ class TestInfer:
         tts.pipeline = MagicMock()
         tts.decoder = MagicMock()
         tts.decoder_batch_size = 4
+        tts.decoder_dtype = torch.float32
         return tts
 
     def test_infer_returns_tensor(self):
@@ -313,6 +314,7 @@ class TestInferBatch:
         tts.pipeline = MagicMock()
         tts.decoder = MagicMock()
         tts.decoder_batch_size = 4
+        tts.decoder_dtype = torch.float32
         return tts
 
     def test_batch_multiple_texts(self):
@@ -463,6 +465,7 @@ class TestInferStream:
         tts.pipeline = MagicMock()
         tts.decoder = MagicMock()
         tts.decoder_batch_size = 4
+        tts.decoder_dtype = torch.float32
         return tts
 
     def test_stream_yields_audio_chunks(self):
@@ -1573,6 +1576,7 @@ class TestMultiSentenceReassembly:
         tts.pipeline = MagicMock()
         tts.decoder = MagicMock()
         tts.decoder_batch_size = 10
+        tts.decoder_dtype = torch.float32
         return tts
 
     def test_two_texts_different_lengths_assigned_correctly(self):
@@ -1628,6 +1632,7 @@ class TestHallucinationRetryExhaustion:
         tts.pipeline = MagicMock()
         tts.decoder = MagicMock()
         tts.decoder_batch_size = 4
+        tts.decoder_dtype = torch.float32
         return tts
 
     def test_uses_last_result_when_retries_exhausted(self):
@@ -1666,6 +1671,7 @@ class TestWavOutputContract:
         tts.pipeline = MagicMock()
         tts.decoder = MagicMock()
         tts.decoder_batch_size = 4
+        tts.decoder_dtype = torch.float32
         return tts
 
     def test_wav_has_correct_sample_rate_and_format(self):

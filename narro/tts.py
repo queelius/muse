@@ -82,6 +82,10 @@ class Narro:
 
         from .decode_only import load_decoder
         self.decoder = load_decoder(model_path=model_path, compile=compile, device=device)
+        try:
+            self.decoder_dtype = next(self.decoder.parameters()).dtype
+        except (StopIteration, AttributeError):
+            self.decoder_dtype = torch.float32
         self.decoder_batch_size = decoder_batch_size
 
         # Warmup decoder directly with synthetic tensors (no LLM needed).
@@ -340,6 +344,7 @@ class Narro:
                     if finished or chunk_counter == chunk_size:
                         batch_hidden_states = torch.stack(list(hidden_states_buffer))
                         inp = batch_hidden_states.unsqueeze(0).transpose(1, 2)
+                        inp = inp.to(dtype=self.decoder_dtype)
                         with torch.inference_mode():
                             audio = self.decoder(inp)[0]
                         if finished:
