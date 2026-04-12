@@ -81,18 +81,12 @@ class Narro:
                                           quantize=quantize, device=device)
 
         from .decode_only import load_decoder
-        self.decoder = load_decoder(model_path=model_path, compile=compile, device=device)
+        self.decoder = load_decoder(model_path=model_path, compile=False, device=device)
         try:
             self.decoder_dtype = next(self.decoder.parameters()).dtype
         except (StopIteration, AttributeError):
             self.decoder_dtype = torch.float32
         self.decoder_batch_size = decoder_batch_size
-
-        # Warmup decoder directly with synthetic tensors (no LLM needed).
-        if compile:
-            for warmup_len in [10, 20, 50]:
-                with torch.inference_mode():
-                    self.decoder(torch.zeros(1, HIDDEN_DIM, warmup_len, device=device))
 
     def _preprocess_text(self, texts, min_length=30):
         res = []
