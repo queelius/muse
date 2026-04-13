@@ -57,7 +57,15 @@ class ModelEntry:
     sample_rate: int
     size_mb: int
     voices: list[str] = field(default_factory=list)
+    pip_extras: list[str] = field(default_factory=list)
+    system_packages: list[str] = field(default_factory=list)
 
+
+_BARK_VOICES = [
+    f"v2/{lang}_speaker_{i}"
+    for lang in ("en", "de", "es", "fr", "hi", "it", "ja", "ko", "pl", "pt", "ru", "tr", "zh")
+    for i in range(10)
+]
 
 KNOWN_MODELS: dict[str, ModelEntry] = {
     "soprano-80m": ModelEntry(
@@ -75,11 +83,7 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
         backend="narro.models.bark.BarkModel",
         sample_rate=24000,
         size_mb=1500,
-        voices=[
-            f"v2/{lang}_speaker_{i}"
-            for lang in ("en", "de", "es", "fr", "hi", "it", "ja", "ko", "pl", "pt", "ru", "tr", "zh")
-            for i in range(10)
-        ],
+        voices=_BARK_VOICES,
     ),
     "bark-small": ModelEntry(
         id="bark-small",
@@ -88,11 +92,7 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
         backend="narro.models.bark.BarkModel",
         sample_rate=24000,
         size_mb=600,
-        voices=[
-            f"v2/{lang}_speaker_{i}"
-            for lang in ("en", "de", "es", "fr", "hi", "it", "ja", "ko", "pl", "pt", "ru", "tr", "zh")
-            for i in range(10)
-        ],
+        voices=_BARK_VOICES,
     ),
     "kokoro-82m": ModelEntry(
         id="kokoro-82m",
@@ -109,6 +109,8 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
             "jf_alpha", "jm_kumo",
             "zf_xiaobei", "zm_yunxi",
         ],
+        pip_extras=["kokoro", "soundfile", "misaki[en]"],
+        system_packages=["espeak-ng"],
     ),
     "parler-tts": ModelEntry(
         id="parler-tts",
@@ -121,6 +123,7 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
                 "Eileen", "Jordan", "Mike", "Yolanda", "Patrick", "Rose", "Jerry",
                 "Jenna", "Bill", "Tom", "Carol", "Barbara", "Rebecca", "Anna",
                 "Bruce", "Emily"],
+        pip_extras=["parler-tts"],
     ),
     "xtts-v2": ModelEntry(
         id="xtts-v2",
@@ -129,6 +132,8 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
         backend="narro.models.xtts.XttsModel",
         sample_rate=24000,
         size_mb=1800,
+        pip_extras=["TTS"],
+        system_packages=["espeak-ng"],
     ),
 }
 
@@ -162,18 +167,48 @@ def is_pulled(model_id: str) -> bool:
 # Pull / remove
 # ---------------------------------------------------------------------------
 
-def pull(model_id: str) -> None:
-    """Download a model's weights and record it as pulled.
+def _install_pip_extras(packages: list[str]) -> None:
+    """Install Python packages via pip."""
+    import subprocess
+    import sys
+    logger.info("Installing dependencies: %s", ", ".join(packages))
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", *packages],
+        stdout=subprocess.DEVNULL,
+    )
 
-    Uses ``huggingface_hub.snapshot_download`` so all files are cached
-    in HuggingFace's standard cache directory.  This function just
-    triggers the download and records the pull in catalog.json.
+
+def _check_system_packages(packages: list[str]) -> list[str]:
+    """Return system packages that are not installed."""
+    import shutil
+    missing = [p for p in packages if shutil.which(p) is None]
+    return missing
+
+
+def pull(model_id: str) -> None:
+    """Download a model's weights and install required dependencies.
+
+    Installs pip extras automatically.  Checks for required system
+    packages and warns if missing (cannot auto-install those).
     """
     if model_id not in KNOWN_MODELS:
         available = ", ".join(sorted(KNOWN_MODELS))
         raise ValueError(f"Unknown model: {model_id!r}. Available: {available}")
 
     entry = KNOWN_MODELS[model_id]
+
+    if entry.pip_extras:
+        _install_pip_extras(entry.pip_extras)
+
+    if entry.system_packages:
+        missing = _check_system_packages(entry.system_packages)
+        if missing:
+            logger.warning(
+                "Required system packages not found: %s. Install with:\n"
+                "  sudo apt install %s",
+                ", ".join(missing), " ".join(missing),
+            )
+
     logger.info("Pulling %s from %s (~%d MB)...", model_id, entry.hf_repo, entry.size_mb)
 
     from huggingface_hub import snapshot_download
