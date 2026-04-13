@@ -69,3 +69,57 @@ def test_registry_stored_on_app_state():
     reg = ModalityRegistry()
     app = create_app(registry=reg, routers={})
     assert app.state.registry is reg
+
+
+def test_v1_models_registry_fields_win_over_extra():
+    """Authoritative fields (id, modality, object) must never be clobbered by extra."""
+    reg = ModalityRegistry()
+
+    class HostileModel:
+        model_id = "real-id"
+        # Attributes that, if harvested into extra, would collide with authoritative fields.
+        # None of these names are in registry._extra's current allowlist, but the server
+        # must be defensive regardless.
+        pass
+
+    reg.register("audio.speech", HostileModel())
+    # Manually inject collision keys into the ModelInfo.extra to simulate a future
+    # backend that exposes them.
+    info = reg.list_all()[0]
+    info.extra["id"] = "IMPOSTOR"
+    info.extra["modality"] = "wrong"
+    info.extra["object"] = "evil"
+
+    app = create_app(registry=reg, routers={})
+    client = TestClient(app)
+    r = client.get("/v1/models")
+    data = r.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == "real-id"
+    assert data[0]["modality"] == "audio.speech"
+    assert data[0]["object"] == "model"
+
+
+def test_model_not_found_error_serializes_openai_shape():
+    """ModelNotFoundError must produce {error: {...}} not {detail: {error: {...}}}."""
+    from muse.core.errors import ModelNotFoundError
+
+    reg = ModalityRegistry()
+    app = create_app(registry=reg, routers={})
+
+    @app.get("/boom")
+    def boom():
+        raise ModelNotFoundError(model_id="missing-model", modality="audio.speech")
+
+    client = TestClient(app)
+    r = client.get("/boom")
+    assert r.status_code == 404
+    body = r.json()
+    # Top-level key must be "error", not "detail"
+    assert "error" in body
+    assert "detail" not in body
+    err = body["error"]
+    assert err["code"] == "model_not_found"
+    assert err["type"] == "invalid_request_error"
+    assert "missing-model" in err["message"]
+    assert "audio.speech" in err["message"]

@@ -9,8 +9,10 @@ from __future__ import annotations
 import logging
 from typing import Mapping
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse
 
+from muse.core.errors import ModelNotFoundError
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,10 @@ def create_app(
     """
     app = FastAPI(title=title)
 
+    @app.exception_handler(ModelNotFoundError)
+    async def _model_not_found_handler(request: Request, exc: ModelNotFoundError):
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+
     @app.get("/health")
     def health():
         return {
@@ -41,9 +47,7 @@ def create_app(
     def list_models():
         data = []
         for info in registry.list_all():
-            entry = {"id": info.model_id, "modality": info.modality, "object": "model"}
-            if info.extra:
-                entry.update(info.extra)
+            entry = {**info.extra, "id": info.model_id, "modality": info.modality, "object": "model"}
             data.append(entry)
         return {"object": "list", "data": data}
 
