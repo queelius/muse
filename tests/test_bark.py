@@ -32,6 +32,7 @@ class TestBarkModel:
         adapter._processor = mock_processor
         adapter._model = mock_model
         adapter._device = "cpu"
+        adapter._is_small = False
         return adapter
 
     def test_protocol_conformance(self):
@@ -108,6 +109,7 @@ class TestBarkVoiceCloning:
         adapter._processor = mock_processor
         adapter._model = mock_model
         adapter._device = "cpu"
+        adapter._is_small = False
         return adapter
 
     def test_create_voice(self, tmp_path):

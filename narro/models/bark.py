@@ -41,7 +41,6 @@ class BarkModel:
         quantize: Unused.
     """
 
-    MODEL_ID = "bark"
     VOICES = VOICE_PRESETS
 
     def __init__(
@@ -58,6 +57,7 @@ class BarkModel:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
         repo = model_path or ("suno/bark-small" if small else "suno/bark")
+        self._is_small = small or (model_path is not None and "small" in model_path)
         dtype = torch.float16 if device != "cpu" else torch.float32
 
         logger.info("Loading Bark from %s (device=%s, dtype=%s)", repo, device, dtype)
@@ -67,7 +67,7 @@ class BarkModel:
 
     @property
     def model_id(self) -> str:
-        return self.MODEL_ID
+        return "bark-small" if self._is_small else "bark"
 
     @property
     def sample_rate(self) -> int:
@@ -89,7 +89,7 @@ class BarkModel:
             raise ValueError(
                 f"Voice .npz must contain {required}, got {set(data.files)}"
             )
-        dest = voices_dir(self.MODEL_ID) / f"{name}.npz"
+        dest = voices_dir(self.model_id) / f"{name}.npz"
         import shutil
         shutil.copy2(str(src), str(dest))
         logger.info("Saved voice %r to %s", name, dest)
@@ -145,7 +145,7 @@ class BarkModel:
             return None
         if voice in VOICE_PRESETS or voice.startswith("v2/"):
             return voice
-        npz = voices_dir(self.MODEL_ID) / f"{voice}.npz"
+        npz = voices_dir(self.model_id) / f"{voice}.npz"
         if npz.exists():
             return str(npz)
         available = ", ".join(self._custom_voice_names()[:5])
@@ -155,5 +155,5 @@ class BarkModel:
         )
 
     def _custom_voice_names(self) -> list[str]:
-        vdir = voices_dir(self.MODEL_ID)
+        vdir = voices_dir(self.model_id)
         return [f.stem for f in vdir.iterdir() if f.suffix == ".npz"]
