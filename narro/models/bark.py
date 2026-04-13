@@ -111,8 +111,11 @@ class BarkModel:
         inputs = self._processor(text, voice_preset=voice_preset, return_tensors="pt")
         inputs = {k: v.to(self._device) for k, v in inputs.items()}
 
+        import warnings
         import torch
-        with torch.inference_mode():
+        with torch.inference_mode(), warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*max_new_tokens.*max_length.*")
+            warnings.filterwarnings("ignore", message=".*attention_mask.*pad_token_id.*")
             output = self._model.generate(
                 **inputs,
                 do_sample=True,
