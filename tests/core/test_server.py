@@ -123,3 +123,42 @@ def test_model_not_found_error_serializes_openai_shape():
     assert err["type"] == "invalid_request_error"
     assert "missing-model" in err["message"]
     assert "audio.speech" in err["message"]
+
+
+def test_speech_route_with_empty_registry_returns_openai_404():
+    """When no audio.speech model is registered, POST /v1/audio/speech must
+    return a 404 with the OpenAI error envelope (not FastAPI's generic 404).
+
+    This requires the audio.speech router to be mounted even when no models are
+    loaded — otherwise FastAPI returns {detail: 'Not Found'} for an unknown path.
+    """
+    from muse.audio.speech.routes import build_router as build_audio_router
+
+    reg = ModalityRegistry()
+    router = build_audio_router(reg)
+    app = create_app(registry=reg, routers={"audio.speech": router})
+    client = TestClient(app)
+
+    r = client.post("/v1/audio/speech", json={"input": "hello"})
+    assert r.status_code == 404
+    body = r.json()
+    assert "error" in body, f"Expected OpenAI envelope, got: {body}"
+    assert "detail" not in body
+    assert body["error"]["code"] == "model_not_found"
+
+
+def test_images_route_with_empty_registry_returns_openai_404():
+    """Same contract for images.generations."""
+    from muse.images.generations.routes import build_router as build_images_router
+
+    reg = ModalityRegistry()
+    router = build_images_router(reg)
+    app = create_app(registry=reg, routers={"images.generations": router})
+    client = TestClient(app)
+
+    r = client.post("/v1/images/generations", json={"prompt": "a cat"})
+    assert r.status_code == 404
+    body = r.json()
+    assert "error" in body, f"Expected OpenAI envelope, got: {body}"
+    assert "detail" not in body
+    assert body["error"]["code"] == "model_not_found"

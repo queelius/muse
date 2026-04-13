@@ -46,12 +46,13 @@ def run_serve(*, host: str, port: int,
             continue
         registry.register(entry.modality, backend)
 
-    if "audio.speech" in registry.modalities():
-        from muse.audio.speech.routes import build_router as build_audio
-        routers["audio.speech"] = build_audio(registry)
-    if "images.generations" in registry.modalities():
-        from muse.images.generations.routes import build_router as build_images
-        routers["images.generations"] = build_images(registry)
+    # Always mount all modality routers so the API surface is stable regardless
+    # of which models are currently loaded. The route handlers raise
+    # ModelNotFoundError (OpenAI-envelope 404) when the registry is empty.
+    from muse.audio.speech.routes import build_router as build_audio
+    from muse.images.generations.routes import build_router as build_images
+    routers["audio.speech"] = build_audio(registry)
+    routers["images.generations"] = build_images(registry)
 
     app = create_app(registry=registry, routers=routers)
     uvicorn.run(app, host=host, port=port)
