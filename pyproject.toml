@@ -28,7 +28,7 @@ Issues = "https://github.com/queelius/muse/issues"
 
 [project.optional-dependencies]
 # Server runtime
-server = ["fastapi", "uvicorn"]
+server = ["fastapi", "uvicorn", "sse-starlette"]
 
 # Audio modality (TTS)
 audio = [
