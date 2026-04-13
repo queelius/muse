@@ -87,3 +87,40 @@ def test_streaming_response(client):
     })
     assert r.status_code == 200
     assert "text/event-stream" in r.headers["content-type"]
+
+
+def test_404_uses_openai_error_envelope(client):
+    """Unknown model must return {error:{...}} not {detail:...}."""
+    r = client.post("/v1/audio/speech", json={
+        "input": "hi", "model": "no-such",
+    })
+    assert r.status_code == 404
+    body = r.json()
+    # OpenAI envelope: top-level "error" with code/message/type
+    assert "error" in body
+    assert "detail" not in body
+    err = body["error"]
+    assert err["code"] == "model_not_found"
+    assert err["type"] == "invalid_request_error"
+    assert "no-such" in err["message"]
+
+
+def test_voices_404_uses_openai_error_envelope(client):
+    r = client.get("/v1/audio/speech/voices?model=no-such")
+    assert r.status_code == 404
+    assert "error" in r.json()
+
+
+def test_streaming_yields_multiple_events_progressively(client):
+    """With the producer-queue pattern, each chunk is a distinct SSE event."""
+    r = client.post("/v1/audio/speech", json={
+        "input": "hello world",
+        "stream": True,
+    })
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers["content-type"]
+    text = r.text
+    # FakeTTS yields 3 chunks then "done". Expect at least 3 data events + done.
+    data_event_count = text.count("data: ")  # each SSE event starts with "data: "
+    assert data_event_count >= 3
+    assert "event: done" in text

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from muse.audio.speech.codec import AudioFormatError, audio_to_wav_bytes, wav_bytes_to_opus
+from muse.core.errors import ModelNotFoundError
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -44,8 +45,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     def list_voices(model: str | None = None):
         try:
             m = registry.get(MODALITY, model)
-        except KeyError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+        except KeyError:
+            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
         voices = getattr(m, "voices", [])
         return {"model": m.model_id, "voices": voices}
 
@@ -53,8 +54,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def speech(req: SpeechRequest):
         try:
             model = registry.get(MODALITY, req.model)
-        except KeyError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+        except KeyError:
+            raise ModelNotFoundError(model_id=req.model or "<default>", modality=MODALITY)
 
         if req.stream:
             return await _stream(model, req)
@@ -101,16 +102,33 @@ async def _non_stream(model, req: SpeechRequest) -> Response:
 
 async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
     async def event_gen():
-        def _chunks():
-            with _inference_lock:
-                return list(model.synthesize_stream(
-                    req.input, voice=req.voice, speed=req.speed,
-                ))
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        _SENTINEL = object()
 
-        loop = asyncio.get_event_loop()
-        chunks = await loop.run_in_executor(None, _chunks)
-        for chunk in chunks:
-            pcm = (np.clip(chunk.audio, -1.0, 1.0) * 32767).astype(np.int16)
+        def _produce():
+            try:
+                with _inference_lock:
+                    for chunk in model.synthesize_stream(
+                        req.input, voice=req.voice, speed=req.speed,
+                    ):
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, e)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+        loop.run_in_executor(None, _produce)
+
+        while True:
+            item = await queue.get()
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                logger.error("stream producer raised: %s", item)
+                yield {"event": "error", "data": str(item)}
+                break
+            pcm = (np.clip(item.audio, -1.0, 1.0) * 32767).astype(np.int16)
             yield {"data": base64.b64encode(pcm.tobytes()).decode()}
         yield {"event": "done", "data": ""}
 
