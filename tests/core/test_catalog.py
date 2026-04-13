@@ -111,6 +111,24 @@ def test_load_backend_imports_and_constructs(tmp_catalog):
     fake_class.assert_called_once()
     # Verify the constructor got hf_repo, local_dir, and device kwargs
     kwargs = fake_class.call_args.kwargs
-    assert "hf_repo" in kwargs
-    assert "local_dir" in kwargs
+    assert kwargs["local_dir"] == "/fake/local"
+    assert kwargs["hf_repo"] == "ekwek/Soprano-1.1-80M"
     assert kwargs["device"] == "cpu"
+
+
+def test_load_backend_raises_keyerror_on_unknown_model(tmp_catalog):
+    with pytest.raises(KeyError, match="unknown model"):
+        load_backend("bogus-model-xyz")
+
+
+def test_write_catalog_is_atomic_no_tmp_leftover(tmp_catalog):
+    with patch("muse.core.catalog.install_pip_extras"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+    # After successful write, the .tmp file must not exist
+    tmp_files = list(tmp_catalog.glob("*.tmp"))
+    assert tmp_files == [], f"leftover tmp files: {tmp_files}"
+    # And catalog.json must have the entry
+    catalog_file = tmp_catalog / "catalog.json"
+    assert catalog_file.exists()

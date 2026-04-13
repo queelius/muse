@@ -97,9 +97,16 @@ def _read_catalog() -> dict:
 
 
 def _write_catalog(data: dict) -> None:
+    """Atomic write: write to .tmp in same dir, then rename.
+
+    Rename within the same filesystem is atomic on POSIX and near-atomic
+    on Windows (Python 3.3+ Path.replace wraps MoveFileEx with REPLACE_EXISTING).
+    """
     p = _catalog_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, indent=2))
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(p)
 
 
 def is_pulled(model_id: str) -> bool:
@@ -155,6 +162,8 @@ def load_backend(model_id: str, **kwargs) -> Any:
     `backend_path` has the form "package.module:ClassName". The class
     is expected to accept (hf_repo, local_dir, **kwargs) in its constructor.
     """
+    if model_id not in KNOWN_MODELS:
+        raise KeyError(f"unknown model {model_id!r}; known: {sorted(KNOWN_MODELS)}")
     if not is_pulled(model_id):
         raise RuntimeError(f"model {model_id!r} not pulled; run `muse pull {model_id}`")
     entry = KNOWN_MODELS[model_id]
