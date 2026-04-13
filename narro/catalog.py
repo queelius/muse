@@ -94,6 +94,42 @@ KNOWN_MODELS: dict[str, ModelEntry] = {
             for i in range(10)
         ],
     ),
+    "kokoro-82m": ModelEntry(
+        id="kokoro-82m",
+        description="Kokoro 82M: fast lightweight TTS with 54 voices (24kHz, 6 languages)",
+        hf_repo="hexgrad/Kokoro-82M",
+        backend="narro.models.kokoro.KokoroModel",
+        sample_rate=24000,
+        size_mb=200,
+        voices=[
+            "af_heart", "af_alloy", "af_bella", "af_jessica", "af_nova", "af_sky",
+            "am_adam", "am_echo", "am_eric", "am_liam", "am_michael", "am_onyx",
+            "bf_emma", "bf_isabella", "bm_daniel", "bm_george",
+            "ef_dora", "em_alex", "ff_siwis",
+            "jf_alpha", "jm_kumo",
+            "zf_xiaobei", "zm_yunxi",
+        ],
+    ),
+    "parler-tts": ModelEntry(
+        id="parler-tts",
+        description="Parler-TTS Mini: voice-described TTS (44.1kHz, text prompt controls voice)",
+        hf_repo="parler-tts/parler-tts-mini-v1",
+        backend="narro.models.parler.ParlerModel",
+        sample_rate=44100,
+        size_mb=600,
+        voices=["Jon", "Laura", "Gary", "Lea", "Karen", "Rick", "Brenda", "David",
+                "Eileen", "Jordan", "Mike", "Yolanda", "Patrick", "Rose", "Jerry",
+                "Jenna", "Bill", "Tom", "Carol", "Barbara", "Rebecca", "Anna",
+                "Bruce", "Emily"],
+    ),
+    "xtts-v2": ModelEntry(
+        id="xtts-v2",
+        description="XTTS v2: zero-shot voice cloning TTS (24kHz, 16 languages)",
+        hf_repo="coqui/XTTS-v2",
+        backend="narro.models.xtts.XttsModel",
+        sample_rate=24000,
+        size_mb=1800,
+    ),
 }
 
 
