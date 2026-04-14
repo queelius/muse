@@ -14,6 +14,7 @@ work without gateway changes.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -91,6 +92,53 @@ def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
                 {"model_id": r.model_id, "worker_url": r.worker_url}
                 for r in app.state.routes.values()
             ],
+        }
+
+    @app.get("/v1/models")
+    async def list_models():
+        worker_urls = {r.worker_url for r in app.state.routes.values()}
+        aggregated: list[dict] = []
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            async def _one(url: str) -> list[dict]:
+                try:
+                    r = await client.get(f"{url}/v1/models")
+                    if r.status_code != 200:
+                        return []
+                    return r.json().get("data", [])
+                except httpx.HTTPError as e:
+                    logger.warning("worker %s unreachable: %s", url, e)
+                    return []
+            results = await asyncio.gather(*[_one(u) for u in worker_urls])
+        for items in results:
+            aggregated.extend(items)
+        return {"object": "list", "data": aggregated}
+
+    @app.get("/health")
+    async def health():
+        worker_urls = {r.worker_url for r in app.state.routes.values()}
+        modalities: set[str] = set()
+        models: set[str] = set()
+        any_down = False
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            async def _one(url: str) -> dict | None:
+                try:
+                    r = await client.get(f"{url}/health")
+                    if r.status_code != 200:
+                        return None
+                    return r.json()
+                except httpx.HTTPError:
+                    return None
+            results = await asyncio.gather(*[_one(u) for u in worker_urls])
+        for body in results:
+            if body is None:
+                any_down = True
+                continue
+            modalities.update(body.get("modalities", []))
+            models.update(body.get("models", []))
+        return {
+            "status": "degraded" if any_down else "ok",
+            "modalities": sorted(modalities),
+            "models": sorted(models),
         }
 
     @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])

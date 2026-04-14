@@ -149,3 +149,143 @@ class TestProxy:
         body = r.json()
         assert "error" in body
         assert body["error"]["code"] == "model_required"
+
+
+class TestAggregation:
+    def test_v1_models_aggregates_across_workers(self):
+        routes = [
+            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
+            WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
+        ]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            def make_resp(data):
+                r = MagicMock()
+                r.status_code = 200
+                r.json.return_value = {"object": "list", "data": data}
+                return r
+
+            responses_by_url = {
+                "http://127.0.0.1:9001/v1/models": make_resp([
+                    {"id": "soprano-80m", "modality": "audio.speech", "object": "model"},
+                ]),
+                "http://127.0.0.1:9002/v1/models": make_resp([
+                    {"id": "sd-turbo", "modality": "images.generations", "object": "model"},
+                ]),
+            }
+
+            async def fake_get(url, **kwargs):
+                return responses_by_url[url]
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            r = client.get("/v1/models")
+        assert r.status_code == 200
+        data = r.json()["data"]
+        ids = {m["id"] for m in data}
+        assert ids == {"soprano-80m", "sd-turbo"}
+
+    def test_v1_models_skips_unreachable_workers(self):
+        """If a worker is down, its models are omitted (not a 500)."""
+        routes = [
+            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
+            WorkerRoute("sd-turbo", "http://127.0.0.1:9999"),  # down
+        ]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {"object": "list", "data": [
+                {"id": "soprano-80m", "modality": "audio.speech", "object": "model"},
+            ]}
+
+            async def fake_get(url, **kwargs):
+                if "9001" in url:
+                    return r_ok
+                raise httpx.ConnectError("connection refused", request=None)
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            r = client.get("/v1/models")
+        assert r.status_code == 200
+        ids = {m["id"] for m in r.json()["data"]}
+        assert ids == {"soprano-80m"}
+
+    def test_health_aggregates_worker_status(self):
+        routes = [
+            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
+            WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
+        ]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            def make_resp(payload):
+                r = MagicMock(status_code=200)
+                r.json.return_value = payload
+                return r
+
+            responses = {
+                "http://127.0.0.1:9001/health": make_resp({
+                    "status": "ok", "modalities": ["audio.speech"], "models": ["soprano-80m"],
+                }),
+                "http://127.0.0.1:9002/health": make_resp({
+                    "status": "ok", "modalities": ["images.generations"], "models": ["sd-turbo"],
+                }),
+            }
+
+            async def fake_get(url, **kwargs):
+                return responses[url]
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            r = client.get("/health")
+        body = r.json()
+        assert body["status"] == "ok"
+        assert set(body["modalities"]) == {"audio.speech", "images.generations"}
+        assert set(body["models"]) == {"soprano-80m", "sd-turbo"}
+
+    def test_health_degraded_when_any_worker_down(self):
+        routes = [
+            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
+            WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
+        ]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {
+                "status": "ok", "modalities": ["audio.speech"], "models": ["soprano-80m"],
+            }
+
+            async def fake_get(url, **kwargs):
+                if "9001" in url:
+                    return r_ok
+                raise httpx.ConnectError("down", request=None)
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            r = client.get("/health")
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert "sd-turbo" not in body["models"]
