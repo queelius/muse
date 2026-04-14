@@ -80,28 +80,48 @@ class TestFindFreePort:
 
     def test_skips_bound_ports(self):
         import socket
-        # Bind 9001 so find_free_port must skip it
+        # Use OS-assigned ephemeral port (avoids flakiness on busy hosts).
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        bound_port = s.getsockname()[1]
+        s.listen(1)
         try:
-            s.bind(("127.0.0.1", 9001))
-            s.listen(1)
-            p = find_free_port(start=9001, end=9003)
-            assert p != 9001
+            p = find_free_port(start=bound_port, end=bound_port + 2)
+            assert p != bound_port
         finally:
             s.close()
 
     def test_raises_when_no_free_port_in_range(self):
         import socket
+        # Bind 3 consecutive ephemeral ports, then call find_free_port over
+        # exactly that range so every port is taken.
         sockets = []
         try:
-            # Bind every port in a tiny range
-            for port in (19001, 19002, 19003):
+            # Bind first port; OS picks the number
+            s0 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s0.bind(("127.0.0.1", 0))
+            s0.listen(1)
+            sockets.append(s0)
+            port_start = s0.getsockname()[1]
+
+            # Try to bind the next two sequential ports. If either is already
+            # taken by some other process, adjust bound_ports accordingly so
+            # the range we pass to find_free_port contains ONLY bound ports.
+            bound_ports = [port_start]
+            for offset in (1, 2):
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.bind(("127.0.0.1", port))
-                s.listen(1)
-                sockets.append(s)
+                try:
+                    s.bind(("127.0.0.1", port_start + offset))
+                    s.listen(1)
+                    sockets.append(s)
+                    bound_ports.append(port_start + offset)
+                except OSError:
+                    s.close()
+                    break
+
+            # Exhaust exactly the contiguous bound range
             with pytest.raises(RuntimeError, match="no free port"):
-                find_free_port(start=19001, end=19003)
+                find_free_port(start=bound_ports[0], end=bound_ports[-1])
         finally:
             for s in sockets:
                 s.close()
