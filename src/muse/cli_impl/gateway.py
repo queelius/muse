@@ -4,12 +4,13 @@ The gateway is the user-facing process (port 8000 by default). Workers
 live on internal ports (9001+). The gateway:
   1. Reads catalog + venv map at startup, builds a model-id -> worker-url table
   2. Extracts `model` from each request (body for POST, query for GET)
-  3. Forwards the request to the hosting worker, streaming the response
-  4. Aggregates /v1/models and /health across all workers
+  3. Forwards the request to the hosting worker, streaming the response (D4)
+  4. Aggregates /v1/models and /health across all workers (D3)
 
-This file in Task D1 implements ONLY the skeleton: WorkerRoute dataclass,
-extract_model_from_request, and build_gateway with a diagnostic endpoint.
-Proxy logic (D2), aggregation (D3), and streaming (D4) follow.
+Proxy routing is modality-agnostic: any request with a `model` field
+routes to the worker hosting that model, regardless of URL path. This
+means future modalities (/v1/embeddings, /v1/audio/transcriptions, ...)
+work without gateway changes.
 """
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +66,23 @@ async def extract_model_from_request(request: Any) -> str | None:
     return None
 
 
-def build_gateway(routes: list[WorkerRoute]) -> FastAPI:
-    """Build a FastAPI app that proxies requests based on the route table.
+def _openai_error(status: int, code: str, message: str) -> JSONResponse:
+    """OpenAI-compatible error envelope."""
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"code": code, "message": message, "type": "invalid_request_error"}},
+    )
 
-    Full implementation lands in subsequent tasks. For now this returns
-    an app with only a /_gateway-info diagnostic endpoint so tests can
-    assert the route table is preserved.
+
+def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
+    """Build the gateway FastAPI app.
+
+    `routes` is the model-id -> worker-url table. This task (D2) implements
+    buffered forwarding; streaming support lands in D4.
     """
     app = FastAPI(title="Muse Gateway")
     app.state.routes = {r.model_id: r for r in routes}
+    app.state.timeout = timeout
 
     @app.get("/_gateway-info")
     def info():
@@ -82,4 +93,57 @@ def build_gateway(routes: list[WorkerRoute]) -> FastAPI:
             ],
         }
 
+    @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+    async def proxy(request: Request, full_path: str):
+        # NOTE: aggregated endpoints (/v1/models, /health) land in D3 as
+        # explicit routes registered BEFORE this catch-all, so they win
+        # via FastAPI's registration order.
+
+        model_id = await extract_model_from_request(request)
+        if model_id is None:
+            return _openai_error(
+                400, "model_required",
+                "request is missing a `model` field (required for gateway routing)",
+            )
+
+        route = app.state.routes.get(model_id)
+        if route is None:
+            return _openai_error(
+                404, "model_not_found",
+                f"model {model_id!r} is not registered with any worker; "
+                f"known: {sorted(app.state.routes)}",
+            )
+
+        target_url = f"{route.worker_url}/{full_path}"
+        return await _forward(request, target_url, app.state.timeout)
+
     return app
+
+
+async def _forward(request: Request, target_url: str, timeout: float) -> Response:
+    """Forward a request to target_url. Buffers full body (streaming in D4)."""
+    body = await request.body()
+
+    # Strip hop-by-hop headers that httpx / FastAPI manage themselves
+    excluded = {"host", "content-length", "transfer-encoding", "connection"}
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded}
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.request(
+            method=request.method,
+            url=target_url,
+            headers=fwd_headers,
+            content=body,
+            params=dict(request.query_params),
+        )
+
+    resp_headers = {
+        k: v for k, v in response.headers.items()
+        if k.lower() not in excluded
+    }
+
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        headers=resp_headers,
+    )

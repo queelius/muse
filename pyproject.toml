@@ -28,7 +28,7 @@ Issues = "https://github.com/queelius/muse/issues"
 
 [project.optional-dependencies]
 # Server runtime
-server = ["fastapi", "uvicorn", "sse-starlette"]
+server = ["fastapi", "uvicorn", "sse-starlette", "httpx"]
 
 # Audio modality (TTS)
 audio = [
@@ -50,7 +50,7 @@ images = [
 ]
 
 # Development
-dev = ["pytest", "pytest-cov", "pytest-asyncio", "httpx"]
+dev = ["pytest", "pytest-cov", "pytest-asyncio"]
 
 [project.scripts]
 muse = "muse.cli:main"

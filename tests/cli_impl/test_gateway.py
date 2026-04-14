@@ -1,7 +1,9 @@
 """Tests for the gateway proxy FastAPI app."""
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from muse.cli_impl.gateway import (
     extract_model_from_request,
@@ -90,3 +92,60 @@ class TestBuildGateway:
         data = r.json()
         model_ids = {entry["model_id"] for entry in data["routes"]}
         assert model_ids == {"soprano-80m", "sd-turbo"}
+
+
+class TestProxy:
+    def test_proxy_forwards_post_to_matching_worker(self):
+        routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.content = b'{"ok": true}'
+            mock_response.headers = {"content-type": "application/json"}
+            async_mock_request = AsyncMock(return_value=mock_response)
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.request = async_mock_request
+            mock_client_cls.return_value = mock_client
+
+            r = client.post("/v1/audio/speech", json={
+                "input": "hi", "model": "soprano-80m",
+            })
+
+        assert r.status_code == 200
+        # The AsyncClient.request call should have targeted the worker url
+        call_kwargs = async_mock_request.call_args.kwargs
+        call_args = async_mock_request.call_args.args
+        target_url = call_args[1] if len(call_args) > 1 else call_kwargs.get("url")
+        assert target_url == "http://127.0.0.1:9001/v1/audio/speech"
+
+    def test_proxy_returns_404_openai_envelope_for_unknown_model(self):
+        routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        r = client.post("/v1/audio/speech", json={
+            "input": "hi", "model": "does-not-exist",
+        })
+        assert r.status_code == 404
+        body = r.json()
+        assert "error" in body
+        assert "detail" not in body
+        assert body["error"]["code"] == "model_not_found"
+        assert "does-not-exist" in body["error"]["message"]
+
+    def test_proxy_returns_400_when_model_not_specified(self):
+        """POST without a model field: 400 (client must provide routing info)."""
+        routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        r = client.post("/v1/audio/speech", json={"input": "hi"})
+        assert r.status_code == 400
+        body = r.json()
+        assert "error" in body
+        assert body["error"]["code"] == "model_required"
