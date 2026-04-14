@@ -1,7 +1,7 @@
 """Tests for the supervisor: catalog -> worker specs."""
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import pytest
 
@@ -106,3 +106,69 @@ class TestPlanWorkers:
         assert "new-model" in all_models
         # Warning should mention the legacy model id or re-pulling
         assert "legacy-model" in caplog.text or "re-pull" in caplog.text.lower() or "re-run" in caplog.text.lower()
+
+
+class TestSpawnWorker:
+    @patch("muse.cli_impl.supervisor.subprocess.Popen")
+    def test_spawn_worker_invokes_venv_python_with_worker_subcommand(self, mock_popen):
+        mock_popen.return_value = MagicMock(pid=12345)
+        spec = WorkerSpec(
+            models=["soprano-80m"],
+            python_path="/venvs/soprano-80m/bin/python",
+            port=9001,
+        )
+        from muse.cli_impl.supervisor import spawn_worker
+        spawn_worker(spec, device="cpu")
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args.args[0]
+        assert args[0] == "/venvs/soprano-80m/bin/python"
+        assert args[1:4] == ["-m", "muse.cli", "_worker"]
+        assert "--port" in args and "9001" in args
+        assert "--model" in args and "soprano-80m" in args
+        assert "--device" in args and "cpu" in args
+        assert spec.process is mock_popen.return_value
+
+    @patch("muse.cli_impl.supervisor.subprocess.Popen")
+    def test_spawn_worker_passes_all_models_in_group(self, mock_popen):
+        spec = WorkerSpec(
+            models=["model-a", "model-b"],
+            python_path="/venvs/shared/bin/python",
+            port=9001,
+        )
+        from muse.cli_impl.supervisor import spawn_worker
+        spawn_worker(spec, device="cuda")
+        args = mock_popen.call_args.args[0]
+        # Each model passed via separate --model
+        model_values = [args[i+1] for i, v in enumerate(args) if v == "--model"]
+        assert set(model_values) == {"model-a", "model-b"}
+
+
+class TestWaitForReady:
+    def test_returns_when_health_responds_200(self):
+        from muse.cli_impl.supervisor import wait_for_ready
+
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            # Should return cleanly
+            wait_for_ready(port=9001, timeout=5.0, poll_interval=0.01)
+
+    def test_raises_timeouterror_when_worker_never_responds(self):
+        from muse.cli_impl.supervisor import wait_for_ready
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            import httpx
+            mock_get.side_effect = httpx.ConnectError("nope", request=None)
+            with pytest.raises(TimeoutError, match="did not become ready"):
+                wait_for_ready(port=9001, timeout=0.1, poll_interval=0.01)
+
+    def test_polls_multiple_times_before_success(self):
+        from muse.cli_impl.supervisor import wait_for_ready
+        import httpx
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            # First two calls fail, third succeeds
+            mock_get.side_effect = [
+                httpx.ConnectError("not yet", request=None),
+                httpx.ConnectError("not yet", request=None),
+                MagicMock(status_code=200),
+            ]
+            wait_for_ready(port=9001, timeout=5.0, poll_interval=0.001)
+            assert mock_get.call_count == 3
