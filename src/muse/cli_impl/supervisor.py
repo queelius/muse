@@ -56,6 +56,14 @@ def plan_workers(port_start: int = 9001, port_end: int = 9999) -> list[WorkerSpe
                 model_id, model_id,
             )
             continue
+        # Default True covers legacy entries without the field
+        # (also backfilled by _read_catalog's setdefault)
+        if not entry.get("enabled", True):
+            logger.info(
+                "skipping disabled model %r (use `muse models enable %s` to re-enable)",
+                model_id, model_id,
+            )
+            continue
         groups.setdefault(python, []).append(model_id)
 
     specs: list[WorkerSpec] = []

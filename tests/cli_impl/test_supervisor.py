@@ -107,6 +107,41 @@ class TestPlanWorkers:
         # Warning should mention the legacy model id or re-pulling
         assert "legacy-model" in caplog.text or "re-pull" in caplog.text.lower() or "re-run" in caplog.text.lower()
 
+    def test_skips_disabled_models(self, tmp_catalog):
+        """Disabled models are filtered out of plan_workers results."""
+        _seed_catalog({
+            "enabled-model": {
+                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
+                "venv_path": "/venvs/a",
+                "python_path": "/venvs/a/bin/python",
+                "enabled": True,
+            },
+            "disabled-model": {
+                "pulled_at": "...", "hf_repo": "b", "local_dir": "/b",
+                "venv_path": "/venvs/b",
+                "python_path": "/venvs/b/bin/python",
+                "enabled": False,
+            },
+        })
+        specs = plan_workers()
+        all_models = {m for s in specs for m in s.models}
+        assert "enabled-model" in all_models
+        assert "disabled-model" not in all_models
+
+    def test_legacy_entries_without_enabled_field_treated_as_enabled(self, tmp_catalog):
+        """Pre-flag entries (no `enabled` key) must still be planned."""
+        _seed_catalog({
+            "legacy-model": {
+                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
+                "venv_path": "/venvs/a",
+                "python_path": "/venvs/a/bin/python",
+                # no 'enabled' key
+            },
+        })
+        specs = plan_workers()
+        all_models = {m for s in specs for m in s.models}
+        assert "legacy-model" in all_models
+
 
 class TestSpawnWorker:
     @patch("muse.cli_impl.supervisor.subprocess.Popen")
