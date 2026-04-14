@@ -66,7 +66,9 @@ def test_pull_installs_pip_downloads_and_writes_catalog(tmp_catalog):
         mock_download.return_value = "/fake/cache/soprano"
         pull("soprano-80m")
         mock_create.assert_called_once()
-        mock_install.assert_called_once()
+        # install_into_venv called twice: once for muse[server], once for
+        # the model's pip_extras.
+        assert mock_install.call_count == 2
         mock_download.assert_called_once()
         assert is_pulled("soprano-80m")
 
@@ -162,11 +164,40 @@ def test_pull_installs_pip_extras_into_venv_not_system(tmp_catalog):
          patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
          patch("muse.core.catalog.check_system_packages", return_value=[]):
         pull("soprano-80m")
-        mock_install.assert_called_once()
-        venv_arg, packages_arg = mock_install.call_args[0]
-        assert venv_arg == tmp_catalog / "venvs" / "soprano-80m"
-        # transformers and scipy are in soprano-80m's pip_extras
-        assert any("transformers" in p for p in packages_arg)
+    # Find the call that installed soprano's actual pip_extras. There are
+    # two calls in total: muse[server] first, then the model's pip_extras.
+    model_call = next(
+        c for c in mock_install.call_args_list
+        if any("transformers" in p for p in c.args[1])
+    )
+    venv_arg, packages_arg = model_call.args
+    assert venv_arg == tmp_catalog / "venvs" / "soprano-80m"
+    assert any("transformers" in p for p in packages_arg)
+
+
+def test_pull_installs_muse_editable_with_server_extras(tmp_catalog):
+    """Worker venvs must have muse installed so python -m muse.cli works.
+
+    Without this, `<venv>/bin/python -m muse.cli _worker` crashes with
+    ModuleNotFoundError: No module named 'muse'. The supervisor can't
+    spawn workers.
+    """
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv") as mock_install, \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+
+    muse_call = next(
+        (c for c in mock_install.call_args_list if "-e" in c.args[1]),
+        None,
+    )
+    assert muse_call is not None, "muse was not installed into the venv"
+    venv_arg, packages_arg = muse_call.args
+    assert venv_arg == tmp_catalog / "venvs" / "soprano-80m"
+    # Format: ["-e", "<repo-root>[server]"]
+    assert packages_arg[0] == "-e"
+    assert "[server]" in packages_arg[1]
 
 
 def test_pull_records_venv_path_and_python_in_catalog(tmp_catalog):

@@ -141,12 +141,30 @@ def list_known(modality: str | None = None) -> list[CatalogEntry]:
     return [e for e in entries if e.modality == modality]
 
 
-def pull(model_id: str) -> None:
-    """Create per-model venv, install deps into it, download weights, record state.
+def _muse_repo_root() -> Path:
+    """Resolve the muse source tree that contains this catalog.py.
 
-    Each pulled model gets `<MUSE_CATALOG_DIR>/venvs/<model-id>/` with its
-    `pip_extras` installed inside. The catalog records the venv's Python path
-    so `muse serve` can spawn workers with the right interpreter.
+    `__file__` is at `<repo>/src/muse/core/catalog.py`, so `parents[3]`
+    is the repo root with pyproject.toml. Used to install muse itself
+    (editable) into each worker venv.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def pull(model_id: str) -> None:
+    """Create per-model venv, install muse + deps into it, download weights.
+
+    Each pulled model gets `<MUSE_CATALOG_DIR>/venvs/<model-id>/`. The venv
+    contains:
+      - `muse` itself (editable, pointing at the current repo) so that
+        `<venv>/bin/python -m muse.cli _worker ...` works when the
+        supervisor spawns a worker subprocess.
+      - The `[server]` extras (fastapi, uvicorn, sse-starlette, httpx)
+        for the worker's FastAPI app.
+      - The model's own `pip_extras` (torch, transformers, diffusers, etc).
+
+    The catalog records the venv's Python path so `muse serve` can spawn
+    workers with the right interpreter.
     """
     if model_id not in KNOWN_MODELS:
         raise KeyError(f"unknown model {model_id!r}; known: {sorted(KNOWN_MODELS)}")
@@ -156,12 +174,17 @@ def pull(model_id: str) -> None:
     venvs_root = _catalog_dir() / "venvs"
     venv_path = venvs_root / model_id
 
-    # Skip creation if the venv dir already exists; pip_extras are
-    # (re-)installed below regardless to pick up any catalog updates.
+    # Skip creation if the venv dir already exists; pip installs below
+    # are (re-)run regardless to pick up repo or catalog updates.
     if not venv_path.exists():
         create_venv(venv_path)
 
-    # Install pip_extras INTO the venv, not the supervisor's env
+    # Install muse itself (editable) + [server] extras so the worker
+    # subprocess can `python -m muse.cli _worker`.  Editable means a
+    # `git pull` in the repo is reflected in workers on next start.
+    install_into_venv(venv_path, ["-e", f"{_muse_repo_root()}[server]"])
+
+    # Install model-specific pip_extras on top
     if entry.pip_extras:
         install_into_venv(venv_path, list(entry.pip_extras))
 
