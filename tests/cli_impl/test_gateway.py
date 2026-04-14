@@ -101,15 +101,21 @@ class TestProxy:
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.content = b'{"ok": true}'
-            mock_response.headers = {"content-type": "application/json"}
-            async_mock_request = AsyncMock(return_value=mock_response)
             mock_client = MagicMock()
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client.request = async_mock_request
+            mock_client.aclose = AsyncMock()
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = {"content-type": "application/json"}
+            mock_response.aread = AsyncMock(return_value=b'{"ok": true}')
+
+            stream_ctx = MagicMock()
+            stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+            stream_ctx.__aexit__ = AsyncMock(return_value=None)
+            mock_client.stream = MagicMock(return_value=stream_ctx)
+
             mock_client_cls.return_value = mock_client
 
             r = client.post("/v1/audio/speech", json={
@@ -117,9 +123,9 @@ class TestProxy:
             })
 
         assert r.status_code == 200
-        # The AsyncClient.request call should have targeted the worker url
-        call_kwargs = async_mock_request.call_args.kwargs
-        call_args = async_mock_request.call_args.args
+        # The stream() call should have targeted the worker url
+        call_kwargs = mock_client.stream.call_args.kwargs
+        call_args = mock_client.stream.call_args.args
         target_url = call_args[1] if len(call_args) > 1 else call_kwargs.get("url")
         assert target_url == "http://127.0.0.1:9001/v1/audio/speech"
 
@@ -289,3 +295,49 @@ class TestAggregation:
         body = r.json()
         assert body["status"] == "degraded"
         assert "sd-turbo" not in body["models"]
+
+
+class TestStreaming:
+    def test_sse_stream_is_relayed_chunk_by_chunk(self):
+        """A `stream: true` response (text/event-stream) must pass through."""
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        chunks = [b"data: chunk1\n\n", b"data: chunk2\n\n", b"event: done\ndata: \n\n"]
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.aclose = AsyncMock()
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = {"content-type": "text/event-stream"}
+
+            async def aiter_raw():
+                for c in chunks:
+                    yield c
+            mock_response.aiter_raw = aiter_raw
+            mock_response.aclose = AsyncMock()
+            mock_response.aread = AsyncMock(return_value=b"".join(chunks))
+
+            # stream() is an async context manager
+            stream_ctx = MagicMock()
+            stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+            stream_ctx.__aexit__ = AsyncMock(return_value=None)
+            mock_client.stream = MagicMock(return_value=stream_ctx)
+
+            mock_client_cls.return_value = mock_client
+
+            r = client.post("/v1/audio/speech", json={
+                "input": "hi", "model": "soprano-80m", "stream": True,
+            })
+
+        assert r.status_code == 200
+        assert "text/event-stream" in r.headers.get("content-type", "")
+        # All chunks received in order
+        assert b"data: chunk1" in r.content
+        assert b"data: chunk2" in r.content
+        assert b"event: done" in r.content

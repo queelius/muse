@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -169,29 +169,64 @@ def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
 
 
 async def _forward(request: Request, target_url: str, timeout: float) -> Response:
-    """Forward a request to target_url. Buffers full body (streaming in D4)."""
-    body = await request.body()
+    """Forward a request to target_url.
 
-    # Strip hop-by-hop headers that httpx / FastAPI manage themselves
+    Detects streaming content-types (text/event-stream) and relays chunks
+    via StreamingResponse. Non-streaming responses are read fully and
+    returned in one go.
+
+    The httpx client and stream context are held open for the duration of
+    a streaming response so chunks dispatch as they arrive from the worker
+    (not after full synthesis completes). Same producer-consumer shape as
+    the audio.speech router's internal streaming.
+    """
+    body = await request.body()
     excluded = {"host", "content-length", "transfer-encoding", "connection"}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.request(
-            method=request.method,
-            url=target_url,
-            headers=fwd_headers,
-            content=body,
-            params=dict(request.query_params),
-        )
+    client = httpx.AsyncClient(timeout=timeout)
+    stream_ctx = client.stream(
+        method=request.method,
+        url=target_url,
+        headers=fwd_headers,
+        content=body,
+        params=dict(request.query_params),
+    )
+    response = await stream_ctx.__aenter__()
+
+    content_type = response.headers.get("content-type", "")
+    is_stream = "text/event-stream" in content_type
 
     resp_headers = {
         k: v for k, v in response.headers.items()
         if k.lower() not in excluded
     }
 
+    if is_stream:
+        async def relay():
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await stream_ctx.__aexit__(None, None, None)
+                await client.aclose()
+
+        return StreamingResponse(
+            relay(),
+            status_code=response.status_code,
+            headers=resp_headers,
+            media_type=content_type,
+        )
+
+    # Non-streaming: read once, close stream + client, return buffered.
+    try:
+        content = await response.aread()
+    finally:
+        await stream_ctx.__aexit__(None, None, None)
+        await client.aclose()
+
     return Response(
-        content=response.content,
+        content=content,
         status_code=response.status_code,
         headers=resp_headers,
     )
