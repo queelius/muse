@@ -43,13 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=False)
 
     # serve
-    sp_serve = sub.add_parser("serve", help="start the HTTP server")
+    sp_serve = sub.add_parser("serve", help="start the HTTP gateway (spawns one worker per venv)")
     sp_serve.add_argument("--host", default="0.0.0.0")
     sp_serve.add_argument("--port", type=int, default=8000)
-    sp_serve.add_argument("--modality", action="append", default=None,
-                          help="modality to enable (default: all with pulled models). Repeatable.")
-    sp_serve.add_argument("--model", action="append", default=None,
-                          help="specific model(s) to load. Repeatable.")
     sp_serve.add_argument("--device", default="auto",
                           choices=["auto", "cpu", "cuda", "mps"])
     sp_serve.set_defaults(func=_cmd_serve)
@@ -58,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp_pull = sub.add_parser("pull", help="download weights + install deps for a model")
     sp_pull.add_argument("model_id")
     sp_pull.set_defaults(func=_cmd_pull)
+
+    # _worker (hidden; invoked by supervisor via subprocess)
+    sp_worker = sub.add_parser("_worker", help="internal: run a single worker (invoked by muse serve)")
+    sp_worker.add_argument("--host", default="127.0.0.1",
+                           help="bind address (default: 127.0.0.1, workers are internal)")
+    sp_worker.add_argument("--port", type=int, required=True)
+    sp_worker.add_argument("--model", action="append", default=[], required=True,
+                           help="model to load (repeatable; one worker can host multiple compatible models)")
+    sp_worker.add_argument("--device", default="auto",
+                           choices=["auto", "cpu", "cuda", "mps"])
+    sp_worker.set_defaults(func=_cmd_worker)
 
     # models (catalog admin)
     sp_models = sub.add_parser("models", help="manage the model catalog")
@@ -83,10 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _cmd_serve(args):
     from muse.cli_impl.serve import run_serve
-    return run_serve(
-        host=args.host, port=args.port,
-        modalities=args.modality, models=args.model, device=args.device,
-    )
+    return run_serve(host=args.host, port=args.port, device=args.device)
 
 
 def _cmd_pull(args):
@@ -98,6 +102,14 @@ def _cmd_pull(args):
         return 2
     print(f"pulled {args.model_id}")
     return 0
+
+
+def _cmd_worker(args):
+    from muse.cli_impl.worker import run_worker
+    return run_worker(
+        host=args.host, port=args.port,
+        models=args.model, device=args.device,
+    )
 
 
 def _cmd_models_list(args):
