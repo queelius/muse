@@ -285,6 +285,194 @@ class TestWorkerSpecExtensions:
         assert spec.last_spawn_at == 0.0
 
 
+class TestAttemptRestart:
+    def test_respawns_after_process_death(self):
+        """If process exited, terminate (no-op if dead) + respawn."""
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(
+            models=["x"], python_path="/p", port=9001, device="cpu",
+        )
+        spec.process = MagicMock(poll=MagicMock(return_value=1))  # already exited
+        stop_event = threading.Event()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
+             patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait:
+            _attempt_restart(spec, stop_event=stop_event, max_restarts=10, backoff_base=0)
+
+        mock_spawn.assert_called_once_with(spec, device="cpu")
+        mock_wait.assert_called_once()
+        assert spec.restart_count == 1
+        assert spec.failure_count == 0
+        assert spec.status == "running"
+
+    def test_terminates_still_running_process_before_respawn(self):
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        old_process = MagicMock(poll=MagicMock(return_value=None))  # still alive
+        spec.process = old_process
+        stop_event = threading.Event()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor.wait_for_ready"):
+            _attempt_restart(spec, stop_event=stop_event, max_restarts=10, backoff_base=0)
+
+        old_process.terminate.assert_called_once()
+
+    def test_marks_dead_after_max_restarts(self):
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(
+            models=["x"], python_path="/p", port=9001, device="cpu",
+            restart_count=10,  # already at budget
+        )
+        spec.process = MagicMock(poll=MagicMock(return_value=1))
+        stop_event = threading.Event()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn:
+            _attempt_restart(spec, stop_event=stop_event, max_restarts=10, backoff_base=0)
+
+        mock_spawn.assert_not_called()
+        assert spec.status == "dead"
+
+    def test_spawn_failure_keeps_status_unhealthy(self):
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        spec.process = MagicMock(poll=MagicMock(return_value=1))
+        stop_event = threading.Event()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait:
+            mock_wait.side_effect = TimeoutError("never ready")
+            _attempt_restart(spec, stop_event=stop_event, max_restarts=10, backoff_base=0)
+
+        assert spec.restart_count == 1  # counter still increments
+        assert spec.status != "running"  # spawn tried, but didn't become ready
+
+    def test_respects_stop_event_during_backoff(self):
+        """If stop_event is set during backoff wait, skip the restart."""
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        spec.process = MagicMock(poll=MagicMock(return_value=1))
+        stop_event = threading.Event()
+        stop_event.set()  # shutdown already requested
+
+        with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn:
+            _attempt_restart(spec, stop_event=stop_event, max_restarts=10, backoff_base=1)
+
+        # With stop_event set, we don't respawn
+        mock_spawn.assert_not_called()
+
+
+class TestMonitorLoop:
+    def test_monitor_calls_restart_after_threshold_failures(self):
+        from muse.cli_impl.supervisor import _monitor_workers
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        spec.process = MagicMock(poll=MagicMock(return_value=None))  # alive
+        stop_event = threading.Event()
+
+        # First 3 checks fail, then we stop
+        health_calls = {"count": 0}
+        def health_side_effect(**kwargs):
+            health_calls["count"] += 1
+            if health_calls["count"] >= 4:
+                stop_event.set()
+            return False
+
+        with patch("muse.cli_impl.supervisor.check_worker_health", side_effect=health_side_effect), \
+             patch("muse.cli_impl.supervisor._attempt_restart") as mock_restart:
+            _monitor_workers(
+                [spec], stop_event,
+                interval=0.001, failure_threshold=3, max_restarts=10,
+            )
+
+        # After 3 consecutive unhealthy polls, restart should be invoked at least once
+        assert mock_restart.called
+
+    def test_monitor_resets_failure_count_on_success(self):
+        from muse.cli_impl.supervisor import _monitor_workers
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        spec.process = MagicMock(poll=MagicMock(return_value=None))
+        spec.failure_count = 2  # close to threshold
+        stop_event = threading.Event()
+
+        call_count = {"n": 0}
+        def health_side_effect(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                stop_event.set()
+            return True  # healthy
+
+        with patch("muse.cli_impl.supervisor.check_worker_health", side_effect=health_side_effect), \
+             patch("muse.cli_impl.supervisor._attempt_restart") as mock_restart:
+            _monitor_workers(
+                [spec], stop_event,
+                interval=0.001, failure_threshold=3, max_restarts=10,
+            )
+
+        assert spec.failure_count == 0
+        assert spec.status == "running"
+        mock_restart.assert_not_called()
+
+    def test_monitor_stops_when_event_set(self):
+        from muse.cli_impl.supervisor import _monitor_workers
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        spec.process = MagicMock(poll=MagicMock(return_value=None))
+        stop_event = threading.Event()
+        stop_event.set()  # already stopped
+
+        with patch("muse.cli_impl.supervisor.check_worker_health", return_value=True) as mock_health:
+            _monitor_workers(
+                [spec], stop_event,
+                interval=0.001, failure_threshold=3, max_restarts=10,
+            )
+
+        # Loop should exit immediately without any health checks
+        mock_health.assert_not_called()
+
+    def test_monitor_skips_dead_workers(self):
+        from muse.cli_impl.supervisor import _monitor_workers
+        import threading
+
+        alive_spec = WorkerSpec(models=["a"], python_path="/p", port=9001, device="cpu")
+        alive_spec.process = MagicMock(poll=MagicMock(return_value=None))
+        dead_spec = WorkerSpec(models=["b"], python_path="/p", port=9002, device="cpu")
+        dead_spec.status = "dead"
+
+        stop_event = threading.Event()
+        checked_ports = []
+
+        def health_side_effect(**kwargs):
+            checked_ports.append(kwargs["port"])
+            if len(checked_ports) >= 1:
+                stop_event.set()
+            return True
+
+        with patch("muse.cli_impl.supervisor.check_worker_health", side_effect=health_side_effect):
+            _monitor_workers(
+                [alive_spec, dead_spec], stop_event,
+                interval=0.001, failure_threshold=3, max_restarts=10,
+            )
+
+        # Only the alive worker should have been polled
+        assert 9001 in checked_ports
+        assert 9002 not in checked_ports
+
+
 class TestCheckWorkerHealth:
     def test_returns_true_on_200(self):
         from muse.cli_impl.supervisor import check_worker_health

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -154,6 +155,120 @@ def check_worker_health(*, port: int, timeout: float = 2.0) -> bool:
         return r.status_code == 200
     except httpx.HTTPError:
         return False
+
+
+# Monitor defaults (module constants; not CLI-configurable in this iteration)
+_MONITOR_INTERVAL = 5.0
+_FAILURE_THRESHOLD = 3
+_MAX_RESTARTS = 10
+_BACKOFF_CAP = 30.0  # seconds
+_BACKOFF_BASE = 1.0
+
+
+def _attempt_restart(
+    spec: WorkerSpec,
+    *,
+    stop_event: "threading.Event",
+    max_restarts: int = _MAX_RESTARTS,
+    backoff_base: float = _BACKOFF_BASE,
+    backoff_cap: float = _BACKOFF_CAP,
+    ready_timeout: float = 60.0,
+) -> None:
+    """Terminate existing process if alive, wait backoff, respawn.
+
+    Mutates spec.process, spec.restart_count, spec.failure_count, spec.status.
+    Marks spec.status = "dead" if restart_count reaches max_restarts.
+    Returns early if stop_event fires during backoff.
+    """
+    if spec.restart_count >= max_restarts:
+        logger.error(
+            "worker on port %d: exhausted %d restart attempts; marking dead",
+            spec.port, max_restarts,
+        )
+        spec.status = "dead"
+        return
+
+    # Exponential backoff, capped
+    backoff = min(backoff_base * (2 ** spec.restart_count), backoff_cap)
+    logger.warning(
+        "worker on port %d: restart attempt %d after %.1fs backoff",
+        spec.port, spec.restart_count + 1, backoff,
+    )
+    # wait() returns True if event was set during the wait (skip restart)
+    if stop_event.wait(backoff):
+        return
+
+    # Terminate existing process if still alive (best-effort)
+    if spec.process is not None and spec.process.poll() is None:
+        try:
+            spec.process.terminate()
+            try:
+                spec.process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                spec.process.kill()
+        except Exception as e:
+            logger.warning("worker on port %d: terminate failed: %s", spec.port, e)
+
+    # Respawn. Always bump restart_count so we can't loop forever.
+    spec.restart_count += 1
+    try:
+        spawn_worker(spec, device=spec.device)
+        wait_for_ready(port=spec.port, timeout=ready_timeout)
+        spec.failure_count = 0
+        spec.status = "running"
+        logger.info("worker on port %d: successfully restarted", spec.port)
+    except (subprocess.SubprocessError, TimeoutError) as e:
+        logger.error("worker on port %d: restart failed: %s", spec.port, e)
+        spec.status = "unhealthy"
+
+
+def _monitor_workers(
+    specs: list[WorkerSpec],
+    stop_event: "threading.Event",
+    *,
+    interval: float = _MONITOR_INTERVAL,
+    failure_threshold: int = _FAILURE_THRESHOLD,
+    max_restarts: int = _MAX_RESTARTS,
+) -> None:
+    """Poll each worker; restart after `failure_threshold` consecutive failures.
+
+    Exits when stop_event is set. Called from the monitor daemon thread
+    started by run_supervisor (Task B4).
+    """
+    while not stop_event.is_set():
+        for spec in specs:
+            if stop_event.is_set():
+                return
+            if spec.status == "dead":
+                continue
+
+            # Process-death detection is unambiguous; short-circuit
+            if spec.process is not None and spec.process.poll() is not None:
+                logger.warning(
+                    "worker on port %d: process exited with code %s",
+                    spec.port, spec.process.returncode,
+                )
+                spec.failure_count = failure_threshold
+            else:
+                healthy = check_worker_health(port=spec.port)
+                if healthy:
+                    spec.failure_count = 0
+                    spec.status = "running"
+                    continue
+                spec.failure_count += 1
+                if spec.status == "running":
+                    spec.status = "unhealthy"
+                logger.info(
+                    "worker on port %d: unhealthy (%d/%d consecutive failures)",
+                    spec.port, spec.failure_count, failure_threshold,
+                )
+
+            if spec.failure_count >= failure_threshold:
+                _attempt_restart(spec, stop_event=stop_event, max_restarts=max_restarts)
+
+        # Sleep with early-exit if stop_event fires
+        if stop_event.wait(interval):
+            return
 
 
 def _shutdown_workers(specs: list[WorkerSpec], grace: float = 5.0) -> None:
