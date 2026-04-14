@@ -77,10 +77,16 @@ class KokoroModel:
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        # `local_dir` is accepted for catalog-loader compatibility but
+        # NOT forwarded to KPipeline. Kokoro's KPipeline validates
+        # `repo_id` as an HF-style "namespace/name" string and rejects
+        # filesystem paths. Since `muse pull` already populates the HF
+        # cache via snapshot_download, passing the repo_id here still
+        # resolves from the local cache without re-downloading.
         logger.info("Loading Kokoro (lang=%s, device=%s)", lang_code, device)
         self._pipeline = KPipeline(
             lang_code=lang_code,
-            repo_id=local_dir or hf_repo,
+            repo_id=hf_repo,
             device=device,
         )
         self._device = device

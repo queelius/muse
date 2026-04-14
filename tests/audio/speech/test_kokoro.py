@@ -68,3 +68,33 @@ def test_kokoro_has_lowercase_voices_property():
     assert isinstance(adapter.voices, list)
     assert len(adapter.voices) > 0
     assert adapter.voices is KokoroModel.VOICES
+
+
+def test_kokoro_init_does_not_pass_local_dir_as_repo_id(monkeypatch):
+    """Regression: KPipeline.repo_id must be an HF-style 'namespace/name',
+    never a filesystem path. Catalog.load_backend passes both hf_repo and
+    local_dir; KokoroModel must forward hf_repo only.
+
+    Symptom of the bug: 'Repo id must be in the form ... or namespace/name'
+    when the HF cache snapshot directory was passed as repo_id.
+    """
+    from unittest import mock
+
+    # Patch the symbols KokoroModel imports inside __init__
+    import sys
+    fake_kokoro = mock.MagicMock()
+    fake_kpipeline = mock.MagicMock()
+    fake_kokoro.KPipeline = fake_kpipeline
+    monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
+
+    # torch is already importable in the test env but we only need a device branch
+    from muse.audio.speech.backends.kokoro import KokoroModel
+    _ = KokoroModel(
+        hf_repo="hexgrad/Kokoro-82M",
+        local_dir="/home/user/.cache/huggingface/hub/models--hexgrad--Kokoro-82M/snapshots/abc",
+        device="cpu",
+    )
+    # KPipeline was called with repo_id=hf_repo, NOT with local_dir
+    call_kwargs = fake_kpipeline.call_args.kwargs
+    assert call_kwargs["repo_id"] == "hexgrad/Kokoro-82M"
+    assert "/home/user" not in call_kwargs.get("repo_id", "")
