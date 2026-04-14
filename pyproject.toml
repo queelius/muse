@@ -50,7 +50,7 @@ images = [
 ]
 
 # Development
-dev = ["pytest", "pytest-cov", "pytest-asyncio"]
+dev = ["pytest", "pytest-cov", "pytest-asyncio", "pytest-timeout"]
 
 [project.scripts]
 muse = "muse.cli:main"
@@ -63,3 +63,6 @@ include = ["muse*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = ["--import-mode=importlib"]
+markers = [
+    "slow: end-to-end test that spawns real subprocesses (skipped by default CI lanes)",
+]
