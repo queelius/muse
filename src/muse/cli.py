@@ -43,13 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=False)
 
     # serve
-    sp_serve = sub.add_parser("serve", help="start the HTTP server")
+    sp_serve = sub.add_parser("serve", help="start the HTTP gateway (spawns one worker per venv)")
     sp_serve.add_argument("--host", default="0.0.0.0")
     sp_serve.add_argument("--port", type=int, default=8000)
-    sp_serve.add_argument("--modality", action="append", default=None,
-                          help="modality to enable (default: all with pulled models). Repeatable.")
-    sp_serve.add_argument("--model", action="append", default=None,
-                          help="specific model(s) to load. Repeatable.")
     sp_serve.add_argument("--device", default="auto",
                           choices=["auto", "cpu", "cuda", "mps"])
     sp_serve.set_defaults(func=_cmd_serve)
@@ -94,10 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _cmd_serve(args):
     from muse.cli_impl.serve import run_serve
-    return run_serve(
-        host=args.host, port=args.port,
-        modalities=args.modality, models=args.model, device=args.device,
-    )
+    return run_serve(host=args.host, port=args.port, device=args.device)
 
 
 def _cmd_pull(args):
