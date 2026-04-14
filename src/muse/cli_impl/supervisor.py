@@ -143,6 +143,19 @@ def wait_for_ready(
     )
 
 
+def check_worker_health(*, port: int, timeout: float = 2.0) -> bool:
+    """Single /health poll. Returns True iff the worker responds 200.
+
+    Swallows all httpx errors; they indicate "unhealthy" for our purposes.
+    Used by the monitor thread's periodic liveness check.
+    """
+    try:
+        r = httpx.get(f"http://127.0.0.1:{port}/health", timeout=timeout)
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 def _shutdown_workers(specs: list[WorkerSpec], grace: float = 5.0) -> None:
     """SIGTERM all workers; SIGKILL any that don't exit within `grace` seconds."""
     for spec in specs:

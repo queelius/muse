@@ -283,3 +283,31 @@ class TestWorkerSpecExtensions:
     def test_worker_spec_has_last_spawn_at_default(self):
         spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
         assert spec.last_spawn_at == 0.0
+
+
+class TestCheckWorkerHealth:
+    def test_returns_true_on_200(self):
+        from muse.cli_impl.supervisor import check_worker_health
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            assert check_worker_health(port=9001) is True
+
+    def test_returns_false_on_non_200(self):
+        from muse.cli_impl.supervisor import check_worker_health
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=500)
+            assert check_worker_health(port=9001) is False
+
+    def test_returns_false_on_connection_error(self):
+        from muse.cli_impl.supervisor import check_worker_health
+        import httpx
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.side_effect = httpx.ConnectError("down", request=None)
+            assert check_worker_health(port=9001) is False
+
+    def test_returns_false_on_timeout(self):
+        from muse.cli_impl.supervisor import check_worker_health
+        import httpx
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.side_effect = httpx.TimeoutException("slow", request=None)
+            assert check_worker_health(port=9001) is False
