@@ -81,3 +81,32 @@ def test_run_search_passes_backend_kwarg():
     with patch("muse.cli_impl.search.search", return_value=[]) as mock_search:
         run_search(query="x", limit=10, sort="downloads", backend="hf")
     assert mock_search.call_args.kwargs["backend"] == "hf"
+
+
+def test_run_search_silences_noisy_third_party_loggers():
+    """muse search must not interleave 'HTTP Request: GET ...' lines with
+    its table output. v0.10.2 fix: raise httpx / huggingface_hub logger
+    levels to WARNING at the start of run_search."""
+    import logging
+    # Pre-populate loggers at INFO so the silencer has work to do
+    for name in ("httpx", "httpcore", "huggingface_hub"):
+        logging.getLogger(name).setLevel(logging.INFO)
+
+    with patch("muse.cli_impl.search.search", return_value=[]):
+        run_search(query="x", limit=10, sort="downloads")
+
+    for name in ("httpx", "httpcore", "huggingface_hub"):
+        assert logging.getLogger(name).level >= logging.WARNING, (
+            f"logger {name!r} not silenced after run_search"
+        )
+
+
+def test_run_search_does_not_lower_already_silent_loggers():
+    """If a user pre-set httpx to ERROR (extra-quiet), don't loosen them."""
+    import logging
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+
+    with patch("muse.cli_impl.search.search", return_value=[]):
+        run_search(query="x", limit=10, sort="downloads")
+
+    assert logging.getLogger("httpx").level == logging.ERROR

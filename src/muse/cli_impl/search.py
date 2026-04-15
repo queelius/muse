@@ -18,6 +18,35 @@ from muse.core.resolvers import ResolverError, search
 logger = logging.getLogger(__name__)
 
 
+# Loggers that emit per-request lines during search and would interleave
+# with the table output. Quieted to WARNING during search so the table
+# stays readable. Per-request HTTP debug remains accessible via
+# `muse --log-level DEBUG search ...` only if the user re-lowers them
+# after this call (rare).
+_NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "huggingface_hub",
+    "huggingface_hub.repocard_data",
+    "huggingface_hub.file_download",
+)
+
+
+def _quiet_third_party_logs() -> None:
+    """Raise per-request HTTP loggers to WARNING.
+
+    Only raises levels (never lowers them), so users who explicitly
+    asked for DEBUG via `muse --log-level DEBUG search ...` and a
+    custom logging-config still get whatever they configured.
+    """
+    for name in _NOISY_LOGGERS:
+        lg = logging.getLogger(name)
+        # logging.NOTSET (0) means "inherit"; treat as silenceable.
+        # Otherwise only raise, never lower.
+        if lg.level == logging.NOTSET or lg.level < logging.WARNING:
+            lg.setLevel(logging.WARNING)
+
+
 def run_search(
     *,
     query: str,
@@ -31,6 +60,7 @@ def run_search(
 
     Returns 0 on success (including no-results), 2 on resolver error.
     """
+    _quiet_third_party_logs()
     try:
         results = list(search(
             query,

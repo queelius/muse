@@ -166,19 +166,31 @@ class HFResolver(Resolver):
             siblings = getattr(repo, "siblings", None) or []
             if not siblings:
                 try:
-                    info = self._api.repo_info(repo.id)
+                    # `files_metadata=True` is what makes RepoSibling.size populated.
+                    # Without it, .size is always None and --max-size-gb is meaningless.
+                    info = self._api.repo_info(repo.id, files_metadata=True)
                     siblings = info.siblings
                 except Exception:
                     continue
+            # Per-repo deduplication by variant: sharded GGUFs (model-q4_k_m-00001-of-00003.gguf)
+            # and repos that publish duplicate quants emit the same @variant tag for multiple
+            # files. We sum sizes across files sharing a variant (so a sharded model reports
+            # its true total size) and emit one row per variant per repo.
+            variant_to_size: dict[str, float] = {}
+            variant_to_first_file: dict[str, str] = {}
             for s in siblings:
                 if not s.rfilename.endswith(".gguf"):
                     continue
                 variant = _extract_variant(s.rfilename)
+                size_bytes = getattr(s, "size", None) or 0
+                variant_to_size[variant] = variant_to_size.get(variant, 0) + size_bytes
+                variant_to_first_file.setdefault(variant, s.rfilename)
+            for variant, total_bytes in variant_to_size.items():
                 yield SearchResult(
                     uri=f"hf://{repo.id}@{variant}",
                     model_id=_gguf_model_id(repo.id, variant),
                     modality="chat/completion",
-                    size_gb=(s.size / 1e9) if getattr(s, "size", None) else None,
+                    size_gb=(total_bytes / 1e9) if total_bytes else None,
                     downloads=getattr(repo, "downloads", None),
                     license=None,
                     description=f"{repo.id} ({variant})",

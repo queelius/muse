@@ -190,6 +190,64 @@ def test_search_gguf_returns_variant_rows():
         assert "hf://org/Qwen3-8B-GGUF@q8_0" in uris
 
 
+def test_search_gguf_dedupes_variants_per_repo():
+    """Sharded GGUFs (model-q4_k_m-00001-of-00003.gguf) and repos that
+    publish the same quant in multiple files emit ONE row per (repo, variant)
+    with sizes summed across files. Without this dedup, search output is
+    flooded with duplicates (the bug v0.10.2 fixes)."""
+    from muse.core.resolvers_hf import HFResolver
+    # list_models returns a repo without sibling info; resolver falls back
+    # to repo_info(files_metadata=True) to fetch siblings + sizes.
+    list_repo = MagicMock(id="unsloth/Qwen3-122B-GGUF", downloads=500_000, tags=[])
+    list_repo.siblings = []  # force the repo_info fallback
+    info = MagicMock()
+    info.siblings = [
+        # Three shards of one bf16 quant
+        MagicMock(rfilename="m-bf16-00001-of-00003.gguf", size=80_000_000_000),
+        MagicMock(rfilename="m-bf16-00002-of-00003.gguf", size=80_000_000_000),
+        MagicMock(rfilename="m-bf16-00003-of-00003.gguf", size=80_000_000_000),
+        # Also a single-file q4_k_m
+        MagicMock(rfilename="m-q4_k_m.gguf", size=12_000_000_000),
+    ]
+    with patch("muse.core.resolvers_hf.HfApi") as MockApi:
+        api = MockApi.return_value
+        api.list_models.return_value = [list_repo]
+        api.repo_info.return_value = info
+        r = HFResolver()
+        results = list(r.search("qwen3", modality="chat/completion"))
+
+    uris = [res.uri for res in results]
+    # Exactly one row per variant
+    assert uris.count("hf://unsloth/Qwen3-122B-GGUF@bf16") == 1
+    assert uris.count("hf://unsloth/Qwen3-122B-GGUF@q4_k_m") == 1
+    assert len(results) == 2
+    # Sharded bf16's size is the sum of all three shards (240 GB)
+    bf16 = next(r for r in results if r.uri.endswith("@bf16"))
+    assert abs(bf16.size_gb - 240.0) < 0.001
+    # Single-file q4_k_m is 12 GB
+    q4 = next(r for r in results if r.uri.endswith("@q4_k_m"))
+    assert abs(q4.size_gb - 12.0) < 0.001
+
+
+def test_search_gguf_passes_files_metadata_when_repo_info_called():
+    """Without files_metadata=True, RepoSibling.size is None and our
+    --max-size-gb filter is meaningless. v0.10.2 fix: always request it."""
+    from muse.core.resolvers_hf import HFResolver
+    list_repo = MagicMock(id="org/repo-gguf", downloads=1, tags=[])
+    list_repo.siblings = []  # force fallback
+    info = MagicMock()
+    info.siblings = [MagicMock(rfilename="model-q4_k_m.gguf", size=4_000_000_000)]
+    with patch("muse.core.resolvers_hf.HfApi") as MockApi:
+        api = MockApi.return_value
+        api.list_models.return_value = [list_repo]
+        api.repo_info.return_value = info
+        list(HFResolver().search("anything", modality="chat/completion"))
+        # The fallback repo_info call must include files_metadata=True
+        api.repo_info.assert_called_once()
+        kwargs = api.repo_info.call_args.kwargs
+        assert kwargs.get("files_metadata") is True
+
+
 def test_search_embeddings_returns_repo_rows():
     from muse.core.resolvers_hf import HFResolver
     with patch("muse.core.resolvers_hf.HfApi") as MockApi:
