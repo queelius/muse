@@ -116,7 +116,7 @@ def test_load_backend_imports_and_constructs(tmp_catalog):
 
     fake_class = MagicMock()
     fake_module = MagicMock()
-    fake_module.SopranoModel = fake_class
+    fake_module.Model = fake_class
     with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
         load_backend("soprano-80m", device="cpu")
     fake_class.assert_called_once()

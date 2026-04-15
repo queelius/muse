@@ -1,4 +1,4 @@
-"""Tests for muse.modalities.audio_speech.backends.bark: Bark TTS adapter."""
+"""Tests for muse.models.bark_small: Bark TTS adapter."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -27,7 +27,7 @@ class TestBarkModel:
         mock_model.generate.return_value = torch.randn(1, 24000)
         mock_model.to.return_value = mock_model
 
-        from muse.modalities.audio_speech.backends.bark import BarkModel
+        from muse.models.bark_small import Model as BarkModel
         adapter = object.__new__(BarkModel)
         adapter._processor = mock_processor
         adapter._model = mock_model
@@ -41,7 +41,7 @@ class TestBarkModel:
 
     def test_model_id(self):
         adapter = self._make_adapter()
-        assert adapter.model_id == "bark"
+        assert adapter.model_id == "bark-small"
 
     def test_sample_rate(self):
         adapter = self._make_adapter()
@@ -104,7 +104,7 @@ class TestBarkVoiceCloning:
         mock_model.generate.return_value = torch.randn(1, 24000)
         mock_model.to.return_value = mock_model
 
-        from muse.modalities.audio_speech.backends.bark import BarkModel
+        from muse.models.bark_small import Model as BarkModel
         adapter = object.__new__(BarkModel)
         adapter._processor = mock_processor
         adapter._model = mock_model
@@ -161,7 +161,7 @@ class TestBarkVoiceCloning:
 
 def test_bark_has_lowercase_voices_property():
     """routes.py + registry look for `voices` (lowercase); BarkModel must satisfy."""
-    from muse.modalities.audio_speech.backends.bark import BarkModel
+    from muse.models.bark_small import Model as BarkModel
 
     assert "voices" in dir(BarkModel), "BarkModel must expose a `voices` attribute/property"
 
@@ -172,3 +172,11 @@ def test_bark_has_lowercase_voices_property():
     assert isinstance(adapter.voices, list)
     assert len(adapter.voices) > 0
     assert adapter.voices is BarkModel.VOICES
+
+
+def test_manifest_has_required_fields():
+    from muse.models.bark_small import MANIFEST
+    assert MANIFEST["model_id"] == "bark-small"
+    assert MANIFEST["modality"] == "audio/speech"
+    assert "hf_repo" in MANIFEST
+    assert "pip_extras" in MANIFEST

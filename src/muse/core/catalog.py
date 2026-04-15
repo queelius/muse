@@ -47,7 +47,7 @@ KNOWN_MODELS: dict[str, CatalogEntry] = {
     "soprano-80m": CatalogEntry(
         model_id="soprano-80m",
         modality="audio/speech",
-        backend_path="muse.modalities.audio_speech.backends.soprano:SopranoModel",
+        backend_path="muse.models.soprano_80m:Model",
         hf_repo="ekwek/Soprano-1.1-80M",
         description="Qwen3 LLM backbone + Vocos decoder, 32kHz, 80M params",
         pip_extras=("transformers>=4.36.0", "scipy", "inflect", "unidecode"),
@@ -55,7 +55,7 @@ KNOWN_MODELS: dict[str, CatalogEntry] = {
     "kokoro-82m": CatalogEntry(
         model_id="kokoro-82m",
         modality="audio/speech",
-        backend_path="muse.modalities.audio_speech.backends.kokoro:KokoroModel",
+        backend_path="muse.models.kokoro_82m:Model",
         hf_repo="hexgrad/Kokoro-82M",
         description="Lightweight TTS, 54 voices, 24kHz",
         pip_extras=("kokoro", "soundfile", "misaki[en]"),
@@ -64,7 +64,7 @@ KNOWN_MODELS: dict[str, CatalogEntry] = {
     "bark-small": CatalogEntry(
         model_id="bark-small",
         modality="audio/speech",
-        backend_path="muse.modalities.audio_speech.backends.bark:BarkModel",
+        backend_path="muse.models.bark_small:Model",
         hf_repo="suno/bark-small",
         description="Multilingual + voice cloning, 24kHz",
         pip_extras=("transformers>=4.36.0", "scipy"),

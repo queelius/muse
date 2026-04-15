@@ -1,9 +1,9 @@
-"""Smoke tests for muse.modalities.audio_speech.backends.soprano.SopranoModel (mocked; no real weights)."""
+"""Smoke tests for muse.models.soprano_80m.Model (mocked; no real weights)."""
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from muse.modalities.audio_speech.backends.soprano import SopranoModel
+from muse.models.soprano_80m import Model as SopranoModel
 
 
 # Narro is imported inside SopranoModel.__init__, so patch at the source module.
@@ -65,3 +65,11 @@ def test_soprano_falls_back_to_hf_repo_when_no_local_dir():
         SopranoModel(hf_repo="ekwek/Soprano-1.1-80M", local_dir=None)
         call_kwargs = mock_narro.call_args[1]
         assert call_kwargs["model_path"] == "ekwek/Soprano-1.1-80M"
+
+
+def test_manifest_has_required_fields():
+    from muse.models.soprano_80m import MANIFEST
+    assert MANIFEST["model_id"] == "soprano-80m"
+    assert MANIFEST["modality"] == "audio/speech"
+    assert "hf_repo" in MANIFEST
+    assert "pip_extras" in MANIFEST

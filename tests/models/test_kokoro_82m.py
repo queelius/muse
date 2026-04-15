@@ -1,4 +1,4 @@
-"""Tests for muse.modalities.audio_speech.backends.kokoro: Kokoro TTS adapter."""
+"""Tests for muse.models.kokoro_82m: Kokoro TTS adapter."""
 
 from unittest.mock import MagicMock
 
@@ -11,7 +11,7 @@ from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, TTSMo
 
 class TestKokoroModel:
     def _make_adapter(self):
-        from muse.modalities.audio_speech.backends.kokoro import KokoroModel
+        from muse.models.kokoro_82m import Model as KokoroModel
 
         mock_pipeline = MagicMock()
         result = MagicMock()
@@ -50,7 +50,7 @@ class TestKokoroModel:
         assert isinstance(chunks[0], AudioChunk)
 
     def test_voices_list(self):
-        from muse.modalities.audio_speech.backends.kokoro import KOKORO_VOICES
+        from muse.models.kokoro_82m import KOKORO_VOICES
         assert "af_heart" in KOKORO_VOICES
         assert "am_adam" in KOKORO_VOICES
         assert len(KOKORO_VOICES) > 50
@@ -58,7 +58,7 @@ class TestKokoroModel:
 
 def test_kokoro_has_lowercase_voices_property():
     """routes.py + registry look for `voices` (lowercase); KokoroModel must satisfy."""
-    from muse.modalities.audio_speech.backends.kokoro import KokoroModel
+    from muse.models.kokoro_82m import Model as KokoroModel
 
     assert "voices" in dir(KokoroModel), "KokoroModel must expose a `voices` attribute/property"
 
@@ -88,7 +88,7 @@ def test_kokoro_init_does_not_pass_local_dir_as_repo_id(monkeypatch):
     monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
 
     # torch is already importable in the test env but we only need a device branch
-    from muse.modalities.audio_speech.backends.kokoro import KokoroModel
+    from muse.models.kokoro_82m import Model as KokoroModel
     _ = KokoroModel(
         hf_repo="hexgrad/Kokoro-82M",
         local_dir="/home/user/.cache/huggingface/hub/models--hexgrad--Kokoro-82M/snapshots/abc",
@@ -98,3 +98,11 @@ def test_kokoro_init_does_not_pass_local_dir_as_repo_id(monkeypatch):
     call_kwargs = fake_kpipeline.call_args.kwargs
     assert call_kwargs["repo_id"] == "hexgrad/Kokoro-82M"
     assert "/home/user" not in call_kwargs.get("repo_id", "")
+
+
+def test_manifest_has_required_fields():
+    from muse.models.kokoro_82m import MANIFEST
+    assert MANIFEST["model_id"] == "kokoro-82m"
+    assert MANIFEST["modality"] == "audio/speech"
+    assert "hf_repo" in MANIFEST
+    assert "pip_extras" in MANIFEST
