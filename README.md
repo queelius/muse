@@ -1,10 +1,26 @@
 # Muse
 
-Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface: text-to-speech on `/v1/audio/speech`, text-to-image on `/v1/images/generations`, text-to-vector on `/v1/embeddings`, more landing the same way (transcriptions, video). Modality tags are MIME-style (`audio/speech`, `embedding/text`, `image/generation`).
+Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface:
+- text-to-speech on `/v1/audio/speech`
+- text-to-image on `/v1/images/generations`
+- text-to-vector on `/v1/embeddings`
+- text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 
-Adding a new model is a drop-in: write one `.py` file with a `MANIFEST` dict and a `Model` class, put it in `~/.muse/models/`, run `muse pull`. Adding a new modality (rarer) is dropping a subpackage under `src/muse/modalities/` (or `$MUSE_MODALITIES_DIR` for the escape hatch). Both surfaces are discovered at runtime; there is no hardcoded catalog, no allowlist, and no registration calls.
+Modality tags are MIME-style (`audio/speech`, `chat/completion`, `embedding/text`, `image/generation`).
 
-The CLI is deliberately admin-only (`serve`, `pull`, `models`). Generation is reached via the HTTP API, consumed by Python clients, `curl`, or future wrappers like `muse mcp`.
+Three ways to add a model, in order of how often you'll reach for them:
+
+1. **Pull a GGUF or sentence-transformers model from HuggingFace by URI.** No script, no edits:
+   ```bash
+   muse search qwen3 --modality chat/completion --max-size-gb 10
+   muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m
+   ```
+2. **Drop a `.py` script into `~/.muse/models/`** for a one-off model with custom code (see `docs/MODEL_SCRIPTS.md`).
+3. **Add a whole new modality** (rare) by dropping a subpackage into `src/muse/modalities/` or `$MUSE_MODALITIES_DIR`. The subpackage exports `MODALITY` + `build_router` and discovery picks it up.
+
+All three surfaces are discovered at runtime; there is no hardcoded catalog, no allowlist, and no registration calls.
+
+The CLI is deliberately admin-only (`serve`, `pull`, `search`, `models`). Generation is reached via the HTTP API, consumed by Python clients, `curl`, or future wrappers like `muse mcp`.
 
 ## Install
 
@@ -22,9 +38,13 @@ Optional extras:
 ## Quick start
 
 ```bash
-# Pull a model (creates a dedicated venv + installs its pip deps + downloads HF weights)
+# Pull bundled models by id (creates a dedicated venv + installs deps + downloads weights)
 muse pull soprano-80m
 muse pull sd-turbo
+
+# Or pull anything resolvable from HuggingFace by URI
+muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m
+muse pull hf://sentence-transformers/all-MiniLM-L6-v2
 
 # Admin: list what's in the catalog
 muse models list
@@ -36,28 +56,45 @@ muse serve --host 0.0.0.0 --port 8000
 From any client, generation is an HTTP call:
 
 ```bash
+# Text-to-speech
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{"input":"Hello world","model":"soprano-80m"}' \
   --output hello.wav
-```
 
-```bash
 # Embeddings (accepts single string or list)
 curl -X POST http://localhost:8000/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"input":"hello world","model":"all-minilm-l6-v2"}'
+
+# Chat (OpenAI-compatible incl. tools and streaming)
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-8b-gguf-q4-k-m","messages":[{"role":"user","content":"Capital of France?"}]}'
 ```
 
 ```python
 from muse.modalities.audio_speech import SpeechClient
 from muse.modalities.image_generation import GenerationsClient
 from muse.modalities.embedding_text import EmbeddingsClient
+from muse.modalities.chat_completion import ChatClient
 
 # MUSE_SERVER env var sets the base URL for remote use; default http://localhost:8000
 wav_bytes = SpeechClient().infer("Hello world")
 pngs = GenerationsClient().generate("a cat on mars, cinematic", n=1)
 vectors = EmbeddingsClient().embed(["alpha", "beta"])   # list[list[float]]
+chat = ChatClient().chat(
+    model="qwen3-8b-gguf-q4-k-m",
+    messages=[{"role": "user", "content": "Capital of France?"}],
+)
+```
+
+The OpenAI Python SDK works against muse with no modifications:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-used")
+client.chat.completions.create(model="qwen3-8b-gguf-q4-k-m", messages=[...])
 ```
 
 `muse serve` auto-restarts crashed worker processes with exponential backoff.
@@ -68,7 +105,8 @@ Individual model failures don't take down the server or other modalities.
 | Command | Description |
 |---|---|
 | `muse serve` | start the HTTP server |
-| `muse pull <model-id>` | download weights + install deps |
+| `muse pull <model-id-or-uri>` | download weights + install deps (accepts bundled id OR resolver URI like `hf://org/repo@variant`) |
+| `muse search <query> [--modality M]` | search HuggingFace for pullable GGUF / sentence-transformers models |
 | `muse models list [--modality X]` | list known/pulled models |
 | `muse models info <model-id>` | show catalog entry |
 | `muse models remove <model-id>` | unregister from catalog |
@@ -87,6 +125,7 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `GET /v1/audio/speech/voices` | list voices for a model |
 | `POST /v1/images/generations` | generate images (OpenAI-compatible) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
+| `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
 
 Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (model not found) and 422 (validation). Matches OpenAI's envelope so clients written against their API work against muse.
 
@@ -96,18 +135,27 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
 - `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
 - `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
   - `audio_speech/` (MODALITY `"audio/speech"`)
-  - `embedding_text/` (MODALITY `"embedding/text"`)
+  - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)
+  - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
   - `all_minilm_l6_v2.py`, `qwen3_embedding_0_6b.py`, `nv_embed_v2.py` (embedding/text)
   - `sd_turbo.py` (image/generation)
+- `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
+  - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.
 
 `muse serve` is a supervisor process. It spawns one worker subprocess per venv (each pulled model has its own venv with its own deps) and runs a gateway that proxies by the `model` field. Dep conflicts between models are structurally impossible.
 
-Users extend muse by dropping a `.py` file into `~/.muse/models/` (see `docs/MODEL_SCRIPTS.md` for the MANIFEST schema and Model class contract). No muse source edits required.
+Three ways to extend muse:
+1. **Resolver URI**: `muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m` for any GGUF or sentence-transformers HF repo. See `docs/RESOLVERS.md`.
+2. **Model script**: drop a `.py` into `~/.muse/models/` for one-off models with custom code. See `docs/MODEL_SCRIPTS.md`.
+3. **Modality subpackage**: drop into `src/muse/modalities/` or `$MUSE_MODALITIES_DIR` for a whole new modality.
 
-See `CLAUDE.md` for implementation details and contribution guide, and `docs/MODEL_SCRIPTS.md` for writing your own model scripts.
+See `CLAUDE.md` for implementation details and contribution guide,
+`docs/MODEL_SCRIPTS.md` for writing your own model scripts,
+`docs/RESOLVERS.md` for adding a new URI scheme, and
+`docs/CHAT_COMPLETION.md` for the chat endpoint specification.
 
 ## License
 

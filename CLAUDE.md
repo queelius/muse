@@ -5,26 +5,38 @@ Guidance for Claude Code when working on Muse.
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-three modalities:
+four modalities:
 
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
 - **image/generation**: text-to-image via `/v1/images/generations` (SD-Turbo)
-- **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2)
+- **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
+- **chat/completion**: text-to-text LLMs via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming; powered by llama-cpp-python; any GGUF on HF via the resolver)
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
-path hierarchy still mirrors OpenAI (`/v1/audio/speech`) for client
-compatibility.
+path hierarchy still mirrors OpenAI (`/v1/audio/speech`,
+`/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`) for
+client compatibility.
 
-The package is organized around two plugin surfaces discovered at runtime:
+The package is organized around three plugin surfaces:
 
 - `src/muse/modalities/<mime_name>/`: self-contained wire contract
   (protocol + routes + codec + client). Each modality package exports
   `MODALITY: str` + `build_router: Callable[[registry], APIRouter]`.
+  Discovered at runtime by `discover_modalities`.
 - `src/muse/models/*.py`: flat directory of drop-in model scripts.
   Each `.py` file declares `MANIFEST: dict` + a `Model` class.
+  Discovered at runtime by `discover_models`. Best for one-off models
+  with custom code (NV-Embed, Soprano).
+- `muse.core.resolvers.*`: URI-addressable model sources. `muse pull
+  hf://Qwen/Qwen3-8B-GGUF@q4_k_m` synthesizes a manifest, persists it
+  in `catalog.json`, and routes requests through a generic runtime class
+  (`LlamaCppModel` for GGUF, `SentenceTransformerModel` for ST embedders).
+  Best for uniform model classes where one runtime serves many models.
+  See `docs/RESOLVERS.md` and `docs/CHAT_COMPLETION.md`.
 
 A modality-agnostic core (`muse.core`) holds the registry, discovery,
-HF downloader, per-venv pip install, and FastAPI app factory.
+resolver dispatch, HF downloader, per-venv pip install, and FastAPI
+app factory.
 
 ## Architecture
 
@@ -217,7 +229,26 @@ PY
 
 ## Adding a new model (the common case)
 
-Users add models without touching muse source:
+Two paths:
+
+**Resolver path (recommended for uniform model classes).** If the model
+is a GGUF on HuggingFace or a sentence-transformers repo, no script
+needed. Just pull by URI:
+
+```bash
+muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m
+muse pull hf://Qwen/Qwen3-Embedding-0.6B
+```
+
+The HF resolver synthesizes a manifest, persists it in
+`~/.muse/catalog.json`, and routes inference through the matching
+generic runtime (`LlamaCppModel` / `SentenceTransformerModel`). Use
+`muse search <query> --modality chat/completion --max-size-gb N` to
+discover candidates. See `docs/RESOLVERS.md`.
+
+**Script path (for one-offs with custom code).** Models that need
+non-uniform behavior (NV-Embed's custom encode method, Soprano's Narro
+engine) get a hand-written script:
 
 1. Write a `.py` file with a `MANIFEST` dict + `Model` class (see
    `docs/MODEL_SCRIPTS.md` for the full schema).
@@ -228,6 +259,9 @@ Users add models without touching muse source:
 Bundled model scripts live in `src/muse/models/<id>.py`. Adding a
 bundled model requires no catalog edits, no registry changes, and no
 worker changes: discovery just finds it.
+
+Bundled scripts always win on `model_id` collision with resolver-pulled
+entries.
 
 ## Adding a new modality (rare)
 
