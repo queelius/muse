@@ -12,7 +12,7 @@ import logging
 
 import uvicorn
 
-from muse.core.catalog import KNOWN_MODELS, is_pulled, load_backend
+from muse.core.catalog import is_pulled, known_models, load_backend
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
 
@@ -29,8 +29,9 @@ def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
     registry = ModalityRegistry()
     routers: dict = {}
 
-    to_load = [m for m in models if m in KNOWN_MODELS]
-    unknown = [m for m in models if m not in KNOWN_MODELS]
+    catalog = known_models()
+    to_load = [m for m in models if m in catalog]
+    unknown = [m for m in models if m not in catalog]
     if unknown:
         log.warning("ignoring unknown models: %s", unknown)
 
@@ -41,7 +42,7 @@ def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
         if not is_pulled(model_id):
             log.error("model %s not pulled; skipping", model_id)
             continue
-        entry = KNOWN_MODELS[model_id]
+        entry = catalog[model_id]
         log.info("loading %s (%s)", model_id, entry.modality)
         try:
             backend = load_backend(model_id, device=device)

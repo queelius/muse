@@ -139,11 +139,12 @@ def _cmd_models_list(args):
 
 
 def _cmd_models_info(args):
-    from muse.core.catalog import KNOWN_MODELS
-    if args.model_id not in KNOWN_MODELS:
+    from muse.core.catalog import known_models
+    catalog = known_models()
+    if args.model_id not in catalog:
         print(f"error: unknown model {args.model_id!r}", file=sys.stderr)
         return 2
-    e = KNOWN_MODELS[args.model_id]
+    e = catalog[args.model_id]
     print(f"model_id:     {e.model_id}")
     print(f"modality:     {e.modality}")
     print(f"hf_repo:      {e.hf_repo}")

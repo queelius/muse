@@ -1,7 +1,13 @@
 """Known-models catalog: what can be pulled, what's been pulled.
 
+The set of known models is not hardcoded. It is discovered at first
+access by scanning `src/muse/models/*.py` for scripts that define a
+top-level `MANIFEST` dict and a `Model` class (see `muse.core.discovery`).
+Each MANIFEST's fields are projected onto the stable `CatalogEntry`
+shape that the rest of muse (CLI, server, worker) consumes.
+
 Structure:
-    KNOWN_MODELS: dict[model_id, CatalogEntry] -- static at import time
+    known_models() -> dict[model_id, CatalogEntry]  # cached, discovery-driven
     catalog.json (on disk): dict[model_id, {
         pulled_at,                     # ISO 8601 timestamp
         hf_repo,                       # original HF repo id
@@ -23,6 +29,7 @@ from typing import Any
 
 from huggingface_hub import snapshot_download
 
+from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.install import check_system_packages, install_pip_extras
 from muse.core.venv import create_venv, install_into_venv, venv_python
 
@@ -31,97 +38,82 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CatalogEntry:
-    """Static metadata for a known model."""
+    """Stable catalog shape derived from a model script's MANIFEST."""
     model_id: str
-    modality: str              # "audio/speech" | "image/generation"
+    modality: str              # MIME-style: "audio/speech", "embedding/text", etc.
     backend_path: str          # "module.path:ClassName"
     hf_repo: str
     description: str = ""
     pip_extras: tuple[str, ...] = ()
     system_packages: tuple[str, ...] = ()
-    extra: dict = field(default_factory=dict)  # voices, default_size, etc.
+    extra: dict = field(default_factory=dict)  # voices, default_size, capabilities
 
 
-# Seeded with representative models. Expand as new backends land.
-KNOWN_MODELS: dict[str, CatalogEntry] = {
-    "soprano-80m": CatalogEntry(
-        model_id="soprano-80m",
-        modality="audio/speech",
-        backend_path="muse.models.soprano_80m:Model",
-        hf_repo="ekwek/Soprano-1.1-80M",
-        description="Qwen3 LLM backbone + Vocos decoder, 32kHz, 80M params",
-        pip_extras=("transformers>=4.36.0", "scipy", "inflect", "unidecode"),
-    ),
-    "kokoro-82m": CatalogEntry(
-        model_id="kokoro-82m",
-        modality="audio/speech",
-        backend_path="muse.models.kokoro_82m:Model",
-        hf_repo="hexgrad/Kokoro-82M",
-        description="Lightweight TTS, 54 voices, 24kHz",
-        pip_extras=("kokoro", "soundfile", "misaki[en]"),
-        system_packages=("espeak-ng",),
-    ),
-    "bark-small": CatalogEntry(
-        model_id="bark-small",
-        modality="audio/speech",
-        backend_path="muse.models.bark_small:Model",
-        hf_repo="suno/bark-small",
-        description="Multilingual + voice cloning, 24kHz",
-        pip_extras=("transformers>=4.36.0", "scipy"),
-    ),
-    "sd-turbo": CatalogEntry(
-        model_id="sd-turbo",
-        modality="image/generation",
-        backend_path="muse.models.sd_turbo:Model",
-        hf_repo="stabilityai/sd-turbo",
-        description="Stable Diffusion Turbo: 1-step distilled, 512x512",
-        pip_extras=("diffusers>=0.27.0", "accelerate", "Pillow", "safetensors"),
-        extra={"default_size": (512, 512)},
-    ),
-    "all-minilm-l6-v2": CatalogEntry(
-        model_id="all-minilm-l6-v2",
-        modality="embedding/text",
-        backend_path="muse.models.all_minilm_l6_v2:Model",
-        hf_repo="sentence-transformers/all-MiniLM-L6-v2",
-        description="MiniLM sentence embeddings: 384 dims, 22MB, CPU-friendly",
-        pip_extras=("torch>=2.1.0", "sentence-transformers>=2.2.0"),
-        extra={"dimensions": 384},
-    ),
-    "qwen3-embedding-0.6b": CatalogEntry(
-        model_id="qwen3-embedding-0.6b",
-        modality="embedding/text",
-        backend_path="muse.models.qwen3_embedding_0_6b:Model",
-        hf_repo="Qwen/Qwen3-Embedding-0.6B",
-        description="Qwen3-Embedding 0.6B: 1024 dims (matryoshka), 32K context, Apache 2.0",
-        pip_extras=(
-            "torch>=2.1.0",
-            "sentence-transformers>=4.0.0",
-            "transformers>=4.51.0",
-        ),
-        extra={"dimensions": 1024, "context_length": 32768, "matryoshka": True},
-    ),
-    "nv-embed-v2": CatalogEntry(
-        model_id="nv-embed-v2",
-        modality="embedding/text",
-        backend_path="muse.models.nv_embed_v2:Model",
-        hf_repo="nvidia/NV-Embed-v2",
-        description=(
-            "NVIDIA NV-Embed-v2: 4096 dims, 32K context, SotA MTEB "
-            "(LICENSE: CC-BY-NC-4.0, non-commercial only)"
-        ),
-        pip_extras=(
-            "torch>=2.1.0",
-            "transformers>=4.42.4",
-            "sentence-transformers>=2.7.0",
-            "einops",
-        ),
-        extra={
-            "dimensions": 4096,
-            "context_length": 32768,
-            "license": "CC-BY-NC-4.0",
-        },
-    ),
-}
+def _bundled_models_dir() -> Path:
+    """Path to the in-repo `src/muse/models/` directory."""
+    # catalog.py sits at src/muse/core/catalog.py; parents[1] is src/muse/.
+    return Path(__file__).resolve().parents[1] / "models"
+
+
+def _model_dirs() -> list[Path]:
+    """Scan order for model discovery (bundled first).
+
+    Task F1 will extend this with `~/.muse/models/` and `$MUSE_MODELS_DIR`.
+    For now, only the bundled dir is scanned.
+    """
+    return [_bundled_models_dir()]
+
+
+def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
+    """Project a DiscoveredModel onto the CatalogEntry shape.
+
+    Manifest -> CatalogEntry mapping:
+        model_id        -> model_id                 (required)
+        modality        -> modality                 (required)
+        hf_repo         -> hf_repo                  (required)
+        description     -> description              (optional, defaults "")
+        pip_extras      -> pip_extras               (tuple-coerced, defaults ())
+        system_packages -> system_packages          (tuple-coerced, defaults ())
+        capabilities    -> extra                    (dict-copied, defaults {})
+    backend_path is synthesized from the Model class's module and name.
+    """
+    m = discovered.manifest
+    cls = discovered.model_class
+    return CatalogEntry(
+        model_id=m["model_id"],
+        modality=m["modality"],
+        backend_path=f"{cls.__module__}:{cls.__name__}",
+        hf_repo=m["hf_repo"],
+        description=m.get("description", ""),
+        pip_extras=tuple(m.get("pip_extras", ())),
+        system_packages=tuple(m.get("system_packages", ())),
+        extra=dict(m.get("capabilities", {})),
+    )
+
+
+_known_models_cache: dict[str, CatalogEntry] | None = None
+
+
+def known_models() -> dict[str, CatalogEntry]:
+    """Return {model_id: CatalogEntry} for every discovered model.
+
+    Runs `discover_models` over the configured dirs on first call and
+    caches the result. Restart the process to pick up new scripts.
+    """
+    global _known_models_cache
+    if _known_models_cache is None:
+        discovered = discover_models(_model_dirs())
+        _known_models_cache = {
+            model_id: _manifest_to_catalog_entry(d)
+            for model_id, d in discovered.items()
+        }
+    return _known_models_cache
+
+
+def _reset_known_models_cache() -> None:
+    """Test hook: clear the cache so discovery re-runs on next call."""
+    global _known_models_cache
+    _known_models_cache = None
 
 
 def _catalog_dir() -> Path:
@@ -169,7 +161,7 @@ def is_pulled(model_id: str) -> bool:
 
 
 def list_known(modality: str | None = None) -> list[CatalogEntry]:
-    entries = list(KNOWN_MODELS.values())
+    entries = list(known_models().values())
     if modality is None:
         return entries
     return [e for e in entries if e.modality == modality]
@@ -200,9 +192,10 @@ def pull(model_id: str) -> None:
     The catalog records the venv's Python path so `muse serve` can spawn
     workers with the right interpreter.
     """
-    if model_id not in KNOWN_MODELS:
-        raise KeyError(f"unknown model {model_id!r}; known: {sorted(KNOWN_MODELS)}")
-    entry = KNOWN_MODELS[model_id]
+    catalog_known = known_models()
+    if model_id not in catalog_known:
+        raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
+    entry = catalog_known[model_id]
 
     # Venv lives under the catalog dir so MUSE_CATALOG_DIR controls everything
     venvs_root = _catalog_dir() / "venvs"
@@ -279,11 +272,12 @@ def load_backend(model_id: str, **kwargs) -> Any:
     `backend_path` has the form "package.module:ClassName". The class
     is expected to accept (hf_repo, local_dir, **kwargs) in its constructor.
     """
-    if model_id not in KNOWN_MODELS:
-        raise KeyError(f"unknown model {model_id!r}; known: {sorted(KNOWN_MODELS)}")
+    catalog_known = known_models()
+    if model_id not in catalog_known:
+        raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
     if not is_pulled(model_id):
         raise RuntimeError(f"model {model_id!r} not pulled; run `muse pull {model_id}`")
-    entry = KNOWN_MODELS[model_id]
+    entry = catalog_known[model_id]
     module_path, class_name = entry.backend_path.split(":")
     module = importlib.import_module(module_path)
     cls = getattr(module, class_name)

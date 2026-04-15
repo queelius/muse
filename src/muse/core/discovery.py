@@ -167,8 +167,16 @@ def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
 
 
 def _load_script(path: Path) -> Any:
-    """Import a single-file .py module given its filesystem path."""
-    mod_name = f"_muse_discover_{path.parent.name}_{path.stem}"
+    """Import a single-file .py module given its filesystem path.
+
+    Uses the canonical import name (e.g. `muse.models.kokoro_82m`) if
+    the script lives inside the installed muse package tree. Otherwise
+    (user/env dirs) falls back to a mangled private name so user scripts
+    can't collide with real modules in `sys.modules`.
+    """
+    mod_name = _canonical_module_name(path) or (
+        f"_muse_discover_{path.parent.name}_{path.stem}"
+    )
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"could not load spec for {path}")
@@ -176,6 +184,30 @@ def _load_script(path: Path) -> Any:
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _canonical_module_name(path: Path) -> str | None:
+    """Return `'muse.models.kokoro_82m'` if path is inside the muse package.
+
+    Otherwise None: script lives outside muse (user or env dir) and will
+    get a mangled private module name instead.
+    """
+    try:
+        import muse  # local import so discovery module has no hard dep
+    except ImportError:
+        return None
+    muse_init = getattr(muse, "__file__", None)
+    if not muse_init:
+        return None
+    muse_dir = Path(muse_init).resolve().parent
+    try:
+        rel = path.resolve().relative_to(muse_dir)
+    except ValueError:
+        return None
+    parts = list(rel.with_suffix("").parts)
+    if not parts or parts[0] == "__pycache__":
+        return None
+    return ".".join(["muse", *parts])
 
 
 def _load_package(pkg_dir: Path) -> Any:

@@ -1,4 +1,4 @@
-"""Tests for the KNOWN_MODELS catalog and pull()."""
+"""Tests for the discovery-driven catalog and pull()."""
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -6,14 +6,28 @@ import pytest
 
 from muse.core.catalog import (
     CatalogEntry,
-    KNOWN_MODELS,
     pull,
     is_pulled,
+    known_models,
     list_known,
     load_backend,
     remove,
     _read_catalog,
+    _reset_known_models_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_catalog_cache():
+    """Reset the known-models cache around every test.
+
+    The cache persists in process memory and would otherwise bleed
+    state between tests. Bundled-only discovery is cheap, so re-running
+    it per test is fine.
+    """
+    _reset_known_models_cache()
+    yield
+    _reset_known_models_cache()
 
 
 @pytest.fixture
@@ -25,19 +39,43 @@ def tmp_catalog(tmp_path, monkeypatch):
 
 def test_known_models_entries_have_valid_modality():
     valid = {"audio/speech", "image/generation", "embedding/text"}
-    for model_id, entry in KNOWN_MODELS.items():
+    for model_id, entry in known_models().items():
         assert entry.modality in valid, \
             f"model {model_id} has invalid modality {entry.modality!r}"
 
 
 def test_known_models_seeded_with_required_entries():
-    assert "soprano-80m" in KNOWN_MODELS
-    assert "kokoro-82m" in KNOWN_MODELS
-    assert "bark-small" in KNOWN_MODELS
-    assert "sd-turbo" in KNOWN_MODELS
-    assert "all-minilm-l6-v2" in KNOWN_MODELS
-    assert "qwen3-embedding-0.6b" in KNOWN_MODELS
-    assert "nv-embed-v2" in KNOWN_MODELS
+    """Bundled src/muse/models/ discovery picks up every built-in model."""
+    catalog = known_models()
+    assert "soprano-80m" in catalog
+    assert "kokoro-82m" in catalog
+    assert "bark-small" in catalog
+    assert "sd-turbo" in catalog
+    assert "all-minilm-l6-v2" in catalog
+    assert "qwen3-embedding-0.6b" in catalog
+    assert "nv-embed-v2" in catalog
+
+
+def test_catalog_entry_reflects_manifest_capabilities():
+    """MANIFEST['capabilities'] flows into CatalogEntry.extra."""
+    kokoro = known_models()["kokoro-82m"]
+    assert kokoro.modality == "audio/speech"
+    assert kokoro.hf_repo == "hexgrad/Kokoro-82M"
+    assert "sample_rate" in kokoro.extra
+    assert kokoro.extra["sample_rate"] == 24000
+
+
+def test_catalog_backend_path_points_at_discovered_model_class():
+    """backend_path is synthesized from the Model class, not the MANIFEST."""
+    kokoro = known_models()["kokoro-82m"]
+    assert kokoro.backend_path == "muse.models.kokoro_82m:Model"
+
+
+def test_known_models_cache_is_reusable():
+    """Second call within the same cache window returns the same dict."""
+    first = known_models()
+    second = known_models()
+    assert first is second
 
 
 def test_list_known_filters_by_modality():
