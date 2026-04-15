@@ -828,3 +828,72 @@ def test_pull_bare_id_unaffected_by_curated_cache(tmp_catalog):
          patch("muse.core.catalog.check_system_packages", return_value=[]):
         pull("soprano-80m")
     assert is_pulled("soprano-80m")
+
+
+# --- v0.11.3: unknown-id error includes curated ids + did-you-mean ----------
+
+
+def test_pull_unknown_id_suggests_close_curated_match(tmp_catalog):
+    """Typing a stale curated id (e.g. `qwen3-8b-q4` after rename to
+    `qwen3.5-9b-q4`) should surface close matches from the curated list
+    in the error, not just bundled ids."""
+    from muse.core.catalog import pull
+    from muse.core.curated import CuratedEntry
+
+    fake_curated = [
+        CuratedEntry(
+            id="qwen3.5-9b-q4", bundled=False,
+            uri="hf://x/y", modality="chat/completion",
+            size_gb=5.0, description="close match", tags=(),
+        ),
+    ]
+    with patch("muse.core.catalog.find_curated", return_value=None), \
+         patch("muse.core.curated.load_curated", return_value=fake_curated):
+        with pytest.raises(KeyError) as exc_info:
+            pull("qwen3-8b-q4")
+    msg = str(exc_info.value)
+    assert "qwen3-8b-q4" in msg
+    assert "did you mean" in msg.lower()
+    assert "qwen3.5-9b-q4" in msg
+
+
+def test_pull_unknown_id_with_no_close_matches_suggests_models_list(tmp_catalog):
+    """If no close match, the error should tell the user how to find ids."""
+    from muse.core.catalog import pull
+
+    # patch curated to empty so only bundled ids are candidates
+    with patch("muse.core.catalog.find_curated", return_value=None), \
+         patch("muse.core.curated.load_curated", return_value=[]):
+        with pytest.raises(KeyError) as exc_info:
+            pull("total-gibberish-no-match-zzzzz")
+    msg = str(exc_info.value).lower()
+    assert "total-gibberish-no-match-zzzzz" in msg
+    assert "muse models list" in msg
+    # Should NOT show the "did you mean" since nothing is close
+    assert "did you mean" not in msg
+
+
+def test_pull_unknown_id_error_includes_curated_ids_in_did_you_mean(tmp_catalog):
+    """The did-you-mean list draws from both bundled AND curated."""
+    from muse.core.catalog import pull
+    from muse.core.curated import CuratedEntry
+
+    fake_curated = [
+        CuratedEntry(
+            id="llama-3.2-3b-q4", bundled=False, uri="hf://b/a",
+            modality="chat/completion", size_gb=2.0,
+            description="", tags=(),
+        ),
+        CuratedEntry(
+            id="qwen3.5-9b-q4", bundled=False, uri="hf://b/c",
+            modality="chat/completion", size_gb=5.0,
+            description="", tags=(),
+        ),
+    ]
+    with patch("muse.core.catalog.find_curated", return_value=None), \
+         patch("muse.core.curated.load_curated", return_value=fake_curated):
+        with pytest.raises(KeyError) as exc_info:
+            pull("llama-3.2-3b")  # close to llama-3.2-3b-q4
+    msg = str(exc_info.value)
+    assert "did you mean" in msg.lower()
+    assert "llama-3.2-3b-q4" in msg

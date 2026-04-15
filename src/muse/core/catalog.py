@@ -283,15 +283,46 @@ def pull(identifier: str) -> None:
 
     if "://" in identifier:
         _pull_via_resolver(identifier)
-    else:
+        return
+
+    # Bare id: must be a bundled script (resolver-pulled ids that land
+    # in catalog.json also show up in known_models() after persist).
+    # If neither bundled nor curated, produce a helpful error covering
+    # BOTH sources plus a did-you-mean suggestion. The old code only
+    # listed bundled ids, so typing a misspelled curated id returned a
+    # misleading "known:" list that hid the curated options entirely.
+    from muse.core.curated import load_curated
+
+    catalog_known = known_models()
+    if identifier in catalog_known:
         _pull_bundled(identifier)
+        return
+
+    curated_ids = [c.id for c in load_curated()]
+    all_known = sorted(set(list(catalog_known) + curated_ids))
+    from difflib import get_close_matches
+    suggestions = get_close_matches(identifier, all_known, n=3, cutoff=0.5)
+    msg = f"unknown model {identifier!r}"
+    if suggestions:
+        msg += f"; did you mean: {', '.join(suggestions)}?"
+    else:
+        msg += " (run `muse models list` to see all model ids)"
+    raise KeyError(msg)
 
 
 def _pull_bundled(model_id: str) -> None:
-    """Pull a bundled (script-discovered) model by bare id."""
+    """Pull a bundled (script-discovered) model by bare id.
+
+    Callers (only `pull()`) verify the id is in `known_models()` first
+    and produce a user-friendly error for unknown ids; this defensive
+    check guards against internal mistakes.
+    """
     catalog_known = known_models()
     if model_id not in catalog_known:
-        raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
+        raise KeyError(
+            f"unknown model {model_id!r} (internal dispatch bug in "
+            f"_pull_bundled; use pull() to get a better error)"
+        )
     entry = catalog_known[model_id]
 
     venvs_root = _catalog_dir() / "venvs"
