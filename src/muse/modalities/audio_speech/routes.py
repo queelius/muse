@@ -17,13 +17,13 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from muse.audio.speech.codec import AudioFormatError, audio_to_wav_bytes, wav_bytes_to_opus
+from muse.modalities.audio_speech.codec import AudioFormatError, audio_to_wav_bytes, wav_bytes_to_opus
 from muse.core.errors import ModelNotFoundError
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
 
-MODALITY = "audio.speech"
+MODALITY = "audio/speech"
 MAX_INPUT_LENGTH = 50_000
 _inference_lock = Lock()
 
@@ -39,7 +39,7 @@ class SpeechRequest(BaseModel):
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
-    router = APIRouter(prefix="/v1/audio", tags=["audio.speech"])
+    router = APIRouter(prefix="/v1/audio", tags=["audio/speech"])
 
     @router.get("/speech/voices")
     def list_voices(model: str | None = None):

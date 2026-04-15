@@ -1,4 +1,4 @@
-"""Muse audio.speech modality protocol.
+"""Muse audio/speech modality protocol.
 
 Defines TTSModel (the backend contract) and AudioResult / AudioChunk
 (return types for sync / streaming synthesis). A backend is any object

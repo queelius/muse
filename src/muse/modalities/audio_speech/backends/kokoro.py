@@ -1,7 +1,7 @@
 """Kokoro TTS model backend.
 
 Wraps hexgrad/Kokoro-82M via the ``kokoro`` package to implement
-the :class:`~muse.audio.speech.protocol.TTSModel` protocol.  Lightweight (82M),
+the :class:`~muse.modalities.audio_speech.protocol.TTSModel` protocol.  Lightweight (82M),
 fast, with 54 voices across 6 languages. Sentence-level streaming.
 
 Requires: ``pip install kokoro soundfile`` and system ``espeak-ng``.
@@ -14,7 +14,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-from muse.audio.speech.protocol import AudioChunk, AudioResult
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult
 
 logger = logging.getLogger(__name__)
 

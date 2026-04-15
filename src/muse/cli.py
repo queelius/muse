@@ -9,7 +9,7 @@ The CLI surface is deliberately minimal and modality-agnostic:
     muse models remove <model-id> unregister from catalog
 
 Generation endpoints are reached via HTTP (the canonical interface):
-    - Python: muse.audio.speech.SpeechClient,
+    - Python: muse.modalities.audio_speech.SpeechClient,
               muse.images.generations.GenerationsClient
     - Shell:  curl -X POST http://host:8000/v1/audio/speech ...
     - LLMs:   muse mcp (future — MCP server over HTTP)
@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_list = models_sub.add_parser("list", help="list known models across all modalities")
     sp_list.add_argument("--modality", default=None,
-                         help="filter by modality (e.g., audio.speech)")
+                         help="filter by modality (e.g., audio/speech)")
     sp_list.set_defaults(func=_cmd_models_list)
 
     sp_info = models_sub.add_parser("info", help="show catalog entry for a model")

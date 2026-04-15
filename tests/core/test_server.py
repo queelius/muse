@@ -26,13 +26,13 @@ def test_health_reports_registered_modalities():
 
     class Fake:
         model_id = "fake"
-    reg.register("audio.speech", Fake())
+    reg.register("audio/speech", Fake())
     reg.register("images.generations", Fake())
 
     app = create_app(registry=reg, routers={})
     client = TestClient(app)
     r = client.get("/health")
-    assert set(r.json()["modalities"]) == {"audio.speech", "images.generations"}
+    assert set(r.json()["modalities"]) == {"audio/speech", "images.generations"}
 
 
 def test_routers_are_mounted():
@@ -55,14 +55,14 @@ def test_global_v1_models_endpoint_aggregates():
     class FakeAudio:
         model_id = "fake-tts"
         sample_rate = 16000
-    reg.register("audio.speech", FakeAudio())
+    reg.register("audio/speech", FakeAudio())
 
     app = create_app(registry=reg, routers={})
     client = TestClient(app)
     r = client.get("/v1/models")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert any(m["id"] == "fake-tts" and m["modality"] == "audio.speech" for m in data)
+    assert any(m["id"] == "fake-tts" and m["modality"] == "audio/speech" for m in data)
 
 
 def test_registry_stored_on_app_state():
@@ -82,7 +82,7 @@ def test_v1_models_registry_fields_win_over_extra():
         # must be defensive regardless.
         pass
 
-    reg.register("audio.speech", HostileModel())
+    reg.register("audio/speech", HostileModel())
     # Manually inject collision keys into the ModelInfo.extra to simulate a future
     # backend that exposes them.
     info = reg.list_all()[0]
@@ -96,7 +96,7 @@ def test_v1_models_registry_fields_win_over_extra():
     data = r.json()["data"]
     assert len(data) == 1
     assert data[0]["id"] == "real-id"
-    assert data[0]["modality"] == "audio.speech"
+    assert data[0]["modality"] == "audio/speech"
     assert data[0]["object"] == "model"
 
 
@@ -109,7 +109,7 @@ def test_model_not_found_error_serializes_openai_shape():
 
     @app.get("/boom")
     def boom():
-        raise ModelNotFoundError(model_id="missing-model", modality="audio.speech")
+        raise ModelNotFoundError(model_id="missing-model", modality="audio/speech")
 
     client = TestClient(app)
     r = client.get("/boom")
@@ -122,21 +122,21 @@ def test_model_not_found_error_serializes_openai_shape():
     assert err["code"] == "model_not_found"
     assert err["type"] == "invalid_request_error"
     assert "missing-model" in err["message"]
-    assert "audio.speech" in err["message"]
+    assert "audio/speech" in err["message"]
 
 
 def test_speech_route_with_empty_registry_returns_openai_404():
-    """When no audio.speech model is registered, POST /v1/audio/speech must
+    """When no audio/speech model is registered, POST /v1/audio/speech must
     return a 404 with the OpenAI error envelope (not FastAPI's generic 404).
 
-    This requires the audio.speech router to be mounted even when no models are
+    This requires the audio/speech router to be mounted even when no models are
     loaded — otherwise FastAPI returns {detail: 'Not Found'} for an unknown path.
     """
-    from muse.audio.speech.routes import build_router as build_audio_router
+    from muse.modalities.audio_speech.routes import build_router as build_audio_router
 
     reg = ModalityRegistry()
     router = build_audio_router(reg)
-    app = create_app(registry=reg, routers={"audio.speech": router})
+    app = create_app(registry=reg, routers={"audio/speech": router})
     client = TestClient(app)
 
     r = client.post("/v1/audio/speech", json={"input": "hello"})

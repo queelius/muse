@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class CatalogEntry:
     """Static metadata for a known model."""
     model_id: str
-    modality: str              # "audio.speech" | "images.generations"
+    modality: str              # "audio/speech" | "images.generations"
     backend_path: str          # "module.path:ClassName"
     hf_repo: str
     description: str = ""
@@ -46,16 +46,16 @@ class CatalogEntry:
 KNOWN_MODELS: dict[str, CatalogEntry] = {
     "soprano-80m": CatalogEntry(
         model_id="soprano-80m",
-        modality="audio.speech",
-        backend_path="muse.audio.speech.backends.soprano:SopranoModel",
+        modality="audio/speech",
+        backend_path="muse.modalities.audio_speech.backends.soprano:SopranoModel",
         hf_repo="ekwek/Soprano-1.1-80M",
         description="Qwen3 LLM backbone + Vocos decoder, 32kHz, 80M params",
         pip_extras=("transformers>=4.36.0", "scipy", "inflect", "unidecode"),
     ),
     "kokoro-82m": CatalogEntry(
         model_id="kokoro-82m",
-        modality="audio.speech",
-        backend_path="muse.audio.speech.backends.kokoro:KokoroModel",
+        modality="audio/speech",
+        backend_path="muse.modalities.audio_speech.backends.kokoro:KokoroModel",
         hf_repo="hexgrad/Kokoro-82M",
         description="Lightweight TTS, 54 voices, 24kHz",
         pip_extras=("kokoro", "soundfile", "misaki[en]"),
@@ -63,8 +63,8 @@ KNOWN_MODELS: dict[str, CatalogEntry] = {
     ),
     "bark-small": CatalogEntry(
         model_id="bark-small",
-        modality="audio.speech",
-        backend_path="muse.audio.speech.backends.bark:BarkModel",
+        modality="audio/speech",
+        backend_path="muse.modalities.audio_speech.backends.bark:BarkModel",
         hf_repo="suno/bark-small",
         description="Multilingual + voice cloning, 24kHz",
         pip_extras=("transformers>=4.36.0", "scipy"),

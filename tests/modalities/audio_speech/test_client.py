@@ -1,10 +1,10 @@
-"""Tests for muse.audio.speech.client — HTTP client for remote Muse TTS server."""
+"""Tests for muse.modalities.audio_speech.client — HTTP client for remote Muse TTS server."""
 import json
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from muse.audio.speech.client import SpeechClient
+from muse.modalities.audio_speech.client import SpeechClient
 
 
 class TestSpeechClient:
@@ -12,7 +12,7 @@ class TestSpeechClient:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"status": "ok", "device": "cuda"}
-        with patch('muse.audio.speech.client.requests.get', return_value=mock_resp):
+        with patch('muse.modalities.audio_speech.client.requests.get', return_value=mock_resp):
             client = SpeechClient("http://localhost:8000")
             result = client.health()
             assert result["status"] == "ok"
@@ -23,7 +23,7 @@ class TestSpeechClient:
         mock_resp.status_code = 200
         mock_resp.content = fake_wav
         mock_resp.headers = {"content-type": "audio/wav"}
-        with patch('muse.audio.speech.client.requests.post', return_value=mock_resp):
+        with patch('muse.modalities.audio_speech.client.requests.post', return_value=mock_resp):
             client = SpeechClient("http://localhost:8000")
             audio = client.infer("Hello world")
             assert audio == fake_wav
@@ -38,7 +38,7 @@ class TestSpeechClient:
             "content-type": "audio/wav",
             "x-alignment": json.dumps(alignment),
         }
-        with patch('muse.audio.speech.client.requests.post', return_value=mock_resp):
+        with patch('muse.modalities.audio_speech.client.requests.post', return_value=mock_resp):
             client = SpeechClient("http://localhost:8000")
             audio, align = client.generate_with_alignment(
                 ["Paragraph one.", "Paragraph two."], out_path="/dev/null",
@@ -47,7 +47,7 @@ class TestSpeechClient:
 
     def test_server_unreachable_raises(self):
         import requests as req_lib
-        with patch('muse.audio.speech.client.requests.get',
+        with patch('muse.modalities.audio_speech.client.requests.get',
                    side_effect=req_lib.ConnectionError("refused")):
             client = SpeechClient("http://localhost:9999")
             with pytest.raises(ConnectionError):

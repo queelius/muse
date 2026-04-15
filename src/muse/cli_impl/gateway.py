@@ -178,7 +178,7 @@ async def _forward(request: Request, target_url: str, timeout: float) -> Respons
     The httpx client and stream context are held open for the duration of
     a streaming response so chunks dispatch as they arrive from the worker
     (not after full synthesis completes). Same producer-consumer shape as
-    the audio.speech router's internal streaming.
+    the audio/speech router's internal streaming.
     """
     body = await request.body()
     excluded = {"host", "content-length", "transfer-encoding", "connection"}

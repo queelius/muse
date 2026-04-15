@@ -44,11 +44,11 @@ def test_models_help_lists_subcommands():
 
 
 def test_models_list_shows_entries_across_all_modalities():
-    """Without filter, list shows audio.speech AND images.generations models."""
+    """Without filter, list shows audio/speech AND images.generations models."""
     r = _run("models", "list")
     assert r.returncode == 0
     combined = r.stdout + r.stderr
-    # Expect at least one audio.speech and one images.generations model
+    # Expect at least one audio/speech and one images.generations model
     assert any(m in combined for m in ("soprano", "kokoro", "bark"))
     assert "sd-turbo" in combined
 
@@ -58,7 +58,7 @@ def test_models_list_shows_modality_column():
     r = _run("models", "list")
     assert r.returncode == 0
     combined = r.stdout + r.stderr
-    assert "audio.speech" in combined
+    assert "audio/speech" in combined
     assert "images.generations" in combined
 
 
@@ -66,7 +66,7 @@ def test_models_list_modality_filter():
     r = _run("models", "list", "--modality", "images.generations")
     assert r.returncode == 0
     assert "sd-turbo" in r.stdout
-    # audio.speech models must NOT appear under this filter
+    # audio/speech models must NOT appear under this filter
     for m in ("soprano", "kokoro", "bark"):
         assert m not in r.stdout
 
@@ -82,7 +82,7 @@ def test_models_info_on_known_model():
     r = _run("models", "info", "soprano-80m")
     assert r.returncode == 0
     assert "soprano" in r.stdout.lower()
-    assert "audio.speech" in r.stdout
+    assert "audio/speech" in r.stdout
 
 
 def test_models_info_unknown_nonzero():

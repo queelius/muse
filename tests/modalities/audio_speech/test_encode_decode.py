@@ -22,14 +22,14 @@ def _make_batch_encoding(d):
     m.to.return_value = m
     return m
 
-from muse.audio.speech.tts import (
+from muse.modalities.audio_speech.tts import (
     Narro,
     SAMPLE_RATE,
     INT16_MAX,
     TOKEN_SIZE,
     HIDDEN_DIM,
 )
-from muse.audio.speech.encoded import EncodedSpeech, SentenceEncoding, save, load
+from muse.modalities.audio_speech.encoded import EncodedSpeech, SentenceEncoding, save, load
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +509,7 @@ class TestDecodeOnly:
 
     def test_decode_function_with_mock_decoder(self):
         """decode_only.decode() should work with a pre-loaded decoder."""
-        from muse.audio.speech.decode_only import decode
+        from muse.modalities.audio_speech.decode_only import decode
 
         encoded = _make_encoded_speech([20], num_texts=1)
 
@@ -525,7 +525,7 @@ class TestDecodeOnly:
 
     def test_decode_to_wav_with_mock_decoder(self):
         """decode_only.decode_to_wav() should write a WAV file."""
-        from muse.audio.speech.decode_only import decode_to_wav
+        from muse.modalities.audio_speech.decode_only import decode_to_wav
 
         encoded = _make_encoded_speech([20], num_texts=1)
 
@@ -547,7 +547,7 @@ class TestDecodeOnly:
 
     def test_decode_multiple_texts(self):
         """decode_only.decode() should handle multiple texts."""
-        from muse.audio.speech.decode_only import decode
+        from muse.modalities.audio_speech.decode_only import decode
 
         sentences = [
             SentenceEncoding(
@@ -582,7 +582,7 @@ class TestDecodeOnly:
 class TestBaseModelEnrichedOutput:
 
     def _make_base_model(self):
-        from muse.audio.speech.backends.base import BaseModel
+        from muse.modalities.audio_speech.backends.base import BaseModel
         bm = BaseModel()
         bm.model = MagicMock()
         bm.tokenizer = MagicMock()

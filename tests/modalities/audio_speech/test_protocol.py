@@ -1,9 +1,9 @@
-"""Tests for muse.audio.speech.protocol — TTSModel protocol and audio types."""
+"""Tests for muse.modalities.audio_speech.protocol — TTSModel protocol and audio types."""
 
 import numpy as np
 import pytest
 
-from muse.audio.speech.protocol import AudioChunk, AudioResult, TTSModel
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, TTSModel
 
 
 class TestAudioResult:

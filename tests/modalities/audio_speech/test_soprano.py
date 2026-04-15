@@ -1,14 +1,14 @@
-"""Smoke tests for muse.audio.speech.backends.soprano.SopranoModel (mocked; no real weights)."""
+"""Smoke tests for muse.modalities.audio_speech.backends.soprano.SopranoModel (mocked; no real weights)."""
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from muse.audio.speech.backends.soprano import SopranoModel
+from muse.modalities.audio_speech.backends.soprano import SopranoModel
 
 
 # Narro is imported inside SopranoModel.__init__, so patch at the source module.
-_NARRO_PATH = "muse.audio.speech.tts.Narro"
-_SAMPLE_RATE_PATH = "muse.audio.speech.tts.SAMPLE_RATE"
+_NARRO_PATH = "muse.modalities.audio_speech.tts.Narro"
+_SAMPLE_RATE_PATH = "muse.modalities.audio_speech.tts.SAMPLE_RATE"
 
 
 def _make_model(**kwargs):
@@ -49,8 +49,8 @@ def test_soprano_accepts_unknown_kwargs_gracefully():
 
 def test_soprano_prefers_local_dir_over_hf_repo():
     """When local_dir is set, Narro should receive it rather than hf_repo."""
-    with patch("muse.audio.speech.tts.Narro") as mock_narro, \
-         patch("muse.audio.speech.tts.SAMPLE_RATE", 32000):
+    with patch("muse.modalities.audio_speech.tts.Narro") as mock_narro, \
+         patch("muse.modalities.audio_speech.tts.SAMPLE_RATE", 32000):
         mock_narro.return_value = MagicMock(sample_rate=32000)
         SopranoModel(hf_repo="ekwek/Soprano-1.1-80M", local_dir="/local/weights")
         call_kwargs = mock_narro.call_args[1]
@@ -59,8 +59,8 @@ def test_soprano_prefers_local_dir_over_hf_repo():
 
 def test_soprano_falls_back_to_hf_repo_when_no_local_dir():
     """When local_dir is None, Narro should receive hf_repo."""
-    with patch("muse.audio.speech.tts.Narro") as mock_narro, \
-         patch("muse.audio.speech.tts.SAMPLE_RATE", 32000):
+    with patch("muse.modalities.audio_speech.tts.Narro") as mock_narro, \
+         patch("muse.modalities.audio_speech.tts.SAMPLE_RATE", 32000):
         mock_narro.return_value = MagicMock(sample_rate=32000)
         SopranoModel(hf_repo="ekwek/Soprano-1.1-80M", local_dir=None)
         call_kwargs = mock_narro.call_args[1]

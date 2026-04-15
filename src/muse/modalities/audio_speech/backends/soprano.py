@@ -1,7 +1,7 @@
 """Soprano TTS model backend.
 
 Wraps the Soprano-1.1-80M model (Qwen3 LLM + Vocos decoder) to
-implement the :class:`~muse.audio.speech.protocol.TTSModel` protocol.
+implement the :class:`~muse.modalities.audio_speech.protocol.TTSModel` protocol.
 
 The encode/decode split, hidden-state IR (``.soprano`` files), and
 Vocos decoder are all internal to this backend -- the server and
@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-from muse.audio.speech.protocol import AudioChunk, AudioResult
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class SopranoModel:
         device: str = "auto",
         **_: Any,
     ) -> None:
-        from muse.audio.speech.tts import Narro, SAMPLE_RATE
+        from muse.modalities.audio_speech.tts import Narro, SAMPLE_RATE
 
         self._tts = Narro(
             model_path=local_dir or hf_repo,
@@ -86,7 +86,7 @@ class SopranoModel:
                 sample_rate=self._sample_rate,
             )
 
-        from muse.audio.speech.alignment import extract_paragraph_alignment
+        from muse.modalities.audio_speech.alignment import extract_paragraph_alignment
         import torch
 
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]

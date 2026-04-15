@@ -3,7 +3,7 @@ import torch
 import inspect
 import pytest
 
-from muse.audio.speech.tts import Narro
+from muse.modalities.audio_speech.tts import Narro
 
 
 @pytest.fixture

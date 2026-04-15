@@ -4,8 +4,8 @@ Loads only the Vocos decoder (~5MB) without the LLM (~374MB).
 Useful for decoding pre-encoded .soprano files on resource-constrained devices.
 
 Usage:
-    from muse.audio.speech.decode_only import decode, decode_to_wav
-    from muse.audio.speech.encoded import load
+    from muse.modalities.audio_speech.decode_only import decode, decode_to_wav
+    from muse.modalities.audio_speech.encoded import load
 
     encoded = load("blog-post.soprano")
     audio = decode(encoded)              # list[torch.Tensor]

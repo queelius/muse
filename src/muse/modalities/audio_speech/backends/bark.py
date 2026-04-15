@@ -1,7 +1,7 @@
 """Bark TTS model backend.
 
 Wraps Suno's Bark model (via HuggingFace transformers) to implement
-the :class:`~muse.audio.speech.protocol.TTSModel` protocol.  Supports voice
+the :class:`~muse.modalities.audio_speech.protocol.TTSModel` protocol.  Supports voice
 presets and voice cloning from ``.npz`` history prompts.
 
 Bark generates complete audio in one shot (no native streaming).
@@ -16,8 +16,8 @@ from typing import Any, Iterator
 
 import numpy as np
 
-from muse.audio.speech.backends.base import voices_dir
-from muse.audio.speech.protocol import AudioChunk, AudioResult
+from muse.modalities.audio_speech.backends.base import voices_dir
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult
 
 logger = logging.getLogger(__name__)
 

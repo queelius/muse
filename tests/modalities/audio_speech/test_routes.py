@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from muse.audio.speech.protocol import AudioChunk, AudioResult
-from muse.audio.speech.routes import build_router
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult
+from muse.modalities.audio_speech.routes import build_router
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
 
@@ -30,8 +30,8 @@ class FakeTTS:
 @pytest.fixture
 def client():
     reg = ModalityRegistry()
-    reg.register("audio.speech", FakeTTS())
-    app = create_app(registry=reg, routers={"audio.speech": build_router(reg)})
+    reg.register("audio/speech", FakeTTS())
+    app = create_app(registry=reg, routers={"audio/speech": build_router(reg)})
     return TestClient(app)
 
 

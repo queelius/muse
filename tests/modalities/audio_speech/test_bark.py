@@ -1,4 +1,4 @@
-"""Tests for muse.audio.speech.backends.bark: Bark TTS adapter."""
+"""Tests for muse.modalities.audio_speech.backends.bark: Bark TTS adapter."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from muse.audio.speech.protocol import AudioChunk, AudioResult, TTSModel
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, TTSModel
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +27,7 @@ class TestBarkModel:
         mock_model.generate.return_value = torch.randn(1, 24000)
         mock_model.to.return_value = mock_model
 
-        from muse.audio.speech.backends.bark import BarkModel
+        from muse.modalities.audio_speech.backends.bark import BarkModel
         adapter = object.__new__(BarkModel)
         adapter._processor = mock_processor
         adapter._model = mock_model
@@ -104,7 +104,7 @@ class TestBarkVoiceCloning:
         mock_model.generate.return_value = torch.randn(1, 24000)
         mock_model.to.return_value = mock_model
 
-        from muse.audio.speech.backends.bark import BarkModel
+        from muse.modalities.audio_speech.backends.bark import BarkModel
         adapter = object.__new__(BarkModel)
         adapter._processor = mock_processor
         adapter._model = mock_model
@@ -161,7 +161,7 @@ class TestBarkVoiceCloning:
 
 def test_bark_has_lowercase_voices_property():
     """routes.py + registry look for `voices` (lowercase); BarkModel must satisfy."""
-    from muse.audio.speech.backends.bark import BarkModel
+    from muse.modalities.audio_speech.backends.bark import BarkModel
 
     assert "voices" in dir(BarkModel), "BarkModel must expose a `voices` attribute/property"
 

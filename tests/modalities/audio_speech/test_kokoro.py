@@ -1,4 +1,4 @@
-"""Tests for muse.audio.speech.backends.kokoro: Kokoro TTS adapter."""
+"""Tests for muse.modalities.audio_speech.backends.kokoro: Kokoro TTS adapter."""
 
 from unittest.mock import MagicMock
 
@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 import torch
 
-from muse.audio.speech.protocol import AudioChunk, AudioResult, TTSModel
+from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, TTSModel
 
 
 class TestKokoroModel:
     def _make_adapter(self):
-        from muse.audio.speech.backends.kokoro import KokoroModel
+        from muse.modalities.audio_speech.backends.kokoro import KokoroModel
 
         mock_pipeline = MagicMock()
         result = MagicMock()
@@ -50,7 +50,7 @@ class TestKokoroModel:
         assert isinstance(chunks[0], AudioChunk)
 
     def test_voices_list(self):
-        from muse.audio.speech.backends.kokoro import KOKORO_VOICES
+        from muse.modalities.audio_speech.backends.kokoro import KOKORO_VOICES
         assert "af_heart" in KOKORO_VOICES
         assert "am_adam" in KOKORO_VOICES
         assert len(KOKORO_VOICES) > 50
@@ -58,7 +58,7 @@ class TestKokoroModel:
 
 def test_kokoro_has_lowercase_voices_property():
     """routes.py + registry look for `voices` (lowercase); KokoroModel must satisfy."""
-    from muse.audio.speech.backends.kokoro import KokoroModel
+    from muse.modalities.audio_speech.backends.kokoro import KokoroModel
 
     assert "voices" in dir(KokoroModel), "KokoroModel must expose a `voices` attribute/property"
 
@@ -88,7 +88,7 @@ def test_kokoro_init_does_not_pass_local_dir_as_repo_id(monkeypatch):
     monkeypatch.setitem(sys.modules, "kokoro", fake_kokoro)
 
     # torch is already importable in the test env but we only need a device branch
-    from muse.audio.speech.backends.kokoro import KokoroModel
+    from muse.modalities.audio_speech.backends.kokoro import KokoroModel
     _ = KokoroModel(
         hf_repo="hexgrad/Kokoro-82M",
         local_dir="/home/user/.cache/huggingface/hub/models--hexgrad--Kokoro-82M/snapshots/abc",

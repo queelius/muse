@@ -24,7 +24,7 @@ def tmp_catalog(tmp_path, monkeypatch):
 
 
 def test_known_models_entries_have_valid_modality():
-    valid = {"audio.speech", "images.generations", "embeddings"}
+    valid = {"audio/speech", "images.generations", "embeddings"}
     for model_id, entry in KNOWN_MODELS.items():
         assert entry.modality in valid, \
             f"model {model_id} has invalid modality {entry.modality!r}"
@@ -41,8 +41,8 @@ def test_known_models_seeded_with_required_entries():
 
 
 def test_list_known_filters_by_modality():
-    audio = list_known("audio.speech")
-    assert all(e.modality == "audio.speech" for e in audio)
+    audio = list_known("audio/speech")
+    assert all(e.modality == "audio/speech" for e in audio)
     assert len(audio) >= 1
     images = list_known("images.generations")
     assert all(e.modality == "images.generations" for e in images)
@@ -52,7 +52,7 @@ def test_list_known_filters_by_modality():
 def test_list_known_all():
     all_entries = list_known()
     modalities = {e.modality for e in all_entries}
-    assert "audio.speech" in modalities
+    assert "audio/speech" in modalities
     assert "images.generations" in modalities
 
 

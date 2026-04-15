@@ -5,7 +5,7 @@ import wave
 import numpy as np
 import pytest
 
-from muse.audio.speech.codec import (
+from muse.modalities.audio_speech.codec import (
     AudioFormatError,
     audio_to_wav_bytes,
     wav_bytes_to_opus,
@@ -49,7 +49,7 @@ def test_wav_bytes_to_opus_produces_bytes_when_ffmpeg_present():
 
 
 def test_wav_bytes_to_opus_raises_when_ffmpeg_missing(monkeypatch):
-    import muse.audio.speech.codec as codec_module
+    import muse.modalities.audio_speech.codec as codec_module
     monkeypatch.setattr(codec_module.shutil, "which", lambda x: None)
     with pytest.raises(AudioFormatError, match="ffmpeg not found"):
         wav_bytes_to_opus(b"fake wav data")

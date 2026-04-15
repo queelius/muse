@@ -1,7 +1,7 @@
 """Muse: model-agnostic multi-modality generation server.
 
 Modalities:
-  - audio.speech  — /v1/audio/speech (text-to-speech)
+  - audio/speech  — /v1/audio/speech (text-to-speech)
   - images.generations — /v1/images/generations (text-to-image)
 
 Heavy backends (transformers, diffusers) are imported lazily inside

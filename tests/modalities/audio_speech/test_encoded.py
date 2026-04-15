@@ -6,7 +6,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from muse.audio.speech.encoded import (
+from muse.modalities.audio_speech.encoded import (
     SentenceEncoding,
     EncodedSpeech,
     FORMAT_VERSION,
@@ -322,7 +322,7 @@ class TestSaveLoad:
 
     def test_load_future_format_version_raises(self):
         """load() should raise ValueError for unsupported future format versions."""
-        from muse.audio.speech.encoded import _tamper_format_version_for_test
+        from muse.modalities.audio_speech.encoded import _tamper_format_version_for_test
         enc = _make_encoded()
 
         with tempfile.TemporaryDirectory() as tmpdir:

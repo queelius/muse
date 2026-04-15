@@ -1,4 +1,4 @@
-"""WAV and Opus encoding for audio.speech responses.
+"""WAV and Opus encoding for audio/speech responses.
 
 Extracted from narro/server.py to separate modality-specific encoding
 from the modality-agnostic server framework.

@@ -7,12 +7,12 @@ import tempfile
 import numpy as np
 import pytest
 
-from muse.audio.speech.alignment import (
+from muse.modalities.audio_speech.alignment import (
     save_alignment,
     extract_alignment_from_encoded,
     extract_paragraph_alignment,
 )
-from muse.audio.speech.encoded import SentenceEncoding, EncodedSpeech
+from muse.modalities.audio_speech.encoded import SentenceEncoding, EncodedSpeech
 
 
 # ---------------------------------------------------------------------------
