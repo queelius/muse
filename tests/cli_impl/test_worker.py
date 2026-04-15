@@ -93,3 +93,38 @@ def test_worker_mounts_routers_from_discovery(mock_discover, mock_uvicorn):
     app = mock_uvicorn.run.call_args.args[0]
     route_paths = {getattr(r, "path", "") for r in app.routes}
     assert "/v1/sentinel/ping" in route_paths
+
+
+@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.discover_modalities")
+def test_worker_includes_env_modalities_dir_when_set(
+    mock_discover, mock_uvicorn, monkeypatch, tmp_path,
+):
+    """$MUSE_MODALITIES_DIR is appended to the modality scan dirs."""
+    mock_discover.return_value = {}
+    monkeypatch.setenv("MUSE_MODALITIES_DIR", str(tmp_path))
+
+    run_worker(host="127.0.0.1", port=9999, models=[], device="cpu")
+
+    # The positional arg to discover_modalities is the list of dirs
+    dirs_arg = mock_discover.call_args.args[0]
+    # Bundled comes first, env second
+    assert len(dirs_arg) == 2
+    assert dirs_arg[0].name == "modalities"
+    assert dirs_arg[1] == tmp_path
+
+
+@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.discover_modalities")
+def test_worker_modality_dirs_are_just_bundled_when_env_unset(
+    mock_discover, mock_uvicorn, monkeypatch,
+):
+    """Without $MUSE_MODALITIES_DIR, only the bundled dir is scanned."""
+    mock_discover.return_value = {}
+    monkeypatch.delenv("MUSE_MODALITIES_DIR", raising=False)
+
+    run_worker(host="127.0.0.1", port=9999, models=[], device="cpu")
+
+    dirs_arg = mock_discover.call_args.args[0]
+    assert len(dirs_arg) == 1
+    assert dirs_arg[0].name == "modalities"

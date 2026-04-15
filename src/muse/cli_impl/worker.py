@@ -9,6 +9,7 @@ Can also be run standalone for debugging. Not advertised in top-level help.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import uvicorn
@@ -27,13 +28,28 @@ def _bundled_modalities_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "modalities"
 
 
-def _modality_dirs() -> list[Path]:
-    """Scan order for modality discovery.
+def _env_modalities_dir() -> Path | None:
+    """Optional extra modalities dir from `$MUSE_MODALITIES_DIR` env var.
 
-    Task F2 will extend this with $MUSE_MODALITIES_DIR (escape hatch).
-    For now, only the bundled dir is scanned.
+    Intended as an escape hatch for power users experimenting with new
+    modality contracts, not a normal extension surface. Most users
+    should extend via model scripts instead (see $MUSE_MODELS_DIR).
     """
-    return [_bundled_modalities_dir()]
+    env = os.environ.get("MUSE_MODALITIES_DIR")
+    return Path(env) if env else None
+
+
+def _modality_dirs() -> list[Path]:
+    """Scan order for modality discovery: bundled first, then env override.
+
+    First-found-wins on MODALITY tag collision, so bundled modalities
+    shadow env-dir entries that declare the same MIME tag.
+    """
+    dirs = [_bundled_modalities_dir()]
+    env = _env_modalities_dir()
+    if env is not None:
+        dirs.append(env)
+    return dirs
 
 
 def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
