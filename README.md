@@ -1,6 +1,8 @@
 # Muse
 
-Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface: text-to-speech on `/v1/audio/speech`, text-to-image on `/v1/images/generations`, more modalities landing the same way (embeddings, transcriptions, video). Add a modality by dropping in a router, a protocol, and a catalog entry (no shared base class, no coupling between modalities).
+Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface: text-to-speech on `/v1/audio/speech`, text-to-image on `/v1/images/generations`, text-to-vector on `/v1/embeddings`, more landing the same way (transcriptions, video). Modality tags are MIME-style (`audio/speech`, `embedding/text`, `image/generation`).
+
+Adding a new model is a drop-in: write one `.py` file with a `MANIFEST` dict and a `Model` class, put it in `~/.muse/models/`, run `muse pull`. Adding a new modality (rarer) is dropping a subpackage under `src/muse/modalities/` (or `$MUSE_MODALITIES_DIR` for the escape hatch). Both surfaces are discovered at runtime; there is no hardcoded catalog, no allowlist, and no registration calls.
 
 The CLI is deliberately admin-only (`serve`, `pull`, `models`). Generation is reached via the HTTP API, consumed by Python clients, `curl`, or future wrappers like `muse mcp`.
 
@@ -48,9 +50,9 @@ curl -X POST http://localhost:8000/v1/embeddings \
 ```
 
 ```python
-from muse.audio.speech import SpeechClient
-from muse.images.generations import GenerationsClient
-from muse.embeddings import EmbeddingsClient
+from muse.modalities.audio_speech import SpeechClient
+from muse.modalities.image_generation import GenerationsClient
+from muse.modalities.embedding_text import EmbeddingsClient
 
 # MUSE_SERVER env var sets the base URL for remote use; default http://localhost:8000
 wav_bytes = SpeechClient().infer("Hello world")
@@ -90,15 +92,22 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
 
 ## Architecture
 
-- `muse.core`: modality-agnostic registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory
-- `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy by model-id)
-- `muse.audio.speech`: text-to-speech (Soprano, Kokoro, Bark backends)
-- `muse.images.generations`: text-to-image (SD-Turbo backend)
-- `muse.embeddings`: text-to-vector (MiniLM backend; OpenAI-compatible /v1/embeddings)
+- `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
+- `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
+- `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
+  - `audio_speech/` (MODALITY `"audio/speech"`)
+  - `embedding_text/` (MODALITY `"embedding/text"`)
+  - `image_generation/` (MODALITY `"image/generation"`)
+- `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
+  - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
+  - `all_minilm_l6_v2.py`, `qwen3_embedding_0_6b.py`, `nv_embed_v2.py` (embedding/text)
+  - `sd_turbo.py` (image/generation)
 
-`muse serve` is a supervisor process. It spawns one worker subprocess per venv (each model has its own venv with its own deps) and runs a gateway that proxies requests by the request's `model` field. Dep conflicts between models are structurally impossible.
+`muse serve` is a supervisor process. It spawns one worker subprocess per venv (each pulled model has its own venv with its own deps) and runs a gateway that proxies by the `model` field. Dep conflicts between models are structurally impossible.
 
-See `CLAUDE.md` for implementation details and contribution guide.
+Users extend muse by dropping a `.py` file into `~/.muse/models/` (see `docs/MODEL_SCRIPTS.md` for the MANIFEST schema and Model class contract). No muse source edits required.
+
+See `CLAUDE.md` for implementation details and contribution guide, and `docs/MODEL_SCRIPTS.md` for writing your own model scripts.
 
 ## License
 

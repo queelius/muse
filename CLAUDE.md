@@ -5,15 +5,26 @@ Guidance for Claude Code when working on Muse.
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-two modalities:
+three modalities:
 
-- **audio.speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
-- **images.generations**: text-to-image via `/v1/images/generations` (SD-Turbo)
-- **embeddings**: text-to-vector via `/v1/embeddings` (MiniLM; sentence-transformers)
+- **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
+- **image/generation**: text-to-image via `/v1/images/generations` (SD-Turbo)
+- **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2)
 
-The package structure mirrors OpenAI's URL hierarchy. Each modality owns its
-protocol, routes, CLI subcommands, and backends. A modality-agnostic core
-holds the registry, HF downloader, pip auto-install, and FastAPI app factory.
+Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
+path hierarchy still mirrors OpenAI (`/v1/audio/speech`) for client
+compatibility.
+
+The package is organized around two plugin surfaces discovered at runtime:
+
+- `src/muse/modalities/<mime_name>/`: self-contained wire contract
+  (protocol + routes + codec + client). Each modality package exports
+  `MODALITY: str` + `build_router: Callable[[registry], APIRouter]`.
+- `src/muse/models/*.py`: flat directory of drop-in model scripts.
+  Each `.py` file declares `MANIFEST: dict` + a `Model` class.
+
+A modality-agnostic core (`muse.core`) holds the registry, discovery,
+HF downloader, per-venv pip install, and FastAPI app factory.
 
 ## Architecture
 
@@ -32,15 +43,29 @@ Modality backends implementing modality-specific protocols
 
 ### Key modules
 
+- `muse.core.discovery`: scans directories and returns `{model_id:
+  DiscoveredModel}` (for model scripts) and `{mime_tag: build_router}`
+  (for modality packages). First-found-wins on collisions; script
+  errors are logged, never raised. Bundled scripts in the installed
+  `muse/models/` tree get their canonical Python import name
+  (`muse.models.<stem>`); external scripts get a mangled private name
+  to avoid sys.modules collisions.
+- `muse.core.catalog.known_models()`: discovery-driven, cached on first
+  call. Projects each script's MANIFEST onto the `CatalogEntry` shape
+  the rest of muse consumes (backend_path is synthesized from the
+  Model class's `__module__:__name__`). `pull()` creates a per-model
+  venv, installs muse editable + `[server]` extras + MANIFEST's
+  `pip_extras`, warns on missing `system_packages`, and downloads
+  weights from HF. Catalog state lives at `~/.muse/catalog.json` (or
+  `MUSE_CATALOG_DIR` env override); writes are atomic (write-then-rename).
+  `get_manifest(model_id)` returns the raw MANIFEST dict for a known
+  model (used by the worker to forward it to the registry).
 - `muse.core.registry.ModalityRegistry`: keyed by `(modality, model_id)`.
-  First registered model per modality is the default for that modality. No
-  shared protocol base across modalities.
-- `muse.core.catalog.KNOWN_MODELS`: static dict of `CatalogEntry`. Each entry
-  carries `modality`, `backend_path`, `hf_repo`, `pip_extras`,
-  `system_packages`. `pull()` installs pip deps, warns on missing system
-  packages, and downloads weights from HF. Catalog state lives at
-  `~/.muse/catalog.json` (or `MUSE_CATALOG_DIR` env override); writes are
-  atomic (write-then-rename).
+  First registered model per modality is the default for that modality.
+  `register(modality, model, manifest=...)` stores the MANIFEST verbatim;
+  `/v1/models` splats `manifest.capabilities` + top-level description
+  /license/hf_repo into each entry. No shared protocol base across
+  modalities.
 - `muse.core.server.create_app(registry, routers)`: builds the FastAPI app
   with shared `/health` and `/v1/models`, mounts per-modality routers, and
   registers the `ModelNotFoundError` exception handler so 404s use the
@@ -53,19 +78,22 @@ Modality backends implementing modality-specific protocols
 ### Modality conventions
 
 Each modality subpackage contains:
+- `__init__.py`: exports `MODALITY: str` (MIME-style tag like `"audio/speech"`) and `build_router: Callable[[ModalityRegistry], APIRouter]`. These two are what `discover_modalities` scans for.
 - `protocol.py`: Protocol + Result dataclass(es) for this modality
-- `routes.py`: `build_router(registry) -> APIRouter`
+- `routes.py`: defines `build_router(registry) -> APIRouter`
 - `client.py`: HTTP client for this modality's endpoints
-- `codec.py`: modality-specific encoding (wav/opus for audio; png/jpeg for images)
-- `backends/`: concrete model adapters
+- `codec.py`: modality-specific encoding (wav/opus for audio; png/jpeg for images; base64 float32 for embeddings)
+- `backends/` (optional): private helpers used by model scripts; NOT a plugin surface. `audio_speech/backends/` currently holds `base.py` (shared voices_dir + BaseModel) and `transformers.py` (the Narro engine Soprano delegates to). Public backends live in `muse/models/`.
 
-Each backend class:
-- Satisfies the modality's Protocol structurally (no base class required)
-- Accepts `hf_repo=`, `local_dir=`, `device=`, `**_` in its constructor (the
-  catalog loader calls with those kwargs; `**_` absorbs future additions)
-- Prefers `local_dir` over `hf_repo` when loading weights
-- Defers heavy imports (transformers, diffusers) to module top-level behind a
-  try/except so `muse --help` stays instant
+Each model script (`src/muse/models/<id>.py`) contains:
+- Top-level `MANIFEST: dict` with required keys `model_id`, `modality`, `hf_repo` and optional `description`, `license`, `pip_extras`, `system_packages`, `capabilities`. Anything else passes through.
+- A class named exactly `Model` (tests alias it: `from muse.models.kokoro_82m import Model as KokoroModel`).
+
+Each `Model` class:
+- Satisfies the modality's Protocol structurally (no base class required).
+- Accepts `hf_repo=`, `local_dir=`, `device=`, `**_` in its constructor (the catalog loader calls with those kwargs; `**_` absorbs future additions).
+- Prefers `local_dir` over `hf_repo` when loading weights.
+- Defers heavy imports (torch, transformers, diffusers, kokoro) to inside `__init__` or function bodies behind a try/except so `muse --help` stays instant.
 
 ### No shared supertype across modalities
 
@@ -131,9 +159,13 @@ pip install -e ".[dev,server,audio,images]"
 # Run all tests
 pytest tests/
 
-# Run tests for one modality
-pytest tests/audio/speech/
-pytest tests/images/generations/
+# Run tests for one modality contract
+pytest tests/modalities/audio_speech/
+pytest tests/modalities/embedding_text/
+pytest tests/modalities/image_generation/
+
+# Run tests for one bundled model
+pytest tests/models/test_kokoro_82m.py
 
 # Coverage
 pytest tests/ --cov=muse
@@ -146,11 +178,11 @@ muse serve --device cuda
 # The CLI is admin-only (serve / pull / models) so new modalities land
 # without CLI churn.
 python - <<'PY'
-from muse.audio.speech import SpeechClient
-from muse.images.generations import GenerationsClient
-from muse.embeddings import EmbeddingsClient
-SpeechClient().infer("hello")           # → WAV bytes (MUSE_SERVER env sets base URL)
-GenerationsClient().generate("a cat")   # → list[bytes] (PNGs)
+from muse.modalities.audio_speech import SpeechClient
+from muse.modalities.image_generation import GenerationsClient
+from muse.modalities.embedding_text import EmbeddingsClient
+SpeechClient().infer("hello")           # WAV bytes; MUSE_SERVER env sets base URL
+GenerationsClient().generate("a cat")   # list[bytes] of PNGs
 EmbeddingsClient().embed(["alpha", "beta"])   # list[list[float]]
 PY
 ```
@@ -165,7 +197,7 @@ PY
   without any ML deps installed; pulling a model installs them on demand.
 - **FakeModel-pattern tests:** Server and router tests use plain classes that
   satisfy the modality protocol, no real weights. Backend tests also mock
-  heavy libs (see `tests/images/generations/test_sd_turbo.py`).
+  heavy libs (see `tests/models/test_sd_turbo.py`).
 - **Registry is a singleton at module level** (`muse.core.registry.registry`),
   but tests create their own `ModalityRegistry()` instances to avoid coupling.
 - **Audio is float32 in `[-1, 1]`** at the protocol boundary; codec converts
@@ -183,18 +215,45 @@ PY
 - **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.
 - **Enable/disable is catalog state**, not runtime state. `muse serve` reads the catalog at startup. Changing a model's enabled bit while the server is running has no effect until the next restart.
 
-## Adding a new modality
+## Adding a new model (the common case)
 
-1. Create `src/muse/<family>/<op>/` (e.g., `muse/audio/transcriptions/`).
-2. Write `protocol.py` with the backend Protocol and Result dataclass.
-3. Write `routes.py` exposing `build_router(registry) -> APIRouter`.
-4. Write `client.py` with an HTTP client.
-5. Add backends under `backends/`.
-6. Add `CatalogEntry`s to `muse.core.catalog.KNOWN_MODELS`.
-7. Wire up the CLI subtree in `src/muse/cli.py`.
-8. Wire the router into `src/muse/cli_impl/serve.py`.
-9. Add matching tests in `tests/<family>/<op>/`.
+Users add models without touching muse source:
 
-No gateway changes are needed when adding a new modality: the gateway routes
-by the `model` field in the request body and forwards to whichever worker
+1. Write a `.py` file with a `MANIFEST` dict + `Model` class (see
+   `docs/MODEL_SCRIPTS.md` for the full schema).
+2. Drop it in `~/.muse/models/` or any dir pointed to by `$MUSE_MODELS_DIR`.
+3. `muse pull <model_id>` to install deps + download weights.
+4. `muse serve` picks it up.
+
+Bundled model scripts live in `src/muse/models/<id>.py`. Adding a
+bundled model requires no catalog edits, no registry changes, and no
+worker changes: discovery just finds it.
+
+## Adding a new modality (rare)
+
+Modalities define wire contracts; most users should NOT need to add one.
+If you do:
+
+1. Create `src/muse/modalities/<mime_name>/` (e.g. `audio_transcriptions/`
+   for MODALITY `"audio/transcription"`). Use underscores in the dir
+   name; the MIME tag has the slash.
+2. Write `protocol.py` (Protocol + Result dataclass), `routes.py`
+   (with `build_router(registry) -> APIRouter`), `client.py` (HTTP
+   client), and `codec.py` (encoding for this modality's output).
+3. Export from `__init__.py`: `MODALITY = "audio/transcription"` (the
+   MIME string) and `build_router` (the router factory). Also re-export
+   the Protocol + Result for user imports.
+4. Add bundled model scripts under `src/muse/models/`.
+5. Add tests under `tests/modalities/<mime_name>/` and
+   `tests/models/test_<new_model>.py`.
+
+No edits to `worker.py`, `catalog.py`, `registry.py`, or `server.py`
+are needed: discovery handles the wiring.
+
+No gateway changes are needed either: the gateway routes by the
+`model` field in the request body and forwards to whichever worker
 loaded that model. New modalities are transparent to the proxy layer.
+
+External escape hatch: dropping a modality subpackage into
+`$MUSE_MODALITIES_DIR/<mime_name>/` registers it without forking muse.
+Intended for experimentation, not routine extension.
