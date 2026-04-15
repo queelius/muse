@@ -223,3 +223,104 @@ class TestDiscoverModalities:
         assert len(result) == 1
         assert result["collide/tag"](None) == ("bundled",)
         assert "collide/tag" in caplog.text
+
+
+# ---------- Edge-case regression tests (B2) ----------
+#
+# These guard the defensive checks in the B1 implementation:
+#   - isinstance(manifest, dict)
+#   - isinstance(model_class, type)
+#   - isinstance(tag, str) and non-empty
+#   - callable(build_router)
+#   - repeat-scan produces consistent results (no leaked state)
+
+class TestDiscoveryEdgeCases:
+    def test_non_dict_MANIFEST_is_skipped(self, tmp_path, caplog):
+        """MANIFEST defined as something other than a dict must not crash."""
+        _write_model_script(tmp_path, "string_manifest.py", """
+            MANIFEST = "this should be a dict"
+            class Model: ...
+        """)
+        import logging
+        caplog.set_level(logging.WARNING)
+        result = discover_models([tmp_path])
+        assert result == {}
+        assert "MANIFEST" in caplog.text or "string_manifest" in caplog.text
+
+    def test_Model_as_instance_not_class_is_skipped(self, tmp_path, caplog):
+        """`Model = SomeClass()` (instance, not class) must be rejected."""
+        _write_model_script(tmp_path, "instance_model.py", """
+            MANIFEST = {
+                "model_id": "inst",
+                "modality": "audio/speech",
+                "hf_repo": "x/y",
+            }
+            class _RealModel: ...
+            Model = _RealModel()
+        """)
+        import logging
+        caplog.set_level(logging.WARNING)
+        result = discover_models([tmp_path])
+        assert result == {}
+        assert "Model" in caplog.text or "instance_model" in caplog.text
+
+    def test_non_string_MODALITY_is_skipped(self, tmp_path, caplog):
+        """MODALITY = 42 (or any non-str) must be rejected."""
+        _write_modality_package(tmp_path, "numeric_tag", """
+            MODALITY = 42
+            def build_router(r): return None
+        """)
+        import logging
+        caplog.set_level(logging.WARNING)
+        result = discover_modalities([tmp_path])
+        assert result == {}
+        assert "MODALITY" in caplog.text or "numeric_tag" in caplog.text
+
+    def test_non_callable_build_router_is_skipped(self, tmp_path, caplog):
+        """build_router = "not a function" must be rejected."""
+        _write_modality_package(tmp_path, "stringy_router", """
+            MODALITY = "x/y"
+            build_router = "not a callable"
+        """)
+        import logging
+        caplog.set_level(logging.WARNING)
+        result = discover_modalities([tmp_path])
+        assert result == {}
+        assert "build_router" in caplog.text or "stringy_router" in caplog.text
+
+    def test_discovery_is_isolated_per_scan(self, tmp_path):
+        """Repeat scans are idempotent and don't pollute top-level sys.modules.
+
+        Guards the mangled-module-name pattern in `_load_script`. Two
+        concerns: (1) scanning the same directory twice returns the
+        same model_ids; (2) model filenames like `soprano.py` must NOT
+        end up in sys.modules under their bare name, because that
+        would collide with user code or other discovery roots.
+        """
+        import sys
+        _write_model_script(tmp_path, "soprano.py", """
+            MANIFEST = {
+                "model_id": "soprano-test",
+                "modality": "audio/speech",
+                "hf_repo": "fake/soprano",
+            }
+            class Model: ...
+        """)
+
+        before_keys = set(sys.modules.keys())
+
+        first = discover_models([tmp_path])
+        second = discover_models([tmp_path])
+
+        # (1) Idempotent: same keys, same manifest content
+        assert set(first.keys()) == set(second.keys()) == {"soprano-test"}
+        assert first["soprano-test"].manifest == second["soprano-test"].manifest
+
+        # (2) sys.modules hygiene: bare "soprano" must not be registered.
+        # Only mangled `_muse_discover_*` names are allowed to appear.
+        new_keys = set(sys.modules.keys()) - before_keys
+        assert "soprano" not in sys.modules
+        for k in new_keys:
+            assert k.startswith("_muse_discover_"), (
+                f"discovery leaked non-mangled module name into sys.modules: {k}"
+            )
