@@ -67,3 +67,29 @@ def test_worker_mounts_all_three_modality_routers(mock_uvicorn):
     assert "/v1/audio/speech" in paths_str
     assert "/v1/images/generations" in paths_str
     assert "/v1/embeddings" in paths_str
+
+
+@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.discover_modalities")
+def test_worker_mounts_routers_from_discovery(mock_discover, mock_uvicorn):
+    """Worker delegates router selection to discover_modalities, not hardcoded imports."""
+    from fastapi import APIRouter
+
+    sentinel_router = APIRouter()
+
+    @sentinel_router.get("/v1/sentinel/ping")
+    def _ping():
+        return {"ok": True}
+
+    sentinel_build = MagicMock(return_value=sentinel_router)
+    mock_discover.return_value = {"sentinel/type": sentinel_build}
+
+    run_worker(host="127.0.0.1", port=9999, models=[], device="cpu")
+
+    # Discovery was consulted
+    mock_discover.assert_called_once()
+    # The router from the discovered build function was mounted
+    sentinel_build.assert_called_once()
+    app = mock_uvicorn.run.call_args.args[0]
+    route_paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/v1/sentinel/ping" in route_paths

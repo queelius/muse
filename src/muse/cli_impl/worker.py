@@ -1,4 +1,4 @@
-"""`muse _worker` implementation — runs ONE worker (optionally hosting
+"""`muse _worker` implementation: runs ONE worker (optionally hosting
 multiple models from the same venv) and starts uvicorn.
 
 Invoked by the supervisor (`muse serve`) via subprocess:
@@ -9,14 +9,31 @@ Can also be run standalone for debugging. Not advertised in top-level help.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import uvicorn
 
 from muse.core.catalog import get_manifest, is_pulled, known_models, load_backend
+from muse.core.discovery import discover_modalities
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
 
 log = logging.getLogger(__name__)
+
+
+def _bundled_modalities_dir() -> Path:
+    """Directory containing muse's built-in modality packages."""
+    # worker.py sits at src/muse/cli_impl/worker.py; parents[1] is src/muse/.
+    return Path(__file__).resolve().parents[1] / "modalities"
+
+
+def _modality_dirs() -> list[Path]:
+    """Scan order for modality discovery.
+
+    Task F2 will extend this with $MUSE_MODALITIES_DIR (escape hatch).
+    For now, only the bundled dir is scanned.
+    """
+    return [_bundled_modalities_dir()]
 
 
 def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
@@ -52,15 +69,14 @@ def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
         manifest = get_manifest(model_id)
         registry.register(entry.modality, backend, manifest=manifest)
 
-    # Always mount all modality routers so empty-registry requests get
-    # the OpenAI envelope rather than FastAPI's default {"detail": "Not Found"}.
-    from muse.modalities.audio_speech.routes import build_router as build_audio
-    from muse.modalities.embedding_text.routes import build_router as build_embeddings
-    from muse.modalities.image_generation.routes import build_router as build_images
-
-    routers["audio/speech"] = build_audio(registry)
-    routers["embedding/text"] = build_embeddings(registry)
-    routers["image/generation"] = build_images(registry)
+    # Always mount every discovered modality router so empty-registry
+    # requests get the OpenAI envelope rather than FastAPI's default
+    # {"detail": "Not Found"}. Adding a new modality requires zero
+    # changes here: drop a subpackage under src/muse/modalities/ that
+    # exports MODALITY + build_router, and discovery picks it up.
+    for tag, build_router in discover_modalities(_modality_dirs()).items():
+        log.info("mounting modality router for %s", tag)
+        routers[tag] = build_router(registry)
 
     app = create_app(registry=registry, routers=routers)
     uvicorn.run(app, host=host, port=port, log_config=None)
