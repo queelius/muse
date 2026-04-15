@@ -4,7 +4,7 @@ import base64
 import numpy as np
 import pytest
 
-from muse.images.generations.codec import (
+from muse.modalities.image_generation.codec import (
     ImageFormatError,
     to_bytes,
     to_data_url,

@@ -2,14 +2,14 @@
 
 Uses diffusers AutoPipelineForText2Image with stabilityai/sd-turbo.
 Very fast (1 inference step by default) at modest quality; good first
-backend to prove the images.generations modality end-to-end.
+backend to prove the image/generation modality end-to-end.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from muse.images.generations.protocol import ImageResult
+from muse.modalities.image_generation.protocol import ImageResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class SDTurboModel:
             raise RuntimeError("diffusers is not installed; run `muse pull sd-turbo`")
         self._device = _select_device(device)
         # Access the module-level `torch` name so tests can patch it.
-        import muse.images.generations.backends.sd_turbo as _self_mod
+        import muse.modalities.image_generation.backends.sd_turbo as _self_mod
         _torch = _self_mod.torch
         torch_dtype = None
         if _torch is not None:
@@ -78,7 +78,7 @@ class SDTurboModel:
 
         gen = None
         if seed is not None:
-            import muse.images.generations.backends.sd_turbo as _self_mod
+            import muse.modalities.image_generation.backends.sd_turbo as _self_mod
             _torch = _self_mod.torch
             if _torch is not None:
                 gen = _torch.Generator(device=self._device).manual_seed(seed)

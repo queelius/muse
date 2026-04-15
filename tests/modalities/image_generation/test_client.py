@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from muse.images.generations.client import GenerationsClient
+from muse.modalities.image_generation.client import GenerationsClient
 
 
 def test_default_base_url():
@@ -25,7 +25,7 @@ def test_muse_server_env_var_used_when_base_url_unset(monkeypatch):
 
 def test_generate_sends_prompt_and_returns_decoded_bytes():
     fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
-    with patch("muse.images.generations.client.requests.post") as mock_post:
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
             json=lambda: {"data": [{"b64_json": base64.b64encode(fake_png).decode()}]},
@@ -43,7 +43,7 @@ def test_generate_sends_prompt_and_returns_decoded_bytes():
 
 
 def test_generate_sends_optional_kwargs_when_provided():
-    with patch("muse.images.generations.client.requests.post") as mock_post:
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
             json=lambda: {"data": [{"b64_json": base64.b64encode(b"x").decode()}]},
@@ -71,7 +71,7 @@ def test_generate_sends_optional_kwargs_when_provided():
 
 def test_generate_omits_none_optional_fields():
     """Unsupplied optionals must not appear in the request body."""
-    with patch("muse.images.generations.client.requests.post") as mock_post:
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
             json=lambda: {"data": [{"b64_json": base64.b64encode(b"x").decode()}]},
@@ -85,7 +85,7 @@ def test_generate_omits_none_optional_fields():
 
 
 def test_generate_raises_on_http_error():
-    with patch("muse.images.generations.client.requests.post") as mock_post:
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
         mock_post.return_value = MagicMock(status_code=500, text="boom")
         c = GenerationsClient()
         with pytest.raises(RuntimeError, match="500"):
@@ -95,7 +95,7 @@ def test_generate_raises_on_http_error():
 def test_generate_returns_list_of_bytes_for_n_greater_than_1():
     fake_a = b"\x89PNG" + b"A" * 10
     fake_b = b"\x89PNG" + b"B" * 10
-    with patch("muse.images.generations.client.requests.post") as mock_post:
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
         mock_post.return_value = MagicMock(
             status_code=200,
             json=lambda: {"data": [

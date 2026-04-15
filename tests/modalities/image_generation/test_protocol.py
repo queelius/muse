@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from muse.images.generations.protocol import ImageModel, ImageResult
+from muse.modalities.image_generation.protocol import ImageModel, ImageResult
 
 
 def _fake_img():

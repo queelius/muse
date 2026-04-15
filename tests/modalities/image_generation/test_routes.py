@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
-from muse.images.generations.protocol import ImageResult
-from muse.images.generations.routes import build_router
+from muse.modalities.image_generation.protocol import ImageResult
+from muse.modalities.image_generation.routes import build_router
 
 
 class FakeImageModel:
@@ -27,10 +27,10 @@ class FakeImageModel:
 @pytest.fixture
 def client():
     reg = ModalityRegistry()
-    reg.register("images.generations", FakeImageModel())
+    reg.register("image/generation", FakeImageModel())
     app = create_app(
         registry=reg,
-        routers={"images.generations": build_router(reg)},
+        routers={"image/generation": build_router(reg)},
     )
     return TestClient(app)
 

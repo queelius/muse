@@ -20,11 +20,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from muse.core.errors import ModelNotFoundError
 from muse.core.registry import ModalityRegistry
-from muse.images.generations.codec import to_bytes, to_data_url
+from muse.modalities.image_generation.codec import to_bytes, to_data_url
 
 logger = logging.getLogger(__name__)
 
-MODALITY = "images.generations"
+MODALITY = "image/generation"
 _inference_lock = Lock()
 
 
@@ -49,7 +49,7 @@ class GenerationRequest(BaseModel):
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
-    router = APIRouter(prefix="/v1/images", tags=["images.generations"])
+    router = APIRouter(prefix="/v1/images", tags=["image/generation"])
 
     @router.post("/generations")
     async def generations(req: GenerationRequest):
