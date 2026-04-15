@@ -72,7 +72,7 @@ KNOWN_MODELS: dict[str, CatalogEntry] = {
     "sd-turbo": CatalogEntry(
         model_id="sd-turbo",
         modality="image/generation",
-        backend_path="muse.modalities.image_generation.backends.sd_turbo:SDTurboModel",
+        backend_path="muse.models.sd_turbo:Model",
         hf_repo="stabilityai/sd-turbo",
         description="Stable Diffusion Turbo: 1-step distilled, 512x512",
         pip_extras=("diffusers>=0.27.0", "accelerate", "Pillow", "safetensors"),
