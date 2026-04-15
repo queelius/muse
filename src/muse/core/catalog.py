@@ -116,19 +116,69 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
 _known_models_cache: dict[str, CatalogEntry] | None = None
 
 
+def _persisted_manifest_to_catalog_entry(manifest: dict) -> CatalogEntry:
+    """Project a catalog-persisted manifest dict onto the CatalogEntry shape.
+
+    Resolver-pulled models persist their full synthesized MANIFEST inside
+    catalog.json (under the `manifest` key) so that `known_models()` can
+    surface them without rerunning discovery. The persisted dict carries
+    `backend_path` directly (it was synthesized from the resolver's
+    runtime class path), unlike script-discovered models where backend_path
+    is computed from the Model class's `__module__:__name__`.
+    """
+    return CatalogEntry(
+        model_id=manifest["model_id"],
+        modality=manifest["modality"],
+        backend_path=manifest["backend_path"],
+        hf_repo=manifest["hf_repo"],
+        description=manifest.get("description", ""),
+        pip_extras=tuple(manifest.get("pip_extras", ())),
+        system_packages=tuple(manifest.get("system_packages", ())),
+        extra=dict(manifest.get("capabilities", {})),
+    )
+
+
 def known_models() -> dict[str, CatalogEntry]:
     """Return {model_id: CatalogEntry} for every discovered model.
 
-    Runs `discover_models` over the configured dirs on first call and
-    caches the result. Restart the process to pick up new scripts.
+    Two sources are merged:
+      1. `discover_models` over the configured dirs (script-based models,
+         bundled or user-dropped).
+      2. catalog.json entries with a `manifest` field (resolver-pulled
+         models persisted by Task F2's `_pull_via_resolver`).
+
+    Bundled / discovered scripts win on model_id collision: a user
+    cannot silently shadow a script by pulling a same-id resolver
+    entry. The persisted entry is dropped from the merge with a
+    debug log; the resolver entry can still be removed via
+    `muse models remove`.
+
+    Cached on first call; restart the process to pick up new scripts
+    or new resolver pulls.
     """
     global _known_models_cache
     if _known_models_cache is None:
         discovered = discover_models(_model_dirs())
-        _known_models_cache = {
+        entries = {
             model_id: _manifest_to_catalog_entry(d)
             for model_id, d in discovered.items()
         }
+        catalog = _read_catalog()
+        for model_id, entry_data in catalog.items():
+            manifest = entry_data.get("manifest")
+            if not manifest:
+                # Legacy entry: pulled via the bare-id path; the
+                # corresponding script's discovery already populated
+                # `entries`. Nothing to merge.
+                continue
+            if model_id in entries:
+                logger.debug(
+                    "skipping persisted manifest for %s: shadowed by bundled script",
+                    model_id,
+                )
+                continue
+            entries[model_id] = _persisted_manifest_to_catalog_entry(manifest)
+        _known_models_cache = entries
     return _known_models_cache
 
 
@@ -199,41 +249,43 @@ def _muse_repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def pull(model_id: str) -> None:
-    """Create per-model venv, install muse + deps into it, download weights.
+def pull(identifier: str) -> None:
+    """Pull a model. Dispatch on identifier shape.
 
-    Each pulled model gets `<MUSE_CATALOG_DIR>/venvs/<model-id>/`. The venv
-    contains:
-      - `muse` itself (editable, pointing at the current repo) so that
-        `<venv>/bin/python -m muse.cli _worker ...` works when the
-        supervisor spawns a worker subprocess.
-      - The `[server]` extras (fastapi, uvicorn, sse-starlette, httpx)
-        for the worker's FastAPI app.
-      - The model's own `pip_extras` (torch, transformers, diffusers, etc).
+    Two forms:
+      - bare model_id (e.g. "kokoro-82m"): looked up in `known_models()`
+        and pulled via the bundled-script path.
+      - resolver URI (e.g. "hf://Qwen/Qwen3-8B-GGUF@q4_k_m"): routed to
+        the matching resolver, which synthesizes a manifest. The
+        synthesized manifest is persisted in catalog.json so future
+        startups see the model alongside bundled ones.
 
-    The catalog records the venv's Python path so `muse serve` can spawn
+    Both paths create a per-model venv at `<MUSE_CATALOG_DIR>/venvs/<id>/`,
+    install muse[server] (editable) + the manifest's pip_extras, fetch
+    weights, and record the venv's Python path so `muse serve` can spawn
     workers with the right interpreter.
     """
+    if "://" in identifier:
+        _pull_via_resolver(identifier)
+    else:
+        _pull_bundled(identifier)
+
+
+def _pull_bundled(model_id: str) -> None:
+    """Pull a bundled (script-discovered) model by bare id."""
     catalog_known = known_models()
     if model_id not in catalog_known:
         raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
     entry = catalog_known[model_id]
 
-    # Venv lives under the catalog dir so MUSE_CATALOG_DIR controls everything
     venvs_root = _catalog_dir() / "venvs"
     venv_path = venvs_root / model_id
 
-    # Skip creation if the venv dir already exists; pip installs below
-    # are (re-)run regardless to pick up repo or catalog updates.
     if not venv_path.exists():
         create_venv(venv_path)
 
-    # Install muse itself (editable) + [server] extras so the worker
-    # subprocess can `python -m muse.cli _worker`.  Editable means a
-    # `git pull` in the repo is reflected in workers on next start.
     install_into_venv(venv_path, ["-e", f"{_muse_repo_root()}[server]"])
 
-    # Install model-specific pip_extras on top
     if entry.pip_extras:
         install_into_venv(venv_path, list(entry.pip_extras))
 
@@ -258,6 +310,69 @@ def pull(model_id: str) -> None:
         "enabled": True,
     }
     _write_catalog(catalog)
+    _reset_known_models_cache()
+
+
+def _pull_via_resolver(uri: str) -> None:
+    """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
+
+    Looks up the resolver for the URI's scheme, calls `resolve(uri)` to
+    get a synthesized ResolvedModel (manifest + backend_path + download
+    callable), creates the per-model venv, installs deps, downloads the
+    weights via `resolved.download()`, persists the synthesized manifest
+    plus a `source: <uri>` field into catalog.json, and invalidates the
+    known_models cache so the next call sees the new entry.
+    """
+    from muse.core.resolvers import resolve
+
+    resolved = resolve(uri)
+    manifest = dict(resolved.manifest)
+    # Resolver may put backend_path in the manifest itself, or only on
+    # the ResolvedModel. Persist it consistently so load_backend can
+    # find it without consulting the resolver again.
+    manifest.setdefault("backend_path", resolved.backend_path)
+
+    model_id = manifest["model_id"]
+
+    venvs_root = _catalog_dir() / "venvs"
+    venv_path = venvs_root / model_id
+
+    if not venv_path.exists():
+        create_venv(venv_path)
+
+    install_into_venv(venv_path, ["-e", f"{_muse_repo_root()}[server]"])
+
+    pip_extras = manifest.get("pip_extras") or ()
+    if pip_extras:
+        install_into_venv(venv_path, list(pip_extras))
+
+    system_packages = manifest.get("system_packages") or ()
+    if system_packages:
+        missing = check_system_packages(list(system_packages))
+        if missing:
+            logger.warning(
+                "model %s needs system packages not found on PATH: %s "
+                "(install via apt/brew before running)",
+                model_id, missing,
+            )
+
+    weights_cache = _catalog_dir() / "weights"
+    weights_cache.mkdir(parents=True, exist_ok=True)
+    local_dir = resolved.download(weights_cache)
+
+    catalog = _read_catalog()
+    catalog[model_id] = {
+        "pulled_at": datetime.now(timezone.utc).isoformat(),
+        "hf_repo": manifest["hf_repo"],
+        "local_dir": str(local_dir),
+        "venv_path": str(venv_path),
+        "python_path": str(venv_python(venv_path)),
+        "enabled": True,
+        "source": uri,
+        "manifest": manifest,
+    }
+    _write_catalog(catalog)
+    _reset_known_models_cache()
 
 
 def remove(model_id: str) -> None:
@@ -293,6 +408,13 @@ def load_backend(model_id: str, **kwargs) -> Any:
 
     `backend_path` has the form "package.module:ClassName". The class
     is expected to accept (hf_repo, local_dir, **kwargs) in its constructor.
+
+    For resolver-pulled models, manifest.capabilities are merged into the
+    kwargs (caller's explicit kwargs win). This lets generic runtimes
+    like LlamaCppModel pull `gguf_file`, `chat_template`, `context_length`
+    out of the persisted manifest without the worker having to know
+    those keys exist. `model_id` is also injected so generic runtimes
+    (one class, many models) know which model they're loading.
     """
     catalog_known = known_models()
     if model_id not in catalog_known:
@@ -305,21 +427,32 @@ def load_backend(model_id: str, **kwargs) -> Any:
     cls = getattr(module, class_name)
     catalog = _read_catalog()
     local_dir = catalog[model_id]["local_dir"]
-    return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **kwargs)
+    persisted_manifest = catalog[model_id].get("manifest") or {}
+    capabilities = persisted_manifest.get("capabilities") or {}
+    merged: dict = {"model_id": model_id, **capabilities, **kwargs}
+    return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **merged)
 
 
 def get_manifest(model_id: str) -> dict:
-    """Return the MANIFEST dict from a known model's script.
+    """Return the MANIFEST dict for a known model.
 
-    Looks up the model's module via its CatalogEntry.backend_path, then
-    reads the module-level MANIFEST. Returns a copy so callers can mutate
-    without affecting the source.
+    Two sources, in order of preference:
+      1. catalog.json's persisted manifest (resolver-pulled models). The
+         resolver synthesized this dict at pull time; it's the source of
+         truth for that entry.
+      2. The model script's module-level MANIFEST (bundled scripts).
+
+    Returns a copy so callers can mutate without affecting the source.
 
     Raises KeyError if the model is not in `known_models()`.
     """
     catalog_known = known_models()
     if model_id not in catalog_known:
         raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
+    catalog = _read_catalog()
+    persisted = catalog.get(model_id, {}).get("manifest")
+    if persisted:
+        return dict(persisted)
     entry = catalog_known[model_id]
     module_path, _ = entry.backend_path.split(":", 1)
     module = importlib.import_module(module_path)

@@ -414,3 +414,313 @@ def test_set_enabled_preserves_other_fields(tmp_catalog):
     for key in ("pulled_at", "hf_repo", "local_dir", "venv_path", "python_path"):
         assert before[key] == after[key]
     assert after["enabled"] is False
+
+
+# --- F1: catalog merges resolver-persisted manifests ------------------------
+
+
+def _write_persisted_resolver_entry(
+    tmp_catalog,
+    *,
+    model_id,
+    modality="chat/completion",
+    hf_repo="fake/repo",
+    backend_path="muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel",
+    capabilities=None,
+):
+    """Write a catalog.json entry mimicking what _pull_via_resolver would persist."""
+    import json
+    from muse.core.catalog import _catalog_path
+    p = _catalog_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = json.loads(p.read_text()) if p.exists() else {}
+    existing[model_id] = {
+        "pulled_at": "2026-04-15T00:00:00Z",
+        "hf_repo": hf_repo,
+        "local_dir": str(tmp_catalog / "weights" / model_id),
+        "venv_path": str(tmp_catalog / "venvs" / model_id),
+        "python_path": str(tmp_catalog / "venvs" / model_id / "bin" / "python"),
+        "enabled": True,
+        "source": f"hf://{hf_repo}@variant",
+        "manifest": {
+            "model_id": model_id,
+            "modality": modality,
+            "hf_repo": hf_repo,
+            "backend_path": backend_path,
+            "description": f"resolver-pulled {model_id}",
+            "pip_extras": [],
+            "system_packages": [],
+            "capabilities": capabilities or {},
+        },
+    }
+    p.write_text(json.dumps(existing))
+
+
+def test_known_models_merges_resolver_persisted_entries(tmp_catalog):
+    """Catalog entries with a `manifest` field show up in known_models()."""
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="qwen3-8b-gguf-q4-k-m",
+        capabilities={"gguf_file": "qwen3-8b-q4_k_m.gguf", "supports_tools": True},
+    )
+    _reset_known_models_cache()
+    entries = known_models()
+    assert "qwen3-8b-gguf-q4-k-m" in entries
+    e = entries["qwen3-8b-gguf-q4-k-m"]
+    assert e.modality == "chat/completion"
+    assert e.backend_path.endswith(":LlamaCppModel")
+    assert e.extra["gguf_file"] == "qwen3-8b-q4_k_m.gguf"
+    assert e.extra["supports_tools"] is True
+
+
+def test_bundled_scripts_win_on_collision_with_resolver_manifest(tmp_catalog):
+    """A persisted manifest with the same id as a bundled script is shadowed."""
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="kokoro-82m",
+        modality="audio/speech",
+        hf_repo="malicious/fake",
+        backend_path="muse.models.kokoro_82m:Model",
+    )
+    _reset_known_models_cache()
+    entries = known_models()
+    # Bundled wins: hf_repo from the script, not from the malicious manifest
+    assert entries["kokoro-82m"].hf_repo == "hexgrad/Kokoro-82M"
+
+
+def test_legacy_catalog_entries_without_manifest_are_skipped_in_merge(tmp_catalog):
+    """Old catalog entries (pre-resolver) lack `manifest`; they don't break merge."""
+    import json
+    from muse.core.catalog import _catalog_path
+    p = _catalog_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "kokoro-82m": {
+            "pulled_at": "2026-04-15T00:00:00Z",
+            "hf_repo": "hexgrad/Kokoro-82M",
+            "local_dir": "/some/path",
+            "venv_path": "/v",
+            "python_path": "/v/bin/python",
+            "enabled": True,
+            # no `manifest` key
+        },
+        "alien-legacy-model": {
+            "pulled_at": "2026-04-15T00:00:00Z",
+            "hf_repo": "alien/repo",
+            "local_dir": "/a",
+            "venv_path": "/av",
+            "python_path": "/av/bin/python",
+            "enabled": True,
+            # no `manifest` key
+        },
+    }))
+    _reset_known_models_cache()
+    entries = known_models()
+    assert "kokoro-82m" in entries  # bundled script discovery
+    assert "alien-legacy-model" not in entries  # no manifest, no script -> skip
+
+
+def test_get_manifest_returns_persisted_manifest_for_resolver_entry(tmp_catalog):
+    """get_manifest() returns the catalog-persisted manifest for resolver-pulled models."""
+    from muse.core.catalog import get_manifest
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="q3-gguf-q4",
+        capabilities={"gguf_file": "q4.gguf"},
+    )
+    _reset_known_models_cache()
+    m = get_manifest("q3-gguf-q4")
+    assert m["model_id"] == "q3-gguf-q4"
+    assert m["capabilities"]["gguf_file"] == "q4.gguf"
+
+
+def test_get_manifest_falls_back_to_script_module_for_bundled(tmp_catalog):
+    """Bundled-script models have no persisted manifest; get_manifest reads the module."""
+    from muse.core.catalog import get_manifest
+    m = get_manifest("kokoro-82m")
+    assert m["model_id"] == "kokoro-82m"
+    assert m["modality"] == "audio/speech"
+
+
+# --- F2: pull() dispatch on URI vs bare id ----------------------------------
+
+
+def test_pull_dispatches_to_resolver_for_uri(tmp_catalog):
+    """`muse pull hf://...` routes through the resolver and persists the manifest."""
+    from muse.core.catalog import pull
+    from muse.core.resolvers import (
+        Resolver, ResolvedModel, register_resolver, _reset_registry_for_tests,
+    )
+
+    class _FakeResolver(Resolver):
+        scheme = "fake"
+
+        def resolve(self, uri):
+            return ResolvedModel(
+                manifest={
+                    "model_id": "pulled-from-resolver",
+                    "modality": "chat/completion",
+                    "hf_repo": "fake/repo",
+                    "backend_path": "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel",
+                    "pip_extras": ["llama-cpp-python"],
+                    "capabilities": {"gguf_file": "x.gguf"},
+                },
+                backend_path="muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel",
+                download=lambda cache: cache / "weights",
+            )
+
+        def search(self, q, **k):
+            return []
+
+    _reset_registry_for_tests()
+    register_resolver(_FakeResolver())
+
+    try:
+        with patch("muse.core.catalog.create_venv"), \
+             patch("muse.core.catalog.install_into_venv"), \
+             patch("muse.core.catalog.check_system_packages", return_value=[]):
+            pull("fake://some/repo@variant")
+    finally:
+        _reset_registry_for_tests()
+
+    catalog = _read_catalog()
+    assert "pulled-from-resolver" in catalog
+    entry = catalog["pulled-from-resolver"]
+    assert entry["source"] == "fake://some/repo@variant"
+    assert entry["manifest"]["modality"] == "chat/completion"
+    assert entry["manifest"]["capabilities"]["gguf_file"] == "x.gguf"
+    # Cache invalidation: the new model must show up in known_models()
+    assert "pulled-from-resolver" in known_models()
+
+
+def test_pull_bare_id_still_uses_bundled_path(tmp_catalog):
+    """Regression: non-URI pull goes through known_models() / scripts."""
+    from muse.core.catalog import pull, is_pulled
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("kokoro-82m")
+    assert is_pulled("kokoro-82m")
+    # Bundled-path entries do NOT carry a `manifest` field (legacy shape preserved)
+    assert "manifest" not in _read_catalog()["kokoro-82m"]
+
+
+def test_pull_invalidates_known_models_cache_on_resolver_pull(tmp_catalog):
+    """After resolver pull, known_models() must reflect the new entry without
+    needing a manual cache reset."""
+    from muse.core.catalog import pull
+    from muse.core.resolvers import (
+        Resolver, ResolvedModel, register_resolver, _reset_registry_for_tests,
+    )
+
+    baseline = set(known_models())
+    assert "freshly-resolved" not in baseline
+
+    class _FakeResolver(Resolver):
+        scheme = "fake"
+
+        def resolve(self, uri):
+            return ResolvedModel(
+                manifest={
+                    "model_id": "freshly-resolved",
+                    "modality": "chat/completion",
+                    "hf_repo": "x/y",
+                    "backend_path": "x.y:Z",
+                },
+                backend_path="x.y:Z",
+                download=lambda cache: cache / "w",
+            )
+
+        def search(self, q, **k):
+            return []
+
+    _reset_registry_for_tests()
+    register_resolver(_FakeResolver())
+
+    try:
+        with patch("muse.core.catalog.create_venv"), \
+             patch("muse.core.catalog.install_into_venv"), \
+             patch("muse.core.catalog.check_system_packages", return_value=[]):
+            pull("fake://anything")
+    finally:
+        _reset_registry_for_tests()
+
+    assert "freshly-resolved" in known_models()
+
+
+def test_load_backend_merges_persisted_capabilities_into_kwargs(tmp_catalog):
+    """LlamaCppModel-style runtimes need gguf_file from the manifest;
+    load_backend must merge capabilities + inject model_id."""
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="llama-mock",
+        capabilities={
+            "gguf_file": "model.gguf",
+            "context_length": 4096,
+            "chat_template": "chatml",
+        },
+    )
+    _reset_known_models_cache()
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.LlamaCppModel = fake_class
+    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+        load_backend("llama-mock", device="cpu")
+
+    fake_class.assert_called_once()
+    kwargs = fake_class.call_args.kwargs
+    assert kwargs["model_id"] == "llama-mock"
+    assert kwargs["hf_repo"] == "fake/repo"
+    assert kwargs["gguf_file"] == "model.gguf"
+    assert kwargs["context_length"] == 4096
+    assert kwargs["chat_template"] == "chatml"
+    assert kwargs["device"] == "cpu"
+
+
+def test_load_backend_caller_kwargs_override_manifest_capabilities(tmp_catalog):
+    """If the caller passes a kwarg that's also in capabilities, caller wins."""
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="llama-mock-2",
+        capabilities={"chat_template": "chatml"},
+    )
+    _reset_known_models_cache()
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.LlamaCppModel = fake_class
+    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+        load_backend("llama-mock-2", chat_template="qwen", device="cpu")
+
+    kwargs = fake_class.call_args.kwargs
+    assert kwargs["chat_template"] == "qwen"
+
+
+def test_load_backend_bundled_path_unchanged(tmp_catalog):
+    """Regression: bundled-path load_backend still works (no manifest in catalog).
+
+    The new merging logic gates on `persisted_manifest` being non-empty;
+    bundled entries have no manifest field, so the merge is a no-op
+    apart from injecting `model_id` (which bundled scripts already
+    accept via **_).
+    """
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.Model = fake_class
+    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+        load_backend("soprano-80m", device="cpu")
+    kwargs = fake_class.call_args.kwargs
+    # model_id injected
+    assert kwargs["model_id"] == "soprano-80m"
+    # bundled path semantics preserved
+    assert kwargs["hf_repo"] == "ekwek/Soprano-1.1-80M"
+    assert kwargs["local_dir"] == "/fake/local"
+    assert kwargs["device"] == "cpu"
