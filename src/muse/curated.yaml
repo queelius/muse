@@ -27,12 +27,6 @@
 
 # ---------- chat/completion (GGUF via llama-cpp-python) ----------
 
-- id: qwen3.5-0.8b-q4
-  uri: hf://unsloth/Qwen3.5-0.8B-GGUF@q4_k_m
-  modality: chat/completion
-  size_gb: 0.5
-  description: "Qwen3.5 0.8B (Q4_K_M): ultra-tiny CPU chat, smoke-test sized"
-
 - id: qwen3.5-4b-q4
   uri: hf://unsloth/Qwen3.5-4B-GGUF@q4_k_m
   modality: chat/completion
@@ -60,9 +54,6 @@
   description: "Qwen3-Embedding 0.6B: 1024 dims (matryoshka), 32K context, Apache 2.0"
   capabilities:
     trust_remote_code: true
-
-- id: nv-embed-v2
-  bundled: true
 
 # ---------- audio/speech (TTS) ----------
 
