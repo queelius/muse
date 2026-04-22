@@ -39,18 +39,6 @@
   size_gb: 2.5
   description: "Qwen3.5 4B (Q4_K_M): small but capable, runs on 4GB+ GPU or CPU"
 
-- id: qwen3.5-9b-q4
-  uri: hf://unsloth/Qwen3.5-9B-GGUF@q4_k_m
-  modality: chat/completion
-  size_gb: 5.5
-  description: "Qwen3.5 9B (Q4_K_M): solid general chat + tools, 8GB+ GPU"
-
-- id: qwen3.5-27b-q4
-  uri: hf://unsloth/Qwen3.5-27B-GGUF@q4_k_m
-  modality: chat/completion
-  size_gb: 16.0
-  description: "Qwen3.5 27B (Q4_K_M): strong reasoning, 24GB+ GPU"
-
 - id: llama-3.2-3b-q4
   uri: hf://bartowski/Llama-3.2-3B-Instruct-GGUF@q4_k_m
   modality: chat/completion
