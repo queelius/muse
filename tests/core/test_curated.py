@@ -180,3 +180,45 @@ def test_load_curated_optional_fields_default_correctly():
     assert e.size_gb is None
     assert e.description is None
     assert e.tags == ()
+
+
+def test_load_curated_parses_capabilities_overlay():
+    yaml_text = """
+- id: q3e
+  uri: hf://Qwen/Qwen3-Embedding-0.6B
+  modality: embedding/text
+  size_gb: 0.6
+  description: Qwen3-Embedding 0.6B
+  capabilities:
+    trust_remote_code: true
+    matryoshka: true
+"""
+    with _patch_yaml(yaml_text):
+        entries = load_curated()
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.id == "q3e"
+    assert e.capabilities == {"trust_remote_code": True, "matryoshka": True}
+
+
+def test_load_curated_capabilities_defaults_to_empty_dict():
+    yaml_text = """
+- id: minimal
+  uri: hf://x/y
+  modality: chat/completion
+"""
+    with _patch_yaml(yaml_text):
+        entries = load_curated()
+    assert entries[0].capabilities == {}
+
+
+def test_load_curated_capabilities_non_dict_is_rejected():
+    yaml_text = """
+- id: bad
+  uri: hf://x/y
+  modality: chat/completion
+  capabilities: "not a dict"
+"""
+    with _patch_yaml(yaml_text):
+        entries = load_curated()
+    assert entries == []

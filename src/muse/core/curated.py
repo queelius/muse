@@ -41,6 +41,7 @@ class CuratedEntry:
     size_gb: float | None
     description: str | None
     tags: tuple[str, ...]
+    capabilities: dict
 
 
 _CURATED_CACHE: list[CuratedEntry] | None = None
@@ -107,6 +108,11 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
         raise ValueError(
             f"entry {d['id']!r}: cannot set both 'uri' and 'bundled: true'"
         )
+    caps = d.get("capabilities", {})
+    if not isinstance(caps, dict):
+        raise ValueError(
+            f"entry {d['id']!r}: 'capabilities' must be a mapping, got {type(caps).__name__}"
+        )
     return CuratedEntry(
         id=d["id"],
         bundled=bundled,
@@ -115,6 +121,7 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
         size_gb=d.get("size_gb"),
         description=d.get("description"),
         tags=tuple(d.get("tags", ())),
+        capabilities=dict(caps),
     )
 
 
