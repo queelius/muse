@@ -897,3 +897,101 @@ def test_pull_unknown_id_error_includes_curated_ids_in_did_you_mean(tmp_catalog)
     msg = str(exc_info.value)
     assert "did you mean" in msg.lower()
     assert "llama-3.2-3b-q4" in msg
+
+
+# --- Task 2: curated capabilities overlay merges into persisted manifest -----
+
+
+def test_pull_via_resolver_merges_curated_capabilities_overlay(tmp_catalog):
+    """Curated entries may carry a capabilities dict; it merges into the
+    persisted manifest's capabilities so the runtime gets the overlay."""
+    from unittest.mock import patch
+    from muse.core.catalog import pull, _read_catalog
+    from muse.core.curated import CuratedEntry
+    from muse.core.resolvers import ResolvedModel
+
+    fake_curated = CuratedEntry(
+        id="my-model",
+        bundled=False,
+        uri="hf://org/repo",
+        modality="embedding/text",
+        size_gb=0.5,
+        description="custom",
+        tags=(),
+        capabilities={"trust_remote_code": True, "custom_flag": 42},
+    )
+
+    fake_resolved = ResolvedModel(
+        manifest={
+            "model_id": "repo",
+            "modality": "embedding/text",
+            "hf_repo": "org/repo",
+            "pip_extras": [],
+            "system_packages": [],
+            "capabilities": {"base_caps_key": "base_val"},
+        },
+        backend_path="fake.mod:Cls",
+        download=lambda cache_root: cache_root / "weights" / "my-model",
+    )
+
+    # resolve() is imported locally inside _pull_via_resolver
+    # (`from muse.core.resolvers import resolve`), so the patch must
+    # target the source module, not muse.core.catalog.
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
+         patch("muse.core.resolvers.resolve", return_value=fake_resolved), \
+         patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog.venv_python", return_value="/fake/py"):
+        pull("my-model")
+
+    catalog = _read_catalog()
+    assert "my-model" in catalog
+    persisted = catalog["my-model"]["manifest"]
+    assert persisted["capabilities"] == {
+        "base_caps_key": "base_val",
+        "trust_remote_code": True,
+        "custom_flag": 42,
+    }
+
+
+def test_pull_via_resolver_overlay_wins_on_collision(tmp_catalog):
+    """On key collision, curated capabilities win (curated is hand-edited
+    source of truth; resolver output is heuristic)."""
+    from unittest.mock import patch
+    from muse.core.catalog import pull, _read_catalog
+    from muse.core.curated import CuratedEntry
+    from muse.core.resolvers import ResolvedModel
+
+    fake_curated = CuratedEntry(
+        id="collide",
+        bundled=False,
+        uri="hf://org/repo",
+        modality="embedding/text",
+        size_gb=None,
+        description=None,
+        tags=(),
+        capabilities={"shared_key": "curated_wins"},
+    )
+    fake_resolved = ResolvedModel(
+        manifest={
+            "model_id": "repo",
+            "modality": "embedding/text",
+            "hf_repo": "org/repo",
+            "pip_extras": [],
+            "system_packages": [],
+            "capabilities": {"shared_key": "resolver_loses"},
+        },
+        backend_path="fake.mod:Cls",
+        download=lambda cache_root: cache_root / "weights" / "collide",
+    )
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog.venv_python", return_value="/fake/py"), \
+         patch("muse.core.resolvers.resolve", return_value=fake_resolved):
+        pull("collide")
+
+    persisted = _read_catalog()["collide"]["manifest"]
+    assert persisted["capabilities"]["shared_key"] == "curated_wins"

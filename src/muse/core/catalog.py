@@ -274,7 +274,14 @@ def pull(identifier: str) -> None:
             # Resolver-pulled curated entry. Override the synthesized id
             # so the catalog stores the friendly curated id (e.g.
             # qwen3-8b-q4) instead of qwen3-8b-instruct-gguf-q4-k-m.
-            _pull_via_resolver(curated.uri, model_id_override=curated.id)
+            # Also forward the curated capabilities overlay so any
+            # runtime-specific settings (trust_remote_code, chat_format,
+            # context_length) land in the persisted manifest.
+            _pull_via_resolver(
+                curated.uri,
+                model_id_override=curated.id,
+                capabilities_overlay=curated.capabilities or None,
+            )
             return
         # Bundled curated entry: id equals an existing bundled script's
         # model_id. Fall through to the bundled path with that id.
@@ -360,7 +367,12 @@ def _pull_bundled(model_id: str) -> None:
     _reset_known_models_cache()
 
 
-def _pull_via_resolver(uri: str, *, model_id_override: str | None = None) -> None:
+def _pull_via_resolver(
+    uri: str,
+    *,
+    model_id_override: str | None = None,
+    capabilities_overlay: dict | None = None,
+) -> None:
     """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
 
     Looks up the resolver for the URI's scheme, calls `resolve(uri)` to
@@ -375,6 +387,13 @@ def _pull_via_resolver(uri: str, *, model_id_override: str | None = None) -> Non
     `hf://Qwen/Qwen3-8B-Instruct-GGUF@q4_k_m`). The override replaces
     the resolver's synthesized model_id so the catalog stores the
     friendly curated id.
+
+    `capabilities_overlay` is set when the URI was reached via a curated
+    alias that declared its own `capabilities:` block. It merges into
+    the resolver-synthesized manifest's `capabilities` (shallow merge;
+    overlay wins on key collision). The merged block ends up in the
+    persisted manifest and flows into the runtime constructor via
+    `load_backend`.
     """
     from muse.core.resolvers import resolve
 
@@ -384,6 +403,11 @@ def _pull_via_resolver(uri: str, *, model_id_override: str | None = None) -> Non
     # the ResolvedModel. Persist it consistently so load_backend can
     # find it without consulting the resolver again.
     manifest.setdefault("backend_path", resolved.backend_path)
+
+    if capabilities_overlay:
+        merged_caps = dict(manifest.get("capabilities") or {})
+        merged_caps.update(capabilities_overlay)
+        manifest["capabilities"] = merged_caps
 
     if model_id_override:
         manifest["model_id"] = model_id_override
