@@ -458,6 +458,21 @@ def set_enabled(model_id: str, enabled: bool) -> None:
     _write_catalog(catalog)
 
 
+def _import_backend_module(module_path: str):
+    """Local indirection for `importlib.import_module`.
+
+    Why this wrapper exists: tests need to stub out the catalog's backend
+    import to install a fake module without fetching real ML deps. Patching
+    `importlib.import_module` directly (or `muse.core.catalog.importlib.
+    import_module`) mutates the shared global `importlib` module object, so
+    the stub also intercepts calls from `muse.core.discovery` and anywhere
+    else that imports at test time. Indirecting through a catalog-local
+    function gives tests a patching target (`muse.core.catalog.
+    _import_backend_module`) that only affects catalog's import path.
+    """
+    return importlib.import_module(module_path)
+
+
 def load_backend(model_id: str, **kwargs) -> Any:
     """Import backend class and instantiate it.
 
@@ -478,7 +493,7 @@ def load_backend(model_id: str, **kwargs) -> Any:
         raise RuntimeError(f"model {model_id!r} not pulled; run `muse pull {model_id}`")
     entry = catalog_known[model_id]
     module_path, class_name = entry.backend_path.split(":")
-    module = importlib.import_module(module_path)
+    module = _import_backend_module(module_path)
     cls = getattr(module, class_name)
     catalog = _read_catalog()
     local_dir = catalog[model_id]["local_dir"]
@@ -510,5 +525,5 @@ def get_manifest(model_id: str) -> dict:
         return dict(persisted)
     entry = catalog_known[model_id]
     module_path, _ = entry.backend_path.split(":", 1)
-    module = importlib.import_module(module_path)
+    module = _import_backend_module(module_path)
     return dict(getattr(module, "MANIFEST", {}))

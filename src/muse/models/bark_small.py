@@ -16,9 +16,22 @@ from typing import Any, Iterator
 import numpy as np
 
 from muse.modalities.audio_speech import AudioChunk, AudioResult
-from muse.modalities.audio_speech.backends.base import voices_dir
+
+# NOTE: voices_dir lives in audio_speech.backends.base, which has
+# unconditional module-top imports of torch + transformers. Importing
+# it at muse.models.bark_small module-top breaks discovery in the
+# supervisor process (which has no ML deps) with "No module named
+# 'transformers'". We defer the import inside _voices_dir() so it only
+# fires when Bark is actually instantiated (in its own venv where
+# transformers is installed).
 
 logger = logging.getLogger(__name__)
+
+
+def _voices_dir(model_id: str):
+    """Deferred import shim for audio_speech.backends.base.voices_dir."""
+    from muse.modalities.audio_speech.backends.base import voices_dir
+    return voices_dir(model_id)
 
 BARK_SAMPLE_RATE = 24000
 
@@ -107,7 +120,7 @@ class Model:
             raise ValueError(
                 f"Voice .npz must contain {required}, got {set(data.files)}"
             )
-        dest = voices_dir(self.model_id) / f"{name}.npz"
+        dest = _voices_dir(self.model_id) / f"{name}.npz"
         import shutil
         shutil.copy2(str(src), str(dest))
         logger.info("Saved voice %r to %s", name, dest)
@@ -163,7 +176,7 @@ class Model:
             return None
         if voice in VOICE_PRESETS or voice.startswith("v2/"):
             return voice
-        npz = voices_dir(self.model_id) / f"{voice}.npz"
+        npz = _voices_dir(self.model_id) / f"{voice}.npz"
         if npz.exists():
             return str(npz)
         available = ", ".join(self._custom_voice_names()[:5])
@@ -173,5 +186,5 @@ class Model:
         )
 
     def _custom_voice_names(self) -> list[str]:
-        vdir = voices_dir(self.model_id)
+        vdir = _voices_dir(self.model_id)
         return [f.stem for f in vdir.iterdir() if f.suffix == ".npz"]

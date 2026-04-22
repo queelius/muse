@@ -169,14 +169,37 @@ def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
 def _load_script(path: Path) -> Any:
     """Import a single-file .py module given its filesystem path.
 
-    Uses the canonical import name (e.g. `muse.models.kokoro_82m`) if
-    the script lives inside the installed muse package tree. Otherwise
-    (user/env dirs) falls back to a mangled private name so user scripts
-    can't collide with real modules in `sys.modules`.
+    Two paths depending on where the script lives:
+
+      1. Inside the installed muse package tree (canonical name exists,
+         e.g. `muse.models.kokoro_82m`): use standard
+         `importlib.import_module`. This ensures the parent-child module
+         chain is fully set up in `sys.modules` AND that the parent
+         package's __dict__ has the submodule as an attribute. Without
+         that, downstream `importlib.import_module("muse.models.foo")`
+         calls walk the hierarchy via the normal machinery and fail
+         with "cannot import name 'models' from 'muse'" because
+         `spec_from_file_location` registers the module under the
+         canonical name but doesn't rebuild the parent chain.
+
+      2. Outside the muse tree (user/env dirs, no canonical name):
+         use `spec_from_file_location` with a mangled private name.
+         Keeps user scripts from colliding with real modules in
+         `sys.modules`.
     """
-    mod_name = _canonical_module_name(path) or (
-        f"_muse_discover_{path.parent.name}_{path.stem}"
-    )
+    canonical = _canonical_module_name(path)
+    if canonical is not None:
+        # Canonical path: let Python's normal import machinery handle
+        # parent-package bookkeeping. Works because `muse` and
+        # `muse.models` (or whichever intermediate packages) are real
+        # on-disk packages reachable via sys.path.
+        return importlib.import_module(canonical)
+
+    # Non-canonical (external user/env dir): fall back to the
+    # spec_from_file_location approach with a mangled name. These
+    # scripts by design DON'T have a canonical parent chain; the
+    # mangled name avoids sys.modules collisions with real modules.
+    mod_name = f"_muse_discover_{path.parent.name}_{path.stem}"
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"could not load spec for {path}")

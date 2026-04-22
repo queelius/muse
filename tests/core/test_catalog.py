@@ -228,7 +228,7 @@ def test_load_backend_imports_and_constructs(tmp_catalog):
     fake_class = MagicMock()
     fake_module = MagicMock()
     fake_module.Model = fake_class
-    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
         load_backend("soprano-80m", device="cpu")
     fake_class.assert_called_once()
     # Verify the constructor got hf_repo, local_dir, and device kwargs
@@ -666,7 +666,7 @@ def test_load_backend_merges_persisted_capabilities_into_kwargs(tmp_catalog):
     fake_class = MagicMock()
     fake_module = MagicMock()
     fake_module.LlamaCppModel = fake_class
-    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
         load_backend("llama-mock", device="cpu")
 
     fake_class.assert_called_once()
@@ -691,7 +691,7 @@ def test_load_backend_caller_kwargs_override_manifest_capabilities(tmp_catalog):
     fake_class = MagicMock()
     fake_module = MagicMock()
     fake_module.LlamaCppModel = fake_class
-    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
         load_backend("llama-mock-2", chat_template="qwen", device="cpu")
 
     kwargs = fake_class.call_args.kwargs
@@ -715,7 +715,7 @@ def test_load_backend_bundled_path_unchanged(tmp_catalog):
     fake_class = MagicMock()
     fake_module = MagicMock()
     fake_module.Model = fake_class
-    with patch("muse.core.catalog.importlib.import_module", return_value=fake_module):
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
         load_backend("soprano-80m", device="cpu")
     kwargs = fake_class.call_args.kwargs
     # model_id injected
