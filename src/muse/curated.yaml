@@ -8,6 +8,10 @@
 #   - For URI entries: also set `modality`, `size_gb`, `description`.
 #     For bundled entries: leave the rest empty; metadata comes from
 #     the script's MANIFEST.
+#   - Optional `capabilities:` mapping (URI entries only): runtime-specific
+#     overrides (e.g. `trust_remote_code: true`, `chat_format`,
+#     `context_length`) that merge into the resolver-synthesized manifest
+#     at pull time. Overlay wins on collision.
 #   - Curation taste: keep the list small. New users should be able to
 #     scan it in seconds and pick something. ~10-20 entries total.
 #

@@ -14,6 +14,13 @@ Two entry shapes:
     bundled script's model_id; metadata is read from that script's
     MANIFEST at display time.
 
+Optional `capabilities:` mapping on either shape: runtime-specific
+overrides (e.g. `trust_remote_code: true`, `chat_format: "..."`,
+`context_length`) that merge into the resolver-synthesized manifest at
+pull time. See `catalog._pull_via_resolver` for merge semantics (overlay
+wins on key collision). Only applied to resolver entries; ignored for
+bundled entries since those carry their own MANIFEST.
+
 The list is loaded once at import and cached. Restart muse to pick up
 edits to the YAML (matches the rest of muse's "static at startup"
 discovery model).
@@ -41,6 +48,9 @@ class CuratedEntry:
     size_gb: float | None
     description: str | None
     tags: tuple[str, ...]
+    # Runtime-specific overrides that merge into the resolver-synthesized
+    # manifest at pull time (shallow merge; overlay wins on collision).
+    # See catalog._pull_via_resolver.
     capabilities: dict = field(default_factory=dict)
 
 
