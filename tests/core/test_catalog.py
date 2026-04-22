@@ -767,7 +767,6 @@ def test_pull_curated_resolver_id_uses_curated_id_in_catalog(tmp_catalog):
         size_gb=1.0,
         description="aliased",
         tags=(),
-        capabilities={},
     )
     try:
         with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
@@ -801,7 +800,6 @@ def test_pull_curated_bundled_alias_uses_bundled_path(tmp_catalog):
         size_gb=None,
         description=None,
         tags=(),
-        capabilities={},
     )
     with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
          patch("muse.core.catalog.create_venv"), \
@@ -847,7 +845,6 @@ def test_pull_unknown_id_suggests_close_curated_match(tmp_catalog):
             id="qwen3.5-9b-q4", bundled=False,
             uri="hf://x/y", modality="chat/completion",
             size_gb=5.0, description="close match", tags=(),
-            capabilities={},
         ),
     ]
     with patch("muse.core.catalog.find_curated", return_value=None), \
@@ -886,13 +883,11 @@ def test_pull_unknown_id_error_includes_curated_ids_in_did_you_mean(tmp_catalog)
             id="llama-3.2-3b-q4", bundled=False, uri="hf://b/a",
             modality="chat/completion", size_gb=2.0,
             description="", tags=(),
-            capabilities={},
         ),
         CuratedEntry(
             id="qwen3.5-9b-q4", bundled=False, uri="hf://b/c",
             modality="chat/completion", size_gb=5.0,
             description="", tags=(),
-            capabilities={},
         ),
     ]
     with patch("muse.core.catalog.find_curated", return_value=None), \

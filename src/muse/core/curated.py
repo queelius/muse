@@ -21,7 +21,7 @@ discovery model).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import Any
 
@@ -41,7 +41,7 @@ class CuratedEntry:
     size_gb: float | None
     description: str | None
     tags: tuple[str, ...]
-    capabilities: dict
+    capabilities: dict = field(default_factory=dict)
 
 
 _CURATED_CACHE: list[CuratedEntry] | None = None
