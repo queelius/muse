@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working on Muse.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project overview
 
@@ -65,13 +65,32 @@ Modality backends implementing modality-specific protocols
 - `muse.core.catalog.known_models()`: discovery-driven, cached on first
   call. Projects each script's MANIFEST onto the `CatalogEntry` shape
   the rest of muse consumes (backend_path is synthesized from the
-  Model class's `__module__:__name__`). `pull()` creates a per-model
-  venv, installs muse editable + `[server]` extras + MANIFEST's
-  `pip_extras`, warns on missing `system_packages`, and downloads
-  weights from HF. Catalog state lives at `~/.muse/catalog.json` (or
+  Model class's `__module__:__name__`). Merges two sources: discovered
+  bundled scripts PLUS catalog.json entries that carry a persisted
+  `manifest` field (resolver-pulled models). Bundled wins on collision.
+  `pull()` dispatches by identifier shape: curated alias > `://` URI
+  > bare id. `get_manifest(model_id)` prefers the persisted manifest
+  for resolver-pulled models, falls back to the script module's
+  MANIFEST. Catalog state lives at `~/.muse/catalog.json` (or
   `MUSE_CATALOG_DIR` env override); writes are atomic (write-then-rename).
-  `get_manifest(model_id)` returns the raw MANIFEST dict for a known
-  model (used by the worker to forward it to the registry).
+- `muse.core.resolvers` + `muse.core.resolvers_hf`: URI -> `ResolvedModel`
+  dispatch for `muse pull hf://...`. `HFResolver` sniffs each HF repo
+  (`.gguf` siblings -> `chat/completion` / LlamaCppModel; sentence-
+  transformers tag -> `embedding/text` / SentenceTransformerModel).
+  GGUF `@variant` is required; no magic default. Search implemented for
+  both modalities with per-variant deduping (sharded GGUFs don't emit
+  one row per shard). Registers `hf://` scheme on import.
+- `muse.core.curated`: loads `src/muse/curated.yaml` (hand-edited
+  recommendations list). `find_curated(id)` / `expand_curated_pull(id)`.
+  Curated entries either alias a bundled script (`bundled: true`) or
+  point at a URI; the curated id is preserved as the catalog key even
+  when the URI would synthesize a different one, so newbie-friendly ids
+  like `qwen3.5-4b-q4` survive end-to-end.
+- `muse.core.chat_formats`: loads `src/muse/chat_formats.yaml` (hand-
+  edited map from HF repo substring to llama-cpp-python `chat_format`
+  string + `supports_tools` flag). Consulted by the HF resolver when
+  synthesizing GGUF manifests. First-match-wins; case-insensitive
+  substring on `hf_repo`. More-specific patterns must come first.
 - `muse.core.registry.ModalityRegistry`: keyed by `(modality, model_id)`.
   First registered model per modality is the default for that modality.
   `register(modality, model, manifest=...)` stores the MANIFEST verbatim;
@@ -86,16 +105,26 @@ Modality backends implementing modality-specific protocols
 - `muse.cli_impl.worker`: single-worker mode (runs one uvicorn in one venv). Invoked via `muse _worker` (hidden subcommand).
 - `muse.cli_impl.gateway`: FastAPI proxy app. Routes by `model` field in request body/query; aggregates `/v1/models` and `/health` across workers.
 - `muse.cli_impl.supervisor`: orchestrates workers + gateway. `plan_workers` groups catalog by venv; `spawn_worker` + `wait_for_ready` manage subprocess lifecycle; `run_supervisor` is the entrypoint `muse serve` delegates to.
+- `muse.cli_impl.search`: `run_search()` for `muse search`. Thin wrapper over `resolvers.search()` plus log-level quieting so httpx's per-request debug lines don't interleave with the table output.
 
 ### Modality conventions
 
-Each modality subpackage contains:
+Each modality subpackage (`src/muse/modalities/<mime_name>/`) contains:
 - `__init__.py`: exports `MODALITY: str` (MIME-style tag like `"audio/speech"`) and `build_router: Callable[[ModalityRegistry], APIRouter]`. These two are what `discover_modalities` scans for.
 - `protocol.py`: Protocol + Result dataclass(es) for this modality
 - `routes.py`: defines `build_router(registry) -> APIRouter`
 - `client.py`: HTTP client for this modality's endpoints
-- `codec.py`: modality-specific encoding (wav/opus for audio; png/jpeg for images; base64 float32 for embeddings)
-- `backends/` (optional): private helpers used by model scripts; NOT a plugin surface. `audio_speech/backends/` currently holds `base.py` (shared voices_dir + BaseModel) and `transformers.py` (the Narro engine Soprano delegates to). Public backends live in `muse/models/`.
+- `codec.py`: modality-specific encoding (wav/opus for audio; png/jpeg for images; base64 float32 for embeddings; SSE+OpenAI chunk shape for chat)
+- `runtimes/` (optional): *generic* runtime classes that serve many models from one implementation. `chat_completion/runtimes/llama_cpp.py:LlamaCppModel` wraps any GGUF; `embedding_text/runtimes/sentence_transformers.py:SentenceTransformerModel` wraps any sentence-transformers repo. Runtime class paths are referenced by resolver-synthesized manifests.
+- `backends/` (optional): *private helpers* used by this modality's own model scripts. NOT a plugin surface. Only `audio_speech/backends/` exists (`base.py` with `voices_dir` + `BaseModel`; `transformers.py` with the Narro engine Soprano delegates to).
+
+Three distinct concepts worth keeping straight:
+
+| Surface | Who writes it | Purpose |
+|---|---|---|
+| `muse/models/*.py` | bundled muse + users | public model scripts, one per model, discoverable |
+| `modalities/*/runtimes/*.py` | muse internal | generic runtimes, one class serves many models (GGUF, ST) |
+| `modalities/*/backends/*.py` | muse internal | private helpers shared inside a modality |
 
 Each model script (`src/muse/models/<id>.py`) contains:
 - Top-level `MANIFEST: dict` with required keys `model_id`, `modality`, `hf_repo` and optional `description`, `license`, `pip_extras`, `system_packages`, `capabilities`. Anything else passes through.
@@ -105,7 +134,23 @@ Each `Model` class:
 - Satisfies the modality's Protocol structurally (no base class required).
 - Accepts `hf_repo=`, `local_dir=`, `device=`, `**_` in its constructor (the catalog loader calls with those kwargs; `**_` absorbs future additions).
 - Prefers `local_dir` over `hf_repo` when loading weights.
-- Defers heavy imports (torch, transformers, diffusers, kokoro) to inside `__init__` or function bodies behind a try/except so `muse --help` stays instant.
+- Defers heavy imports (torch, transformers, diffusers, kokoro, llama_cpp) to inside `__init__` (via an `_ensure_deps()` helper that lazy-imports into module-level sentinels). Tests patch the module-level names directly; the `_ensure_deps` check `if X is None` short-circuits when tests have pre-populated mocks. `muse --help` and `muse pull` must work without any ML deps installed.
+
+### Capability precedence
+
+For resolver-pulled GGUFs, the `chat_format` and `supports_tools` fields
+in the catalog's persisted manifest come from layered lookups:
+
+1. MANIFEST `capabilities.chat_format` (user-set explicitly) -- highest
+2. `src/muse/chat_formats.yaml` pattern match on `hf_repo` at resolve time
+3. None -- falls through to llama-cpp-python's GGUF-metadata autodetection
+
+At `load_backend` time, `manifest.capabilities` is merged into the
+runtime constructor's kwargs (caller kwargs win). This lets generic
+runtimes like `LlamaCppModel` receive `gguf_file`, `chat_template`,
+`context_length`, etc. without the worker layer knowing those keys
+exist. The generic runtime also gets `model_id` injected, since one
+class serves many models.
 
 ### No shared supertype across modalities
 
@@ -168,34 +213,53 @@ restarts the server; the change takes effect next `muse serve`.
 # Install (dev)
 pip install -e ".[dev,server,audio,images]"
 
-# Run all tests
-pytest tests/
+# Fast lane: unit tests only (excludes slow e2e + integration)
+pytest tests/ -q -m "not slow"
 
-# Run tests for one modality contract
-pytest tests/modalities/audio_speech/
-pytest tests/modalities/embedding_text/
-pytest tests/modalities/image_generation/
+# Full lane: fast + slow e2e supervisor test (in-process)
+pytest tests/ -q
 
-# Run tests for one bundled model
+# Integration tests (opt-in, hit a real muse server)
+MUSE_REMOTE_SERVER=http://192.168.0.225:8000 pytest tests/integration/
+# Override which chat model the integration suite targets:
+MUSE_REMOTE_SERVER=http://192.168.0.225:8000 \
+    MUSE_CHAT_MODEL_ID=qwen3.5-9b-q4 pytest tests/integration/
+
+# One modality contract, or one bundled model
+pytest tests/modalities/chat_completion/
 pytest tests/models/test_kokoro_82m.py
 
-# Coverage
-pytest tests/ --cov=muse
+# Single test by name
+pytest tests/core/test_resolvers.py::test_register_and_get_resolver -v
 
-# Start server
+# Coverage
+pytest tests/ -m "not slow" --cov=muse
+
+# CLI: admin surface (no per-modality verbs; generation is HTTP)
+muse --help                                    # top-level help
+muse models list                               # bundled + curated + pulled
+muse models list --available --modality chat/completion
+muse search qwen3 --modality chat/completion --max-size-gb 10
+muse pull qwen3.5-4b-q4                        # curated alias
+muse pull hf://unsloth/Qwen3.5-9B-GGUF@q4_k_m  # resolver URI
+muse pull kokoro-82m                           # bundled bare id
+muse models info <id>
+muse models enable <id> / disable <id>
+muse models remove <id>
 muse serve --device cuda
 
-# Generation is over HTTP (Python client, curl, or future muse mcp).
-# There are deliberately no `muse speak` / `muse imagine` subcommands.
-# The CLI is admin-only (serve / pull / models) so new modalities land
-# without CLI churn.
+# Python clients (HTTP)
 python - <<'PY'
 from muse.modalities.audio_speech import SpeechClient
 from muse.modalities.image_generation import GenerationsClient
 from muse.modalities.embedding_text import EmbeddingsClient
-SpeechClient().infer("hello")           # WAV bytes; MUSE_SERVER env sets base URL
-GenerationsClient().generate("a cat")   # list[bytes] of PNGs
-EmbeddingsClient().embed(["alpha", "beta"])   # list[list[float]]
+from muse.modalities.chat_completion import ChatClient
+SpeechClient().infer("hello")                         # WAV bytes; MUSE_SERVER env sets base URL
+GenerationsClient().generate("a cat")                 # list[bytes] of PNGs
+EmbeddingsClient().embed(["alpha", "beta"])           # list[list[float]]
+ChatClient().chat(model="qwen3.5-4b-q4", messages=[{"role": "user", "content": "hi"}])
+# or via OpenAI SDK (muse is wire-compatible):
+#   OpenAI(base_url="http://localhost:8000/v1", api_key="not-used")
 PY
 ```
 
@@ -226,29 +290,38 @@ PY
   location, defaults `~/.muse/`), `MUSE_HOME` (voices dir base).
 - **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.
 - **Enable/disable is catalog state**, not runtime state. `muse serve` reads the catalog at startup. Changing a model's enabled bit while the server is running has no effect until the next restart.
+- **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
+- **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 
 ## Adding a new model (the common case)
 
-Two paths:
+Three paths, in order of least-to-most effort:
 
-**Resolver path (recommended for uniform model classes).** If the model
-is a GGUF on HuggingFace or a sentence-transformers repo, no script
-needed. Just pull by URI:
+**1. Curated alias (easiest; a muse-blessed shortcut).** Edit
+`src/muse/curated.yaml` to add a friendly id that points at an HF URI
+or a bundled script. Users then `muse pull <id>` (no `hf://` prefix
+needed). The curated id is preserved as the catalog key even when the
+URI would synthesize a different one. See existing entries for shape.
+
+**2. Resolver URI (good for GGUF + sentence-transformers).** No script
+needed; let the HF resolver synthesize a manifest:
 
 ```bash
-muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m
-muse pull hf://Qwen/Qwen3-Embedding-0.6B
+muse pull hf://unsloth/Qwen3.5-9B-GGUF@q4_k_m
+muse pull hf://sentence-transformers/all-MiniLM-L6-v2
 ```
 
-The HF resolver synthesizes a manifest, persists it in
-`~/.muse/catalog.json`, and routes inference through the matching
-generic runtime (`LlamaCppModel` / `SentenceTransformerModel`). Use
-`muse search <query> --modality chat/completion --max-size-gb N` to
-discover candidates. See `docs/RESOLVERS.md`.
+The HF resolver sniffs the repo (`.gguf` -> chat/completion via
+`LlamaCppModel`; sentence-transformers tag -> embedding/text via
+`SentenceTransformerModel`), persists a synthesized manifest in
+`~/.muse/catalog.json`. For chat/completion, the resolver also
+consults `src/muse/chat_formats.yaml` for the right llama-cpp
+`chat_format` string. `muse search <query> --modality chat/completion
+--max-size-gb N` helps discover candidates. See `docs/RESOLVERS.md`.
 
-**Script path (for one-offs with custom code).** Models that need
-non-uniform behavior (NV-Embed's custom encode method, Soprano's Narro
-engine) get a hand-written script:
+**3. Script path (for one-offs with custom code).** Models that need
+non-uniform behavior (NV-Embed's custom `encode` method, Soprano's
+Narro engine) get a hand-written script:
 
 1. Write a `.py` file with a `MANIFEST` dict + `Model` class (see
    `docs/MODEL_SCRIPTS.md` for the full schema).
@@ -260,8 +333,9 @@ Bundled model scripts live in `src/muse/models/<id>.py`. Adding a
 bundled model requires no catalog edits, no registry changes, and no
 worker changes: discovery just finds it.
 
-Bundled scripts always win on `model_id` collision with resolver-pulled
-entries.
+Collision precedence: bundled scripts > resolver-pulled (persisted
+manifest). A user pulling `hf://malicious/fake` that claims an
+existing bundled id gets shadowed by the bundled script.
 
 ## Adding a new modality (rare)
 
@@ -291,3 +365,27 @@ loaded that model. New modalities are transparent to the proxy layer.
 External escape hatch: dropping a modality subpackage into
 `$MUSE_MODALITIES_DIR/<mime_name>/` registers it without forking muse.
 Intended for experimentation, not routine extension.
+
+## Test organization
+
+```
+tests/
+├── core/                 # resolvers, catalog, curated, chat_formats, discovery, registry, server
+├── modalities/<name>/    # protocol + codec + routes + client for each modality
+├── models/               # one test per bundled model script (fully mocked)
+├── cli_impl/             # worker, search, supervisor (in-process e2e marked @pytest.mark.slow)
+├── integration/          # opt-in; hits a real muse server via OpenAI SDK
+└── test_cli.py           # subprocess-level CLI smoke
+```
+
+Fast lane is `-m "not slow"`. The one `@pytest.mark.slow` test in
+`cli_impl/test_e2e_supervisor.py` spawns a real supervisor subprocess
+(in-process, no network). The `tests/integration/` suite is separately
+opt-in via `MUSE_REMOTE_SERVER` env var; fixtures auto-skip when the
+server isn't reachable or the required model isn't loaded. The
+`MUSE_CHAT_MODEL_ID` env var (default `qwen3.5-4b-q4`) lets the same
+integration suite run against any chat model on the target server.
+
+Test naming for integration tests:
+- `test_protocol_*`: hard claims muse should always satisfy. Failure is a regression.
+- `test_observe_*`: records what a particular model actually did. Usually xfail-style; useful as a watchdog (a passing xfail shows up as XPASS, signaling "upstream fixed something; promote to a hard assertion").
