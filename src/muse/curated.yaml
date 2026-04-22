@@ -55,14 +55,19 @@
 
 # ---------- embedding/text ----------
 
-- id: all-minilm-l6-v2-st
+- id: all-minilm-l6-v2
   uri: hf://sentence-transformers/all-MiniLM-L6-v2
   modality: embedding/text
   size_gb: 0.1
   description: "MiniLM 384 dims, 22MB: CPU-friendly default embedder"
 
 - id: qwen3-embedding-0.6b
-  bundled: true
+  uri: hf://Qwen/Qwen3-Embedding-0.6B
+  modality: embedding/text
+  size_gb: 0.6
+  description: "Qwen3-Embedding 0.6B: 1024 dims (matryoshka), 32K context, Apache 2.0"
+  capabilities:
+    trust_remote_code: true
 
 - id: nv-embed-v2
   bundled: true
