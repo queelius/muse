@@ -454,11 +454,25 @@ def _pull_via_resolver(
     _reset_known_models_cache()
 
 
-def remove(model_id: str) -> None:
-    """Unregister from catalog (does not delete HF cache)."""
+def remove(model_id: str, *, purge: bool = False) -> None:
+    """Unregister `model_id` from the catalog.
+
+    By default this only edits `catalog.json`; the per-model venv at
+    `~/.muse/venvs/<model_id>/` and any HF weight cache stay on disk.
+    Mirrors `apt remove`'s "metadata only" semantics.
+
+    When `purge=True`, also `shutil.rmtree` the venv directory.
+    Tolerates the venv being already gone. Does NOT touch the HF
+    weights cache, which is shared across muse pulls and other tools;
+    use `huggingface-cli delete-cache` for that.
+    """
     catalog = _read_catalog()
+    venv_path = catalog.get(model_id, {}).get("venv_path")
     catalog.pop(model_id, None)
     _write_catalog(catalog)
+    if purge and venv_path:
+        import shutil
+        shutil.rmtree(venv_path, ignore_errors=True)
 
 
 def is_enabled(model_id: str) -> bool:

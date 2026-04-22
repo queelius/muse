@@ -211,6 +211,51 @@ def test_remove_clears_from_catalog(tmp_catalog):
         assert not is_pulled("soprano-80m")
 
 
+def test_remove_default_leaves_venv_on_disk(tmp_catalog):
+    """Default remove() unregisters from catalog only; venv persists."""
+    venv_path = tmp_catalog / "venvs" / "soprano-80m"
+    venv_path.mkdir(parents=True)
+    (venv_path / "marker").write_text("present")
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+    remove("soprano-80m")
+    assert venv_path.exists(), "default remove must not delete the venv"
+    assert (venv_path / "marker").exists()
+
+
+def test_remove_with_purge_deletes_venv(tmp_catalog):
+    """remove(purge=True) also wipes the per-model venv directory."""
+    venv_path = tmp_catalog / "venvs" / "soprano-80m"
+    venv_path.mkdir(parents=True)
+    (venv_path / "marker").write_text("present")
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+    remove("soprano-80m", purge=True)
+    assert not venv_path.exists(), "purge must delete the venv directory"
+
+
+def test_remove_with_purge_tolerates_missing_venv(tmp_catalog):
+    """purge=True must not raise if the venv directory is already gone."""
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+    venv_path = tmp_catalog / "venvs" / "soprano-80m"
+    if venv_path.exists():
+        import shutil
+        shutil.rmtree(venv_path)
+    # Should not raise
+    remove("soprano-80m", purge=True)
+    assert not is_pulled("soprano-80m")
+
+
 def test_load_backend_raises_when_not_pulled(tmp_catalog):
     with pytest.raises(RuntimeError, match="not pulled"):
         load_backend("soprano-80m")

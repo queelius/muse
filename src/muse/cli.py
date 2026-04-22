@@ -135,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_remove = models_sub.add_parser("remove", help="unregister a model from the catalog")
     sp_remove.add_argument("model_id")
+    sp_remove.add_argument(
+        "--purge", action="store_true",
+        help="also delete the per-model venv (HF weights cache is left alone; "
+             "use huggingface-cli delete-cache to reclaim it)",
+    )
     sp_remove.set_defaults(func=_cmd_models_remove)
 
     sp_enable = models_sub.add_parser("enable", help="enable a pulled model for serving")
@@ -302,8 +307,9 @@ def _cmd_models_info(args):
 
 def _cmd_models_remove(args):
     from muse.core.catalog import remove
-    remove(args.model_id)
-    print(f"removed {args.model_id} from catalog")
+    remove(args.model_id, purge=args.purge)
+    suffix = " (purged venv)" if args.purge else ""
+    print(f"removed {args.model_id} from catalog{suffix}")
     return 0
 
 
