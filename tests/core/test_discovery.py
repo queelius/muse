@@ -336,7 +336,7 @@ class TestDiscoveryEdgeCases:
         expected = {
             "soprano-80m", "kokoro-82m", "bark-small",
             "sd-turbo",
-            "all-minilm-l6-v2", "qwen3-embedding-0.6b", "nv-embed-v2",
+            "nv-embed-v2",
         }
         assert expected.issubset(found.keys()), (
             f"missing after dep block: {expected - found.keys()}"

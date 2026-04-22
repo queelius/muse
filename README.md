@@ -140,7 +140,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `image_generation/` (MODALITY `"image/generation"`)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
-  - `all_minilm_l6_v2.py`, `qwen3_embedding_0_6b.py`, `nv_embed_v2.py` (embedding/text)
+  - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
   - `sd_turbo.py` (image/generation)
 - `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
   - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.

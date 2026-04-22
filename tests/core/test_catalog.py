@@ -51,8 +51,6 @@ def test_known_models_seeded_with_required_entries():
     assert "kokoro-82m" in catalog
     assert "bark-small" in catalog
     assert "sd-turbo" in catalog
-    assert "all-minilm-l6-v2" in catalog
-    assert "qwen3-embedding-0.6b" in catalog
     assert "nv-embed-v2" in catalog
 
 
