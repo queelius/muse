@@ -43,6 +43,11 @@ def two_segments():
     (0.999, "00:00:00,999"),
     (3661.5, "01:01:01,500"),
     (7325.123, "02:02:05,123"),
+    # Rounding-edge cases: sub-integer values must roll over cleanly
+    # to the next whole second (regression: pre-fix produced "00:00:00,1000")
+    (0.9999, "00:00:01,000"),
+    (3599.9999, "01:00:00,000"),      # rolls minutes into hours
+    (1.0 - 1e-9, "00:00:01,000"),     # float-epsilon below one second
 ])
 def test_format_srt_ts(secs, expected):
     assert _format_srt_ts(secs) == expected
@@ -51,6 +56,8 @@ def test_format_srt_ts(secs, expected):
 @pytest.mark.parametrize("secs,expected", [
     (0.0, "00:00:00.000"),
     (3661.5, "01:01:01.500"),
+    (0.9999, "00:00:01.000"),
+    (3599.9999, "01:00:00.000"),
 ])
 def test_format_vtt_ts(secs, expected):
     assert _format_vtt_ts(secs) == expected

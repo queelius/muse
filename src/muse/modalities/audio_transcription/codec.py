@@ -90,18 +90,28 @@ def _to_verbose_json(r: TranscriptionResult, *, include_words: bool) -> dict[str
 
 
 def _format_srt_ts(seconds: float) -> str:
-    """SubRip: HH:MM:SS,mmm (comma before milliseconds)."""
-    hours, rem = divmod(seconds, 3600)
-    mins, secs = divmod(rem, 60)
-    whole = int(secs)
-    ms = int(round((secs - whole) * 1000))
-    return f"{int(hours):02d}:{int(mins):02d}:{whole:02d},{ms:03d}"
+    """SubRip: HH:MM:SS,mmm (comma before milliseconds).
+
+    Round to milliseconds first, then decompose, so values just below
+    an integer second (common in faster-whisper float32 output like
+    4.9999998) roll over cleanly to the next whole second rather than
+    producing an invalid 4-digit millisecond field.
+    """
+    total_ms = int(round(seconds * 1000))
+    hours, rem = divmod(total_ms, 3_600_000)
+    mins, rem = divmod(rem, 60_000)
+    secs, ms = divmod(rem, 1000)
+    return f"{hours:02d}:{mins:02d}:{secs:02d},{ms:03d}"
 
 
 def _format_vtt_ts(seconds: float) -> str:
-    """WebVTT: HH:MM:SS.mmm (period before milliseconds)."""
-    hours, rem = divmod(seconds, 3600)
-    mins, secs = divmod(rem, 60)
-    whole = int(secs)
-    ms = int(round((secs - whole) * 1000))
-    return f"{int(hours):02d}:{int(mins):02d}:{whole:02d}.{ms:03d}"
+    """WebVTT: HH:MM:SS.mmm (period before milliseconds).
+
+    Same integer-millisecond pipeline as _format_srt_ts to avoid the
+    sub-integer-second rounding bug.
+    """
+    total_ms = int(round(seconds * 1000))
+    hours, rem = divmod(total_ms, 3_600_000)
+    mins, rem = divmod(rem, 60_000)
+    secs, ms = divmod(rem, 1000)
+    return f"{hours:02d}:{mins:02d}:{secs:02d}.{ms:03d}"
