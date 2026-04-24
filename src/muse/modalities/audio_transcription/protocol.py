@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 @dataclass
@@ -41,6 +41,7 @@ class TranscriptionResult:
     task: Literal["transcribe", "translate"]
 
 
+@runtime_checkable
 class TranscriptionModel(Protocol):
     """Structural protocol any ASR backend satisfies.
 

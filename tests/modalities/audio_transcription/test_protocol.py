@@ -44,15 +44,20 @@ def test_transcription_result_minimal():
     assert len(r.segments) == 2
 
 
-def test_transcription_model_protocol_is_structural():
-    """Any class with a matching `transcribe` signature satisfies the protocol."""
+def test_transcription_model_protocol_accepts_structural_impl():
+    """A class that implements `transcribe(...)` satisfies the protocol
+    without inheriting from TranscriptionModel."""
     class Fake:
         def transcribe(self, audio_path, **kwargs):
             return TranscriptionResult(
                 text="", language="en", duration=0.0,
                 segments=[], task="transcribe",
             )
-    # This import-time check matters: if Protocol is misdefined
-    # (e.g. accidentally ABC), structural subtyping breaks.
-    fake: TranscriptionModel = Fake()  # type: ignore[assignment]
-    assert fake.transcribe("/tmp/x").text == ""
+    assert isinstance(Fake(), TranscriptionModel)
+
+
+def test_transcription_model_protocol_rejects_missing_method():
+    """A class without `transcribe(...)` fails the isinstance check."""
+    class Missing:
+        pass
+    assert not isinstance(Missing(), TranscriptionModel)
