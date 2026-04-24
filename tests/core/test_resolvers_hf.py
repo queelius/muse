@@ -408,3 +408,5 @@ def test_search_faster_whisper_yields_results():
     assert len(results) == 2
     assert all(r.modality == "audio/transcription" for r in results)
     assert all(r.uri.startswith("hf://Systran/faster-whisper-") for r in results)
+    assert results[0].model_id == "faster-whisper-tiny"
+    assert results[1].model_id == "faster-whisper-base"

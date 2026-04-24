@@ -88,7 +88,8 @@ class HFResolver(Resolver):
         tags = getattr(info, "tags", None) or []
         raise ResolverError(
             f"cannot infer modality for {repo_id!r} "
-            f"(no .gguf siblings, no sentence-transformers tag; tags={tags})"
+            f"(no .gguf siblings, no sentence-transformers tag, "
+            f"no CT2 shape with ASR tag; tags={tags})"
         )
 
     def search(self, query: str, **filters) -> Iterable[SearchResult]:
