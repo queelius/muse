@@ -21,6 +21,26 @@ def test_manifest_has_required_fields():
     assert "pip_extras" in MANIFEST
 
 
+def test_manifest_pip_extras_declares_transformers_and_torch():
+    """sd-turbo's pipeline internally needs transformers (CLIP text
+    encoder) and torch; both must be explicitly declared so per-model
+    venvs have them without relying on transitive installs.
+
+    Regression: v0.12.1 caught a live box where a venv pulled before
+    this declaration was added had diffusers + accelerate but no
+    transformers, so the worker exited at load time.
+    """
+    from muse.models.sd_turbo import MANIFEST
+    extras_str = " ".join(MANIFEST["pip_extras"])
+    assert "transformers" in extras_str, (
+        f"transformers must be in pip_extras (StableDiffusionPipeline "
+        f"requires it for the CLIP text encoder); got {MANIFEST['pip_extras']}"
+    )
+    assert "torch" in extras_str, (
+        f"torch must be explicit in pip_extras; got {MANIFEST['pip_extras']}"
+    )
+
+
 def test_sd_turbo_model_id_and_default_size():
     with patch("muse.models.sd_turbo.AutoPipelineForText2Image") as mock_cls:
         mock_cls.from_pretrained.return_value = MagicMock()

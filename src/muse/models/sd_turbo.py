@@ -58,7 +58,15 @@ MANIFEST = {
     "description": "Stable Diffusion Turbo: 1-step distilled, 512x512",
     "license": "SAI Community License",
     "pip_extras": (
+        # torch: hard runtime dep. Pulled transitively by accelerate,
+        # but declaring it keeps the contract self-contained.
+        "torch>=2.1.0",
         "diffusers>=0.27.0",
+        # transformers: required by StableDiffusionPipeline at construct
+        # time (CLIPTextModel text encoder). diffusers lists it as an
+        # optional extra, so we declare it here or per-model venvs end
+        # up missing it and the worker exits at load.
+        "transformers>=4.36.0",
         "accelerate",
         "Pillow",
         "safetensors",

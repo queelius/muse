@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muse"
-version = "0.12.1"
+version = "0.12.2"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]
@@ -45,6 +45,9 @@ audio-kokoro = ["muse[audio]", "kokoro", "soundfile", "misaki[en]"]
 images = [
   "torch>=2.1.0",
   "diffusers>=0.27.0",
+  # transformers is required by StableDiffusionPipeline (CLIP text
+  # encoder) but diffusers lists it as an optional extra.
+  "transformers>=4.36.0",
   "accelerate",
   "Pillow",
   "safetensors",
