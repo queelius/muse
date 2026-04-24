@@ -179,3 +179,69 @@ def test_empty_file_returns_400_envelope():
     assert r.status_code == 400
     body = r.json()
     assert body["error"]["code"] == "invalid_parameter"
+
+
+def test_payload_too_large_returns_413_envelope(monkeypatch):
+    """File exceeding MUSE_ASR_MAX_MB returns the 413 envelope.
+
+    Set the cap to 0 MB so any non-empty file overflows without
+    needing to actually read 100 MB in the test.
+    """
+    monkeypatch.setenv("MUSE_ASR_MAX_MB", "0")
+    backend = MagicMock()
+    backend.transcribe.return_value = _fake_result()
+    client = _make_client(backend)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", b"anything", "audio/wav")},
+        data={"model": "whisper-tiny"},
+    )
+    assert r.status_code == 413
+    body = r.json()
+    assert "error" in body
+    assert "detail" not in body
+    assert body["error"]["code"] == "payload_too_large"
+
+
+def test_backend_decoder_error_returns_415_envelope():
+    """A backend exception matching the decoder-error pattern returns 415.
+
+    The substring gate in routes.py must catch PyAV/ffmpeg decode
+    failures but re-raise unrelated RuntimeErrors cleanly.
+    """
+    backend = MagicMock()
+    backend.model_id = "whisper-tiny"
+    backend.transcribe.side_effect = RuntimeError(
+        "PyAV InvalidDataError: invalid data found when processing input"
+    )
+    client = _make_client(backend)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", b"NOT_REAL_AUDIO", "audio/wav")},
+        data={"model": "whisper-tiny"},
+    )
+    assert r.status_code == 415
+    body = r.json()
+    assert body["error"]["code"] == "unsupported_media_type"
+
+
+def test_backend_unrelated_error_re_raised_not_as_415():
+    """A non-decoder RuntimeError must NOT be silently wrapped as 415."""
+    backend = MagicMock()
+    backend.model_id = "whisper-tiny"
+    backend.transcribe.side_effect = RuntimeError("GPU out of memory")
+    client = _make_client(backend)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", b"FAKEWAV", "audio/wav")},
+        data={"model": "whisper-tiny"},
+    )
+    # Expect a 500 (unhandled) or something NOT 415, because "GPU out of
+    # memory" is not a decode failure.
+    assert r.status_code != 415, (
+        f"non-decoder RuntimeError must not be masked as 415; "
+        f"body={r.text}"
+    )

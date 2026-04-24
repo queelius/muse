@@ -9,9 +9,16 @@ CLAUDE.md).
 Size cap: MUSE_ASR_MAX_MB env var (default 100). 4x OpenAI's 25 MB
 since we're self-hosted.
 
-Error envelopes match the muse OpenAI-compat convention via
-ModelNotFoundError (404) and HTTPException with detail={'error': ...}
-(400, 413, 415). FastAPI's exception handler unwraps detail.error.
+Error envelopes follow muse's OpenAI-compat convention. 404
+(unknown model) raises ModelNotFoundError, which is caught by a
+handler registered in core.server.create_app. 400 (bad parameter),
+413 (payload too large), and 415 (decoder failure) use
+core.errors.error_response() to return a JSONResponse directly
+with the {"error": {code, message, type}} envelope. This
+returned-vs-raised split exists because FastAPI's default
+HTTPException handler wraps detail under {"detail": ...}, not
+{"error": ...}, and muse only registers a handler for
+ModelNotFoundError and RequestValidationError.
 """
 from __future__ import annotations
 
@@ -103,7 +110,21 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 # PyAV/ffmpeg decode failures land here; we don't try to
                 # distinguish finely (message surface is good enough).
                 msg = str(e).lower()
-                if "decoder" in msg or "format" in msg or "ffmpeg" in msg:
+                # Keep this list narrow: "format" alone matches too many unrelated
+                # errors (e.g. "invalid response_format"). The tokens below are
+                # characteristic of PyAV/ffmpeg/ctranslate2 decode failures.
+                if (
+                    "decoder" in msg
+                    or "decode" in msg
+                    or "ffmpeg" in msg
+                    or "invalid data" in msg
+                    or "invaliddata" in msg  # PyAV's InvalidDataError class name lowercased
+                ):
+                    logger.warning(
+                        "backend.transcribe raised a decoder-looking exception; returning 415. "
+                        "If this is a false positive, see routes.py._handle's exception gate. "
+                        "Error: %s", e,
+                    )
                     return error_response(
                         415,
                         "unsupported_media_type",
