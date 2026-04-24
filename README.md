@@ -2,11 +2,12 @@
 
 Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface:
 - text-to-speech on `/v1/audio/speech`
+- speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
 - text-to-image on `/v1/images/generations`
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 
-Modality tags are MIME-style (`audio/speech`, `chat/completion`, `embedding/text`, `image/generation`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -123,6 +124,8 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `GET /v1/models` | all registered models, aggregated |
 | `POST /v1/audio/speech` | synthesize speech (OpenAI-compatible) |
 | `GET /v1/audio/speech/voices` | list voices for a model |
+| `POST /v1/audio/transcriptions` | transcribe audio to text (OpenAI-compatible) |
+| `POST /v1/audio/translations` | transcribe + translate audio to English (OpenAI-compatible) |
 | `POST /v1/images/generations` | generate images (OpenAI-compatible) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
@@ -135,6 +138,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
 - `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
 - `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
   - `audio_speech/` (MODALITY `"audio/speech"`)
+  - `audio_transcription/` (MODALITY `"audio/transcription"`; multipart/form-data upload, OpenAI Whisper wire shape)
   - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)
   - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
