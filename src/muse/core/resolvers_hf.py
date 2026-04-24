@@ -3,17 +3,20 @@
 URI shapes:
   hf://org/repo                  # sentence-transformers (embedding/text)
   hf://org/repo-GGUF@<variant>   # GGUF (chat/completion); variant required
+  hf://org/faster-whisper-tiny   # CT2 faster-whisper (audio/transcription)
 
 Sniff logic (see `_sniff_repo_shape`):
   - any .gguf sibling          -> gguf
   - sentence-transformers tag  -> sentence-transformers
   - sentence_transformers_config.json sibling -> sentence-transformers
+  - model.bin + config.json + (vocabulary.txt|tokenizer.json) + ASR tag -> faster-whisper
   - else                       -> unknown (raises on resolve)
 
 Search:
   - modality="chat/completion": HfApi.list_models(filter="gguf") +
     enumerate each repo's .gguf files as separate variants.
   - modality="embedding/text": HfApi.list_models(filter="sentence-transformers")
+  - modality="audio/transcription": HfApi.list_models(filter="automatic-speech-recognition")
 
 Capability sniffing:
   - supports_tools: loads tokenizer_config.json's chat_template (when
@@ -53,6 +56,11 @@ SENTENCE_TRANSFORMER_PIP_EXTRAS = (
     "torch>=2.1.0",
     "sentence-transformers>=2.2.0",
 )
+FASTER_WHISPER_RUNTIME_PATH = (
+    "muse.modalities.audio_transcription.runtimes.faster_whisper:FasterWhisperModel"
+)
+FASTER_WHISPER_PIP_EXTRAS = ("faster-whisper>=1.0.0",)
+FASTER_WHISPER_SYSTEM_PACKAGES = ("ffmpeg",)
 
 
 class HFResolver(Resolver):
@@ -75,6 +83,8 @@ class HFResolver(Resolver):
             return self._resolve_gguf(repo_id, variant, info)
         if shape == "sentence-transformers":
             return self._resolve_sentence_transformer(repo_id, info)
+        if shape == "faster-whisper":
+            return self._resolve_faster_whisper(repo_id, info)
         tags = getattr(info, "tags", None) or []
         raise ResolverError(
             f"cannot infer modality for {repo_id!r} "
@@ -90,13 +100,15 @@ class HFResolver(Resolver):
             yield from self._search_gguf(query, sort=sort, limit=limit)
         elif modality == "embedding/text":
             yield from self._search_sentence_transformers(query, sort=sort, limit=limit)
+        elif modality == "audio/transcription":
+            yield from self._search_faster_whisper(query, sort=sort, limit=limit)
         elif modality is None:
             yield from self._search_gguf(query, sort=sort, limit=limit)
             yield from self._search_sentence_transformers(query, sort=sort, limit=limit)
         else:
             raise ResolverError(
                 f"HFResolver.search does not support modality {modality!r}; "
-                f"supported: chat/completion, embedding/text"
+                f"supported: chat/completion, embedding/text, audio/transcription"
             )
 
     # --- GGUF branch ---
@@ -249,11 +261,66 @@ class HFResolver(Resolver):
                 description=repo.id,
             )
 
+    # --- Faster-Whisper branch ---
+
+    def _resolve_faster_whisper(self, repo_id: str, info) -> ResolvedModel:
+        manifest = {
+            "model_id": repo_id.split("/", 1)[-1].lower(),
+            "modality": "audio/transcription",
+            "hf_repo": repo_id,
+            "description": f"Faster-Whisper: {repo_id}",
+            "license": _repo_license(info),
+            "pip_extras": list(FASTER_WHISPER_PIP_EXTRAS),
+            "system_packages": list(FASTER_WHISPER_SYSTEM_PACKAGES),
+            "capabilities": {},
+        }
+
+        def _download(cache_root: Path) -> Path:
+            return Path(snapshot_download(
+                repo_id=repo_id,
+                cache_dir=str(cache_root) if cache_root else None,
+            ))
+
+        return ResolvedModel(
+            manifest=manifest,
+            backend_path=FASTER_WHISPER_RUNTIME_PATH,
+            download=_download,
+        )
+
+    def _search_faster_whisper(self, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
+        repos = self._api.list_models(
+            search=query, filter="automatic-speech-recognition",
+            sort=sort, limit=limit,
+        )
+        for repo in repos:
+            yield SearchResult(
+                uri=f"hf://{repo.id}",
+                model_id=repo.id.split("/", 1)[-1].lower(),
+                modality="audio/transcription",
+                size_gb=None,
+                downloads=getattr(repo, "downloads", None),
+                license=None,
+                description=repo.id,
+            )
+
 
 # --- sniff helpers (module-level, pytest-friendly) ---
 
+def _looks_like_faster_whisper(siblings: list[str], tags: list[str]) -> bool:
+    """CT2 faster-whisper repos have model.bin + config.json +
+    (vocabulary.txt or tokenizer.json), plus the ASR tag."""
+    names = {Path(f).name for f in siblings}
+    has_ct2_shape = (
+        "model.bin" in names
+        and "config.json" in names
+        and ("vocabulary.txt" in names or "tokenizer.json" in names)
+    )
+    has_asr_tag = "automatic-speech-recognition" in tags
+    return has_ct2_shape and has_asr_tag
+
+
 def _sniff_repo_shape(info) -> str:
-    """Return one of: 'gguf' | 'sentence-transformers' | 'unknown'."""
+    """Return one of: 'gguf' | 'sentence-transformers' | 'faster-whisper' | 'unknown'."""
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
     if any(f.endswith(".gguf") for f in siblings):
@@ -262,6 +329,8 @@ def _sniff_repo_shape(info) -> str:
         return "sentence-transformers"
     if any(Path(f).name == "sentence_transformers_config.json" for f in siblings):
         return "sentence-transformers"
+    if _looks_like_faster_whisper(siblings, tags):
+        return "faster-whisper"
     return "unknown"
 
 

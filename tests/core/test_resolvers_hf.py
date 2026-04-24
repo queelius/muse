@@ -1,4 +1,5 @@
 """Tests for HFResolver (huggingface_hub mocked; no network)."""
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -330,3 +331,80 @@ def test_resolve_gguf_no_yaml_match_leaves_supports_tools_as_sniff_value():
     caps = rm.manifest["capabilities"]
     assert "chat_format" not in caps
     assert caps["supports_tools"] is None  # sniff returned None and no YAML hint
+
+
+# --- faster-whisper branch ---
+
+def _fake_ct2_whisper_siblings():
+    return [
+        SimpleNamespace(rfilename="model.bin"),
+        SimpleNamespace(rfilename="config.json"),
+        SimpleNamespace(rfilename="vocabulary.txt"),
+        SimpleNamespace(rfilename="README.md"),
+    ]
+
+
+def test_sniff_detects_faster_whisper_shape():
+    from muse.core.resolvers_hf import _sniff_repo_shape
+    info = SimpleNamespace(
+        siblings=_fake_ct2_whisper_siblings(),
+        tags=["automatic-speech-recognition", "whisper"],
+    )
+    assert _sniff_repo_shape(info) == "faster-whisper"
+
+
+def test_sniff_rejects_ct2_shape_without_asr_tag():
+    """CT2 alone is not enough: could be an NMT repo."""
+    from muse.core.resolvers_hf import _sniff_repo_shape
+    info = SimpleNamespace(
+        siblings=_fake_ct2_whisper_siblings(),
+        tags=["machine-translation"],
+    )
+    assert _sniff_repo_shape(info) == "unknown"
+
+
+def test_sniff_rejects_without_model_bin():
+    from muse.core.resolvers_hf import _sniff_repo_shape
+    info = SimpleNamespace(
+        siblings=[
+            SimpleNamespace(rfilename="config.json"),
+            SimpleNamespace(rfilename="tokenizer.json"),
+        ],
+        tags=["automatic-speech-recognition"],
+    )
+    assert _sniff_repo_shape(info) == "unknown"
+
+
+def test_resolve_faster_whisper_synthesizes_manifest():
+    from muse.core.resolvers_hf import HFResolver
+    resolver = HFResolver()
+    info = SimpleNamespace(
+        siblings=_fake_ct2_whisper_siblings(),
+        tags=["automatic-speech-recognition"],
+        card_data=SimpleNamespace(license="mit"),
+    )
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        resolved = resolver.resolve("hf://Systran/faster-whisper-tiny")
+    assert resolved.manifest["modality"] == "audio/transcription"
+    assert resolved.manifest["hf_repo"] == "Systran/faster-whisper-tiny"
+    assert resolved.manifest["model_id"] == "faster-whisper-tiny"
+    assert "faster-whisper>=1.0.0" in resolved.manifest["pip_extras"]
+    assert "ffmpeg" in resolved.manifest["system_packages"]
+    assert resolved.backend_path == (
+        "muse.modalities.audio_transcription.runtimes.faster_whisper"
+        ":FasterWhisperModel"
+    )
+
+
+def test_search_faster_whisper_yields_results():
+    from muse.core.resolvers_hf import HFResolver
+    resolver = HFResolver()
+    fake_repos = [
+        SimpleNamespace(id="Systran/faster-whisper-tiny", downloads=12345, siblings=[]),
+        SimpleNamespace(id="Systran/faster-whisper-base", downloads=8000, siblings=[]),
+    ]
+    with patch.object(resolver._api, "list_models", return_value=fake_repos):
+        results = list(resolver.search("whisper", modality="audio/transcription"))
+    assert len(results) == 2
+    assert all(r.modality == "audio/transcription" for r in results)
+    assert all(r.uri.startswith("hf://Systran/faster-whisper-") for r in results)
