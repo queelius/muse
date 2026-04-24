@@ -56,7 +56,9 @@ def test_transcribe_default_json_returns_text_string():
         data_kw = call.kwargs["data"]
         assert "file" in files
         assert files["file"][0] == "a.wav"
-        assert ("model", "whisper-tiny") in list(data_kw) or data_kw.get("model") == "whisper-tiny"
+        # The contract is always list-of-tuples (so bracketed aliases work).
+        assert isinstance(data_kw, list), f"expected list-of-tuples, got {type(data_kw).__name__}"
+        assert ("model", "whisper-tiny") in data_kw
 
 
 def test_transcribe_text_format_returns_raw_string():
@@ -142,3 +144,23 @@ def test_raise_for_status_invoked():
         import pytest
         with pytest.raises(requests.HTTPError):
             c.transcribe(audio=b"x", filename="a.wav", model="no-such-model")
+
+
+def test_json_format_returns_string_even_if_server_adds_fields():
+    """I2 regression watchdog.
+
+    If muse server ever adds a field to the `json` response
+    (e.g. request_id, duration), callers asking for
+    response_format='json' must still get the transcript STRING,
+    not a dict. The client dispatches on the caller's requested
+    format, not on response shape.
+    """
+    body = '{"text":"hello","request_id":"abc-123"}'
+    with patch("muse.modalities.audio_transcription.client.requests.post") as mock_post:
+        mock_post.return_value = _make_response(body, "application/json")
+        from muse.modalities.audio_transcription import TranscriptionClient
+        c = TranscriptionClient()
+        out = c.transcribe(audio=b"x", filename="a.wav", model="whisper-tiny",
+                           response_format="json")
+        assert isinstance(out, str), f"expected str, got {type(out).__name__}"
+        assert out == "hello"

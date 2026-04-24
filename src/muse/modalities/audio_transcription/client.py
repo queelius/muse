@@ -25,9 +25,9 @@ class TranscriptionClient:
 
     def __init__(
         self,
-        *,
         server_url: str | None = None,
-        timeout: float = 60.0,
+        *,
+        timeout: float = 300.0,
     ) -> None:
         url = (
             server_url
@@ -128,11 +128,14 @@ class TranscriptionClient:
         )
         r.raise_for_status()
 
-        ct = r.headers.get("content-type", "")
-        if "json" in ct:
-            j = r.json()
-            # json format returns {"text": "..."}; verbose_json returns a full dict.
-            if isinstance(j, dict) and set(j.keys()) == {"text"}:
-                return j["text"]
-            return j
+        # Dispatch on the caller's requested format, not on response
+        # shape. If muse ever adds fields to the `json` response (e.g.
+        # request_id), shape-sniffing would silently return dict to a
+        # caller that asked for a string. The caller knows what they
+        # asked for; honor it explicitly.
+        if response_format == "json":
+            return r.json()["text"]
+        if response_format == "verbose_json":
+            return r.json()
+        # text, srt, vtt return raw body
         return r.text
