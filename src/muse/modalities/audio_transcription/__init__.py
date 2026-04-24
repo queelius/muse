@@ -17,6 +17,7 @@ from muse.modalities.audio_transcription.protocol import (
     TranscriptionModel,
 )
 from muse.modalities.audio_transcription.routes import build_router
+from muse.modalities.audio_transcription.client import TranscriptionClient
 
 
 MODALITY = "audio/transcription"
@@ -29,4 +30,5 @@ __all__ = [
     "Segment",
     "TranscriptionResult",
     "TranscriptionModel",
+    "TranscriptionClient",
 ]
