@@ -27,27 +27,81 @@ def test_worker_loads_requested_models_and_runs_uvicorn(mock_pulled, mock_load, 
 @patch("muse.cli_impl.worker.uvicorn")
 @patch("muse.cli_impl.worker.is_pulled", return_value=True)
 @patch("muse.cli_impl.worker.load_backend")
-def test_worker_skips_load_failures_without_crashing(mock_load, mock_pulled, mock_uvicorn):
+def test_worker_exits_nonzero_when_assigned_model_fails_to_load(
+    mock_load, mock_pulled, mock_uvicorn, caplog,
+):
+    """A worker that cannot load an assigned model must fail loud.
+
+    Previously the worker would log the error and run uvicorn anyway
+    with an empty registry, so the supervisor's /health kept reporting
+    'ok' while requests 404'd. Fail-fast lets the supervisor's
+    restart-then-mark-dead machinery kick in.
+    """
+    import logging
+    caplog.set_level(logging.ERROR)
     mock_load.side_effect = RuntimeError("diffusers not installed")
-    # Should not raise; worker starts empty
-    run_worker(host="127.0.0.1", port=9999, models=["sd-turbo"], device="cpu")
-    mock_uvicorn.run.assert_called_once()
+
+    rc = run_worker(host="127.0.0.1", port=9999, models=["sd-turbo"], device="cpu")
+
+    assert rc != 0, "worker must exit non-zero when an assigned model fails to load"
+    mock_uvicorn.run.assert_not_called()
+    assert "sd-turbo" in caplog.text
+    assert "diffusers not installed" in caplog.text
 
 
 @patch("muse.cli_impl.worker.uvicorn")
 @patch("muse.cli_impl.worker.is_pulled", return_value=False)
-def test_worker_skips_unpulled_models_without_crashing(mock_pulled, mock_uvicorn):
-    run_worker(host="127.0.0.1", port=9999, models=["soprano-80m"], device="cpu")
-    mock_uvicorn.run.assert_called_once()
+def test_worker_exits_nonzero_when_assigned_model_not_pulled(
+    mock_pulled, mock_uvicorn, caplog,
+):
+    """An assigned model that isn't pulled (yet) is a configuration bug."""
+    import logging
+    caplog.set_level(logging.ERROR)
+
+    rc = run_worker(host="127.0.0.1", port=9999, models=["soprano-80m"], device="cpu")
+
+    assert rc != 0
+    mock_uvicorn.run.assert_not_called()
+    assert "soprano-80m" in caplog.text
 
 
 @patch("muse.cli_impl.worker.uvicorn")
-def test_worker_ignores_unknown_model_ids(mock_uvicorn, caplog):
+def test_worker_exits_nonzero_when_model_id_unknown(mock_uvicorn, caplog):
+    """An unknown model-id (not in known_models()) must fail loud.
+
+    v0.11.x bundled scripts removed in v0.12.0 manifest in catalogs
+    as ids with stale backend_paths. Silent skip masks the bug;
+    the fail-fast path gives the supervisor a chance to surface it.
+    """
     import logging
     caplog.set_level(logging.WARNING)
-    run_worker(host="127.0.0.1", port=9999, models=["bogus-model-xyz"], device="cpu")
-    mock_uvicorn.run.assert_called_once()
+
+    rc = run_worker(host="127.0.0.1", port=9999, models=["bogus-model-xyz"], device="cpu")
+
+    assert rc != 0
+    mock_uvicorn.run.assert_not_called()
     assert "ignoring unknown models" in caplog.text
+
+
+@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.is_pulled", return_value=True)
+@patch("muse.cli_impl.worker.load_backend")
+def test_worker_exits_nonzero_when_some_models_load_and_others_fail(
+    mock_load, mock_pulled, mock_uvicorn,
+):
+    """Partial success is still a failure. If the worker was asked to
+    host N models, it must host all N. Failing 1 of 2 exits non-zero."""
+    # First call succeeds, second raises
+    good = MagicMock(model_id="soprano-80m", sample_rate=32000)
+    mock_load.side_effect = [good, RuntimeError("gguf load failed")]
+
+    rc = run_worker(
+        host="127.0.0.1", port=9999,
+        models=["soprano-80m", "qwen3.5-4b-q4"], device="cpu",
+    )
+
+    assert rc != 0
+    mock_uvicorn.run.assert_not_called()
 
 
 @patch("muse.cli_impl.worker.uvicorn")

@@ -58,22 +58,33 @@ def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
     `models` is the exact set of model-ids to load into this process.
     The supervisor decides which models share a worker; the worker just
     loads what it's told.
+
+    Fail-fast contract: if any assigned model fails to load for any
+    reason (unknown id, not pulled, backend import error), the worker
+    returns exit code 2 BEFORE starting uvicorn. A partial worker
+    masquerading as healthy is worse than a crashed one: the
+    supervisor's restart-then-mark-dead machinery only engages when
+    the worker process actually exits, and /health only reports
+    'degraded' when the supervisor sees a worker unreachable or dead.
+
+    `models == []` is a valid test configuration (empty-registry
+    router mounting smoke test); it does not trigger the fail-fast.
     """
     registry = ModalityRegistry()
     routers: dict = {}
+    failures: list[str] = []
 
     catalog = known_models()
     to_load = [m for m in models if m in catalog]
     unknown = [m for m in models if m not in catalog]
     if unknown:
         log.warning("ignoring unknown models: %s", unknown)
-
-    if not to_load:
-        log.warning("worker started with no models; serving empty-registry responses")
+        failures.extend(unknown)
 
     for model_id in to_load:
         if not is_pulled(model_id):
-            log.error("model %s not pulled; skipping", model_id)
+            log.error("model %s not pulled; worker cannot host it", model_id)
+            failures.append(model_id)
             continue
         entry = catalog[model_id]
         log.info("loading %s (%s)", model_id, entry.modality)
@@ -81,9 +92,17 @@ def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
             backend = load_backend(model_id, device=device)
         except Exception as e:
             log.error("failed to load %s: %s", model_id, e)
+            failures.append(model_id)
             continue
         manifest = get_manifest(model_id)
         registry.register(entry.modality, backend, manifest=manifest)
+
+    if failures:
+        log.error(
+            "worker exiting (exit 2): %d/%d assigned models failed to load: %s",
+            len(failures), len(models), failures,
+        )
+        return 2
 
     # Always mount every discovered modality router so empty-registry
     # requests get the OpenAI envelope rather than FastAPI's default
