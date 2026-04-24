@@ -108,3 +108,19 @@ def chat_model(remote_health) -> str:
 
 # Backwards-compat alias for the few tests that still want to pin to 4b.
 qwen3_5_4b = require_model_fixture("qwen3.5-4b-q4")
+
+
+@pytest.fixture(scope="session")
+def whisper_model(remote_health) -> str:
+    """The audio/transcription model id integration tests should target.
+
+    Defaults to whisper-tiny (fastest CPU-friendly). Override with
+    MUSE_WHISPER_MODEL_ID for a different model:
+
+      MUSE_WHISPER_MODEL_ID=whisper-base pytest tests/integration/
+
+    Skips the test if the chosen model isn't loaded on the server.
+    """
+    model_id = os.environ.get("MUSE_WHISPER_MODEL_ID", "whisper-tiny")
+    _require_model(remote_health, model_id)
+    return model_id
