@@ -222,3 +222,15 @@ def test_load_curated_capabilities_non_dict_is_rejected():
     with _patch_yaml(yaml_text):
         entries = load_curated()
     assert entries == []
+
+
+def test_load_curated_includes_whisper_entries():
+    """ASR curated shortcuts: whisper-tiny, whisper-base, whisper-large-v3."""
+    entries = load_curated()
+    asr_ids = {e.id for e in entries if e.modality == "audio/transcription"}
+    assert {"whisper-tiny", "whisper-base", "whisper-large-v3"}.issubset(asr_ids)
+    # Each points at a Systran HF URI
+    for e in entries:
+        if e.modality == "audio/transcription":
+            assert e.uri is not None
+            assert e.uri.startswith("hf://Systran/faster-whisper-")

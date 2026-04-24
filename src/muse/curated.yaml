@@ -67,3 +67,23 @@
 
 - id: sd-turbo
   bundled: true
+
+# ---------- audio/transcription (ASR via faster-whisper) ----------
+
+- id: whisper-tiny
+  uri: hf://Systran/faster-whisper-tiny
+  modality: audio/transcription
+  size_gb: 0.08
+  description: "Whisper tiny (39M, ~75MB): CPU-friendly smoke test, multilingual"
+
+- id: whisper-base
+  uri: hf://Systran/faster-whisper-base
+  modality: audio/transcription
+  size_gb: 0.15
+  description: "Whisper base (74M, ~142MB): balanced CPU default"
+
+- id: whisper-large-v3
+  uri: hf://Systran/faster-whisper-large-v3
+  modality: audio/transcription
+  size_gb: 3.0
+  description: "Whisper large-v3 (1550M, ~2.9GB): SotA quality, 8GB+ GPU"
