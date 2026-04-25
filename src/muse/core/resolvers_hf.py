@@ -4,12 +4,14 @@ URI shapes:
   hf://org/repo                  # sentence-transformers (embedding/text)
   hf://org/repo-GGUF@<variant>   # GGUF (chat/completion); variant required
   hf://org/faster-whisper-tiny   # CT2 faster-whisper (audio/transcription)
+  hf://org/Text-Moderation       # text-classification (text/classification)
 
 Sniff logic (see `_sniff_repo_shape`):
   - any .gguf sibling          -> gguf
   - sentence-transformers tag  -> sentence-transformers
   - sentence_transformers_config.json sibling -> sentence-transformers
   - model.bin + config.json + (vocabulary.txt|tokenizer.json) + ASR tag -> faster-whisper
+  - text-classification tag    -> text-classification
   - else                       -> unknown (raises on resolve)
 
 Search:
@@ -17,6 +19,7 @@ Search:
     enumerate each repo's .gguf files as separate variants.
   - modality="embedding/text": HfApi.list_models(filter="sentence-transformers")
   - modality="audio/transcription": HfApi.list_models(filter="automatic-speech-recognition")
+  - modality="text/classification": HfApi.list_models(filter="text-classification")
 
 Capability sniffing:
   - supports_tools: loads tokenizer_config.json's chat_template (when
@@ -62,6 +65,13 @@ FASTER_WHISPER_RUNTIME_PATH = (
 FASTER_WHISPER_PIP_EXTRAS = ("faster-whisper>=1.0.0",)
 FASTER_WHISPER_SYSTEM_PACKAGES = ("ffmpeg",)
 
+TEXT_CLASSIFIER_RUNTIME_PATH = (
+    "muse.modalities.text_classification.runtimes.hf_text_classifier"
+    ":HFTextClassifier"
+)
+TEXT_CLASSIFIER_PIP_EXTRAS = ("transformers>=4.36.0", "torch>=2.1.0")
+TEXT_CLASSIFIER_SYSTEM_PACKAGES = ()
+
 
 class HFResolver(Resolver):
     """Resolver for hf:// URIs."""
@@ -85,11 +95,14 @@ class HFResolver(Resolver):
             return self._resolve_sentence_transformer(repo_id, info)
         if shape == "faster-whisper":
             return self._resolve_faster_whisper(repo_id, info)
+        if shape == "text-classification":
+            return self._resolve_text_classifier(repo_id, info)
         tags = getattr(info, "tags", None) or []
         raise ResolverError(
             f"cannot infer modality for {repo_id!r} "
             f"(no .gguf siblings, no sentence-transformers tag, "
-            f"no CT2 shape with ASR tag; tags={tags})"
+            f"no CT2 shape with ASR tag, no text-classification tag; "
+            f"tags={tags})"
         )
 
     def search(self, query: str, **filters) -> Iterable[SearchResult]:
@@ -103,13 +116,16 @@ class HFResolver(Resolver):
             yield from self._search_sentence_transformers(query, sort=sort, limit=limit)
         elif modality == "audio/transcription":
             yield from self._search_faster_whisper(query, sort=sort, limit=limit)
+        elif modality == "text/classification":
+            yield from self._search_text_classifier(query, sort=sort, limit=limit)
         elif modality is None:
             yield from self._search_gguf(query, sort=sort, limit=limit)
             yield from self._search_sentence_transformers(query, sort=sort, limit=limit)
         else:
             raise ResolverError(
                 f"HFResolver.search does not support modality {modality!r}; "
-                f"supported: chat/completion, embedding/text, audio/transcription"
+                f"supported: chat/completion, embedding/text, "
+                f"audio/transcription, text/classification"
             )
 
     # --- GGUF branch ---
@@ -304,6 +320,48 @@ class HFResolver(Resolver):
                 description=repo.id,
             )
 
+    # --- Text-Classifier branch ---
+
+    def _resolve_text_classifier(self, repo_id: str, info) -> ResolvedModel:
+        manifest = {
+            "model_id": repo_id.split("/", 1)[-1].lower(),
+            "modality": "text/classification",
+            "hf_repo": repo_id,
+            "description": f"Text classifier: {repo_id}",
+            "license": _repo_license(info),
+            "pip_extras": list(TEXT_CLASSIFIER_PIP_EXTRAS),
+            "system_packages": list(TEXT_CLASSIFIER_SYSTEM_PACKAGES),
+            "capabilities": {},
+        }
+
+        def _download(cache_root: Path) -> Path:
+            return Path(snapshot_download(
+                repo_id=repo_id,
+                cache_dir=str(cache_root) if cache_root else None,
+            ))
+
+        return ResolvedModel(
+            manifest=manifest,
+            backend_path=TEXT_CLASSIFIER_RUNTIME_PATH,
+            download=_download,
+        )
+
+    def _search_text_classifier(self, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
+        repos = self._api.list_models(
+            search=query, filter="text-classification",
+            sort=sort, limit=limit,
+        )
+        for repo in repos:
+            yield SearchResult(
+                uri=f"hf://{repo.id}",
+                model_id=repo.id.split("/", 1)[-1].lower(),
+                modality="text/classification",
+                size_gb=None,
+                downloads=getattr(repo, "downloads", None),
+                license=None,
+                description=repo.id,
+            )
+
 
 # --- sniff helpers (module-level, pytest-friendly) ---
 
@@ -320,8 +378,18 @@ def _looks_like_faster_whisper(siblings: list[str], tags: list[str]) -> bool:
     return has_ct2_shape and has_asr_tag
 
 
+def _looks_like_text_classifier(siblings: list[str], tags: list[str]) -> bool:
+    """HF text-classification repos carry the `text-classification` tag.
+    Sibling shape varies (PyTorch / safetensors / older bin formats); we
+    don't gate on file presence, only on the tag, since transformers
+    handles the loading ambiguity for us at AutoModelForSequenceClassification
+    time.
+    """
+    return "text-classification" in tags
+
+
 def _sniff_repo_shape(info) -> str:
-    """Return one of: 'gguf' | 'sentence-transformers' | 'faster-whisper' | 'unknown'."""
+    """Return one of: 'gguf' | 'sentence-transformers' | 'faster-whisper' | 'text-classification' | 'unknown'."""
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
     if any(f.endswith(".gguf") for f in siblings):
@@ -332,6 +400,8 @@ def _sniff_repo_shape(info) -> str:
         return "sentence-transformers"
     if _looks_like_faster_whisper(siblings, tags):
         return "faster-whisper"
+    if _looks_like_text_classifier(siblings, tags):
+        return "text-classification"
     return "unknown"
 
 

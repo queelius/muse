@@ -55,7 +55,7 @@ def test_sniff_returns_unknown_for_unrecognized_repo():
     from muse.core.resolvers_hf import _sniff_repo_shape
     info = _fake_repo_info(
         siblings=["model.safetensors", "config.json"],
-        tags=["text-classification"],
+        tags=["some-unrelated-tag"],
     )
     assert _sniff_repo_shape(info) == "unknown"
 
@@ -138,10 +138,10 @@ def test_resolve_unrecognized_repo_shape_raises():
     with patch("muse.core.resolvers_hf.HfApi") as MockApi:
         MockApi.return_value.repo_info.return_value = _fake_repo_info(
             siblings=["model.safetensors"],
-            tags=["text-classification"],
+            tags=["some-unsupported-tag"],
         )
         r = HFResolver()
-        with pytest.raises(ResolverError, match="cannot infer.*text-classification"):
+        with pytest.raises(ResolverError, match="cannot infer"):
             r.resolve("hf://org/weird-repo")
 
 
@@ -410,3 +410,89 @@ def test_search_faster_whisper_yields_results():
     assert all(r.uri.startswith("hf://Systran/faster-whisper-") for r in results)
     assert results[0].model_id == "faster-whisper-tiny"
     assert results[1].model_id == "faster-whisper-base"
+
+
+# --- text-classification branch ---
+
+def test_sniff_detects_text_classification_tag():
+    from muse.core.resolvers_hf import _sniff_repo_shape
+    info = SimpleNamespace(
+        siblings=[
+            SimpleNamespace(rfilename="config.json"),
+            SimpleNamespace(rfilename="model.safetensors"),
+            SimpleNamespace(rfilename="tokenizer.json"),
+        ],
+        tags=["text-classification", "transformers"],
+    )
+    assert _sniff_repo_shape(info) == "text-classification"
+
+
+def test_sniff_text_classification_does_not_override_gguf():
+    """If a repo has both .gguf siblings AND text-classification tag,
+    gguf wins (it's the more specific format)."""
+    from muse.core.resolvers_hf import _sniff_repo_shape
+    info = SimpleNamespace(
+        siblings=[
+            SimpleNamespace(rfilename="model.q4_k_m.gguf"),
+            SimpleNamespace(rfilename="config.json"),
+        ],
+        tags=["text-classification", "transformers"],
+    )
+    assert _sniff_repo_shape(info) == "gguf"
+
+
+def test_resolve_text_classification_synthesizes_manifest():
+    from muse.core.resolvers_hf import HFResolver
+    resolver = HFResolver()
+    info = SimpleNamespace(
+        siblings=[
+            SimpleNamespace(rfilename="config.json"),
+            SimpleNamespace(rfilename="model.safetensors"),
+            SimpleNamespace(rfilename="tokenizer.json"),
+        ],
+        tags=["text-classification"],
+        card_data=SimpleNamespace(license="apache-2.0"),
+    )
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        resolved = resolver.resolve("hf://KoalaAI/Text-Moderation")
+    assert resolved.manifest["modality"] == "text/classification"
+    assert resolved.manifest["hf_repo"] == "KoalaAI/Text-Moderation"
+    assert resolved.manifest["model_id"] == "text-moderation"
+    assert "transformers>=4.36.0" in resolved.manifest["pip_extras"]
+    assert "torch>=2.1.0" in resolved.manifest["pip_extras"]
+    assert resolved.backend_path == (
+        "muse.modalities.text_classification.runtimes.hf_text_classifier"
+        ":HFTextClassifier"
+    )
+
+
+def test_search_text_classification_yields_results():
+    from muse.core.resolvers_hf import HFResolver
+    resolver = HFResolver()
+    fake_repos = [
+        SimpleNamespace(id="KoalaAI/Text-Moderation", downloads=5000, siblings=[]),
+        SimpleNamespace(id="unitary/toxic-bert", downloads=12000, siblings=[]),
+    ]
+    with patch.object(resolver._api, "list_models", return_value=fake_repos):
+        results = list(resolver.search("toxic", modality="text/classification"))
+    assert len(results) == 2
+    assert all(r.modality == "text/classification" for r in results)
+    assert results[0].model_id == "text-moderation"
+
+
+def test_resolve_unknown_error_message_lists_text_classification():
+    """Sanity: the unknown-shape error mentions all 4 supported branches."""
+    from muse.core.resolvers_hf import HFResolver, ResolverError
+    resolver = HFResolver()
+    info = SimpleNamespace(
+        siblings=[SimpleNamespace(rfilename="random.bin")],
+        tags=["something-unknown"],
+    )
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        try:
+            resolver.resolve("hf://x/y")
+        except ResolverError as e:
+            msg = str(e)
+            assert "text-classification" in msg
+        else:
+            raise AssertionError("expected ResolverError")
