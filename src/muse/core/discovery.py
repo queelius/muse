@@ -17,8 +17,10 @@ a warning log.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +108,63 @@ def discover_models(dirs: list[Path]) -> dict[str, DiscoveredModel]:
                 source_path=py_file,
             )
     return found
+
+
+def modality_tags() -> list[str]:
+    """Single source of truth: which modality MIME tags does this muse know?
+
+    Walks the bundled modalities tree plus `$MUSE_MODALITIES_DIR` (if set)
+    and returns the sorted MODALITY tag list. Used by CLI argparse choices,
+    test invariants, and any caller that needs "what modalities exist?"
+    without paying the full router-build cost of `discover_modalities`.
+
+    Reads each modality `__init__.py` via AST parsing rather than executing
+    it, so callers like `muse --help` and `muse pull` don't transitively
+    import fastapi (which the modality routes depend on but the bare
+    `pip install muse` user may not have).
+
+    First-found-wins on collision (matches `discover_modalities` semantics).
+    """
+    bundled = Path(__file__).resolve().parents[1] / "modalities"
+    env = os.environ.get("MUSE_MODALITIES_DIR")
+    dirs = [bundled] + ([Path(env)] if env else [])
+
+    seen: set[str] = set()
+    for d in dirs:
+        if not d or not d.is_dir():
+            continue
+        for sub in sorted(d.iterdir()):
+            if not sub.is_dir() or sub.name.startswith("_"):
+                continue
+            init_py = sub / "__init__.py"
+            if not init_py.exists():
+                continue
+            tag = _ast_extract_modality(init_py)
+            if tag and tag not in seen:
+                seen.add(tag)
+    return sorted(seen)
+
+
+def _ast_extract_modality(init_py: Path) -> str | None:
+    """Pull the `MODALITY = "..."` literal from an __init__.py without exec.
+
+    Only handles the simple case (top-level `MODALITY = "string-literal"`),
+    which matches the convention every bundled modality follows. Anything
+    fancier (computed values, conditional assignment) returns None.
+    """
+    try:
+        tree = ast.parse(init_py.read_text())
+    except (OSError, SyntaxError):
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not (isinstance(target, ast.Name) and target.id == "MODALITY"):
+                continue
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                return node.value.value
+    return None
 
 
 def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:

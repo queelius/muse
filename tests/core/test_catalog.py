@@ -15,6 +15,7 @@ from muse.core.catalog import (
     _read_catalog,
     _reset_known_models_cache,
 )
+from muse.core.discovery import modality_tags
 
 
 @pytest.fixture(autouse=True)
@@ -38,14 +39,13 @@ def tmp_catalog(tmp_path, monkeypatch):
 
 
 def test_known_models_entries_have_valid_modality():
-    valid = {
-        "audio/speech",
-        "audio/transcription",
-        "chat/completion",
-        "embedding/text",
-        "image/generation",
-        "text/classification",
-    }
+    """Every catalog entry's modality must match a discovered modality.
+
+    The valid set comes from `modality_tags()` (single source of truth).
+    Adding a new modality package is enough to make this test accept it;
+    no test-side hardcoded list to forget to update.
+    """
+    valid = set(modality_tags())
     for model_id, entry in known_models().items():
         assert entry.modality in valid, \
             f"model {model_id} has invalid modality {entry.modality!r}"

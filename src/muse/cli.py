@@ -71,9 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="search resolvers (e.g. HuggingFace) for pullable models",
     )
     sp_search.add_argument("query", help="search query")
+    # Choices come from disk via AST scan: every bundled modality knows
+    # its own MIME tag, so adding text/classification or audio/transcription
+    # later doesn't require an edit here. modality_tags() avoids fastapi
+    # imports, so `muse --help` works on a bare install.
+    from muse.core.discovery import modality_tags
     sp_search.add_argument(
         "--modality",
-        choices=["chat/completion", "embedding/text"],
+        choices=modality_tags(),
         default=None,
         help="filter by modality (omit to search all supported)",
     )
