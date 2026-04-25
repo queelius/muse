@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muse"
-version = "0.13.0"
+version = "0.13.1"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]
@@ -28,8 +28,14 @@ Homepage = "https://github.com/queelius/muse"
 Issues = "https://github.com/queelius/muse/issues"
 
 [project.optional-dependencies]
-# Server runtime
-server = ["fastapi", "uvicorn", "sse-starlette", "httpx"]
+# Server runtime. python-multipart is required by FastAPI any time a
+# route uses Form(...) or UploadFile = File(...); the
+# audio/transcription routes need it at import time (the @router.post
+# decorator inspects parameter types and raises if multipart is
+# missing). Without this entry, per-model venvs that install
+# muse[server] would crash when discover_modalities mounts the
+# audio_transcription router.
+server = ["fastapi", "uvicorn", "sse-starlette", "httpx", "python-multipart"]
 
 # Audio modality (TTS)
 audio = [
