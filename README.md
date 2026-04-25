@@ -6,8 +6,9 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-image on `/v1/images/generations`
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
+- text moderation/classification on `/v1/moderations`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/generation`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/generation`, `text/classification`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -129,6 +130,7 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `POST /v1/images/generations` | generate images (OpenAI-compatible) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
+| `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |
 
 Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (model not found) and 422 (validation). Matches OpenAI's envelope so clients written against their API work against muse.
 
@@ -142,6 +144,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)
   - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
+  - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
   - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
