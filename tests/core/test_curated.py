@@ -234,3 +234,13 @@ def test_load_curated_includes_whisper_entries():
         if e.modality == "audio/transcription":
             assert e.uri is not None
             assert e.uri.startswith("hf://Systran/faster-whisper-")
+
+
+def test_load_curated_includes_text_moderation_entry():
+    """Curated text-moderation alias exists and points at KoalaAI."""
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+    assert "text-moderation" in by_id
+    e = by_id["text-moderation"]
+    assert e.modality == "text/classification"
+    assert e.uri == "hf://KoalaAI/Text-Moderation"

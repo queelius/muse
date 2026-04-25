@@ -87,3 +87,11 @@
   modality: audio/transcription
   size_gb: 3.0
   description: "Whisper large-v3 (1550M, ~2.9GB): SotA quality, 8GB+ GPU"
+
+# ---------- text/classification (moderation) ----------
+
+- id: text-moderation
+  uri: hf://KoalaAI/Text-Moderation
+  modality: text/classification
+  size_gb: 0.14
+  description: "9-category text moderation (S/H/V/HR/SH/S3/H2/V2/OK), CPU-friendly"
