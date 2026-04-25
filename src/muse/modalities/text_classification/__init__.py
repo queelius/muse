@@ -15,6 +15,7 @@ Modality vs URL: this is muse's first modality whose MIME tag
 Future routes (e.g., /v1/text/classifications for sentiment) can share
 the same runtime + dataclasses without a new modality package.
 """
+from muse.modalities.text_classification.client import ModerationsClient
 from muse.modalities.text_classification.protocol import (
     ClassificationResult,
     TextClassifierModel,
@@ -30,4 +31,5 @@ __all__ = [
     "build_router",
     "ClassificationResult",
     "TextClassifierModel",
+    "ModerationsClient",
 ]
