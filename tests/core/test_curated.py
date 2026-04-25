@@ -7,6 +7,7 @@ from muse.core.curated import (
     CuratedEntry,
     expand_curated_pull,
     find_curated,
+    find_curated_by_uri,
     load_curated,
     _reset_curated_cache_for_tests,
 )
@@ -237,10 +238,42 @@ def test_load_curated_includes_whisper_entries():
 
 
 def test_load_curated_includes_text_moderation_entry():
-    """Curated text-moderation alias exists and points at KoalaAI."""
+    """Curated text-moderation alias exists and points at KoalaAI.
+
+    Also asserts the `safe_labels: ["OK"]` capability overlay is present.
+    KoalaAI/Text-Moderation includes "OK" as one of nine single-label
+    classes; without this overlay, benign inputs (where the model
+    correctly assigns >0.99 to OK) erroneously get `flagged=True`. The
+    overlay is the fix; the test guards against accidental removal.
+    """
     entries = load_curated()
     by_id = {e.id: e for e in entries}
     assert "text-moderation" in by_id
     e = by_id["text-moderation"]
     assert e.modality == "text/classification"
     assert e.uri == "hf://KoalaAI/Text-Moderation"
+    assert e.capabilities.get("safe_labels") == ["OK"], (
+        "text-moderation must declare safe_labels=['OK'] or benign inputs "
+        "get flagged when the model is highly confident they're safe"
+    )
+
+
+def test_find_curated_by_uri_round_trips():
+    """find_curated_by_uri(e.uri) == e for every URI-shaped curated entry."""
+    for e in load_curated():
+        if not e.uri:
+            continue
+        match = find_curated_by_uri(e.uri)
+        assert match is e, f"URI lookup for {e.id!r} failed: {match}"
+
+
+def test_find_curated_by_uri_unknown_returns_none():
+    assert find_curated_by_uri("hf://nobody/nothing") is None
+
+
+def test_find_curated_by_uri_lets_uri_pull_inherit_capabilities():
+    """The curated text-moderation overlay is reachable from raw URI."""
+    match = find_curated_by_uri("hf://KoalaAI/Text-Moderation")
+    assert match is not None
+    assert match.id == "text-moderation"
+    assert match.capabilities.get("safe_labels") == ["OK"]

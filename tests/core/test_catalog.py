@@ -1045,3 +1045,54 @@ def test_pull_via_resolver_overlay_wins_on_collision(tmp_catalog):
 
     persisted = _read_catalog()["collide"]["manifest"]
     assert persisted["capabilities"]["shared_key"] == "curated_wins"
+
+
+def test_pull_uri_direct_inherits_curated_capabilities(tmp_catalog):
+    """`muse pull hf://...` should pick up the curated overlay when the URI
+    matches a curated entry, even if the user didn't type the curated id.
+
+    Regression for the C2 bug: copying a URI from `muse search` and
+    pasting it into `muse pull` previously produced a broken model
+    (no `safe_labels` for KoalaAI), because find_curated() only matched
+    by id and the URI path bypassed curated entirely.
+    """
+    from unittest.mock import patch
+    from muse.core.catalog import pull, _read_catalog
+    from muse.core.curated import CuratedEntry
+    from muse.core.resolvers import ResolvedModel
+
+    fake_curated = CuratedEntry(
+        id="text-moderation",
+        bundled=False,
+        uri="hf://KoalaAI/Text-Moderation",
+        modality="text/classification",
+        size_gb=0.14,
+        description="9-cat",
+        tags=(),
+        capabilities={"safe_labels": ["OK"]},
+    )
+    fake_resolved = ResolvedModel(
+        manifest={
+            "model_id": "text-moderation",
+            "modality": "text/classification",
+            "hf_repo": "KoalaAI/Text-Moderation",
+            "pip_extras": [],
+            "system_packages": [],
+            "capabilities": {},
+        },
+        backend_path="fake.mod:Cls",
+        download=lambda cache_root: cache_root / "weights" / "tm",
+    )
+    # find_curated by id returns None (user didn't type curated id);
+    # find_curated_by_uri returns the entry (URI matches curated.yaml).
+    with patch("muse.core.catalog.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_curated), \
+         patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog.venv_python", return_value="/fake/py"), \
+         patch("muse.core.resolvers.resolve", return_value=fake_resolved):
+        pull("hf://KoalaAI/Text-Moderation")
+
+    persisted = _read_catalog()["text-moderation"]["manifest"]
+    assert persisted["capabilities"]["safe_labels"] == ["OK"]

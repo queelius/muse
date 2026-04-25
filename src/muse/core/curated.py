@@ -143,6 +143,23 @@ def find_curated(model_id: str) -> CuratedEntry | None:
     return None
 
 
+def find_curated_by_uri(uri: str) -> CuratedEntry | None:
+    """Return the curated entry whose `uri` matches, or None.
+
+    Lets the URI-only pull path (`muse pull hf://...`) inherit any
+    curated `capabilities` overlay (e.g. `safe_labels`, `chat_format`)
+    that was set for the same upstream repo. Without this, pulling by
+    curated id and pulling by raw URI produce subtly different catalog
+    manifests for the same model — a footgun where curated metadata
+    silently disappears the moment a user copies the URI from `muse
+    search` output.
+    """
+    for e in load_curated():
+        if e.uri and e.uri == uri:
+            return e
+    return None
+
+
 def expand_curated_pull(identifier: str) -> str | None:
     """Map a curated id to whatever `pull()` should actually receive.
 

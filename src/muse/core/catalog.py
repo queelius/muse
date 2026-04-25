@@ -29,7 +29,7 @@ from typing import Any
 
 from huggingface_hub import snapshot_download
 
-from muse.core.curated import find_curated
+from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.install import check_system_packages, install_pip_extras
 from muse.core.venv import create_venv, install_into_venv, venv_python
@@ -289,7 +289,22 @@ def pull(identifier: str) -> None:
         return
 
     if "://" in identifier:
-        _pull_via_resolver(identifier)
+        # Inherit curated capabilities for this URI even when the user
+        # didn't go through the curated id. Without this, copying a URI
+        # out of `muse search` output and pasting it into `muse pull`
+        # silently strips overlay fields like `safe_labels` (KoalaAI)
+        # or `trust_remote_code` (Qwen3-Embedding) that are required
+        # for the model to behave correctly. The curated id, if any,
+        # is also preserved so the catalog key stays friendly.
+        uri_curated = find_curated_by_uri(identifier)
+        if uri_curated is not None:
+            _pull_via_resolver(
+                identifier,
+                model_id_override=uri_curated.id,
+                capabilities_overlay=uri_curated.capabilities or None,
+            )
+        else:
+            _pull_via_resolver(identifier)
         return
 
     # Bare id: must be a bundled script (resolver-pulled ids that land
