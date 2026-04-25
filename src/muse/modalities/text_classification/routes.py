@@ -65,7 +65,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             backend = registry.get(MODALITY, req.model)
         except KeyError:
             raise ModelNotFoundError(
-                model_id=req.model or "(default)", modality=MODALITY,
+                model_id=req.model or "<default>", modality=MODALITY,
             )
 
         # Resolve effective model_id for the response envelope. Prefer

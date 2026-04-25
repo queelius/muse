@@ -56,12 +56,15 @@ def _resolve_threshold(
     """Pick the effective threshold for this request.
 
     Precedence: request > MANIFEST.capabilities.flag_threshold > 0.5.
-    Non-numeric manifest values are silently ignored (default applies).
+    Non-numeric or out-of-range manifest values are silently ignored
+    (default applies). Request-side validation lives in routes.py so
+    the user gets a 400 with a clear message; here we just defend
+    against a malformed YAML capabilities entry from biting at runtime.
     """
     if request_threshold is not None:
         return float(request_threshold)
     cap = manifest_capabilities.get("flag_threshold")
-    if isinstance(cap, (int, float)):
+    if isinstance(cap, (int, float)) and 0.0 <= float(cap) <= 1.0:
         return float(cap)
     return 0.5
 

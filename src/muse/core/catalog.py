@@ -485,6 +485,10 @@ def remove(model_id: str, *, purge: bool = False) -> None:
     venv_path = catalog.get(model_id, {}).get("venv_path")
     catalog.pop(model_id, None)
     _write_catalog(catalog)
+    # Resolver-pulled entries appear in known_models() via the persisted
+    # manifest path; once removed, that cache must drop them too or
+    # `muse models list` keeps reporting a model that no longer exists.
+    _reset_known_models_cache()
     if purge and venv_path:
         import shutil
         shutil.rmtree(venv_path, ignore_errors=True)
@@ -509,6 +513,10 @@ def set_enabled(model_id: str, enabled: bool) -> None:
         raise KeyError(f"model {model_id!r} is not pulled")
     catalog[model_id]["enabled"] = bool(enabled)
     _write_catalog(catalog)
+    # `enabled` flows through known_models() into the CatalogEntry
+    # consumers see; without the reset, `muse models list` would
+    # display the stale state until the process restarts.
+    _reset_known_models_cache()
 
 
 def _import_backend_module(module_path: str):
