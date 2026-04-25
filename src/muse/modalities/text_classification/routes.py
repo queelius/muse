@@ -19,6 +19,9 @@ from pydantic import BaseModel
 
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities.text_classification.codec import (
+    encode_moderations, _resolve_threshold,
+)
 
 # MODALITY defined locally to avoid the __init__ circular import that
 # bit ASR T1; sibling modalities all do this.
@@ -39,11 +42,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.post("/v1/moderations")
     async def moderations(req: _ModerationsRequest):
-        # Lazy import to avoid a circular import with __init__.
-        from muse.modalities.text_classification.codec import (
-            encode_moderations, _resolve_threshold,
-        )
-
         if req.threshold is not None and not (0.0 <= req.threshold <= 1.0):
             return error_response(
                 400, "invalid_parameter",
@@ -73,7 +71,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # the backend's own model_id (set on instantiation) so that the
         # response reflects what actually answered, not the request's
         # model field which may have been None.
-        effective_id = getattr(backend, "model_id", req.model or "unknown")
+        effective_id = backend.model_id
         manifest = registry.manifest(MODALITY, effective_id) or {}
         capabilities = manifest.get("capabilities") or {}
         threshold = _resolve_threshold(req.threshold, capabilities)
