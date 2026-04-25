@@ -223,6 +223,60 @@ class TestProxy:
         assert body["error"]["code"] == "model_not_found"
         assert "does-not-exist" in body["error"]["message"]
 
+    def test_proxy_forwards_multipart_to_matching_worker(self):
+        """Regression: extracting model from a multipart body must NOT
+        consume the receive stream. Without `await request.body()`
+        before `await request.form()`, _forward's later body() raises
+        RuntimeError("Stream consumed") and the request fails as 500.
+
+        Saw this live on v0.13.1 against /v1/audio/transcriptions.
+        """
+        routes = [WorkerRoute(model_id="whisper-tiny", worker_url="http://127.0.0.1:9099")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        captured_body = {}
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.aclose = AsyncMock()
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = {"content-type": "application/json"}
+            mock_response.aread = AsyncMock(return_value=b'{"text":"hello"}')
+
+            stream_ctx = MagicMock()
+            stream_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+            stream_ctx.__aexit__ = AsyncMock(return_value=None)
+
+            def _capture_stream(method, url, **kwargs):
+                captured_body["body"] = kwargs.get("content")
+                captured_body["url"] = url
+                return stream_ctx
+
+            mock_client.stream = MagicMock(side_effect=_capture_stream)
+            mock_client_cls.return_value = mock_client
+
+            r = client.post(
+                "/v1/audio/transcriptions",
+                files={"file": ("a.wav", b"FAKEWAV", "audio/wav")},
+                data={"model": "whisper-tiny"},
+            )
+
+        # Must not be 500 or 400 - the multipart body must have been
+        # parsed for routing AND forwarded with its bytes intact.
+        assert r.status_code == 200, f"got {r.status_code}: {r.text}"
+        assert captured_body["url"] == "http://127.0.0.1:9099/v1/audio/transcriptions"
+        # The forwarded body must contain the multipart payload, not be empty
+        forwarded = captured_body["body"]
+        assert forwarded, "forwarded body is empty (stream was consumed before forward)"
+        assert b"whisper-tiny" in forwarded
+        assert b"FAKEWAV" in forwarded
+
+
     def test_proxy_returns_400_when_model_not_specified(self):
         """POST without a model field: 400 (client must provide routing info)."""
         routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]

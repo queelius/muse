@@ -67,6 +67,12 @@ async def extract_model_from_request(request: Any) -> str | None:
                 return None
         if "multipart/form-data" in content_type:
             try:
+                # Read body FIRST so Starlette caches it on _body.
+                # request.form() consumes the receive stream; without
+                # caching, _forward's later request.body() raises
+                # "Stream consumed". With _body set, stream() yields
+                # the cached bytes and form() parses from those.
+                await request.body()
                 form = await request.form()
                 model = form.get("model")
                 # form values are strings or UploadFile; only the
