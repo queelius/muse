@@ -124,3 +124,15 @@ def whisper_model(remote_health) -> str:
     model_id = os.environ.get("MUSE_WHISPER_MODEL_ID", "whisper-tiny")
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def text_moderation_model(remote_health) -> str:
+    """The text/classification model id integration tests should target.
+
+    Defaults to text-moderation. Override via MUSE_MODERATION_MODEL_ID.
+    Skips the test if the chosen model isn't loaded on the server.
+    """
+    model_id = os.environ.get("MUSE_MODERATION_MODEL_ID", "text-moderation")
+    _require_model(remote_health, model_id)
+    return model_id
