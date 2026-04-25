@@ -22,6 +22,7 @@ ModelNotFoundError and RequestValidationError.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -97,7 +98,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             tmp.write(data)
             tmp.flush()
             try:
-                result = backend.transcribe(
+                # Whisper inference is sync and CPU/GPU-bound; offload
+                # so a long transcription (large-v3 on a 60s clip is
+                # multi-second wall time) doesn't block /health, the
+                # gateway's per-worker probing, or sibling requests.
+                # The `with` stays open across the await — tmp.name is
+                # valid for the duration of the thread.
+                result = await asyncio.to_thread(
+                    backend.transcribe,
                     tmp.name,
                     task=task,
                     language=None if task == "translate" else language,

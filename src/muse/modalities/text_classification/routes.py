@@ -11,6 +11,7 @@ ModelNotFoundError; 400 returns error_response() so the bare
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter
@@ -77,7 +78,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         threshold = _resolve_threshold(req.threshold, capabilities)
         safe_labels = _resolve_safe_labels(capabilities)
 
-        results = backend.classify(req.input)
+        # backend.classify is sync (transformers pipeline); offload to a
+        # thread so a slow inference doesn't block the event loop and
+        # starve sibling /health, /v1/models, or other in-flight
+        # moderation requests on the same worker.
+        results = await asyncio.to_thread(backend.classify, req.input)
         body = encode_moderations(
             results, model_id=effective_id, threshold=threshold,
             safe_labels=safe_labels,
