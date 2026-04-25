@@ -95,3 +95,76 @@ def test_encode_envelope_id_unique_per_call():
     a = encode_moderations(results, model_id="m", threshold=0.5)
     b = encode_moderations(results, model_id="m", threshold=0.5)
     assert a["id"] != b["id"]
+
+
+# --- safe_labels (v0.14.1 fix) ---
+
+def test_flagged_single_label_safe_label_demoted():
+    """Argmax that's in safe_labels never flags True, even if >= threshold.
+
+    Regression: KoalaAI/Text-Moderation has an "OK" label meaning "safe".
+    Confidence in OK shouldn't trigger the flagged boolean. Without
+    safe_labels, the argmax-above-threshold rule would produce
+    `flagged=True` on every benign input where the model is confident.
+    """
+    cats, flagged = _flagged_categories(
+        {"OK": 0.99, "H": 0.005, "V": 0.005}, 0.5,
+        multi_label=False, safe_labels=("OK",),
+    )
+    assert cats == {"OK": False, "H": False, "V": False}
+    assert flagged is False
+
+
+def test_flagged_single_label_safe_label_does_not_protect_other_categories():
+    """If argmax is harmful, safe_labels doesn't suppress flagging."""
+    cats, flagged = _flagged_categories(
+        {"OK": 0.1, "H": 0.7, "V": 0.2}, 0.5,
+        multi_label=False, safe_labels=("OK",),
+    )
+    assert cats == {"OK": False, "H": True, "V": False}
+    assert flagged is True
+
+
+def test_flagged_multi_label_safe_label_demoted():
+    """Multi-label: a category in safe_labels never flags True
+    even if its score >= threshold."""
+    cats, flagged = _flagged_categories(
+        {"toxic": 0.9, "safe": 0.95}, 0.5,
+        multi_label=True, safe_labels=("safe",),
+    )
+    assert cats == {"toxic": True, "safe": False}
+    assert flagged is True
+
+
+def test_flagged_safe_labels_default_empty_preserves_old_behavior():
+    """Without safe_labels (default ()), behavior matches v0.14.0."""
+    cats, flagged = _flagged_categories(
+        {"OK": 0.99, "H": 0.005}, 0.5, multi_label=False,
+    )
+    # OK is argmax with score >= threshold so flagged True (the v0.14.0 bug)
+    assert cats == {"OK": True, "H": False}
+    assert flagged is True
+
+
+def test_resolve_safe_labels_from_manifest():
+    """capabilities.safe_labels parses from manifest."""
+    from muse.modalities.text_classification.codec import _resolve_safe_labels
+    assert _resolve_safe_labels({"safe_labels": ["OK"]}) == ("OK",)
+    assert _resolve_safe_labels({"safe_labels": ("OK", "neutral")}) == ("OK", "neutral")
+    assert _resolve_safe_labels({}) == ()
+    assert _resolve_safe_labels({"safe_labels": "not-a-list"}) == ()
+    assert _resolve_safe_labels({"safe_labels": [1, 2]}) == ()
+
+
+def test_encode_envelope_threads_safe_labels():
+    """encode_moderations passes safe_labels through to flagging logic."""
+    results = [ClassificationResult(
+        scores={"OK": 0.99, "H": 0.005}, multi_label=False,
+    )]
+    body = encode_moderations(
+        results, model_id="text-moderation", threshold=0.5,
+        safe_labels=("OK",),
+    )
+    res0 = body["results"][0]
+    assert res0["flagged"] is False
+    assert res0["categories"] == {"OK": False, "H": False}

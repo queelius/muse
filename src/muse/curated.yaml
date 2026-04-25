@@ -95,3 +95,5 @@
   modality: text/classification
   size_gb: 0.14
   description: "9-category text moderation (S/H/V/HR/SH/S3/H2/V2/OK), CPU-friendly"
+  capabilities:
+    safe_labels: ["OK"]

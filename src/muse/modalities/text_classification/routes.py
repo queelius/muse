@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_classification.codec import (
-    encode_moderations, _resolve_threshold,
+    encode_moderations, _resolve_threshold, _resolve_safe_labels,
 )
 
 # MODALITY defined locally to avoid the __init__ circular import that
@@ -75,10 +75,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         manifest = registry.manifest(MODALITY, effective_id) or {}
         capabilities = manifest.get("capabilities") or {}
         threshold = _resolve_threshold(req.threshold, capabilities)
+        safe_labels = _resolve_safe_labels(capabilities)
 
         results = backend.classify(req.input)
         body = encode_moderations(
             results, model_id=effective_id, threshold=threshold,
+            safe_labels=safe_labels,
         )
         return JSONResponse(content=body)
 

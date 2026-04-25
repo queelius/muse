@@ -44,6 +44,7 @@ def test_known_models_entries_have_valid_modality():
         "chat/completion",
         "embedding/text",
         "image/generation",
+        "text/classification",
     }
     for model_id, entry in known_models().items():
         assert entry.modality in valid, \
