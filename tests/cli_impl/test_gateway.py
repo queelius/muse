@@ -58,10 +58,89 @@ class TestExtractModel:
         assert model is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_content_type_not_json(self):
+    async def test_returns_none_for_unknown_content_type(self):
+        """text/plain (or any non-JSON, non-multipart) returns None."""
         request = MagicMock()
         request.method = "POST"
-        request.headers = {"content-type": "multipart/form-data"}
+        request.headers = {"content-type": "text/plain"}
+        model = await extract_model_from_request(request)
+        assert model is None
+
+    @pytest.mark.asyncio
+    async def test_extracts_model_from_multipart_form_body(self):
+        """POST with multipart/form-data: model is form['model'].
+
+        OpenAI's audio.transcriptions / audio.translations / images.edits
+        / images.variations endpoints all use multipart and put the model
+        in a form field, so the gateway must support extraction here.
+        """
+        # Use a real Starlette Request because request.form() needs the
+        # full receive-channel machinery; MagicMock doesn't carry that.
+        from starlette.requests import Request
+
+        body = (
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="model"\r\n\r\n'
+            b"whisper-tiny\r\n"
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+            b"Content-Type: audio/wav\r\n\r\n"
+            b"FAKEWAVBYTES\r\n"
+            b"--boundary--\r\n"
+        )
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/audio/transcriptions",
+            "headers": [
+                (b"content-type", b"multipart/form-data; boundary=boundary"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "query_string": b"",
+        }
+        sent = False
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request = Request(scope, receive=receive)
+        model = await extract_model_from_request(request)
+        assert model == "whisper-tiny"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_multipart_body_has_no_model_field(self):
+        """A multipart body without a `model` form field returns None."""
+        from starlette.requests import Request
+
+        body = (
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+            b"Content-Type: audio/wav\r\n\r\n"
+            b"FAKEWAVBYTES\r\n"
+            b"--boundary--\r\n"
+        )
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/audio/transcriptions",
+            "headers": [
+                (b"content-type", b"multipart/form-data; boundary=boundary"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "query_string": b"",
+        }
+        sent = False
+        async def receive():
+            nonlocal sent
+            if sent:
+                return {"type": "http.disconnect"}
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request = Request(scope, receive=receive)
         model = await extract_model_from_request(request)
         assert model is None
 

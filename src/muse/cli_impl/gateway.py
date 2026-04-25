@@ -42,6 +42,9 @@ async def extract_model_from_request(request: Any) -> str | None:
     """Extract the `model` field from a request.
 
     - POST with JSON body: body["model"]
+    - POST with multipart/form-data body: form["model"]
+      (used by /v1/audio/transcriptions, /v1/audio/translations, and
+      future multipart endpoints like /v1/images/edits.)
     - GET: query_params["model"]
     - Anything else: None
 
@@ -53,16 +56,24 @@ async def extract_model_from_request(request: Any) -> str | None:
 
     if request.method == "POST":
         content_type = request.headers.get("content-type", "")
-        if "application/json" not in content_type:
-            return None
-        try:
-            body_bytes = await request.body()
-            body = json.loads(body_bytes)
-            if not isinstance(body, dict):
+        if "application/json" in content_type:
+            try:
+                body_bytes = await request.body()
+                body = json.loads(body_bytes)
+                if not isinstance(body, dict):
+                    return None
+                return body.get("model")
+            except (json.JSONDecodeError, ValueError):
                 return None
-            return body.get("model")
-        except (json.JSONDecodeError, ValueError):
-            return None
+        if "multipart/form-data" in content_type:
+            try:
+                form = await request.form()
+                model = form.get("model")
+                # form values are strings or UploadFile; only the
+                # string value is a valid model id.
+                return model if isinstance(model, str) else None
+            except Exception:  # noqa: BLE001
+                return None
 
     return None
 
