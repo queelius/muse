@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -30,6 +31,20 @@ MODALITY = "text/classification"
 
 
 logger = logging.getLogger(__name__)
+
+
+# Defaults are conservative; tunable via env so a power user with a
+# big GPU and a known-safe pipeline can lift them, and a sysadmin
+# fronting a public muse can tighten them. The point isn't a perfect
+# limit, just a finite one — without these, a single curl with
+# `input: [...]` can OOM the worker by trying to materialize a
+# multi-million-string batch. Code paths that hit these caps return
+# 400 so the client knows the request was rejected (vs. silently
+# truncated).
+_MAX_BATCH = int(os.environ.get("MUSE_MODERATIONS_MAX_BATCH", "1024"))
+_MAX_CHARS_PER_ITEM = int(
+    os.environ.get("MUSE_MODERATIONS_MAX_CHARS_PER_ITEM", "100000")
+)
 
 
 class _ModerationsRequest(BaseModel):
@@ -59,6 +74,24 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter",
                 "input must be a non-empty string or list of non-empty strings",
+            )
+
+        items = [req.input] if isinstance(req.input, str) else req.input
+        if len(items) > _MAX_BATCH:
+            return error_response(
+                400, "invalid_parameter",
+                f"input batch size {len(items)} exceeds "
+                f"MUSE_MODERATIONS_MAX_BATCH={_MAX_BATCH}",
+            )
+        too_long = next(
+            (i for i, s in enumerate(items) if len(s) > _MAX_CHARS_PER_ITEM),
+            None,
+        )
+        if too_long is not None:
+            return error_response(
+                400, "invalid_parameter",
+                f"input[{too_long}] exceeds "
+                f"MUSE_MODERATIONS_MAX_CHARS_PER_ITEM={_MAX_CHARS_PER_ITEM}",
             )
 
         try:

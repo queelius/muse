@@ -154,3 +154,46 @@ def test_default_model_used_when_field_omitted():
     r = client.post("/v1/moderations", json={"input": "hi"})
     assert r.status_code == 200
     assert r.json()["model"] == "text-moderation"
+
+
+def test_oversized_batch_returns_400(monkeypatch):
+    """A list bigger than MUSE_MODERATIONS_MAX_BATCH is rejected up front."""
+    monkeypatch.setenv("MUSE_MODERATIONS_MAX_BATCH", "3")
+    # Reimport so the new env var is reflected (module reads at import time).
+    import importlib
+    from muse.modalities.text_classification import routes as routes_mod
+    importlib.reload(routes_mod)
+
+    backend = _fake_classify_single({"OK": 1.0})
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": "text-moderation"})
+    app = create_app(registry=reg, routers={MODALITY: routes_mod.build_router(reg)})
+    client = TestClient(app)
+
+    r = client.post("/v1/moderations", json={
+        "input": ["a", "b", "c", "d"],
+    })
+    assert r.status_code == 400
+    body = r.json()["error"]
+    assert body["code"] == "invalid_parameter"
+    assert "MUSE_MODERATIONS_MAX_BATCH=3" in body["message"]
+
+
+def test_oversized_item_returns_400(monkeypatch):
+    """A single string bigger than the per-item cap is rejected."""
+    monkeypatch.setenv("MUSE_MODERATIONS_MAX_CHARS_PER_ITEM", "10")
+    import importlib
+    from muse.modalities.text_classification import routes as routes_mod
+    importlib.reload(routes_mod)
+
+    backend = _fake_classify_single({"OK": 1.0})
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": "text-moderation"})
+    app = create_app(registry=reg, routers={MODALITY: routes_mod.build_router(reg)})
+    client = TestClient(app)
+
+    r = client.post("/v1/moderations", json={
+        "input": "a" * 100,
+    })
+    assert r.status_code == 400
+    assert "MUSE_MODERATIONS_MAX_CHARS_PER_ITEM=10" in r.json()["error"]["message"]

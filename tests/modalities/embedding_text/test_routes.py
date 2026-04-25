@@ -157,3 +157,48 @@ def test_user_field_accepted_and_ignored(client):
         "user": "user-42",
     })
     assert r.status_code == 200
+
+
+def test_oversized_batch_returns_400(monkeypatch):
+    """Reject batches larger than MUSE_EMBEDDINGS_MAX_BATCH up front."""
+    monkeypatch.setenv("MUSE_EMBEDDINGS_MAX_BATCH", "3")
+    import importlib
+    from muse.modalities.embedding_text import routes as routes_mod
+    importlib.reload(routes_mod)
+
+    reg = ModalityRegistry()
+    reg.register("embedding/text", FakeEmbeddingsModel())
+    app = create_app(
+        registry=reg,
+        routers={"embedding/text": routes_mod.build_router(reg)},
+    )
+    client = TestClient(app)
+
+    r = client.post("/v1/embeddings", json={
+        "input": ["a", "b", "c", "d"], "model": "fake-embed",
+    })
+    assert r.status_code == 400
+    body = r.json()["error"]
+    assert body["code"] == "invalid_parameter"
+    assert "MUSE_EMBEDDINGS_MAX_BATCH=3" in body["message"]
+
+
+def test_oversized_item_returns_400(monkeypatch):
+    monkeypatch.setenv("MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM", "10")
+    import importlib
+    from muse.modalities.embedding_text import routes as routes_mod
+    importlib.reload(routes_mod)
+
+    reg = ModalityRegistry()
+    reg.register("embedding/text", FakeEmbeddingsModel())
+    app = create_app(
+        registry=reg,
+        routers={"embedding/text": routes_mod.build_router(reg)},
+    )
+    client = TestClient(app)
+
+    r = client.post("/v1/embeddings", json={
+        "input": "x" * 100, "model": "fake-embed",
+    })
+    assert r.status_code == 400
+    assert "MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM=10" in r.json()["error"]["message"]

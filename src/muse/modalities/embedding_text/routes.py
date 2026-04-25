@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from threading import Lock
 from typing import Union
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from muse.core.errors import ModelNotFoundError
+from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.embedding_text.codec import embedding_to_base64
 
@@ -36,6 +38,15 @@ logger = logging.getLogger(__name__)
 
 MODALITY = "embedding/text"
 _inference_lock = Lock()
+
+# See text_classification/routes for the rationale (finite caps to
+# prevent worker OOM on giant batches). Embedding caps are higher
+# because RAG ingestion legitimately wants thousands at a time, but
+# they're still finite.
+_MAX_BATCH = int(os.environ.get("MUSE_EMBEDDINGS_MAX_BATCH", "2048"))
+_MAX_CHARS_PER_ITEM = int(
+    os.environ.get("MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM", "100000")
+)
 
 
 class EmbeddingsRequest(BaseModel):
@@ -66,6 +77,24 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.post("/embeddings")
     async def embeddings(req: EmbeddingsRequest):
+        items = [req.input] if isinstance(req.input, str) else req.input
+        if len(items) > _MAX_BATCH:
+            return error_response(
+                400, "invalid_parameter",
+                f"input batch size {len(items)} exceeds "
+                f"MUSE_EMBEDDINGS_MAX_BATCH={_MAX_BATCH}",
+            )
+        too_long = next(
+            (i for i, s in enumerate(items) if len(s) > _MAX_CHARS_PER_ITEM),
+            None,
+        )
+        if too_long is not None:
+            return error_response(
+                400, "invalid_parameter",
+                f"input[{too_long}] exceeds "
+                f"MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM={_MAX_CHARS_PER_ITEM}",
+            )
+
         try:
             model = registry.get(MODALITY, req.model)
         except KeyError:
