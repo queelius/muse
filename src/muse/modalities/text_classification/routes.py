@@ -23,8 +23,8 @@ from muse.modalities.text_classification.codec import (
     encode_moderations, _resolve_threshold, _resolve_safe_labels,
 )
 
-# MODALITY defined locally to avoid the __init__ circular import that
-# bit ASR T1; sibling modalities all do this.
+# MODALITY defined locally to avoid the __init__ circular import;
+# sibling modalities all do this.
 MODALITY = "text/classification"
 
 
@@ -53,7 +53,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_parameter", "input must not be empty",
             )
         if isinstance(req.input, list) and (
-            len(req.input) == 0 or any(not s for s in req.input)
+            not req.input or any(not s for s in req.input)
         ):
             return error_response(
                 400, "invalid_parameter",

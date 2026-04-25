@@ -5,7 +5,7 @@ Public surface:
   - build_router(registry) -> APIRouter (mounted by the worker)
   - ClassificationResult dataclass
   - TextClassifierModel Protocol
-  - ModerationsClient (added in Task 4)
+  - ModerationsClient
 
 Wire contract (OpenAI-compat):
   - POST /v1/moderations

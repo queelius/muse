@@ -107,14 +107,13 @@ def _flagged_categories(
             k: (v >= threshold and k not in safe)
             for k, v in scores.items()
         }
+    elif not scores:
+        cats = {}
     else:
-        if not scores:
-            cats = {}
-        else:
-            top = max(scores, key=scores.get)
-            cats = {
-                k: (k == top and v >= threshold and k not in safe)
-                for k, v in scores.items()
-            }
+        top = max(scores, key=scores.get)
+        cats = {
+            k: (k == top and v >= threshold and k not in safe)
+            for k, v in scores.items()
+        }
     flagged = any(cats.values())
     return cats, flagged

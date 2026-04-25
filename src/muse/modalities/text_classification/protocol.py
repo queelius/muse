@@ -25,9 +25,8 @@ class ClassificationResult:
 class TextClassifierModel(Protocol):
     """Structural protocol any text-classifier backend satisfies.
 
-    HFTextClassifier (the generic runtime, in Task 5) satisfies this
-    without inheriting. Tests use fakes that match the signature
-    structurally.
+    HFTextClassifier (the generic runtime) satisfies this without
+    inheriting. Tests use fakes that match the signature structurally.
     """
 
     def classify(self, input: str | list[str]) -> list[ClassificationResult]:
