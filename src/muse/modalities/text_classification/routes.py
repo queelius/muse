@@ -1,16 +1,87 @@
-"""Stub routes for text/classification.
+"""FastAPI routes for /v1/moderations.
 
-Replaced in Task 3 with the real /v1/moderations endpoint. For now
-this exists only so the modality's build_router() in __init__.py has
-something to import, which keeps run_worker's "mount all discovered
-modality routers" path working between Task 1 (protocol) and Task 3
-(routes).
+OpenAI-compat shape:
+  request:  {"input": str | list[str], "model"?: str, "threshold"?: float}
+  response: {"id", "model", "results": [{"flagged", "categories", "category_scores"}]}
+
+Error envelopes follow muse's OpenAI-compat convention. 404 raises
+ModelNotFoundError; 400 returns error_response() so the bare
+{"error": ...} envelope reaches the client without FastAPI's
+{"detail": ...} wrap.
 """
-from fastapi import APIRouter
+from __future__ import annotations
 
+import logging
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
+
+# MODALITY defined locally to avoid the __init__ circular import that
+# bit ASR T1; sibling modalities all do this.
+MODALITY = "text/classification"
+
+
+logger = logging.getLogger(__name__)
+
+
+class _ModerationsRequest(BaseModel):
+    input: str | list[str]
+    model: str | None = None
+    threshold: float | None = None
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
-    """Empty router placeholder; Task 3 adds POST /v1/moderations."""
-    return APIRouter()
+    router = APIRouter()
+
+    @router.post("/v1/moderations")
+    async def moderations(req: _ModerationsRequest):
+        # Lazy import to avoid a circular import with __init__.
+        from muse.modalities.text_classification.codec import (
+            encode_moderations, _resolve_threshold,
+        )
+
+        if req.threshold is not None and not (0.0 <= req.threshold <= 1.0):
+            return error_response(
+                400, "invalid_parameter",
+                f"threshold must be in [0, 1]; got {req.threshold}",
+            )
+
+        if isinstance(req.input, str) and not req.input:
+            return error_response(
+                400, "invalid_parameter", "input must not be empty",
+            )
+        if isinstance(req.input, list) and (
+            len(req.input) == 0 or any(not s for s in req.input)
+        ):
+            return error_response(
+                400, "invalid_parameter",
+                "input must be a non-empty string or list of non-empty strings",
+            )
+
+        try:
+            backend = registry.get(MODALITY, req.model)
+        except KeyError:
+            raise ModelNotFoundError(
+                model_id=req.model or "(default)", modality=MODALITY,
+            )
+
+        # Resolve effective model_id for the response envelope. Prefer
+        # the backend's own model_id (set on instantiation) so that the
+        # response reflects what actually answered, not the request's
+        # model field which may have been None.
+        effective_id = getattr(backend, "model_id", req.model or "unknown")
+        manifest = registry.manifest(MODALITY, effective_id) or {}
+        capabilities = manifest.get("capabilities") or {}
+        threshold = _resolve_threshold(req.threshold, capabilities)
+
+        results = backend.classify(req.input)
+        body = encode_moderations(
+            results, model_id=effective_id, threshold=threshold,
+        )
+        return JSONResponse(content=body)
+
+    return router

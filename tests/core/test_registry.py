@@ -134,3 +134,19 @@ def test_register_without_manifest_gets_minimal_stub(reg):
     # Minimal stub so downstream consumers never hit a KeyError on these
     assert info.manifest["model_id"] == "anon"
     assert info.manifest["modality"] == "audio/speech"
+
+
+def test_registry_exposes_manifest_after_register():
+    from unittest.mock import MagicMock
+    reg = ModalityRegistry()
+    fake = MagicMock(model_id="m1")
+    reg.register("text/classification", fake, manifest={
+        "model_id": "m1", "capabilities": {"flag_threshold": 0.7},
+    })
+    m = reg.manifest("text/classification", "m1")
+    assert m["capabilities"]["flag_threshold"] == 0.7
+
+
+def test_registry_manifest_returns_none_for_unknown_model():
+    reg = ModalityRegistry()
+    assert reg.manifest("text/classification", "nope") is None

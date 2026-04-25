@@ -100,6 +100,10 @@ class ModalityRegistry:
             for mid in self._models.get(modality, {})
         ]
 
+    def manifest(self, modality: str, model_id: str) -> dict | None:
+        """Return the stored MANIFEST for (modality, model_id), or None if unset."""
+        return self._manifests.get(modality, {}).get(model_id)
+
     def list_all(self) -> list[ModelInfo]:
         out: list[ModelInfo] = []
         for modality in self._models:
