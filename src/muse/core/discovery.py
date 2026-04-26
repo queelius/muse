@@ -225,6 +225,78 @@ def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
     return found
 
 
+REQUIRED_HF_PLUGIN_KEYS = (
+    "modality", "runtime_path", "pip_extras", "system_packages",
+    "priority", "sniff", "resolve", "search",
+)
+
+
+def discover_hf_plugins(dirs: list[Path]) -> list[dict]:
+    """Scan dirs for `<dir>/<name>/hf.py` files exporting HF_PLUGIN.
+
+    Each hf.py is loaded as a single-file module via spec_from_file_location
+    (mangled name) so the modality package's __init__.py is not executed.
+    This preserves the bare-install contract: `muse pull` works without
+    fastapi installed because plugins don't transitively pull in routes.
+
+    Validation: HF_PLUGIN must be a dict with all REQUIRED_HF_PLUGIN_KEYS.
+    Missing keys, type mismatches, or import errors log a warning and skip
+    the plugin. Discovery never raises.
+
+    Returns plugins sorted by (priority asc, modality asc) so the dispatcher
+    iterates specific shapes before catch-alls and the order is deterministic
+    across machines.
+    """
+    found: list[dict] = []
+    for d in dirs:
+        if not d or not d.is_dir():
+            continue
+        for sub in sorted(d.iterdir()):
+            if not sub.is_dir() or sub.name.startswith("_"):
+                continue
+            hf_py = sub / "hf.py"
+            if not hf_py.exists():
+                continue
+            try:
+                module = _load_hf_plugin_script(hf_py)
+            except Exception as e:
+                logger.warning(
+                    "skipping HF plugin %s: import failed (%s)", hf_py, e,
+                )
+                continue
+            plugin = getattr(module, "HF_PLUGIN", None)
+            if not isinstance(plugin, dict):
+                logger.warning(
+                    "skipping HF plugin %s: no top-level HF_PLUGIN dict", hf_py,
+                )
+                continue
+            missing = [k for k in REQUIRED_HF_PLUGIN_KEYS if k not in plugin]
+            if missing:
+                logger.warning(
+                    "skipping HF plugin %s: missing required keys %s",
+                    hf_py, missing,
+                )
+                continue
+            found.append(plugin)
+    return sorted(found, key=lambda p: (p["priority"], p["modality"]))
+
+
+def _load_hf_plugin_script(path: Path) -> Any:
+    """Import hf.py as a single-file module. Bypasses package __init__.py.
+
+    The mangled module name avoids sys.modules collisions when multiple
+    modalities each ship a hf.py.
+    """
+    mod_name = f"_muse_hf_plugin_{path.parent.name}"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_script(path: Path) -> Any:
     """Import a single-file .py module given its filesystem path.
 
@@ -307,3 +379,14 @@ def _load_package(pkg_dir: Path) -> Any:
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _default_hf_plugin_dirs() -> list[Path]:
+    """Default scan paths: bundled modalities + $MUSE_MODALITIES_DIR if set.
+
+    Mirrors `modality_tags()` and `discover_modalities` ordering so all
+    discovery surfaces walk the same roots in the same precedence.
+    """
+    bundled = Path(__file__).resolve().parents[1] / "modalities"
+    env = os.environ.get("MUSE_MODALITIES_DIR")
+    return [bundled] + ([Path(env)] if env else [])
