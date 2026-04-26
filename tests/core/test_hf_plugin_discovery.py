@@ -1,8 +1,6 @@
 """Tests for discover_hf_plugins: per-modality HF plugin loader."""
 from pathlib import Path
 
-import pytest
-
 from muse.core.discovery import discover_hf_plugins, REQUIRED_HF_PLUGIN_KEYS
 
 
@@ -58,7 +56,7 @@ HF_PLUGIN = {
     with caplog.at_level(logging.WARNING):
         plugins = discover_hf_plugins([tmp_path])
     assert plugins == []
-    assert any("missing required keys" in r.message for r in caplog.records)
+    assert "missing required keys" in caplog.text
 
 
 def test_skips_plugin_with_no_hf_plugin_attr(tmp_path, caplog):
@@ -67,7 +65,7 @@ def test_skips_plugin_with_no_hf_plugin_attr(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         plugins = discover_hf_plugins([tmp_path])
     assert plugins == []
-    assert any("no top-level HF_PLUGIN" in r.message for r in caplog.records)
+    assert "no top-level HF_PLUGIN" in caplog.text
 
 
 def test_skips_plugin_with_syntax_error(tmp_path, caplog):
@@ -78,7 +76,7 @@ def test_skips_plugin_with_syntax_error(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         plugins = discover_hf_plugins([tmp_path])
     assert plugins == []
-    assert any("import failed" in r.message for r in caplog.records)
+    assert "import failed" in caplog.text
 
 
 def test_orders_by_priority_then_modality(tmp_path):

@@ -255,7 +255,7 @@ def discover_hf_plugins(dirs: list[Path]) -> list[dict]:
             if not sub.is_dir() or sub.name.startswith("_"):
                 continue
             hf_py = sub / "hf.py"
-            if not hf_py.exists():
+            if not hf_py.is_file():
                 continue
             try:
                 module = _load_hf_plugin_script(hf_py)
