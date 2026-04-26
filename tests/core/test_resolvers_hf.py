@@ -221,15 +221,6 @@ def _fake_ct2_whisper_siblings():
     ]
 
 
-def test_sniff_detects_faster_whisper_shape():
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = SimpleNamespace(
-        siblings=_fake_ct2_whisper_siblings(),
-        tags=["automatic-speech-recognition", "whisper"],
-    )
-    assert _sniff_repo_shape(info) == "faster-whisper"
-
-
 def test_sniff_rejects_ct2_shape_without_asr_tag():
     """CT2 alone is not enough: could be an NMT repo."""
     from muse.core.resolvers_hf import _sniff_repo_shape

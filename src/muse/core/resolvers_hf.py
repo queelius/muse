@@ -7,18 +7,17 @@ URI shapes:
   hf://org/Text-Moderation       # text-classification (text/classification)
 
 Sniff logic (see `_sniff_repo_shape`):
-  - model.bin + config.json + (vocabulary.txt|tokenizer.json) + ASR tag -> faster-whisper
   - text-classification tag    -> text-classification
   - else                       -> unknown (raises on resolve)
 
-Note: GGUF and sentence-transformers dispatch were moved to
-`muse.modalities.chat_completion.hf` and
-`muse.modalities.embedding_text.hf` as part of the per-modality HF
-plugin refactor. The plugins sniff their respective shapes before this
-legacy fallback runs.
+Note: GGUF, sentence-transformers, and faster-whisper dispatch were
+moved to `muse.modalities.chat_completion.hf`,
+`muse.modalities.embedding_text.hf`, and
+`muse.modalities.audio_transcription.hf` as part of the per-modality
+HF plugin refactor. The plugins sniff their respective shapes before
+this legacy fallback runs.
 
 Search:
-  - modality="audio/transcription": HfApi.list_models(filter="automatic-speech-recognition")
   - modality="text/classification": HfApi.list_models(filter="text-classification")
 """
 from __future__ import annotations
@@ -41,12 +40,6 @@ from muse.core.resolvers import (
 
 
 logger = logging.getLogger(__name__)
-
-FASTER_WHISPER_RUNTIME_PATH = (
-    "muse.modalities.audio_transcription.runtimes.faster_whisper:FasterWhisperModel"
-)
-FASTER_WHISPER_PIP_EXTRAS = ("faster-whisper>=1.0.0",)
-FASTER_WHISPER_SYSTEM_PACKAGES = ("ffmpeg",)
 
 TEXT_CLASSIFIER_RUNTIME_PATH = (
     "muse.modalities.text_classification.runtimes.hf_text_classifier"
@@ -129,61 +122,15 @@ class HFResolver(Resolver):
     def _legacy_resolve(self, repo_id, variant, info):
         """Legacy per-shape dispatch. Removed in Task 7."""
         shape = _sniff_repo_shape(info)
-        if shape == "faster-whisper":
-            return self._resolve_faster_whisper(repo_id, info)
         if shape == "text-classification":
             return self._resolve_text_classifier(repo_id, info)
         return None
 
     def _legacy_search(self, query, modality, sort, limit):
         """Old per-modality search. Removed in Task 7."""
-        if modality == "audio/transcription":
-            return self._search_faster_whisper(query, sort=sort, limit=limit)
         if modality == "text/classification":
             return self._search_text_classifier(query, sort=sort, limit=limit)
         return None
-
-    # --- Faster-Whisper branch ---
-
-    def _resolve_faster_whisper(self, repo_id: str, info) -> ResolvedModel:
-        manifest = {
-            "model_id": repo_id.split("/", 1)[-1].lower(),
-            "modality": "audio/transcription",
-            "hf_repo": repo_id,
-            "description": f"Faster-Whisper: {repo_id}",
-            "license": _repo_license(info),
-            "pip_extras": list(FASTER_WHISPER_PIP_EXTRAS),
-            "system_packages": list(FASTER_WHISPER_SYSTEM_PACKAGES),
-            "capabilities": {},
-        }
-
-        def _download(cache_root: Path) -> Path:
-            return Path(snapshot_download(
-                repo_id=repo_id,
-                cache_dir=str(cache_root) if cache_root else None,
-            ))
-
-        return ResolvedModel(
-            manifest=manifest,
-            backend_path=FASTER_WHISPER_RUNTIME_PATH,
-            download=_download,
-        )
-
-    def _search_faster_whisper(self, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-        repos = self._api.list_models(
-            search=query, filter="automatic-speech-recognition",
-            sort=sort, limit=limit,
-        )
-        for repo in repos:
-            yield SearchResult(
-                uri=f"hf://{repo.id}",
-                model_id=repo.id.split("/", 1)[-1].lower(),
-                modality="audio/transcription",
-                size_gb=None,
-                downloads=getattr(repo, "downloads", None),
-                license=None,
-                description=repo.id,
-            )
 
     # --- Text-Classifier branch ---
 
@@ -230,19 +177,6 @@ class HFResolver(Resolver):
 
 # --- sniff helpers (module-level, pytest-friendly) ---
 
-def _looks_like_faster_whisper(siblings: list[str], tags: list[str]) -> bool:
-    """CT2 faster-whisper repos have model.bin + config.json +
-    (vocabulary.txt or tokenizer.json), plus the ASR tag."""
-    names = {Path(f).name for f in siblings}
-    has_ct2_shape = (
-        "model.bin" in names
-        and "config.json" in names
-        and ("vocabulary.txt" in names or "tokenizer.json" in names)
-    )
-    has_asr_tag = "automatic-speech-recognition" in tags
-    return has_ct2_shape and has_asr_tag
-
-
 def _looks_like_text_classifier(siblings: list[str], tags: list[str]) -> bool:
     """HF text-classification repos carry the `text-classification` tag.
     Sibling shape varies (PyTorch / safetensors / older bin formats); we
@@ -254,11 +188,9 @@ def _looks_like_text_classifier(siblings: list[str], tags: list[str]) -> bool:
 
 
 def _sniff_repo_shape(info) -> str:
-    """Return one of: 'faster-whisper' | 'text-classification' | 'unknown'."""
+    """Return one of: 'text-classification' | 'unknown'."""
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
-    if _looks_like_faster_whisper(siblings, tags):
-        return "faster-whisper"
     if _looks_like_text_classifier(siblings, tags):
         return "text-classification"
     return "unknown"
