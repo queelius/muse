@@ -1,8 +1,6 @@
 """Tests for the embedding_text HF plugin (sentence-transformers)."""
 from unittest.mock import MagicMock
 
-import pytest
-
 from muse.modalities.embedding_text.hf import HF_PLUGIN
 from muse.core.discovery import REQUIRED_HF_PLUGIN_KEYS
 from muse.core.resolvers import ResolvedModel
