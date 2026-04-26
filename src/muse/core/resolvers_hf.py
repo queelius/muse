@@ -35,6 +35,7 @@ from typing import Any, Iterable
 
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
+from muse.core.discovery import discover_hf_plugins, _default_hf_plugin_dirs
 from muse.core.resolvers import (
     Resolver,
     ResolvedModel,
@@ -74,12 +75,27 @@ TEXT_CLASSIFIER_SYSTEM_PACKAGES = ()
 
 
 class HFResolver(Resolver):
-    """Resolver for hf:// URIs."""
+    """Resolver for hf:// URIs.
+
+    Plugin-based dispatch: each modality contributes a hf.py exporting an
+    HF_PLUGIN dict (see docs/HF_PLUGINS.md). On resolve, plugins are
+    iterated in (priority, modality) order; first sniff to return True
+    wins. On search, plugins are filtered by modality (or all consulted
+    when no filter).
+
+    During the migration window the legacy `_sniff_repo_shape` cascade
+    runs as a fallback for modalities that have not yet shipped a
+    plugin file. The fallback is removed in Task 7 once all four
+    bundled modalities have migrated.
+    """
 
     scheme = "hf"
 
-    def __init__(self) -> None:
+    def __init__(self, plugins: list[dict] | None = None) -> None:
         self._api = HfApi()
+        self._plugins = plugins if plugins is not None else discover_hf_plugins(
+            _default_hf_plugin_dirs()
+        )
 
     def resolve(self, uri: str) -> ResolvedModel:
         scheme, repo_id, variant = parse_uri(uri)
@@ -87,8 +103,50 @@ class HFResolver(Resolver):
             raise ResolverError(f"HFResolver cannot resolve scheme {scheme!r}")
 
         info = self._api.repo_info(repo_id)
-        shape = _sniff_repo_shape(info)
+        for plugin in self._plugins:
+            if plugin["sniff"](info):
+                return plugin["resolve"](repo_id, variant, info)
 
+        # Legacy fallback: removed in Task 7 once all bundled modalities
+        # have migrated.
+        legacy = self._legacy_resolve(repo_id, variant, info)
+        if legacy is not None:
+            return legacy
+
+        tags = getattr(info, "tags", None) or []
+        siblings = [s.rfilename for s in getattr(info, "siblings", [])][:5]
+        raise ResolverError(
+            f"no HF plugin matched {repo_id!r}; tags={tags}, "
+            f"siblings={siblings}..."
+        )
+
+    def search(self, query: str, **filters) -> Iterable[SearchResult]:
+        modality = filters.get("modality")
+        sort = filters.get("sort", "downloads")
+        limit = filters.get("limit", 20)
+
+        if modality is not None:
+            matched = [p for p in self._plugins if p["modality"] == modality]
+            if not matched:
+                # Legacy fallback for not-yet-migrated modalities.
+                legacy = self._legacy_search(query, modality, sort, limit)
+                if legacy is not None:
+                    yield from legacy
+                    return
+                supported = sorted(p["modality"] for p in self._plugins)
+                raise ResolverError(
+                    f"HFResolver.search does not support modality {modality!r}; "
+                    f"supported: {supported}"
+                )
+        else:
+            matched = self._plugins
+
+        for plugin in matched:
+            yield from plugin["search"](self._api, query, sort=sort, limit=limit)
+
+    def _legacy_resolve(self, repo_id, variant, info):
+        """Old 4-branch dispatch. Removed in Task 7."""
+        shape = _sniff_repo_shape(info)
         if shape == "gguf":
             return self._resolve_gguf(repo_id, variant, info)
         if shape == "sentence-transformers":
@@ -97,36 +155,19 @@ class HFResolver(Resolver):
             return self._resolve_faster_whisper(repo_id, info)
         if shape == "text-classification":
             return self._resolve_text_classifier(repo_id, info)
-        tags = getattr(info, "tags", None) or []
-        raise ResolverError(
-            f"cannot infer modality for {repo_id!r} "
-            f"(no .gguf siblings, no sentence-transformers tag, "
-            f"no CT2 shape with ASR tag, no text-classification tag; "
-            f"tags={tags})"
-        )
+        return None
 
-    def search(self, query: str, **filters) -> Iterable[SearchResult]:
-        modality = filters.get("modality")
-        sort = filters.get("sort", "downloads")
-        limit = filters.get("limit", 20)
-
+    def _legacy_search(self, query, modality, sort, limit):
+        """Old per-modality search. Removed in Task 7."""
         if modality == "chat/completion":
-            yield from self._search_gguf(query, sort=sort, limit=limit)
-        elif modality == "embedding/text":
-            yield from self._search_sentence_transformers(query, sort=sort, limit=limit)
-        elif modality == "audio/transcription":
-            yield from self._search_faster_whisper(query, sort=sort, limit=limit)
-        elif modality == "text/classification":
-            yield from self._search_text_classifier(query, sort=sort, limit=limit)
-        elif modality is None:
-            yield from self._search_gguf(query, sort=sort, limit=limit)
-            yield from self._search_sentence_transformers(query, sort=sort, limit=limit)
-        else:
-            raise ResolverError(
-                f"HFResolver.search does not support modality {modality!r}; "
-                f"supported: chat/completion, embedding/text, "
-                f"audio/transcription, text/classification"
-            )
+            return self._search_gguf(query, sort=sort, limit=limit)
+        if modality == "embedding/text":
+            return self._search_sentence_transformers(query, sort=sort, limit=limit)
+        if modality == "audio/transcription":
+            return self._search_faster_whisper(query, sort=sort, limit=limit)
+        if modality == "text/classification":
+            return self._search_text_classifier(query, sort=sort, limit=limit)
+        return None
 
     # --- GGUF branch ---
 

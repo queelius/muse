@@ -141,7 +141,7 @@ def test_resolve_unrecognized_repo_shape_raises():
             tags=["some-unsupported-tag"],
         )
         r = HFResolver()
-        with pytest.raises(ResolverError, match="cannot infer"):
+        with pytest.raises(ResolverError, match="no HF plugin matched"):
             r.resolve("hf://org/weird-repo")
 
 
@@ -480,8 +480,9 @@ def test_search_text_classification_yields_results():
     assert results[0].model_id == "text-moderation"
 
 
-def test_resolve_unknown_error_message_lists_text_classification():
-    """Sanity: the unknown-shape error mentions all 4 supported branches."""
+def test_resolve_unknown_error_message_includes_repo_diagnostics():
+    """When no plugin matches and the legacy fallback also misses, the error
+    surfaces the repo id plus the seen tags and siblings so users can debug."""
     from muse.core.resolvers_hf import HFResolver, ResolverError
     resolver = HFResolver()
     info = SimpleNamespace(
@@ -493,6 +494,9 @@ def test_resolve_unknown_error_message_lists_text_classification():
             resolver.resolve("hf://x/y")
         except ResolverError as e:
             msg = str(e)
-            assert "text-classification" in msg
+            assert "no HF plugin matched" in msg
+            assert "x/y" in msg
+            assert "something-unknown" in msg
+            assert "random.bin" in msg
         else:
             raise AssertionError("expected ResolverError")
