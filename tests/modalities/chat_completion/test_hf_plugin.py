@@ -59,6 +59,55 @@ def test_resolve_returns_resolved_model_with_correct_manifest():
     assert result.backend_path.endswith(":LlamaCppModel")
 
 
+def test_resolve_applies_chat_format_hints_from_yaml():
+    """When chat_formats.yaml has both chat_format and supports_tools, both land in capabilities."""
+    info = _fake_info(siblings=["model-q4_k_m.gguf"])
+    with patch("muse.modalities.chat_completion.hf._try_sniff_tools_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf._try_sniff_context_length_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={
+             "chat_format": "chatml-function-calling",
+             "supports_tools": True,
+         }):
+        result = HF_PLUGIN["resolve"]("unsloth/Qwen3.5-4B-GGUF", "q4_k_m", info)
+    caps = result.manifest["capabilities"]
+    assert caps["chat_format"] == "chatml-function-calling"
+    assert caps["supports_tools"] is True
+
+
+def test_resolve_yaml_supports_tools_overrides_sniff_result():
+    """YAML's supports_tools wins over the sniff helper's result."""
+    info = _fake_info(siblings=["model-q4_k_m.gguf"])
+    with patch("muse.modalities.chat_completion.hf._try_sniff_tools_from_repo", return_value=False), \
+         patch("muse.modalities.chat_completion.hf._try_sniff_context_length_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={
+             "supports_tools": True,
+         }):
+        result = HF_PLUGIN["resolve"]("org/whatever", "q4_k_m", info)
+    assert result.manifest["capabilities"]["supports_tools"] is True
+
+
+def test_resolve_no_yaml_match_preserves_sniff_supports_tools():
+    """When YAML has no entry, capabilities.supports_tools mirrors the sniff result."""
+    info = _fake_info(siblings=["model-q4_k_m.gguf"])
+    with patch("muse.modalities.chat_completion.hf._try_sniff_tools_from_repo", return_value=True), \
+         patch("muse.modalities.chat_completion.hf._try_sniff_context_length_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={}):
+        result = HF_PLUGIN["resolve"]("org/whatever", "q4_k_m", info)
+    caps = result.manifest["capabilities"]
+    assert caps["supports_tools"] is True
+    assert "chat_format" not in caps
+
+
+def test_resolve_variant_match_is_case_insensitive():
+    """`Q4_K_M` should match `model-q4_k_m.gguf` (variant matching lowercases input)."""
+    info = _fake_info(siblings=["model-q4_k_m.gguf"])
+    with patch("muse.modalities.chat_completion.hf._try_sniff_tools_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf._try_sniff_context_length_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={}):
+        result = HF_PLUGIN["resolve"]("org/Model-GGUF", "Q4_K_M", info)
+    assert result.manifest["capabilities"]["gguf_file"] == "model-q4_k_m.gguf"
+
+
 def test_search_yields_search_results_with_modality_tag():
     fake_api = MagicMock()
     fake_repo = MagicMock(id="org/repo", downloads=100)

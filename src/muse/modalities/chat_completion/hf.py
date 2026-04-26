@@ -27,6 +27,9 @@ _VARIANT_RE = re.compile(
     r"(q\d+_[a-z0-9_]+|iq\d+_[a-z0-9]+|f16|bf16|f32)", re.IGNORECASE,
 )
 
+_RUNTIME_PATH = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
+_PIP_EXTRAS = ("llama-cpp-python>=0.2.90",)
+
 
 def _extract_variant(gguf_filename: str) -> str:
     stem = Path(gguf_filename).stem
@@ -62,7 +65,7 @@ def _sniff_supports_tools(chat_template: str | None) -> bool:
     return bool(re.search(r"(\bif\s+tools\b|\{\{\s*tools|tool_calls)", chat_template))
 
 
-def _try_sniff_tools_from_repo(api: HfApi, repo_id: str) -> bool | None:
+def _try_sniff_tools_from_repo(repo_id: str) -> bool | None:
     try:
         path = hf_hub_download(repo_id=repo_id, filename="tokenizer_config.json")
     except Exception:
@@ -74,7 +77,7 @@ def _try_sniff_tools_from_repo(api: HfApi, repo_id: str) -> bool | None:
     return _sniff_supports_tools(cfg.get("chat_template"))
 
 
-def _try_sniff_context_length_from_repo(api: HfApi, repo_id: str) -> int | None:
+def _try_sniff_context_length_from_repo(repo_id: str) -> int | None:
     try:
         path = hf_hub_download(repo_id=repo_id, filename="config.json")
         cfg = json.loads(Path(path).read_text())
@@ -105,10 +108,8 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
             f"variant {variant!r} not found in {repo_id}; available: {variants}"
         )
 
-    # The shared HfApi instance is created lazily here. Tests patch it.
-    api = HfApi()
-    supports_tools = _try_sniff_tools_from_repo(api, repo_id)
-    ctx_length = _try_sniff_context_length_from_repo(api, repo_id)
+    supports_tools = _try_sniff_tools_from_repo(repo_id)
+    ctx_length = _try_sniff_context_length_from_repo(repo_id)
 
     hints = lookup_chat_format(repo_id) or {}
 
@@ -158,14 +159,12 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
             except Exception:
                 continue
         variant_to_size: dict[str, float] = {}
-        variant_to_first_file: dict[str, str] = {}
         for s in siblings:
             if not s.rfilename.endswith(".gguf"):
                 continue
             variant = _extract_variant(s.rfilename)
             size_bytes = getattr(s, "size", None) or 0
             variant_to_size[variant] = variant_to_size.get(variant, 0) + size_bytes
-            variant_to_first_file.setdefault(variant, s.rfilename)
         for variant, total_bytes in variant_to_size.items():
             yield SearchResult(
                 uri=f"hf://{repo.id}@{variant}",
@@ -176,10 +175,6 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
                 license=None,
                 description=f"{repo.id} ({variant})",
             )
-
-
-_RUNTIME_PATH = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
-_PIP_EXTRAS = ("llama-cpp-python>=0.2.90",)
 
 
 HF_PLUGIN = {

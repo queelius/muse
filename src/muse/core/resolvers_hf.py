@@ -136,7 +136,7 @@ class HFResolver(Resolver):
             yield from plugin["search"](self._api, query, sort=sort, limit=limit)
 
     def _legacy_resolve(self, repo_id, variant, info):
-        """Old 4-branch dispatch. Removed in Task 7."""
+        """Legacy per-shape dispatch. Removed in Task 7."""
         shape = _sniff_repo_shape(info)
         if shape == "sentence-transformers":
             return self._resolve_sentence_transformer(repo_id, info)
