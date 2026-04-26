@@ -7,18 +7,17 @@ URI shapes:
   hf://org/Text-Moderation       # text-classification (text/classification)
 
 Sniff logic (see `_sniff_repo_shape`):
-  - sentence-transformers tag  -> sentence-transformers
-  - sentence_transformers_config.json sibling -> sentence-transformers
   - model.bin + config.json + (vocabulary.txt|tokenizer.json) + ASR tag -> faster-whisper
   - text-classification tag    -> text-classification
   - else                       -> unknown (raises on resolve)
 
-Note: GGUF dispatch was moved to `muse.modalities.chat_completion.hf`
-as part of the per-modality HF plugin refactor. The plugin sniffs
-.gguf siblings before this legacy fallback runs.
+Note: GGUF and sentence-transformers dispatch were moved to
+`muse.modalities.chat_completion.hf` and
+`muse.modalities.embedding_text.hf` as part of the per-modality HF
+plugin refactor. The plugins sniff their respective shapes before this
+legacy fallback runs.
 
 Search:
-  - modality="embedding/text": HfApi.list_models(filter="sentence-transformers")
   - modality="audio/transcription": HfApi.list_models(filter="automatic-speech-recognition")
   - modality="text/classification": HfApi.list_models(filter="text-classification")
 """
@@ -43,14 +42,6 @@ from muse.core.resolvers import (
 
 logger = logging.getLogger(__name__)
 
-SENTENCE_TRANSFORMER_RUNTIME_PATH = (
-    "muse.modalities.embedding_text.runtimes.sentence_transformers:SentenceTransformerModel"
-)
-
-SENTENCE_TRANSFORMER_PIP_EXTRAS = (
-    "torch>=2.1.0",
-    "sentence-transformers>=2.2.0",
-)
 FASTER_WHISPER_RUNTIME_PATH = (
     "muse.modalities.audio_transcription.runtimes.faster_whisper:FasterWhisperModel"
 )
@@ -138,8 +129,6 @@ class HFResolver(Resolver):
     def _legacy_resolve(self, repo_id, variant, info):
         """Legacy per-shape dispatch. Removed in Task 7."""
         shape = _sniff_repo_shape(info)
-        if shape == "sentence-transformers":
-            return self._resolve_sentence_transformer(repo_id, info)
         if shape == "faster-whisper":
             return self._resolve_faster_whisper(repo_id, info)
         if shape == "text-classification":
@@ -148,55 +137,11 @@ class HFResolver(Resolver):
 
     def _legacy_search(self, query, modality, sort, limit):
         """Old per-modality search. Removed in Task 7."""
-        if modality == "embedding/text":
-            return self._search_sentence_transformers(query, sort=sort, limit=limit)
         if modality == "audio/transcription":
             return self._search_faster_whisper(query, sort=sort, limit=limit)
         if modality == "text/classification":
             return self._search_text_classifier(query, sort=sort, limit=limit)
         return None
-
-    # --- Sentence-Transformers branch ---
-
-    def _resolve_sentence_transformer(self, repo_id: str, info) -> ResolvedModel:
-        manifest = {
-            "model_id": _sentence_transformer_model_id(repo_id),
-            "modality": "embedding/text",
-            "hf_repo": repo_id,
-            "description": f"Sentence-Transformers: {repo_id}",
-            "license": _repo_license(info),
-            "pip_extras": list(SENTENCE_TRANSFORMER_PIP_EXTRAS),
-            "system_packages": [],
-            "capabilities": {},
-        }
-
-        def _download(cache_root: Path) -> Path:
-            return Path(snapshot_download(
-                repo_id=repo_id,
-                cache_dir=str(cache_root) if cache_root else None,
-            ))
-
-        return ResolvedModel(
-            manifest=manifest,
-            backend_path=SENTENCE_TRANSFORMER_RUNTIME_PATH,
-            download=_download,
-        )
-
-    def _search_sentence_transformers(self, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-        repos = self._api.list_models(
-            search=query, filter="sentence-transformers",
-            sort=sort, limit=limit,
-        )
-        for repo in repos:
-            yield SearchResult(
-                uri=f"hf://{repo.id}",
-                model_id=_sentence_transformer_model_id(repo.id),
-                modality="embedding/text",
-                size_gb=None,
-                downloads=getattr(repo, "downloads", None),
-                license=None,
-                description=repo.id,
-            )
 
     # --- Faster-Whisper branch ---
 
@@ -309,23 +254,14 @@ def _looks_like_text_classifier(siblings: list[str], tags: list[str]) -> bool:
 
 
 def _sniff_repo_shape(info) -> str:
-    """Return one of: 'sentence-transformers' | 'faster-whisper' | 'text-classification' | 'unknown'."""
+    """Return one of: 'faster-whisper' | 'text-classification' | 'unknown'."""
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
-    if "sentence-transformers" in tags:
-        return "sentence-transformers"
-    if any(Path(f).name == "sentence_transformers_config.json" for f in siblings):
-        return "sentence-transformers"
     if _looks_like_faster_whisper(siblings, tags):
         return "faster-whisper"
     if _looks_like_text_classifier(siblings, tags):
         return "text-classification"
     return "unknown"
-
-
-def _sentence_transformer_model_id(repo_id: str) -> str:
-    """Synthesize a model_id from the repo name (lowercased)."""
-    return repo_id.split("/", 1)[-1].lower()
 
 
 def _repo_license(info) -> str | None:

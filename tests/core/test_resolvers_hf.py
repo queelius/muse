@@ -24,24 +24,6 @@ def _fake_repo_info(siblings=(), tags=()):
     return info
 
 
-def test_sniff_recognizes_sentence_transformers_via_tag():
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = _fake_repo_info(
-        siblings=["config.json", "tokenizer.json"],
-        tags=["sentence-transformers"],
-    )
-    assert _sniff_repo_shape(info) == "sentence-transformers"
-
-
-def test_sniff_recognizes_sentence_transformers_via_config_file():
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = _fake_repo_info(
-        siblings=["config.json", "sentence_transformers_config.json"],
-        tags=[],
-    )
-    assert _sniff_repo_shape(info) == "sentence-transformers"
-
-
 def test_sniff_returns_unknown_for_unrecognized_repo():
     from muse.core.resolvers_hf import _sniff_repo_shape
     info = _fake_repo_info(
