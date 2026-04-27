@@ -112,10 +112,36 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "capabilities": capabilities,
     }
 
+    # SDXL-Turbo and similar repos ship fp32 + fp16 + standalone single-file
+    # checkpoints simultaneously (~47GB total). The diffusers runtime only
+    # needs the fp16 subfolder weights (~7GB). Detect fp16 variants here
+    # and filter the snapshot_download manifest accordingly.
+    siblings = [s.rfilename for s in getattr(info, "siblings", [])]
+    has_fp16_variants = any(".fp16." in name for name in siblings)
+
     def _download(cache_root: Path) -> Path:
+        # The "*/" prefix excludes top-level standalone checkpoints
+        # (A1111/ComfyUI single-file format). Diffusers files always
+        # live in subfolders (unet/, vae/, text_encoder/, etc.).
+        allow_patterns = [
+            "model_index.json",
+            "*/*.json",
+            "*/*.txt",
+        ]
+        if has_fp16_variants:
+            allow_patterns.extend([
+                "*/*.fp16.safetensors",
+                "*/*.fp16.bin",
+            ])
+        else:
+            allow_patterns.extend([
+                "*/*.safetensors",
+                "*/*.bin",
+            ])
         return Path(snapshot_download(
             repo_id=repo_id,
             cache_dir=str(cache_root) if cache_root else None,
+            allow_patterns=allow_patterns,
         ))
 
     return ResolvedModel(

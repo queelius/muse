@@ -86,3 +86,65 @@ def test_search_yields_results_with_modality_tag():
     rows = list(HF_PLUGIN["search"](fake_api, "sdxl", sort="downloads", limit=20))
     assert len(rows) == 1
     assert rows[0].modality == "image/generation"
+
+
+def test_resolve_download_filters_to_fp16_when_variants_exist():
+    """When info shows fp16 variants, _download requests fp16-only patterns."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    info = _fake_info(
+        siblings=[
+            "model_index.json",
+            "unet/diffusion_pytorch_model.safetensors",
+            "unet/diffusion_pytorch_model.fp16.safetensors",
+            "sd_xl_turbo_1.0.safetensors",  # top-level standalone, should be excluded
+        ],
+        tags=["text-to-image"],
+    )
+    with patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as fake_snapshot:
+        result = HF_PLUGIN["resolve"]("stabilityai/sdxl-turbo", None, info)
+        result.download(Path("/tmp/cache"))
+
+    patterns = fake_snapshot.call_args.kwargs["allow_patterns"]
+    assert "*/*.fp16.safetensors" in patterns
+    assert "*/*.fp16.bin" in patterns
+    # Bare safetensors patterns must NOT be present (they would also match fp32)
+    assert "*/*.safetensors" not in patterns
+    assert "*/*.bin" not in patterns
+    # Configs and tokenizer assets always allowed
+    assert "model_index.json" in patterns
+    assert "*/*.json" in patterns
+
+
+def test_resolve_download_uses_bare_pattern_when_no_fp16_variant():
+    """FLUX/SD3 repos ship single-precision weights; download must include them."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    info = _fake_info(
+        siblings=[
+            "model_index.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "vae/diffusion_pytorch_model.safetensors",
+        ],
+        tags=["text-to-image"],
+    )
+    with patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as fake_snapshot:
+        result = HF_PLUGIN["resolve"](
+            "black-forest-labs/FLUX.1-schnell", None, info,
+        )
+        result.download(Path("/tmp/cache"))
+
+    patterns = fake_snapshot.call_args.kwargs["allow_patterns"]
+    assert "*/*.safetensors" in patterns
+    assert "*/*.bin" in patterns
+    # No fp16-only patterns when the repo doesn't have variants
+    assert "*/*.fp16.safetensors" not in patterns
+    assert "model_index.json" in patterns
