@@ -4,6 +4,11 @@ Model by Stability AI (SAI Community License, non-commercial + limited
 commercial). Uses diffusers AutoPipelineForText2Image. Very fast (1
 inference step by default) at modest quality; good first backend to
 prove the image/generation modality end-to-end.
+
+Kept as-is for first-found-wins continuity (curated `sd-turbo` aliases
+this script). See `muse.modalities.image_generation.runtimes.diffusers`
+for the canonical generic-runtime implementation that powers other
+diffusers text-to-image models.
 """
 from __future__ import annotations
 

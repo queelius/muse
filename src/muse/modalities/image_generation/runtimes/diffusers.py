@@ -86,7 +86,9 @@ class DiffusersText2ImageModel:
                 "installed in the per-model venv"
             )
         self.model_id = model_id
-        self.default_size = default_size
+        # JSON round-trips turn (512, 512) into [512, 512]; coerce back to
+        # the documented tuple shape so consumers can rely on it.
+        self.default_size = tuple(default_size)
         self._default_steps = default_steps
         self._default_guidance = default_guidance
         self._device = _select_device(device)

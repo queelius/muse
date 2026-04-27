@@ -24,8 +24,8 @@ def _patched_pipe():
     return fake_pipe
 
 
-def test_construction_loads_from_local_dir(tmp_path):
-    """Constructor passes local_dir to AutoPipelineForText2Image.from_pretrained."""
+def test_construction_uses_local_dir_when_provided(tmp_path):
+    """Constructor passes local_dir as the first positional to from_pretrained."""
     fake_class = MagicMock()
     fake_class.from_pretrained.return_value = _patched_pipe()
     with patch(
@@ -43,7 +43,29 @@ def test_construction_loads_from_local_dir(tmp_path):
             model_id="org-repo",
         )
     fake_class.from_pretrained.assert_called_once()
+    assert fake_class.from_pretrained.call_args.args[0] == str(tmp_path)
     assert m.model_id == "org-repo"
+
+
+def test_construction_falls_back_to_hf_repo_when_no_local_dir():
+    """When local_dir is None, from_pretrained gets the hf_repo as first arg."""
+    fake_class = MagicMock()
+    fake_class.from_pretrained.return_value = _patched_pipe()
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        DiffusersText2ImageModel(
+            hf_repo="org/repo",
+            local_dir=None,
+            device="cpu",
+            dtype="float32",
+            model_id="m",
+        )
+    assert fake_class.from_pretrained.call_args.args[0] == "org/repo"
 
 
 def test_default_size_steps_guidance_from_kwargs():
@@ -178,3 +200,51 @@ def test_generate_returns_image_result_with_seed():
         result = m.generate("a fox", seed=42)
     assert result.seed == 42
     assert result.metadata["model"] == "m"
+
+
+def test_construction_absorbs_unknown_kwargs():
+    """Future capability keys must not crash the constructor.
+
+    Catalog's load_backend splats manifest.capabilities into the constructor
+    call. As muse adds new capability flags (e.g., supports_negative_prompt,
+    supports_seeded_generation, supports_img2img), older runtimes must accept
+    them gracefully via **_.
+    """
+    fake_class = MagicMock()
+    fake_class.from_pretrained.return_value = _patched_pipe()
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        DiffusersText2ImageModel(
+            hf_repo="org/repo",
+            local_dir="/tmp/fake",
+            device="cpu",
+            model_id="m",
+            supports_negative_prompt=True,
+            supports_seeded_generation=True,
+            future_unrecognized_flag="whatever",
+        )
+    fake_class.from_pretrained.assert_called_once()
+
+
+def test_default_size_normalized_to_tuple_when_passed_list():
+    """JSON-loaded manifests produce default_size as list[int]; coerce to tuple."""
+    fake_class = MagicMock()
+    fake_class.from_pretrained.return_value = _patched_pipe()
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_size=[1024, 1024],  # list, not tuple
+        )
+    assert m.default_size == (1024, 1024)
+    assert isinstance(m.default_size, tuple)
