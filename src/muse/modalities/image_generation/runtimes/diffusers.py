@@ -13,6 +13,7 @@ directly; `_ensure_deps()` short-circuits when sentinels are non-None
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from muse.modalities.image_generation.protocol import ImageResult
@@ -229,6 +230,19 @@ class DiffusersText2ImageModel:
         n_steps = steps if steps is not None else self._default_steps
         cfg = guidance if guidance is not None else self._default_guidance
         s = strength if strength is not None else 0.5
+
+        # img2img diffusers contract: num_inference_steps * strength must be >= 1
+        # (lower values round to 0 effective denoise steps and crash the VAE).
+        # Bump steps to satisfy the contract while preserving the user's
+        # requested strength.
+        min_steps_for_strength = max(1, math.ceil(1.0 / max(s, 0.01)))
+        if n_steps < min_steps_for_strength:
+            logger.info(
+                "img2img bumping num_inference_steps from %d to %d to satisfy "
+                "strength=%.2f * steps >= 1 contract",
+                n_steps, min_steps_for_strength, s,
+            )
+            n_steps = min_steps_for_strength
 
         gen = None
         if seed is not None:

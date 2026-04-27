@@ -217,3 +217,24 @@ def test_sd_turbo_generate_img2img_caches_pipeline():
         m.generate("b", init_image=init_img)
 
     assert fake_i2i.from_pretrained.call_count == 1
+
+
+def test_sd_turbo_img2img_bumps_steps_to_satisfy_strength_contract():
+    """sd-turbo defaults to 1 step; with strength=0.4 must bump to >= ceil(1/0.4)=3."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i.from_pretrained.return_value = fake_i2i_pipe
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu")
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.4)
+
+    assert fake_i2i_pipe.call_args.kwargs["num_inference_steps"] == 3

@@ -365,3 +365,71 @@ def test_generate_img2img_caches_pipeline():
         m.generate("b", init_image=init_img)
 
     assert fake_i2i_class.from_pretrained.call_count == 1
+
+
+def test_img2img_bumps_steps_to_satisfy_strength_contract():
+    """num_inference_steps * strength must be >= 1 for diffusers img2img.
+
+    With num_inference_steps=1 and strength=0.4, naive math gives 0.4
+    effective denoise steps (rounds to 0) and the VAE crashes with an
+    empty tensor. Runtime must bump steps to ceil(1/0.4) = 3.
+    """
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i_class.from_pretrained.return_value = fake_i2i_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_steps=1,  # turbo-style 1-step model
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.4)
+
+    # With strength=0.4, ceil(1/0.4) = 3 steps minimum
+    assert fake_i2i_pipe.call_args.kwargs["num_inference_steps"] == 3
+    assert fake_i2i_pipe.call_args.kwargs["strength"] == 0.4
+
+
+def test_img2img_does_not_bump_when_steps_already_sufficient():
+    """If user explicitly requests enough steps, don't bump."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i_class.from_pretrained.return_value = fake_i2i_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_steps=25,
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.4)
+
+    # 25 * 0.4 = 10 effective steps, well above the >= 1 contract
+    assert fake_i2i_pipe.call_args.kwargs["num_inference_steps"] == 25
