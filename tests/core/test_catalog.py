@@ -1210,3 +1210,144 @@ def test_pull_uri_direct_inherits_curated_capabilities(tmp_catalog):
 
     persisted = _read_catalog()["text-moderation"]["manifest"]
     assert persisted["capabilities"]["safe_labels"] == ["OK"]
+
+
+# --- v0.17.3: re-apply curated capabilities overlay at known_models() time ---
+
+
+def test_known_models_reapplies_curated_capabilities_overlay_at_runtime(
+    tmp_catalog,
+):
+    """Edits to curated.yaml take effect on next known_models() call without
+    requiring a re-pull. Critical: a v0.16.2-style curated.yaml edit that
+    adds `device: cpu` to an already-pulled model must surface in
+    catalog entries on next process restart.
+    """
+    from unittest.mock import patch
+    from muse.core.catalog import known_models, _write_catalog, _reset_known_models_cache
+    from muse.core.curated import CuratedEntry
+
+    # Persisted manifest has device:cuda (stale; from before v0.16.2 edit)
+    catalog_state = {
+        "stale-model": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "source": "hf://org/repo",
+            "manifest": {
+                "model_id": "stale-model",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "backend_path": "fake.module:Cls",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {"device": "cuda", "old_key": "old_val"},
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    # Curated.yaml (post-edit) declares device: cpu for this id
+    fake_curated = CuratedEntry(
+        id="stale-model",
+        bundled=False,
+        uri="hf://org/repo",
+        modality="embedding/text",
+        size_gb=None, description=None, tags=(),
+        capabilities={"device": "cpu", "new_key": "new_val"},
+    )
+
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated):
+        _reset_known_models_cache()
+        models = known_models()
+
+    entry = models["stale-model"]
+    # Curated overlay applied: device:cpu wins over device:cuda
+    assert entry.extra["device"] == "cpu"
+    # New curated key surfaces
+    assert entry.extra["new_key"] == "new_val"
+    # Persisted-manifest-only key still present (overlay shallow-merges, doesn't replace)
+    assert entry.extra["old_key"] == "old_val"
+
+
+def test_known_models_uri_based_curated_lookup_when_id_misses(tmp_catalog):
+    """If find_curated(id) misses, fall back to find_curated_by_uri(source)."""
+    from unittest.mock import patch
+    from muse.core.catalog import known_models, _write_catalog, _reset_known_models_cache
+    from muse.core.curated import CuratedEntry
+
+    catalog_state = {
+        "weird-id": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "source": "hf://org/repo",
+            "manifest": {
+                "model_id": "weird-id",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "backend_path": "fake.module:Cls",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {},
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    fake_uri_curated = CuratedEntry(
+        id="canonical-id",  # different from "weird-id"
+        bundled=False,
+        uri="hf://org/repo",
+        modality="embedding/text",
+        size_gb=None, description=None, tags=(),
+        capabilities={"device": "cpu"},
+    )
+
+    with patch("muse.core.catalog.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_uri_curated):
+        _reset_known_models_cache()
+        models = known_models()
+
+    assert models["weird-id"].extra["device"] == "cpu"
+
+
+def test_known_models_no_curated_match_leaves_manifest_unchanged(tmp_catalog):
+    """If no curated entry matches, the persisted manifest is used as-is."""
+    from unittest.mock import patch
+    from muse.core.catalog import known_models, _write_catalog, _reset_known_models_cache
+
+    catalog_state = {
+        "orphan": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "manifest": {
+                "model_id": "orphan",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "backend_path": "fake.module:Cls",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {"device": "cuda"},
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    with patch("muse.core.catalog.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=None):
+        _reset_known_models_cache()
+        models = known_models()
+
+    # Unchanged
+    assert models["orphan"].extra["device"] == "cuda"

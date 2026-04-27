@@ -178,6 +178,21 @@ def known_models() -> dict[str, CatalogEntry]:
                     model_id,
                 )
                 continue
+            # Re-apply curated capabilities overlay so edits to curated.yaml
+            # take effect on next process restart without requiring a re-pull.
+            # Curated wins on key collision: curated.yaml is hand-edited; the
+            # persisted manifest may be stale across muse upgrades. Look up by
+            # id first, fall back to URI (source field).
+            curated = find_curated(model_id)
+            if curated is None:
+                source = entry_data.get("source")
+                if source:
+                    curated = find_curated_by_uri(source)
+            if curated is not None and curated.capabilities:
+                manifest = dict(manifest)
+                merged_caps = dict(manifest.get("capabilities") or {})
+                merged_caps.update(curated.capabilities)
+                manifest["capabilities"] = merged_caps
             entries[model_id] = _persisted_manifest_to_catalog_entry(manifest)
         _known_models_cache = entries
     return _known_models_cache
