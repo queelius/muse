@@ -748,6 +748,120 @@ def test_load_backend_caller_kwargs_override_manifest_capabilities(tmp_catalog):
     assert kwargs["chat_template"] == "qwen"
 
 
+def test_load_backend_capability_device_overrides_caller_kwargs(tmp_catalog):
+    """Capability device declaration wins over supervisor --device flag."""
+    from unittest.mock import patch, MagicMock
+    from muse.core.catalog import load_backend, _write_catalog
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.FakeRuntime = fake_class
+
+    catalog_state = {
+        "test-cpu-model": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake/weights",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "manifest": {
+                "model_id": "test-cpu-model",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {"device": "cpu"},
+                "backend_path": "fake.module:FakeRuntime",
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module), \
+         patch("muse.core.catalog._reset_known_models_cache"):
+        from muse.core.catalog import _reset_known_models_cache
+        _reset_known_models_cache()
+        load_backend("test-cpu-model", device="cuda")
+
+    # Verify the runtime got device="cpu" (capability wins over kwargs)
+    assert fake_class.call_args.kwargs["device"] == "cpu"
+
+
+def test_load_backend_kwargs_win_when_capability_device_is_auto(tmp_catalog):
+    """Capability device='auto' defers to caller's device kwarg."""
+    from unittest.mock import patch, MagicMock
+    from muse.core.catalog import load_backend, _write_catalog, _reset_known_models_cache
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.FakeRuntime = fake_class
+
+    catalog_state = {
+        "test-auto-model": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake/weights",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "manifest": {
+                "model_id": "test-auto-model",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {"device": "auto"},
+                "backend_path": "fake.module:FakeRuntime",
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
+        _reset_known_models_cache()
+        load_backend("test-auto-model", device="cuda")
+
+    assert fake_class.call_args.kwargs["device"] == "cuda"
+
+
+def test_load_backend_kwargs_win_when_no_capability_device(tmp_catalog):
+    """When capabilities omits device entirely, caller kwarg wins (existing behavior)."""
+    from unittest.mock import patch, MagicMock
+    from muse.core.catalog import load_backend, _write_catalog, _reset_known_models_cache
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.FakeRuntime = fake_class
+
+    catalog_state = {
+        "test-no-pref": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake/weights",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "manifest": {
+                "model_id": "test-no-pref",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {},
+                "backend_path": "fake.module:FakeRuntime",
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
+        _reset_known_models_cache()
+        load_backend("test-no-pref", device="mps")
+
+    assert fake_class.call_args.kwargs["device"] == "mps"
+
+
 def test_load_backend_bundled_path_unchanged(tmp_catalog):
     """Regression: bundled-path load_backend still works (no manifest in catalog).
 

@@ -31,6 +31,7 @@ MANIFEST = {
     "capabilities": {
         "sample_rate": 32000,
         "supports_alignment": True,
+        "device": "cpu",
     },
 }
 

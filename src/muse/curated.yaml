@@ -46,6 +46,8 @@
   modality: embedding/text
   size_gb: 0.1
   description: "MiniLM 384 dims, 22MB: CPU-friendly default embedder"
+  capabilities:
+    device: cpu
 
 - id: qwen3-embedding-0.6b
   uri: hf://Qwen/Qwen3-Embedding-0.6B
@@ -87,12 +89,16 @@
   modality: audio/transcription
   size_gb: 0.08
   description: "Whisper tiny (39M, ~75MB): CPU-friendly smoke test, multilingual"
+  capabilities:
+    device: cpu
 
 - id: whisper-base
   uri: hf://Systran/faster-whisper-base
   modality: audio/transcription
   size_gb: 0.15
   description: "Whisper base (74M, ~142MB): balanced CPU default"
+  capabilities:
+    device: cpu
 
 - id: whisper-large-v3
   uri: hf://Systran/faster-whisper-large-v3
@@ -109,3 +115,4 @@
   description: "9-category text moderation (S/H/V/HR/SH/S3/H2/V2/OK), CPU-friendly"
   capabilities:
     safe_labels: ["OK"]
+    device: cpu

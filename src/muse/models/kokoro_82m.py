@@ -53,6 +53,7 @@ MANIFEST = {
     "capabilities": {
         "sample_rate": KOKORO_SAMPLE_RATE,
         "voices": KOKORO_VOICES,
+        "device": "cpu",
     },
 }
 

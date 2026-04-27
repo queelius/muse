@@ -561,6 +561,14 @@ def load_backend(model_id: str, **kwargs) -> Any:
     persisted_manifest = catalog[model_id].get("manifest") or {}
     capabilities = persisted_manifest.get("capabilities") or {}
     merged: dict = {"model_id": model_id, **capabilities, **kwargs}
+    # Capability device pin: a model declaring capabilities.device overrides
+    # the supervisor's --device flag. Other capability keys lose to kwargs
+    # (the documented contract). device is the exception because it's the
+    # only capability-declared placement preference and the supervisor's
+    # --device flag is a server-wide default that should defer to per-model
+    # preferences when set.
+    if "device" in capabilities and capabilities["device"] != "auto":
+        merged["device"] = capabilities["device"]
     return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **merged)
 
 
