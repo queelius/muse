@@ -68,6 +68,18 @@
 - id: sd-turbo
   bundled: true
 
+- id: sdxl-turbo
+  uri: hf://stabilityai/sdxl-turbo
+  modality: image/generation
+  size_gb: 7.0
+  description: "SDXL Turbo: 1-step distilled SDXL, 512x512, fast"
+
+- id: flux-schnell
+  uri: hf://black-forest-labs/FLUX.1-schnell
+  modality: image/generation
+  size_gb: 24.0
+  description: "FLUX.1 Schnell: 4-step distilled, 1024x1024, Apache 2.0"
+
 # ---------- audio/transcription (ASR via faster-whisper) ----------
 
 - id: whisper-tiny

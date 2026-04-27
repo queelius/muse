@@ -237,6 +237,22 @@ def test_load_curated_includes_whisper_entries():
             assert e.uri.startswith("hf://Systran/faster-whisper-")
 
 
+def test_load_curated_includes_sdxl_turbo_and_flux_schnell():
+    """v0.16.0 adds two image/generation curated aliases via the new HF plugin."""
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+
+    assert "sdxl-turbo" in by_id
+    e = by_id["sdxl-turbo"]
+    assert e.modality == "image/generation"
+    assert e.uri == "hf://stabilityai/sdxl-turbo"
+
+    assert "flux-schnell" in by_id
+    e = by_id["flux-schnell"]
+    assert e.modality == "image/generation"
+    assert e.uri == "hf://black-forest-labs/FLUX.1-schnell"
+
+
 def test_load_curated_includes_text_moderation_entry():
     """Curated text-moderation alias exists and points at KoalaAI.
 
