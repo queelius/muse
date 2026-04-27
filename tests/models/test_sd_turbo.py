@@ -137,3 +137,83 @@ def test_sd_turbo_accepts_unknown_kwargs():
             device="cpu",
             extra_future_param="ignored",
         )
+
+
+def test_manifest_advertises_supports_img2img():
+    """sd-turbo's MANIFEST capabilities advertise img2img support."""
+    from muse.models.sd_turbo import MANIFEST
+    assert MANIFEST["capabilities"].get("supports_img2img") is True
+
+
+def _patched_pipe():
+    """Return a fake pipeline whose .from_pretrained yields a mock that
+    returns one PIL-shaped image when called. Mirrors the helper in
+    tests/modalities/image_generation/runtimes/test_diffusers.py."""
+    fake_pipe = MagicMock()
+    fake_image = MagicMock()
+    fake_image.size = (512, 512)
+    fake_pipe.return_value.images = [fake_image]
+    return fake_pipe
+
+
+def test_sd_turbo_generate_img2img_branch():
+    """sd_turbo's bundled Model honors init_image by loading the i2i pipeline."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+    fake_i2i.from_pretrained.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.6)
+
+    fake_i2i.from_pretrained.assert_called_once()
+
+
+def test_sd_turbo_generate_without_init_image_keeps_t2i_path():
+    """init_image=None keeps the existing text-to-image path (no regression)."""
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        m.generate("a fox")
+
+    fake_i2i.from_pretrained.assert_not_called()
+
+
+def test_sd_turbo_generate_img2img_caches_pipeline():
+    """Second img2img call reuses the cached pipeline."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+    fake_i2i.from_pretrained.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("a", init_image=init_img)
+        m.generate("b", init_image=init_img)
+
+    assert fake_i2i.from_pretrained.call_count == 1

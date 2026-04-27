@@ -100,6 +100,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         **defaults,
         "supports_negative_prompt": True,
         "supports_seeded_generation": True,
+        "supports_img2img": True,
     }
     manifest = {
         "model_id": _model_id(repo_id),

@@ -79,6 +79,13 @@ def test_resolve_default_fallback():
     assert caps["default_guidance"] == 7.5
 
 
+def test_resolve_advertises_supports_img2img():
+    """Resolver-pulled diffusers models advertise img2img support by default."""
+    info = _fake_info(siblings=["model_index.json"], tags=["text-to-image"])
+    result = HF_PLUGIN["resolve"]("org/anything", None, info)
+    assert result.manifest["capabilities"]["supports_img2img"] is True
+
+
 def test_search_yields_results_with_modality_tag():
     fake_api = MagicMock()
     fake_repo = MagicMock(id="org/repo", downloads=42)
