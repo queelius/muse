@@ -163,7 +163,7 @@ def test_sd_turbo_generate_img2img_branch():
     fake_t2i = MagicMock()
     fake_t2i.from_pretrained.return_value = _patched_pipe()
     fake_i2i = MagicMock()
-    fake_i2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i.from_pipe.return_value = _patched_pipe()
 
     with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
          patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
@@ -175,7 +175,7 @@ def test_sd_turbo_generate_img2img_branch():
         init_img = Image.new("RGB", (64, 64))
         m.generate("repaint", init_image=init_img, strength=0.6)
 
-    fake_i2i.from_pretrained.assert_called_once()
+    fake_i2i.from_pipe.assert_called_once()
 
 
 def test_sd_turbo_generate_without_init_image_keeps_t2i_path():
@@ -193,7 +193,7 @@ def test_sd_turbo_generate_without_init_image_keeps_t2i_path():
         )
         m.generate("a fox")
 
-    fake_i2i.from_pretrained.assert_not_called()
+    fake_i2i.from_pipe.assert_not_called()
 
 
 def test_sd_turbo_generate_img2img_caches_pipeline():
@@ -203,7 +203,7 @@ def test_sd_turbo_generate_img2img_caches_pipeline():
     fake_t2i = MagicMock()
     fake_t2i.from_pretrained.return_value = _patched_pipe()
     fake_i2i = MagicMock()
-    fake_i2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i.from_pipe.return_value = _patched_pipe()
 
     with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
          patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
@@ -216,7 +216,7 @@ def test_sd_turbo_generate_img2img_caches_pipeline():
         m.generate("a", init_image=init_img)
         m.generate("b", init_image=init_img)
 
-    assert fake_i2i.from_pretrained.call_count == 1
+    assert fake_i2i.from_pipe.call_count == 1
 
 
 def test_sd_turbo_img2img_bumps_steps_to_satisfy_strength_contract():
@@ -227,7 +227,7 @@ def test_sd_turbo_img2img_bumps_steps_to_satisfy_strength_contract():
     fake_t2i.from_pretrained.return_value = _patched_pipe()
     fake_i2i = MagicMock()
     fake_i2i_pipe = _patched_pipe()
-    fake_i2i.from_pretrained.return_value = fake_i2i_pipe
+    fake_i2i.from_pipe.return_value = fake_i2i_pipe
 
     with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
          patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
@@ -238,3 +238,34 @@ def test_sd_turbo_img2img_bumps_steps_to_satisfy_strength_contract():
         m.generate("repaint", init_image=init_img, strength=0.4)
 
     assert fake_i2i_pipe.call_args.kwargs["num_inference_steps"] == 3
+
+
+def test_sd_turbo_img2img_uses_from_pipe_not_from_pretrained_to_share_vram():
+    """from_pipe shares weights; from_pretrained would OOM on small GPUs.
+
+    Regression for v0.17.2: SDXL-Turbo on a 12GB GPU crashed loading a
+    second pipeline because from_pretrained allocated a fresh copy of
+    all weights. from_pipe reuses the loaded UNet/VAE/text-encoders.
+    """
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i_pipe = _patched_pipe()
+    fake_t2i.from_pretrained.return_value = fake_t2i_pipe
+    fake_i2i = MagicMock()
+    fake_i2i.from_pipe.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.4)
+
+    # Critical: from_pipe was called (shares weights). from_pretrained on
+    # the i2i class was NOT called (would have allocated a fresh copy).
+    fake_i2i.from_pipe.assert_called_once_with(fake_t2i_pipe)
+    fake_i2i.from_pretrained.assert_not_called()

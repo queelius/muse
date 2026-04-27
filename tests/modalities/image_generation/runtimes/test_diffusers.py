@@ -257,7 +257,7 @@ def test_generate_with_init_image_uses_img2img_pipeline():
     fake_t2i_class = MagicMock()
     fake_t2i_class.from_pretrained.return_value = _patched_pipe()
     fake_i2i_class = MagicMock()
-    fake_i2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class.from_pipe.return_value = _patched_pipe()
 
     with patch(
         "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
@@ -276,9 +276,9 @@ def test_generate_with_init_image_uses_img2img_pipeline():
         init_img = Image.new("RGB", (64, 64))
         m.generate("repaint", init_image=init_img, strength=0.6)
 
-    fake_i2i_class.from_pretrained.assert_called_once()
+    fake_i2i_class.from_pipe.assert_called_once()
     # The img2img pipeline (not the t2i one) was called for inference
-    fake_i2i_class.from_pretrained.return_value.assert_called()
+    fake_i2i_class.from_pipe.return_value.assert_called()
 
 
 def test_generate_without_init_image_uses_text2image_pipeline():
@@ -304,7 +304,7 @@ def test_generate_without_init_image_uses_text2image_pipeline():
         m.generate("a fox")
 
     # img2img was NEVER loaded
-    fake_i2i_class.from_pretrained.assert_not_called()
+    fake_i2i_class.from_pipe.assert_not_called()
 
 
 def test_generate_img2img_default_strength_when_omitted():
@@ -315,7 +315,7 @@ def test_generate_img2img_default_strength_when_omitted():
     fake_t2i_class.from_pretrained.return_value = _patched_pipe()
     fake_i2i_class = MagicMock()
     fake_i2i_pipe = _patched_pipe()
-    fake_i2i_class.from_pretrained.return_value = fake_i2i_pipe
+    fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
 
     with patch(
         "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
@@ -338,13 +338,13 @@ def test_generate_img2img_default_strength_when_omitted():
 
 
 def test_generate_img2img_caches_pipeline():
-    """Second img2img call reuses the cached pipeline (no second from_pretrained)."""
+    """Second img2img call reuses the cached pipeline (no second from_pipe)."""
     from PIL import Image
 
     fake_t2i_class = MagicMock()
     fake_t2i_class.from_pretrained.return_value = _patched_pipe()
     fake_i2i_class = MagicMock()
-    fake_i2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class.from_pipe.return_value = _patched_pipe()
 
     with patch(
         "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
@@ -364,7 +364,7 @@ def test_generate_img2img_caches_pipeline():
         m.generate("a", init_image=init_img)
         m.generate("b", init_image=init_img)
 
-    assert fake_i2i_class.from_pretrained.call_count == 1
+    assert fake_i2i_class.from_pipe.call_count == 1
 
 
 def test_img2img_bumps_steps_to_satisfy_strength_contract():
@@ -380,7 +380,7 @@ def test_img2img_bumps_steps_to_satisfy_strength_contract():
     fake_t2i_class.from_pretrained.return_value = _patched_pipe()
     fake_i2i_class = MagicMock()
     fake_i2i_pipe = _patched_pipe()
-    fake_i2i_class.from_pretrained.return_value = fake_i2i_pipe
+    fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
 
     with patch(
         "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
@@ -412,7 +412,7 @@ def test_img2img_does_not_bump_when_steps_already_sufficient():
     fake_t2i_class.from_pretrained.return_value = _patched_pipe()
     fake_i2i_class = MagicMock()
     fake_i2i_pipe = _patched_pipe()
-    fake_i2i_class.from_pretrained.return_value = fake_i2i_pipe
+    fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
 
     with patch(
         "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
@@ -433,3 +433,41 @@ def test_img2img_does_not_bump_when_steps_already_sufficient():
 
     # 25 * 0.4 = 10 effective steps, well above the >= 1 contract
     assert fake_i2i_pipe.call_args.kwargs["num_inference_steps"] == 25
+
+
+def test_img2img_uses_from_pipe_not_from_pretrained_to_share_vram():
+    """from_pipe shares weights; from_pretrained would OOM on small GPUs.
+
+    Regression for v0.17.2: SDXL-Turbo on a 12GB GPU crashed loading a
+    second pipeline because from_pretrained allocated a fresh copy of
+    all weights. from_pipe reuses the loaded UNet/VAE/text-encoders.
+    """
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_pipe = _patched_pipe()
+    fake_t2i_class.from_pretrained.return_value = fake_t2i_pipe
+    fake_i2i_class = MagicMock()
+    fake_i2i_class.from_pipe.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.4)
+
+    # Critical: from_pipe was called (shares weights). from_pretrained on
+    # the i2i class was NOT called (would have allocated a fresh copy).
+    fake_i2i_class.from_pipe.assert_called_once_with(fake_t2i_pipe)
+    fake_i2i_class.from_pretrained.assert_not_called()

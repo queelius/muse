@@ -203,9 +203,7 @@ class DiffusersText2ImageModel:
         guidance: float | None,
         seed: int | None,
     ) -> ImageResult:
-        # Lazy-load the img2img pipeline, cached on the instance. Diffusers
-        # shares the underlying model objects between pipelines loaded from
-        # the same checkpoint, so the marginal cost is small.
+        # Lazy-load the img2img pipeline, cached on the instance.
         if self._i2i_pipe is None:
             import muse.modalities.image_generation.runtimes.diffusers as _mod
             _i2i = _mod.AutoPipelineForImage2Image
@@ -218,14 +216,12 @@ class DiffusersText2ImageModel:
                 "loading img2img pipeline from %s (model_id=%s, device=%s, dtype=%s)",
                 self._src, self.model_id, self._device, self._dtype,
             )
-            pipe = _i2i.from_pretrained(
-                self._src,
-                torch_dtype=self._torch_dtype,
-                variant="fp16" if self._dtype == "float16" else None,
-            )
-            if self._device != "cpu":
-                pipe = pipe.to(self._device)
-            self._i2i_pipe = pipe
+            # Share UNet/VAE/text-encoders with the already-loaded t2i pipeline so we
+            # don't double VRAM on small GPUs. AutoPipelineForImage2Image.from_pipe
+            # is the canonical diffusers idiom for this; from_pretrained allocates a
+            # fresh copy and OOMs.
+            # Reference: https://huggingface.co/docs/diffusers/api/pipelines/auto_pipeline
+            self._i2i_pipe = _i2i.from_pipe(self._pipe)
 
         n_steps = steps if steps is not None else self._default_steps
         cfg = guidance if guidance is not None else self._default_guidance
