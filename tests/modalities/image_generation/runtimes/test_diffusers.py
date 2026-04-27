@@ -248,3 +248,120 @@ def test_default_size_normalized_to_tuple_when_passed_list():
         )
     assert m.default_size == (1024, 1024)
     assert isinstance(m.default_size, tuple)
+
+
+def test_generate_with_init_image_uses_img2img_pipeline():
+    """When init_image is set, runtime calls AutoPipelineForImage2Image."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_class.from_pretrained.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.6)
+
+    fake_i2i_class.from_pretrained.assert_called_once()
+    # The img2img pipeline (not the t2i one) was called for inference
+    fake_i2i_class.from_pretrained.return_value.assert_called()
+
+
+def test_generate_without_init_image_uses_text2image_pipeline():
+    """init_image=None keeps the existing text-to-image path (no regression)."""
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        m.generate("a fox")
+
+    # img2img was NEVER loaded
+    fake_i2i_class.from_pretrained.assert_not_called()
+
+
+def test_generate_img2img_default_strength_when_omitted():
+    """When strength is None on an img2img call, defaults to 0.5."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i_class.from_pretrained.return_value = fake_i2i_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img)  # no strength
+
+    assert fake_i2i_pipe.call_args.kwargs["strength"] == 0.5
+
+
+def test_generate_img2img_caches_pipeline():
+    """Second img2img call reuses the cached pipeline (no second from_pretrained)."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_class.from_pretrained.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("a", init_image=init_img)
+        m.generate("b", init_image=init_img)
+
+    assert fake_i2i_class.from_pretrained.call_count == 1

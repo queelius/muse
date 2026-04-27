@@ -45,5 +45,7 @@ class ImageModel(Protocol):
         steps: int | None = None,
         guidance: float | None = None,
         seed: int | None = None,
+        init_image: Any = None,
+        strength: float | None = None,
         **kwargs,
     ) -> ImageResult: ...
