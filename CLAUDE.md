@@ -355,12 +355,17 @@ If you do:
 3. Export from `__init__.py`: `MODALITY = "audio/transcription"` (the
    MIME string) and `build_router` (the router factory). Also re-export
    the Protocol + Result for user imports.
-4. Add bundled model scripts under `src/muse/models/`.
-5. Add tests under `tests/modalities/<mime_name>/` and
-   `tests/models/test_<new_model>.py`.
+4. (HF support) write `hf.py` exporting `HF_PLUGIN: dict` (sniff/
+   resolve/search + metadata). See `docs/HF_PLUGINS.md` for the
+   contract and authoring rules. Loaded via single-file import,
+   so no relative imports.
+5. Add bundled model scripts under `src/muse/models/` (or rely on
+   the resolver alone for uniform-shape modalities).
+6. Add tests under `tests/modalities/<mime_name>/` (route + plugin)
+   and `tests/models/test_<new_model>.py`.
 
-No edits to `worker.py`, `catalog.py`, `registry.py`, or `server.py`
-are needed: discovery handles the wiring.
+No edits to `worker.py`, `catalog.py`, `registry.py`, `server.py`,
+or `resolvers_hf.py` are needed: discovery handles the wiring.
 
 No gateway changes are needed either: the gateway routes by the
 `model` field in the request body and forwards to whichever worker

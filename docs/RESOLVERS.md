@@ -33,17 +33,22 @@ hf://Qwen/Qwen3-Embedding-0.6B          # sentence-transformers embedder
 hf://sentence-transformers/all-MiniLM-L6-v2
 ```
 
-## Currently registered: `hf`
+## How HF resolution works
 
-The HuggingFace resolver lives at `muse.core.resolvers_hf`. It sniffs
-each repo to decide how to handle it:
+The HF resolver discovers per-modality plugins at startup. Each
+modality contributes a `hf.py` file next to its `__init__.py`
+exporting an `HF_PLUGIN: dict` (sniff/resolve/search + metadata).
 
-| Repo signal | Inferred modality | Runtime class |
-|---|---|---|
-| any `*.gguf` sibling | `chat/completion` | `LlamaCppModel` |
-| `sentence-transformers` tag | `embedding/text` | `SentenceTransformerModel` |
-| `sentence_transformers_config.json` sibling | `embedding/text` | `SentenceTransformerModel` |
-| neither | (raises with tag list) | n/a |
+On `muse pull hf://Org/Repo[@variant]`:
+1. The resolver's `repo_info(repo_id)` fetches HuggingFace metadata.
+2. Plugins are iterated in (priority asc, modality asc) order.
+3. The first plugin whose `sniff(info)` returns True wins; its
+   `resolve(repo_id, variant, info)` synthesizes the manifest.
+
+On `muse search foo --modality M`: only plugins with `modality == M`
+are consulted. With no modality filter: all plugins run.
+
+See `docs/HF_PLUGINS.md` for how to author a plugin.
 
 For GGUF, `@variant` is **required**. There is no magic default
 because picking one quantization for the user is rude (Q8_0 vs Q4_K_M

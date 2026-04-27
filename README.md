@@ -18,7 +18,12 @@ Three ways to add a model, in order of how often you'll reach for them:
    muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m
    ```
 2. **Drop a `.py` script into `~/.muse/models/`** for a one-off model with custom code (see `docs/MODEL_SCRIPTS.md`).
-3. **Add a whole new modality** (rare) by dropping a subpackage into `src/muse/modalities/` or `$MUSE_MODALITIES_DIR`. The subpackage exports `MODALITY` + `build_router` and discovery picks it up.
+3. **Add a whole new modality** (rare) by dropping a subpackage into
+   `src/muse/modalities/` or `$MUSE_MODALITIES_DIR`. The subpackage
+   exports `MODALITY` + `build_router` and discovery picks it up.
+   Optional: drop a `hf.py` next to `__init__.py` exporting an
+   `HF_PLUGIN` dict; muse's HF resolver picks it up the same way and
+   `muse search`/`muse pull hf://...` work for the new modality.
 
 All three surfaces are discovered at runtime; there is no hardcoded catalog, no allowlist, and no registration calls.
 
