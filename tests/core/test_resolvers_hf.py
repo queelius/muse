@@ -24,15 +24,6 @@ def _fake_repo_info(siblings=(), tags=()):
     return info
 
 
-def test_sniff_returns_unknown_for_unrecognized_repo():
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = _fake_repo_info(
-        siblings=["model.safetensors", "config.json"],
-        tags=["some-unrelated-tag"],
-    )
-    assert _sniff_repo_shape(info) == "unknown"
-
-
 def test_resolve_gguf_requires_variant():
     """GGUF repos MUST specify @variant; no magic default."""
     from muse.core.resolvers_hf import HFResolver
@@ -221,28 +212,6 @@ def _fake_ct2_whisper_siblings():
     ]
 
 
-def test_sniff_rejects_ct2_shape_without_asr_tag():
-    """CT2 alone is not enough: could be an NMT repo."""
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = SimpleNamespace(
-        siblings=_fake_ct2_whisper_siblings(),
-        tags=["machine-translation"],
-    )
-    assert _sniff_repo_shape(info) == "unknown"
-
-
-def test_sniff_rejects_without_model_bin():
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = SimpleNamespace(
-        siblings=[
-            SimpleNamespace(rfilename="config.json"),
-            SimpleNamespace(rfilename="tokenizer.json"),
-        ],
-        tags=["automatic-speech-recognition"],
-    )
-    assert _sniff_repo_shape(info) == "unknown"
-
-
 def test_resolve_faster_whisper_synthesizes_manifest():
     from muse.core.resolvers_hf import HFResolver
     resolver = HFResolver()
@@ -322,8 +291,8 @@ def test_search_text_classification_yields_results():
 
 
 def test_resolve_unknown_error_message_includes_repo_diagnostics():
-    """When no plugin matches and the legacy fallback also misses, the error
-    surfaces the repo id plus the seen tags and siblings so users can debug."""
+    """When no plugin matches, the error surfaces the repo id plus the seen
+    tags and siblings so users can debug."""
     from muse.core.resolvers_hf import HFResolver, ResolverError
     resolver = HFResolver()
     info = SimpleNamespace(
