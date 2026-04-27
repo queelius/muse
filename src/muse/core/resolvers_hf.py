@@ -12,7 +12,6 @@ order on resolve, and filters by modality on search.
 """
 from __future__ import annotations
 
-import logging
 from typing import Iterable
 
 from huggingface_hub import HfApi
@@ -26,9 +25,6 @@ from muse.core.resolvers import (
     parse_uri,
     register_resolver,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 class HFResolver(Resolver):
