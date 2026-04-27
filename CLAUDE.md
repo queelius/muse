@@ -11,13 +11,20 @@ six modalities:
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming; powered by llama-cpp-python; any GGUF on HF via the resolver)
 - **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
-- **image/generation**: text-to-image via `/v1/images/generations` (SD-Turbo, SDXL-Turbo, FLUX.1-schnell, any diffusers HF repo)
+- **image/generation**: text-to-image and img2img via `/v1/images/generations` (SD-Turbo, SDXL-Turbo, FLUX.1-schnell, any diffusers HF repo)
 - **text/classification**: text moderation/classification via `/v1/moderations` (any HuggingFace text-classification model)
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
 path hierarchy still mirrors OpenAI (`/v1/audio/speech`,
 `/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`) for
 client compatibility.
+
+The `/v1/images/generations` route also accepts optional `image` (data URL or http(s):// URL) + `strength` (0.0 to 1.0, default 0.5) fields for img2img since v0.17.0. OpenAI SDK clients pass them via `extra_body`:
+
+    client.images.generate(prompt="oil painting", model="sdxl-turbo",
+                           extra_body={"image": "data:image/png;base64,...", "strength": 0.6})
+
+Models advertise support via `capabilities.supports_img2img`. Requests for non-supporting models return 400.
 
 The package is organized around three plugin surfaces:
 
