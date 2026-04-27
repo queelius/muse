@@ -6,6 +6,10 @@ Follows OpenAI's /v1/images/generations contract:
   - `size` "WIDTHxHEIGHT" (64-2048 per side)
   - `response_format` "b64_json" (default) | "url" (data URL)
   - muse extensions: `model`, `seed`, `steps`, `guidance`, `negative_prompt`
+  - img2img extensions (since v0.17.0): `image` (data URL or http(s) URL),
+    `strength` (0.0 to 1.0). When `image` is set, the runtime routes through
+    AutoPipelineForImage2Image. Requires the selected model to advertise
+    `capabilities.supports_img2img: True` in its manifest.
 """
 from __future__ import annotations
 
@@ -18,9 +22,10 @@ from threading import Lock
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
-from muse.core.errors import ModelNotFoundError
+from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.image_generation.codec import to_bytes, to_data_url
+from muse.modalities.image_generation.image_input import decode_image_input
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,8 @@ class GenerationRequest(BaseModel):
     steps: int | None = Field(default=None, ge=1, le=100)
     guidance: float | None = Field(default=None, ge=0.0, le=20.0)
     seed: int | None = None
+    image: str | None = None
+    strength: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("size")
     @classmethod
@@ -58,6 +65,32 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         except KeyError:
             raise ModelNotFoundError(model_id=req.model or "<default>", modality=MODALITY)
 
+        # Resolve the effective model id (the registry default when req.model is None)
+        # so capability-gate errors and decode-failure errors name a real model.
+        effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+
+        # img2img gating: if `image` is supplied, the selected model must
+        # declare `supports_img2img: True` in its manifest, and the input
+        # must decode to a PIL.Image.
+        init_image = None
+        if req.image is not None:
+            manifest = registry.manifest(MODALITY, effective_id) or {}
+            if not manifest.get("capabilities", {}).get("supports_img2img"):
+                return error_response(
+                    400,
+                    "invalid_parameter",
+                    f"model {effective_id!r} does not support img2img; "
+                    f"use one of the diffusers-resolved models or sd-turbo",
+                )
+            try:
+                init_image = decode_image_input(req.image)
+            except ValueError as e:
+                return error_response(
+                    400,
+                    "invalid_parameter",
+                    f"image decode failed: {e}",
+                )
+
         width, height = map(int, req.size.split("x"))
 
         def _call_one(seed_offset: int):
@@ -67,6 +100,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "negative_prompt": req.negative_prompt,
                 "steps": req.steps,
                 "guidance": req.guidance,
+                "init_image": init_image,
+                "strength": req.strength,
             }
             if req.seed is not None:
                 kwargs["seed"] = req.seed + seed_offset
