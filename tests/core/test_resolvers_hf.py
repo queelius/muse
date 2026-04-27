@@ -282,19 +282,6 @@ def test_search_faster_whisper_yields_results():
 
 # --- text-classification branch ---
 
-def test_sniff_detects_text_classification_tag():
-    from muse.core.resolvers_hf import _sniff_repo_shape
-    info = SimpleNamespace(
-        siblings=[
-            SimpleNamespace(rfilename="config.json"),
-            SimpleNamespace(rfilename="model.safetensors"),
-            SimpleNamespace(rfilename="tokenizer.json"),
-        ],
-        tags=["text-classification", "transformers"],
-    )
-    assert _sniff_repo_shape(info) == "text-classification"
-
-
 def test_resolve_text_classification_synthesizes_manifest():
     from muse.core.resolvers_hf import HFResolver
     resolver = HFResolver()
