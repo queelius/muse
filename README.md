@@ -3,6 +3,7 @@
 Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface:
 - text-to-speech on `/v1/audio/speech`
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
+- text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
 - text-to-image on `/v1/images/generations`
 - text-to-animation on `/v1/images/animations`
 - text-to-vector on `/v1/embeddings`
@@ -10,7 +11,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text moderation/classification on `/v1/moderations`
 - text rerank (Cohere-compat) on `/v1/rerank`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`, `text/rerank`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `audio/generation`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`, `text/rerank`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -95,6 +96,18 @@ curl -X POST http://localhost:8000/v1/rerank \
     "top_n": 2,
     "return_documents": true
   }'
+
+# Music generation (capability-gated; default model: stable-audio-open-1.0)
+curl -X POST http://localhost:8000/v1/audio/music \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"ambient piano with light rain","model":"stable-audio-open-1.0","duration":10.0}' \
+  --output music.wav
+
+# Sound effects generation (same model, different intent)
+curl -X POST http://localhost:8000/v1/audio/sfx \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"footsteps on gravel","model":"stable-audio-open-1.0","duration":3.0}' \
+  --output footsteps.wav
 ```
 
 ```python
@@ -153,6 +166,9 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
 | `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |
+| `POST /v1/rerank` | text rerank (Cohere-compat) |
+| `POST /v1/audio/music` | music generation (capability-gated; muse-native shape) |
+| `POST /v1/audio/sfx` | sound-effect generation (capability-gated; muse-native shape) |
 
 Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (model not found) and 422 (validation). Matches OpenAI's envelope so clients written against their API work against muse.
 
@@ -161,16 +177,20 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
 - `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
 - `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
+  - `audio_generation/` (MODALITY `"audio/generation"`; mounts both `/v1/audio/music` and `/v1/audio/sfx` on one MIME tag with per-route capability gates)
   - `audio_speech/` (MODALITY `"audio/speech"`)
   - `audio_transcription/` (MODALITY `"audio/transcription"`; multipart/form-data upload, OpenAI Whisper wire shape)
   - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)
   - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
   - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
+  - `text_rerank/` (MODALITY `"text/rerank"`; Cohere `/v1/rerank` wire shape)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
   - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
   - `sd_turbo.py` (image/generation)
+  - `bge_reranker_v2_m3.py` (text/rerank)
+  - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
 - `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
   - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.
 

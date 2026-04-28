@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-eight modalities:
+nine modalities:
 
+- **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming; powered by llama-cpp-python; any GGUF on HF via the resolver)
@@ -27,6 +28,18 @@ the de-facto standard that downstream tooling (LangChain, LlamaIndex,
 Haystack) expects. Response envelope mirrors Cohere's: `results[]`
 with `index` + `relevance_score`, optional `document.text`, plus
 `meta.billed_units.search_units` for SDK compatibility.
+
+`audio/generation` is muse's first modality with TWO URL routes mounted
+on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same
+request body, codec, registry surface, and runtime. The only per-route
+difference is the manifest capability key consulted: `supports_music`
+or `supports_sfx`. When a flag is False (or a future MusicGen-only
+model lacks `supports_sfx`), the unsupported route returns 400. The
+two-URL split is for legibility: a "footsteps on gravel" prompt sent
+to `/v1/audio/music` would silently produce a 30-second loop of
+footsteps treated as music; routing the same prompt to `/v1/audio/sfx`
+makes the user's intent explicit to operators reading logs and to the
+model itself.
 
 The `/v1/images/generations` route also accepts optional `image` (data URL or http(s):// URL) + `strength` (0.0 to 1.0, default 0.5) fields for img2img since v0.17.0. OpenAI SDK clients pass them via `extra_body`:
 
