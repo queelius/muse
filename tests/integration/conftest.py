@@ -136,3 +136,15 @@ def text_moderation_model(remote_health) -> str:
     model_id = os.environ.get("MUSE_MODERATION_MODEL_ID", "text-moderation")
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def rerank_model(remote_health) -> str:
+    """The text/rerank model id integration tests should target.
+
+    Defaults to bge-reranker-v2-m3. Override via MUSE_RERANK_MODEL_ID.
+    Skips the test if the chosen model isn't loaded on the server.
+    """
+    model_id = os.environ.get("MUSE_RERANK_MODEL_ID", "bge-reranker-v2-m3")
+    _require_model(remote_health, model_id)
+    return model_id
