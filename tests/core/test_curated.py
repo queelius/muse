@@ -280,6 +280,17 @@ def test_load_curated_includes_animation_entries():
     assert e.uri == "hf://wangfuyun/AnimateLCM"
 
 
+def test_load_curated_includes_stable_audio_open_1_0():
+    """v0.20.0 adds stable-audio-open-1.0 as a bundled alias under audio/generation."""
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+
+    assert "stable-audio-open-1.0" in by_id
+    e = by_id["stable-audio-open-1.0"]
+    assert e.bundled is True
+    assert e.uri is None  # bundled entries don't have URIs
+
+
 def test_load_curated_includes_text_moderation_entry():
     """Curated text-moderation alias exists and points at KoalaAI.
 

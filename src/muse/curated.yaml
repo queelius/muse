@@ -149,3 +149,8 @@
   description: "AnimateLCM: distilled AnimateDiff, 4 steps, ~3-5x faster than v3"
   capabilities:
     memory_gb: 9.0
+
+# ---------- audio/generation (music + sfx) ----------
+
+- id: stable-audio-open-1.0
+  bundled: true
