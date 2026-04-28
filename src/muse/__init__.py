@@ -2,13 +2,14 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.17.3
+`src/muse/modalities/` plus any user-configured dirs. As of v0.18.0
 the bundled modalities are:
 
   - audio/speech: /v1/audio/speech (TTS: Soprano, Kokoro, Bark)
   - audio/transcription: /v1/audio/transcriptions, /v1/audio/translations (faster-whisper)
   - chat/completion: /v1/chat/completions (llama-cpp-python over GGUF)
   - embedding/text: /v1/embeddings (sentence-transformers)
+  - image/animation: /v1/images/animations (AnimateDiff)
   - image/generation: /v1/images/generations (diffusers)
   - text/classification: /v1/moderations (HF text-classification)
 

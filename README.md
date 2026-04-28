@@ -4,11 +4,12 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-speech on `/v1/audio/speech`
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
 - text-to-image on `/v1/images/generations`
+- text-to-animation on `/v1/images/animations`
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 - text moderation/classification on `/v1/moderations`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/generation`, `text/classification`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 

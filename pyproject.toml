@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muse"
-version = "0.17.3"
+version = "0.18.0"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]
@@ -57,6 +57,7 @@ images = [
   "accelerate",
   "Pillow",
   "safetensors",
+  "imageio[ffmpeg]>=2.31.0",  # for animated MP4 export
 ]
 
 # Embeddings modality
