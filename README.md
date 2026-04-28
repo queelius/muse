@@ -8,8 +8,9 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 - text moderation/classification on `/v1/moderations`
+- text rerank (Cohere-compat) on `/v1/rerank`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`, `text/rerank`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -79,6 +80,21 @@ curl -X POST http://localhost:8000/v1/embeddings \
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3-8b-gguf-q4-k-m","messages":[{"role":"user","content":"Capital of France?"}]}'
+
+# Rerank (Cohere-compat); pulls bge-reranker-v2-m3 by default
+curl -X POST http://localhost:8000/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "what is muse?",
+    "documents": [
+      "muse is an audio server",
+      "muse is a multi-modality generation server",
+      "muse is the goddess of inspiration"
+    ],
+    "model": "bge-reranker-v2-m3",
+    "top_n": 2,
+    "return_documents": true
+  }'
 ```
 
 ```python

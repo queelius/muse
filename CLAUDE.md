@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-seven modalities:
+eight modalities:
 
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
@@ -14,11 +14,19 @@ seven modalities:
 - **image/animation**: text-to-animation via `/v1/images/animations` (AnimateDiff: 16-frame loops, animated WebP/GIF/MP4 output)
 - **image/generation**: text-to-image and img2img via `/v1/images/generations` (SD-Turbo, SDXL-Turbo, FLUX.1-schnell, any diffusers HF repo)
 - **text/classification**: text moderation/classification via `/v1/moderations` (any HuggingFace text-classification model)
+- **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
-path hierarchy still mirrors OpenAI (`/v1/audio/speech`,
+path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,
 `/v1/chat/completions`, `/v1/embeddings`, `/v1/images/animations`,
 `/v1/images/generations`) for client compatibility.
+
+`text/rerank` is muse's first Cohere-compat modality (rather than
+OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is
+the de-facto standard that downstream tooling (LangChain, LlamaIndex,
+Haystack) expects. Response envelope mirrors Cohere's: `results[]`
+with `index` + `relevance_score`, optional `document.text`, plus
+`meta.billed_units.search_units` for SDK compatibility.
 
 The `/v1/images/generations` route also accepts optional `image` (data URL or http(s):// URL) + `strength` (0.0 to 1.0, default 0.5) fields for img2img since v0.17.0. OpenAI SDK clients pass them via `extra_body`:
 

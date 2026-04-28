@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.18.3
+`src/muse/modalities/` plus any user-configured dirs. As of v0.19.0
 the bundled modalities are:
 
   - audio/speech: /v1/audio/speech (TTS: Soprano, Kokoro, Bark)
@@ -12,6 +12,7 @@ the bundled modalities are:
   - image/animation: /v1/images/animations (AnimateDiff)
   - image/generation: /v1/images/generations (diffusers)
   - text/classification: /v1/moderations (HF text-classification)
+  - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
 
 Heavy backends (transformers, diffusers, faster-whisper, llama-cpp,
 sentence-transformers) are imported lazily inside per-modality runtime
