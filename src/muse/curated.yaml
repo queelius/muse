@@ -132,6 +132,11 @@
     device: cpu
     memory_gb: 0.5
 
+# ---------- text/rerank (cross-encoder rerankers) ----------
+
+- id: bge-reranker-v2-m3
+  bundled: true
+
 # ---------- image/animation (AnimateDiff) ----------
 
 - id: animatediff-motion-v3

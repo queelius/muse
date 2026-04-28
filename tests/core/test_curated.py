@@ -253,6 +253,17 @@ def test_load_curated_includes_sdxl_turbo_and_flux_schnell():
     assert e.uri == "hf://black-forest-labs/FLUX.1-schnell"
 
 
+def test_load_curated_includes_bge_reranker_v2_m3():
+    """v0.19.0 adds bge-reranker-v2-m3 as a bundled alias under text/rerank."""
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+
+    assert "bge-reranker-v2-m3" in by_id
+    e = by_id["bge-reranker-v2-m3"]
+    assert e.bundled is True
+    assert e.uri is None  # bundled entries don't have URIs
+
+
 def test_load_curated_includes_animation_entries():
     """v0.18.0 adds image/animation curated aliases."""
     entries = load_curated()
