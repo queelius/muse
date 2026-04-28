@@ -8,6 +8,7 @@ Public surface:
 
 Wire contract: POST /v1/images/animations
 """
+from muse.modalities.image_animation.client import AnimationsClient
 from muse.modalities.image_animation.protocol import (
     AnimationModel,
     AnimationResult,
@@ -21,4 +22,5 @@ __all__ = [
     "build_router",
     "AnimationModel",
     "AnimationResult",
+    "AnimationsClient",
 ]
