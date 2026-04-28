@@ -148,3 +148,18 @@ def rerank_model(remote_health) -> str:
     model_id = os.environ.get("MUSE_RERANK_MODEL_ID", "bge-reranker-v2-m3")
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def audio_generation_model(remote_health) -> str:
+    """The audio/generation model id integration tests should target.
+
+    Defaults to stable-audio-open-1.0. Override via
+    MUSE_AUDIO_GENERATION_MODEL_ID. Skips the test if the chosen model
+    isn't loaded on the server.
+    """
+    model_id = os.environ.get(
+        "MUSE_AUDIO_GENERATION_MODEL_ID", "stable-audio-open-1.0",
+    )
+    _require_model(remote_health, model_id)
+    return model_id
