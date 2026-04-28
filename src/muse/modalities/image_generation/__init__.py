@@ -14,8 +14,16 @@ from muse.modalities.image_generation.routes import build_router
 
 MODALITY = "image/generation"
 
+# Per-modality probe defaults read by `muse models probe`. Defaults to
+# the model's own default size + steps; backends honor capabilities.
+PROBE_DEFAULTS = {
+    "shape": "default size, 1 image",
+    "call": lambda m: m.generate("probe scene"),
+}
+
 __all__ = [
     "MODALITY",
+    "PROBE_DEFAULTS",
     "build_router",
     "GenerationsClient",
     "ImageResult",

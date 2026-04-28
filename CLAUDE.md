@@ -305,6 +305,44 @@ PY
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 
+## Memory accounting
+
+Three sources of truth, in order of fidelity:
+
+1. **`muse models probe <id>`** (most honest). Loads the model in
+   isolation in its per-model venv, runs a representative inference
+   (per-modality default shape from `PROBE_DEFAULTS`), captures peak
+   VRAM/RAM via `torch.cuda.max_memory_allocated()` on GPU or process
+   RSS on CPU. Persists per-device measurement to `~/.muse/catalog.json`
+   under `measurements.<device>`. Default runs inference;
+   `--no-inference` is a faster load-only mode that undersells peak.
+2. **`capabilities.memory_gb` annotation** (peak-inference estimate).
+   Hand-set per-model from architecture knowledge, conservative.
+   Used by `muse models list` until probe measurements exist; shown
+   with a `~` prefix.
+3. **No data**: `-` in the list. Run probe to populate.
+
+`muse models list` picks the most honest available number per row,
+tagged GPU or CPU based on `capabilities.device`. The footer aggregates
+GPU and CPU separately across enabled models.
+
+`muse models info <id>` shows annotation and probe measurement
+side-by-side, including the inference shape that produced the peak
+and the date probed.
+
+**Memory is a function of input shape, not a single number.** Whisper
+at 30s audio uses different VRAM than at 5min. SDXL-Turbo at 512^2 uses
+~half as much as at 1024^2. AnimateDiff at 8 frames uses roughly half
+as much as at 16 frames. The `memory_gb` annotation reflects a
+typical-shape peak. Probe measures the actual default shape. Future
+versions may add `--shape preset=small|medium|large` sweeps to map the
+full curve.
+
+Each modality declares its representative inference via a
+`PROBE_DEFAULTS = {"shape": ..., "call": lambda m: ...}` dict in its
+`__init__.py`. The probe worker imports the modality at run time and
+calls the shape-default lambda against the loaded backend.
+
 ## Adding a new model (the common case)
 
 Three paths, in order of least-to-most effort:

@@ -17,8 +17,17 @@ from muse.modalities.audio_speech.routes import build_router
 
 MODALITY = "audio/speech"
 
+# Per-modality probe defaults read by `muse models probe`. Declares a
+# representative inference shape and a callable that exercises the model
+# at that shape so peak VRAM/RAM is measurable. See cli_impl/probe_worker.
+PROBE_DEFAULTS = {
+    "shape": "5s synthesis",
+    "call": lambda m: m.synthesize("Hello, this is a probe."),
+}
+
 __all__ = [
     "MODALITY",
+    "PROBE_DEFAULTS",
     "build_router",
     "SpeechClient",
     "AudioChunk",

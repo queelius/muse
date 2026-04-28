@@ -90,6 +90,23 @@ MANIFEST = {
         "supports_negative_prompt": True,
         "supports_seeded_generation": True,
         "supports_img2img": True,
+        # Conservative VRAM/RAM peak estimate (fp16, default 512x512).
+        # Annotation feeds `muse models list`; `muse models probe sd-turbo`
+        # measures the real number on this hardware.
+        "memory_gb": 4.0,
+        # SD-Turbo ships fp32 + fp16 + a standalone single-file checkpoint
+        # (~47 GB total). The diffusers runtime only loads the fp16
+        # subfolder weights (~4 GB). Mirror the resolver plugin's
+        # allow_patterns so bundled-pull doesn't bloat the cache either.
+        "allow_patterns": [
+            "*.fp16.safetensors", "*.json", "*.txt", "*.md",
+            "feature_extractor/*.json",
+            "scheduler/*.json",
+            "text_encoder/*.fp16.safetensors", "text_encoder/*.json",
+            "tokenizer/*",
+            "unet/*.fp16.safetensors", "unet/*.json",
+            "vae/*.fp16.safetensors", "vae/*.json",
+        ],
     },
 }
 

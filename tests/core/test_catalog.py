@@ -1434,6 +1434,46 @@ def test_human_size_formats_bytes(nbytes, expected):
     assert _human_size(nbytes) == expected
 
 
+def test_pull_bundled_honors_allow_patterns_capability(tmp_catalog):
+    """MANIFEST.capabilities.allow_patterns flows into snapshot_download."""
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake") as mock_download, \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        # sd-turbo MANIFEST declares allow_patterns in v0.18.2
+        pull("sd-turbo")
+    # Verify snapshot_download was called with allow_patterns
+    mock_download.assert_called_once()
+    kwargs = mock_download.call_args.kwargs
+    assert "allow_patterns" in kwargs
+    patterns = kwargs["allow_patterns"]
+    # spot-check a few patterns we know should be there
+    assert any("fp16" in p for p in patterns)
+    assert any("unet" in p for p in patterns)
+
+
+def test_pull_bundled_no_allow_patterns_calls_default(tmp_catalog):
+    """Models without allow_patterns capability call snapshot_download without it."""
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake") as mock_download, \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("kokoro-82m")  # no allow_patterns in MANIFEST
+    mock_download.assert_called_once()
+    kwargs = mock_download.call_args.kwargs
+    assert "allow_patterns" not in kwargs
+
+
+def test_known_models_surfaces_memory_annotation():
+    """Bundled MANIFESTs that declare capabilities.memory_gb expose it on the entry."""
+    catalog = known_models()
+    # kokoro-82m got memory_gb in v0.18.2
+    assert "memory_gb" in catalog["kokoro-82m"].extra
+    assert catalog["kokoro-82m"].extra["memory_gb"] == 0.5
+    # sd-turbo also got it
+    assert catalog["sd-turbo"].extra["memory_gb"] == 4.0
+
+
 def test_known_models_no_curated_match_leaves_manifest_unchanged(tmp_catalog):
     """If no curated entry matches, the persisted manifest is used as-is."""
     from unittest.mock import patch

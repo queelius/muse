@@ -81,6 +81,10 @@ MANIFEST = {
     "capabilities": {
         "dimensions": 4096,
         "context_length": 32768,
+        # 7B-class Mistral backbone at fp16 is ~14 GB just for weights;
+        # latent-attention pooling + activation working set at default
+        # context lands around 16 GB peak.
+        "memory_gb": 16.0,
     },
 }
 

@@ -290,6 +290,26 @@ def test_load_curated_includes_text_moderation_entry():
     )
 
 
+def test_load_curated_includes_memory_annotations():
+    """v0.18.2: curated entries declare memory_gb under capabilities.
+
+    We spot-check a representative sample (chat, embedding, image,
+    audio). At least 5 entries must carry the annotation.
+    """
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+    annotated = [e for e in entries if e.capabilities.get("memory_gb") is not None]
+    assert len(annotated) >= 5, (
+        "expected memory_gb on most curated entries, got "
+        f"{len(annotated)}/{len(entries)}"
+    )
+    # Spot checks
+    assert by_id["qwen3.5-4b-q4"].capabilities["memory_gb"] == 3.5
+    assert by_id["all-minilm-l6-v2"].capabilities["memory_gb"] == 0.1
+    assert by_id["whisper-tiny"].capabilities["memory_gb"] == 0.1
+    assert by_id["text-moderation"].capabilities["memory_gb"] == 0.5
+
+
 def test_find_curated_by_uri_round_trips():
     """find_curated_by_uri(e.uri) == e for every URI-shaped curated entry."""
     for e in load_curated():

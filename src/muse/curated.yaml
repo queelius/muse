@@ -32,12 +32,16 @@
   modality: chat/completion
   size_gb: 2.5
   description: "Qwen3.5 4B (Q4_K_M): small but capable, runs on 4GB+ GPU or CPU"
+  capabilities:
+    memory_gb: 3.5
 
 - id: llama-3.2-3b-q4
   uri: hf://bartowski/Llama-3.2-3B-Instruct-GGUF@q4_k_m
   modality: chat/completion
   size_gb: 2.0
   description: "Llama 3.2 3B Instruct (Q4_K_M): small, fast, broadly compatible"
+  capabilities:
+    memory_gb: 2.5
 
 # ---------- embedding/text ----------
 
@@ -48,6 +52,7 @@
   description: "MiniLM 384 dims, 22MB: CPU-friendly default embedder"
   capabilities:
     device: cpu
+    memory_gb: 0.1
 
 - id: qwen3-embedding-0.6b
   uri: hf://Qwen/Qwen3-Embedding-0.6B
@@ -56,6 +61,7 @@
   description: "Qwen3-Embedding 0.6B: 1024 dims (matryoshka), 32K context, Apache 2.0"
   capabilities:
     trust_remote_code: true
+    memory_gb: 1.5
 
 # ---------- audio/speech (TTS) ----------
 
@@ -75,12 +81,16 @@
   modality: image/generation
   size_gb: 7.0
   description: "SDXL Turbo: 1-step distilled SDXL, 512x512, fast"
+  capabilities:
+    memory_gb: 8.0
 
 - id: flux-schnell
   uri: hf://black-forest-labs/FLUX.1-schnell
   modality: image/generation
   size_gb: 24.0
   description: "FLUX.1 Schnell: 4-step distilled, 1024x1024, Apache 2.0"
+  capabilities:
+    memory_gb: 24.0
 
 # ---------- audio/transcription (ASR via faster-whisper) ----------
 
@@ -91,6 +101,7 @@
   description: "Whisper tiny (39M, ~75MB): CPU-friendly smoke test, multilingual"
   capabilities:
     device: cpu
+    memory_gb: 0.1
 
 - id: whisper-base
   uri: hf://Systran/faster-whisper-base
@@ -99,12 +110,15 @@
   description: "Whisper base (74M, ~142MB): balanced CPU default"
   capabilities:
     device: cpu
+    memory_gb: 0.2
 
 - id: whisper-large-v3
   uri: hf://Systran/faster-whisper-large-v3
   modality: audio/transcription
   size_gb: 3.0
   description: "Whisper large-v3 (1550M, ~2.9GB): SotA quality, 8GB+ GPU"
+  capabilities:
+    memory_gb: 3.0
 
 # ---------- text/classification (moderation) ----------
 
@@ -116,6 +130,7 @@
   capabilities:
     safe_labels: ["OK"]
     device: cpu
+    memory_gb: 0.5
 
 # ---------- image/animation (AnimateDiff) ----------
 
@@ -127,3 +142,5 @@
   modality: image/animation
   size_gb: 5.0
   description: "AnimateLCM: distilled AnimateDiff, 4 steps, ~3-5x faster than v3"
+  capabilities:
+    memory_gb: 9.0

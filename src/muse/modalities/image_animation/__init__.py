@@ -17,8 +17,16 @@ from muse.modalities.image_animation.routes import build_router
 
 MODALITY = "image/animation"
 
+# Per-modality probe defaults read by `muse models probe`. Defaults to
+# the model's own default frames + size; backends honor capabilities.
+PROBE_DEFAULTS = {
+    "shape": "default frames @ default size",
+    "call": lambda m: m.generate("probe motion"),
+}
+
 __all__ = [
     "MODALITY",
+    "PROBE_DEFAULTS",
     "build_router",
     "AnimationModel",
     "AnimationResult",

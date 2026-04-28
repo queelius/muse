@@ -32,6 +32,9 @@ MANIFEST = {
         "sample_rate": 32000,
         "supports_alignment": True,
         "device": "cpu",
+        # Conservative peak-inference estimate. Qwen3 80M backbone +
+        # Vocos decoder + activation working set lands around 0.5 GB.
+        "memory_gb": 0.5,
     },
 }
 

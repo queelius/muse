@@ -21,8 +21,21 @@ from muse.modalities.chat_completion.routes import build_router
 
 MODALITY = "chat/completion"
 
+# Per-modality probe defaults read by `muse models probe`. An 8-token
+# completion is enough to walk the prefill + a few decode steps so KV
+# cache + attention buffers register in the peak measurement, while
+# staying fast on small models.
+PROBE_DEFAULTS = {
+    "shape": "8-token completion",
+    "call": lambda m: m.chat(
+        messages=[{"role": "user", "content": "probe"}],
+        max_tokens=8,
+    ),
+}
+
 __all__ = [
     "MODALITY",
+    "PROBE_DEFAULTS",
     "build_router",
     "ChatClient",
     "ChatChoice",

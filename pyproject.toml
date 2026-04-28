@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muse"
-version = "0.18.1"
+version = "0.18.2"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]
@@ -35,7 +35,7 @@ Issues = "https://github.com/queelius/muse/issues"
 # missing). Without this entry, per-model venvs that install
 # muse[server] would crash when discover_modalities mounts the
 # audio_transcription router.
-server = ["fastapi", "uvicorn", "sse-starlette", "httpx", "python-multipart"]
+server = ["fastapi", "uvicorn", "sse-starlette", "httpx", "python-multipart", "psutil>=5.9"]
 
 # Audio modality (TTS)
 audio = [

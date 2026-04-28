@@ -54,6 +54,9 @@ MANIFEST = {
         "sample_rate": BARK_SAMPLE_RATE,
         "voices": VOICE_PRESETS,
         "voice_cloning": True,
+        # Bark small is ~600 MB on disk; weights at fp16 plus generation
+        # buffers (semantic, coarse, fine) push peak inference to ~3 GB.
+        "memory_gb": 3.0,
     },
 }
 

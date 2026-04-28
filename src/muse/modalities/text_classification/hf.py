@@ -53,8 +53,21 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     }
 
     def _download(cache_root: Path) -> Path:
+        # text-classification repos commonly ship pytorch_model.bin +
+        # tf_model.h5 + flax + safetensors. We only need safetensors (or
+        # pytorch_model.bin as fallback for older repos). Mirror the
+        # fp16 detection from image_generation/hf.py so distilled fp16
+        # variants don't pull fp32 too.
+        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
+        has_fp16 = any(".fp16." in f for f in siblings)
+        if has_fp16:
+            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
+        else:
+            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
+        allow_patterns.append("pytorch_model.bin")
         return Path(snapshot_download(
             repo_id=repo_id,
+            allow_patterns=allow_patterns,
             cache_dir=str(cache_root) if cache_root else None,
         ))
 

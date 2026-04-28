@@ -155,6 +155,43 @@ def build_parser() -> argparse.ArgumentParser:
     sp_disable.add_argument("model_id")
     sp_disable.set_defaults(func=_cmd_models_disable)
 
+    sp_probe = models_sub.add_parser(
+        "probe",
+        help=(
+            "measure VRAM/RAM by loading the model and (default) running "
+            "representative inference; future versions may add `--shape` "
+            "sweeps to map the full size-vs-memory curve"
+        ),
+    )
+    sp_probe.add_argument("model_id")
+    sp_probe.add_argument(
+        "--no-inference",
+        action="store_true",
+        help="load only; skip representative inference (faster but undersells peak)",
+    )
+    sp_probe.add_argument(
+        "--device",
+        default=None,
+        choices=["auto", "cpu", "cuda", "mps"],
+        help="override the model's device preference for this probe",
+    )
+    sp_probe.add_argument(
+        "--json",
+        action="store_true",
+        help="machine-readable output instead of human-readable summary",
+    )
+    sp_probe.set_defaults(func=_cmd_models_probe)
+
+    # _probe_worker (hidden; invoked by `muse models probe` via subprocess)
+    sp_probe_worker = sub.add_parser(
+        "_probe_worker",
+        help="internal: run a probe in this venv (invoked by `muse models probe`)",
+    )
+    sp_probe_worker.add_argument("--model", required=True)
+    sp_probe_worker.add_argument("--device", default="auto")
+    sp_probe_worker.add_argument("--no-inference", action="store_true")
+    sp_probe_worker.set_defaults(func=_cmd_probe_worker)
+
     return p
 
 
@@ -214,10 +251,11 @@ def _cmd_models_list(args):
       - curated and not pulled  -> 'recommended' (curated trumps bundled-available)
       - bundled and not pulled  -> 'available'
 
-    Size column:
-      - pulled: live `du`-style sum over local_dir (cached per-call)
-      - not-pulled curated: estimated `size_gb` from curated.yaml if present
-      - otherwise: '-'
+    Memory column (v0.18.2+):
+      - measured peak from `muse models probe` (no prefix, most honest)
+      - annotated capabilities.memory_gb (~ prefix, peak-inference estimate)
+      - "-" otherwise
+      Tagged GPU/CPU based on capabilities.device.
 
     Filters (mutually compatible):
       --modality M     : only entries whose modality == M
@@ -225,8 +263,6 @@ def _cmd_models_list(args):
       --available      : only entries you could install (recommended/available)
     """
     from muse.core.catalog import (
-        _dir_size_bytes,
-        _human_size,
         _read_catalog,
         is_enabled,
         is_pulled,
@@ -237,26 +273,6 @@ def _cmd_models_list(args):
     bundled_entries = {e.model_id: e for e in list_known(None)}
     curated_entries = {c.id: c for c in load_curated()}
     catalog_data = _read_catalog()
-
-    def _size_for(model_id: str) -> tuple[int, str]:
-        """Return (bytes, display_str) for a row.
-
-        Pulled rows: live recursive size of local_dir (0 if missing -> '-').
-        Not-pulled curated rows: size_gb estimate from curated.yaml if present.
-        Otherwise: 0 / '-'.
-        """
-        entry = catalog_data.get(model_id)
-        if entry:
-            local_dir = entry.get("local_dir")
-            if local_dir:
-                nbytes = _dir_size_bytes(local_dir)
-                return nbytes, _human_size(nbytes)
-            return 0, "-"
-        c = curated_entries.get(model_id)
-        if c is not None and c.size_gb is not None:
-            nbytes = int(c.size_gb * 1024**3)
-            return nbytes, f"~{_human_size(nbytes)}"
-        return 0, "-"
 
     # Build the unified row set keyed by id. Each row is a dict carrying
     # whatever metadata we have, plus the computed status.
@@ -273,14 +289,17 @@ def _cmd_models_list(args):
             status = "recommended"
         else:
             status = "available"
-        size_bytes, size_str = _size_for(model_id)
+        mem_str, mem_gb, mem_device = _model_memory_display(
+            e.extra, catalog_data.get(model_id)
+        )
         rows.append({
             "id": model_id,
             "modality": e.modality,
             "description": e.description,
             "status": status,
-            "size_bytes": size_bytes,
-            "size_str": size_str,
+            "mem_str": mem_str,
+            "mem_gb": mem_gb,
+            "mem_device": mem_device,
         })
 
     # 2. Curated entries that aren't already covered by a bundled/pulled
@@ -292,14 +311,17 @@ def _cmd_models_list(args):
             status = "enabled" if is_enabled(cid) else "disabled"
         else:
             status = "recommended"
-        size_bytes, size_str = _size_for(cid)
+        mem_str, mem_gb, mem_device = _model_memory_display(
+            c.capabilities or {}, catalog_data.get(cid)
+        )
         rows.append({
             "id": cid,
             "modality": c.modality or "?",
             "description": c.description or "",
             "status": status,
-            "size_bytes": size_bytes,
-            "size_str": size_str,
+            "mem_str": mem_str,
+            "mem_gb": mem_gb,
+            "mem_device": mem_device,
         })
 
     # Filters
@@ -326,32 +348,79 @@ def _cmd_models_list(args):
     for r in rows:
         print(
             f"  {r['id']:20s} [{r['status']:11s}] "
-            f"{r['modality']:22s} {r['size_str']:>10s}  {r['description']}"
+            f"{r['modality']:22s} {r['mem_str']:>14s}  {r['description']}"
         )
 
-    # Footer: total disk usage across enabled, all-pulled, and including
-    # curated estimates. Counts each distinct row once.
-    enabled_bytes = sum(
-        r["size_bytes"] for r in rows
-        if r["status"] == "enabled" and r["size_bytes"] > 0
+    # Footer: aggregate memory by device, counting only ENABLED models so
+    # users can see the budget they'd actually demand at runtime. GPU and
+    # CPU are reported separately because they're different physical
+    # resources.
+    gpu_total = sum(
+        r["mem_gb"] for r in rows
+        if r["status"] == "enabled" and r["mem_gb"] is not None
+        and r["mem_device"] == "GPU"
     )
-    pulled_bytes = sum(
-        r["size_bytes"] for r in rows
-        if r["status"] in ("enabled", "disabled") and r["size_bytes"] > 0
+    cpu_total = sum(
+        r["mem_gb"] for r in rows
+        if r["status"] == "enabled" and r["mem_gb"] is not None
+        and r["mem_device"] == "CPU"
     )
-    total_bytes = sum(r["size_bytes"] for r in rows if r["size_bytes"] > 0)
     n_enabled = sum(1 for r in rows if r["status"] == "enabled")
     print()
     print(
-        f"Total disk usage: {_human_size(enabled_bytes)} across {n_enabled} enabled models "
-        f"({_human_size(pulled_bytes)} total pulled, {_human_size(total_bytes)} total all)"
+        f"Enabled: {gpu_total:.1f} GB GPU + {cpu_total:.1f} GB CPU "
+        f"({n_enabled} models)"
     )
-    print("VRAM at inference may be 1-2x weights size; see CLAUDE.md for tuning.")
+    print("Measured values (from `muse models probe`) shown without prefix;")
+    print("annotated estimates (peak inference) shown with ~ prefix.")
     return 0
 
 
+def _model_memory_display(extra: dict, catalog_entry: dict | None):
+    """Return (display_str, gb_for_aggregate, device_label).
+
+    Resolution order, in decreasing fidelity:
+      1. measured peak from `muse models probe` (per-device measurement)
+      2. annotated `capabilities.memory_gb`
+      3. None (display "-")
+
+    The device label ("CPU" or "GPU") is derived from `capabilities.device`:
+    cpu -> CPU; everything else (cuda/auto/mps/unset) -> GPU.
+    """
+    extra = extra or {}
+    cap_device = (extra.get("device") or "auto").lower()
+    if cap_device == "cpu":
+        device_label = "CPU"
+        measurement_keys = ("cpu",)
+    else:
+        device_label = "GPU"
+        # Prefer cuda; fall back to a generic "auto" key if a future
+        # probe records under that name.
+        measurement_keys = ("cuda", "auto")
+
+    measurements = (catalog_entry or {}).get("measurements") or {}
+    for key in measurement_keys:
+        m = measurements.get(key)
+        if not m:
+            continue
+        peak = m.get("peak_bytes") or 0
+        if peak > 0:
+            gb = peak / (1024**3)
+            return f"{gb:.1f} GB {device_label}", gb, device_label
+
+    annotation = extra.get("memory_gb")
+    if annotation is not None:
+        try:
+            gb = float(annotation)
+        except (TypeError, ValueError):
+            return "-", None, device_label
+        return f"~{gb:.1f} GB {device_label}", gb, device_label
+
+    return "-", None, device_label
+
+
 def _cmd_models_info(args):
-    from muse.core.catalog import known_models
+    from muse.core.catalog import _read_catalog, known_models
     catalog = known_models()
     if args.model_id not in catalog:
         print(f"error: unknown model {args.model_id!r}", file=sys.stderr)
@@ -365,6 +434,51 @@ def _cmd_models_info(args):
     print(f"system_pkgs:  {list(e.system_packages)}")
     if e.extra:
         print(f"extra:        {e.extra}")
+
+    # Memory section: show annotation alongside any per-device probe
+    # measurement so users can compare the architecture estimate against
+    # what was actually observed on this hardware.
+    catalog_data = _read_catalog().get(args.model_id, {}) or {}
+    measurements = catalog_data.get("measurements") or {}
+    annotation = e.extra.get("memory_gb") if e.extra else None
+    if annotation is not None or measurements:
+        print()
+        print("Memory:")
+        if annotation is not None:
+            try:
+                ann_gb = float(annotation)
+                print(
+                    f"  annotated peak: {ann_gb:.1f} GB "
+                    "(architecture estimate)"
+                )
+            except (TypeError, ValueError):
+                print(f"  annotated peak: {annotation!r} (architecture estimate)")
+        for device, m in measurements.items():
+            weights_gb = (m.get("weights_bytes", 0) or 0) / (1024**3)
+            peak_gb = (m.get("peak_bytes", 0) or 0) / (1024**3)
+            line = f"  measured ({device}): weights {weights_gb:.2f} GB"
+            if m.get("ran_inference"):
+                shape = m.get("shape", "?")
+                line += f", peak {peak_gb:.2f} GB at {shape}"
+            elif peak_gb > 0:
+                line += f", peak {peak_gb:.2f} GB (load only)"
+            probed_at = m.get("probed_at") or ""
+            if probed_at:
+                line += f" (probed {probed_at[:10]})"
+            print(line)
+            if m.get("error"):
+                print(f"  measured ({device}) error: {m['error']}")
+            elif m.get("inference_error"):
+                print(f"  measured ({device}) inference error: {m['inference_error']}")
+    elif annotation is None and not measurements:
+        # Pulled but no annotation and no probe yet: nudge the user.
+        if catalog_data:
+            print()
+            print("Memory:")
+            print(
+                "  no annotation; no probe measurement. "
+                f"Run `muse models probe {args.model_id}`."
+            )
     return 0
 
 
@@ -396,6 +510,25 @@ def _cmd_models_disable(args):
         return 2
     print(f"disabled {args.model_id}")
     return 0
+
+
+def _cmd_models_probe(args):
+    from muse.cli_impl.probe import run_probe
+    return run_probe(
+        model_id=args.model_id,
+        no_inference=args.no_inference,
+        device=args.device,
+        as_json=args.json,
+    )
+
+
+def _cmd_probe_worker(args):
+    from muse.cli_impl.probe_worker import run_probe_worker
+    return run_probe_worker(
+        model_id=args.model,
+        device=args.device,
+        run_inference=not args.no_inference,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

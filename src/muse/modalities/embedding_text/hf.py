@@ -54,8 +54,20 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     }
 
     def _download(cache_root: Path) -> Path:
+        # Mirror the v0.16.1 image_generation/hf.py fp16 handling so we
+        # don't haul down fp32 + flax + tf_model.h5 when fp16 weights
+        # exist. Older sentence-transformers repos still use
+        # pytorch_model.bin (no safetensors), so keep that as a fallback.
+        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
+        has_fp16 = any(".fp16." in f for f in siblings)
+        if has_fp16:
+            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
+        else:
+            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
+        allow_patterns.append("pytorch_model.bin")
         return Path(snapshot_download(
             repo_id=repo_id,
+            allow_patterns=allow_patterns,
             cache_dir=str(cache_root) if cache_root else None,
         ))
 

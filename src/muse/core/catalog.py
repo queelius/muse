@@ -382,7 +382,20 @@ def _pull_bundled(model_id: str) -> None:
                 model_id, missing,
             )
 
-    local_dir = snapshot_download(repo_id=entry.hf_repo)
+    # Bundled MANIFESTs may declare `capabilities.allow_patterns` to
+    # restrict the snapshot_download manifest (mirrors what the resolver
+    # plugins do for fp16-shaped or BIN-only repos). This avoids hauling
+    # down fp32 siblings, .bin/.h5 dupes, and standalone single-file
+    # checkpoints when the diffusers/transformers runtime only needs the
+    # subfolder weights.
+    allow_patterns = entry.extra.get("allow_patterns")
+    if allow_patterns:
+        local_dir = snapshot_download(
+            repo_id=entry.hf_repo,
+            allow_patterns=list(allow_patterns),
+        )
+    else:
+        local_dir = snapshot_download(repo_id=entry.hf_repo)
 
     catalog = _read_catalog()
     catalog[model_id] = {

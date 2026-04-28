@@ -16,8 +16,15 @@ from muse.modalities.embedding_text.routes import build_router
 
 MODALITY = "embedding/text"
 
+# Per-modality probe defaults read by `muse models probe`.
+PROBE_DEFAULTS = {
+    "shape": "1 short string",
+    "call": lambda m: m.embed(["probe text"]),
+}
+
 __all__ = [
     "MODALITY",
+    "PROBE_DEFAULTS",
     "build_router",
     "EmbeddingsClient",
     "EmbeddingResult",

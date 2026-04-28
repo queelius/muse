@@ -26,8 +26,16 @@ from muse.modalities.text_classification.routes import build_router
 MODALITY = "text/classification"
 
 
+# Per-modality probe defaults read by `muse models probe`.
+PROBE_DEFAULTS = {
+    "shape": "1 short string",
+    "call": lambda m: m.classify(["probe text"]),
+}
+
+
 __all__ = [
     "MODALITY",
+    "PROBE_DEFAULTS",
     "build_router",
     "ClassificationResult",
     "TextClassifierModel",

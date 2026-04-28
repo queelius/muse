@@ -75,6 +75,9 @@ MANIFEST = {
         "default_guidance": 7.5,
         "device": "cuda",
         "base_model": "emilianJR/epiCRealism",
+        # SD 1.5 base + motion adapter at fp16, plus per-frame activations
+        # for 16 frames at 512x512. Conservative peak estimate.
+        "memory_gb": 10.0,
     },
 }
 
