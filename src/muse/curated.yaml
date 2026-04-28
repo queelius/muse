@@ -116,3 +116,14 @@
   capabilities:
     safe_labels: ["OK"]
     device: cpu
+
+# ---------- image/animation (AnimateDiff) ----------
+
+- id: animatediff-motion-v3
+  bundled: true
+
+- id: animatelcm
+  uri: hf://wangfuyun/AnimateLCM
+  modality: image/animation
+  size_gb: 5.0
+  description: "AnimateLCM: distilled AnimateDiff, 4 steps, ~3-5x faster than v3"

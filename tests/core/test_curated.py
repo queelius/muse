@@ -253,6 +253,22 @@ def test_load_curated_includes_sdxl_turbo_and_flux_schnell():
     assert e.uri == "hf://black-forest-labs/FLUX.1-schnell"
 
 
+def test_load_curated_includes_animation_entries():
+    """v0.18.0 adds image/animation curated aliases."""
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+
+    assert "animatediff-motion-v3" in by_id
+    e = by_id["animatediff-motion-v3"]
+    assert e.bundled is True
+    assert e.uri is None  # bundled entries don't have URIs
+
+    assert "animatelcm" in by_id
+    e = by_id["animatelcm"]
+    assert e.modality == "image/animation"
+    assert e.uri == "hf://wangfuyun/AnimateLCM"
+
+
 def test_load_curated_includes_text_moderation_entry():
     """Curated text-moderation alias exists and points at KoalaAI.
 
