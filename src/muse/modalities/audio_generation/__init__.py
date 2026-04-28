@@ -17,6 +17,7 @@ tag. The two URLs disambiguate user intent for the model (music vs.
 sound effects); per-model capability flags `supports_music` and
 `supports_sfx` decide which routes a given model serves.
 """
+from muse.modalities.audio_generation.client import MusicClient, SFXClient
 from muse.modalities.audio_generation.protocol import (
     AudioGenerationModel,
     AudioGenerationResult,
@@ -42,4 +43,6 @@ __all__ = [
     "build_router",
     "AudioGenerationModel",
     "AudioGenerationResult",
+    "MusicClient",
+    "SFXClient",
 ]
