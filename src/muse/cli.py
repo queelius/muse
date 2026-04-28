@@ -214,16 +214,49 @@ def _cmd_models_list(args):
       - curated and not pulled  -> 'recommended' (curated trumps bundled-available)
       - bundled and not pulled  -> 'available'
 
+    Size column:
+      - pulled: live `du`-style sum over local_dir (cached per-call)
+      - not-pulled curated: estimated `size_gb` from curated.yaml if present
+      - otherwise: '-'
+
     Filters (mutually compatible):
       --modality M     : only entries whose modality == M
       --installed      : only entries with a catalog.json record
       --available      : only entries you could install (recommended/available)
     """
-    from muse.core.catalog import is_enabled, is_pulled, list_known
+    from muse.core.catalog import (
+        _dir_size_bytes,
+        _human_size,
+        _read_catalog,
+        is_enabled,
+        is_pulled,
+        list_known,
+    )
     from muse.core.curated import load_curated
 
     bundled_entries = {e.model_id: e for e in list_known(None)}
     curated_entries = {c.id: c for c in load_curated()}
+    catalog_data = _read_catalog()
+
+    def _size_for(model_id: str) -> tuple[int, str]:
+        """Return (bytes, display_str) for a row.
+
+        Pulled rows: live recursive size of local_dir (0 if missing -> '-').
+        Not-pulled curated rows: size_gb estimate from curated.yaml if present.
+        Otherwise: 0 / '-'.
+        """
+        entry = catalog_data.get(model_id)
+        if entry:
+            local_dir = entry.get("local_dir")
+            if local_dir:
+                nbytes = _dir_size_bytes(local_dir)
+                return nbytes, _human_size(nbytes)
+            return 0, "-"
+        c = curated_entries.get(model_id)
+        if c is not None and c.size_gb is not None:
+            nbytes = int(c.size_gb * 1024**3)
+            return nbytes, f"~{_human_size(nbytes)}"
+        return 0, "-"
 
     # Build the unified row set keyed by id. Each row is a dict carrying
     # whatever metadata we have, plus the computed status.
@@ -240,11 +273,14 @@ def _cmd_models_list(args):
             status = "recommended"
         else:
             status = "available"
+        size_bytes, size_str = _size_for(model_id)
         rows.append({
             "id": model_id,
             "modality": e.modality,
             "description": e.description,
             "status": status,
+            "size_bytes": size_bytes,
+            "size_str": size_str,
         })
 
     # 2. Curated entries that aren't already covered by a bundled/pulled
@@ -256,11 +292,14 @@ def _cmd_models_list(args):
             status = "enabled" if is_enabled(cid) else "disabled"
         else:
             status = "recommended"
+        size_bytes, size_str = _size_for(cid)
         rows.append({
             "id": cid,
             "modality": c.modality or "?",
             "description": c.description or "",
             "status": status,
+            "size_bytes": size_bytes,
+            "size_str": size_str,
         })
 
     # Filters
@@ -287,8 +326,27 @@ def _cmd_models_list(args):
     for r in rows:
         print(
             f"  {r['id']:20s} [{r['status']:11s}] "
-            f"{r['modality']:22s} {r['description']}"
+            f"{r['modality']:22s} {r['size_str']:>10s}  {r['description']}"
         )
+
+    # Footer: total disk usage across enabled, all-pulled, and including
+    # curated estimates. Counts each distinct row once.
+    enabled_bytes = sum(
+        r["size_bytes"] for r in rows
+        if r["status"] == "enabled" and r["size_bytes"] > 0
+    )
+    pulled_bytes = sum(
+        r["size_bytes"] for r in rows
+        if r["status"] in ("enabled", "disabled") and r["size_bytes"] > 0
+    )
+    total_bytes = sum(r["size_bytes"] for r in rows if r["size_bytes"] > 0)
+    n_enabled = sum(1 for r in rows if r["status"] == "enabled")
+    print()
+    print(
+        f"Total disk usage: {_human_size(enabled_bytes)} across {n_enabled} enabled models "
+        f"({_human_size(pulled_bytes)} total pulled, {_human_size(total_bytes)} total all)"
+    )
+    print("VRAM at inference may be 1-2x weights size; see CLAUDE.md for tuning.")
     return 0
 
 

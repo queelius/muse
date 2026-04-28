@@ -1318,6 +1318,122 @@ def test_known_models_uri_based_curated_lookup_when_id_misses(tmp_catalog):
     assert models["weird-id"].extra["device"] == "cpu"
 
 
+def test_load_backend_bundled_script_device_capability_honored(tmp_catalog):
+    """Bundled scripts (no persisted manifest) must have their MANIFEST
+    capabilities.device honored, not just resolver-pulled models.
+
+    Regression: pre-v0.18.1 read capabilities only from persisted_manifest,
+    leaving bundled scripts' capabilities silently ignored at load time.
+    A bundled-pull catalog entry has no `manifest` field (only resolver
+    pulls persist one); the fix routes through entry.extra which
+    known_models() populates from BOTH sources.
+    """
+    from muse.core.catalog import load_backend, _write_catalog
+
+    # Simulate a bundled-pull catalog entry: NO persisted manifest field.
+    # Just the bare-id pull metadata.
+    catalog_state = {
+        "kokoro-82m": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "hexgrad/Kokoro-82M",
+            "local_dir": "/fake/kokoro",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            # no "manifest" key (bundled-pull contract)
+        },
+    }
+    _write_catalog(catalog_state)
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.Model = fake_class
+
+    # Build a fake known_models result where kokoro-82m's extra holds
+    # device: cpu (the bundled MANIFEST's capabilities)
+    fake_entry = CatalogEntry(
+        model_id="kokoro-82m",
+        modality="audio/speech",
+        backend_path="muse.models.kokoro_82m:Model",
+        hf_repo="hexgrad/Kokoro-82M",
+        description="...",
+        pip_extras=(),
+        system_packages=(),
+        extra={"device": "cpu"},  # bundled MANIFEST capability
+    )
+
+    with patch(
+        "muse.core.catalog.known_models",
+        return_value={"kokoro-82m": fake_entry},
+    ), patch(
+        "muse.core.catalog.is_pulled",
+        return_value=True,
+    ), patch(
+        "muse.core.catalog._import_backend_module",
+        return_value=fake_module,
+    ):
+        load_backend("kokoro-82m", device="cuda")
+
+    # Capability cpu MUST win over kwarg cuda. Pre-v0.18.1 this assertion failed.
+    assert fake_class.call_args.kwargs["device"] == "cpu"
+
+
+def test_dir_size_bytes_returns_zero_for_missing_path(tmp_path):
+    """_dir_size_bytes returns 0 for a path that doesn't exist."""
+    from muse.core.catalog import _dir_size_bytes
+    assert _dir_size_bytes(str(tmp_path / "does-not-exist")) == 0
+
+
+def test_dir_size_bytes_returns_zero_for_empty_dir(tmp_path):
+    """_dir_size_bytes returns 0 for an empty directory."""
+    from muse.core.catalog import _dir_size_bytes
+    assert _dir_size_bytes(str(tmp_path)) == 0
+
+
+def test_dir_size_bytes_sums_file_sizes_recursively(tmp_path):
+    """_dir_size_bytes walks subdirectories and totals all file sizes."""
+    from muse.core.catalog import _dir_size_bytes
+    (tmp_path / "a.bin").write_bytes(b"x" * 1024)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.bin").write_bytes(b"y" * 2048)
+    deeper = sub / "deeper"
+    deeper.mkdir()
+    (deeper / "c.bin").write_bytes(b"z" * 4096)
+    assert _dir_size_bytes(str(tmp_path)) == 1024 + 2048 + 4096
+
+
+def test_dir_size_bytes_does_not_follow_symlinks(tmp_path):
+    """Symlinks must not double-count contents from elsewhere."""
+    import os
+    from muse.core.catalog import _dir_size_bytes
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "big.bin").write_bytes(b"x" * 1024 * 1024)  # 1 MB
+    pulled = tmp_path / "pulled"
+    pulled.mkdir()
+    os.symlink(str(target), str(pulled / "link"))
+    # _dir_size_bytes(pulled) walks pulled/ but does not descend into
+    # the symlinked target directory.
+    assert _dir_size_bytes(str(pulled)) == 0
+
+
+@pytest.mark.parametrize("nbytes,expected", [
+    (0, "-"),
+    (1024, "1 KB"),
+    (1024 * 500, "500 KB"),
+    (1024 * 1024, "1 MB"),
+    (1024 * 1024 * 250, "250 MB"),
+    (1024**3, "1.0 GB"),
+    (int(2.5 * 1024**3), "2.5 GB"),
+    (7 * 1024**3, "7.0 GB"),
+])
+def test_human_size_formats_bytes(nbytes, expected):
+    """_human_size renders bytes as '- / N KB / N MB / N.N GB'."""
+    from muse.core.catalog import _human_size
+    assert _human_size(nbytes) == expected
+
+
 def test_known_models_no_curated_match_leaves_manifest_unchanged(tmp_catalog):
     """If no curated entry matches, the persisted manifest is used as-is."""
     from unittest.mock import patch

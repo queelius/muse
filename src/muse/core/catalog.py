@@ -573,8 +573,12 @@ def load_backend(model_id: str, **kwargs) -> Any:
     cls = getattr(module, class_name)
     catalog = _read_catalog()
     local_dir = catalog[model_id]["local_dir"]
-    persisted_manifest = catalog[model_id].get("manifest") or {}
-    capabilities = persisted_manifest.get("capabilities") or {}
+    # entry.extra holds capabilities from either the bundled MANIFEST
+    # (read live from source by known_models() each call) or the persisted
+    # manifest in catalog.json (resolver-pulled). Reading from entry here
+    # means bundled scripts' capabilities (e.g. device: cpu on kokoro) are
+    # honored at load time, not just resolver-pulled ones.
+    capabilities = entry.extra
     merged: dict = {"model_id": model_id, **capabilities, **kwargs}
     # Capability device pin: a model declaring capabilities.device overrides
     # the supervisor's --device flag. Other capability keys lose to kwargs
@@ -585,6 +589,45 @@ def load_backend(model_id: str, **kwargs) -> Any:
     if "device" in capabilities and capabilities["device"] != "auto":
         merged["device"] = capabilities["device"]
     return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **merged)
+
+
+def _dir_size_bytes(path: str) -> int:
+    """Recursive du-style size calc. Returns 0 if path missing/inaccessible.
+
+    Used by `muse models list` to surface on-disk weight size per pulled
+    model. Symlinks are not followed, so HuggingFace's snapshot cache
+    layout (where snapshots/<sha>/* are symlinks into blobs/*) does not
+    double-count blobs already attributed to a sibling pulled model.
+    Per-file getsize errors (permissions, race vs deletion) are swallowed.
+    """
+    total = 0
+    try:
+        for dirpath, _, filenames in os.walk(path, followlinks=False):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    total += os.path.getsize(fp)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _human_size(b: int) -> str:
+    """Format bytes as 'N.N GB' / 'N MB' / 'N KB' for table display.
+
+    Returns '-' for 0 (callers use 0 as the missing-size sentinel).
+    GB uses one decimal; MB and KB are integer-rounded to keep the
+    column narrow enough for table alignment.
+    """
+    if b == 0:
+        return "-"
+    if b >= 1024**3:
+        return f"{b / 1024**3:.1f} GB"
+    if b >= 1024**2:
+        return f"{b / 1024**2:.0f} MB"
+    return f"{b / 1024:.0f} KB"
 
 
 def get_manifest(model_id: str) -> dict:

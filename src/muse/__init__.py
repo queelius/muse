@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.18.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.18.1
 the bundled modalities are:
 
   - audio/speech: /v1/audio/speech (TTS: Soprano, Kokoro, Bark)
