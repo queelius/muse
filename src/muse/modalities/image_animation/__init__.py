@@ -1,23 +1,24 @@
-"""Image animation modality: text-to-animation.
+"""image/animation modality.
 
-Wire contract (added in Task C): POST /v1/images/animations with
-{prompt, model, frames?, fps?, size?, response_format? ('webp' | 'gif' |
-'mp4' | 'frames_b64'), negative_prompt?, steps?, guidance?, seed?,
-init_image?, strength?} returns the encoded animation bytes (or list of
-base64 PNGs for frames_b64).
+Public surface:
+  - MODALITY: str (MIME-shaped tag; used by discover_modalities)
+  - build_router(registry) -> APIRouter (mounted by the worker)
+  - AnimationModel Protocol, AnimationResult dataclass
+  - AnimationsClient (HTTP)
 
-Models declaring `modality = "image/animation"` in their MANIFEST and
-satisfying the AnimationModel protocol plug into this modality.
-
-For now this package exports the protocol + result dataclass only. The
-MODALITY constant and build_router come in Task C.
+Wire contract: POST /v1/images/animations
 """
 from muse.modalities.image_animation.protocol import (
     AnimationModel,
     AnimationResult,
 )
+from muse.modalities.image_animation.routes import build_router
+
+MODALITY = "image/animation"
 
 __all__ = [
+    "MODALITY",
+    "build_router",
     "AnimationModel",
     "AnimationResult",
 ]
