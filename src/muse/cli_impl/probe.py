@@ -123,6 +123,67 @@ def run_probe(
     return 0
 
 
+def run_probe_all(
+    *,
+    no_inference: bool,
+    device: str | None,
+    as_json: bool,
+) -> int:
+    """Probe every enabled+pulled model. Continue past failures.
+
+    Returns 0 if every probe succeeded; non-zero if any failed (but the
+    loop runs to completion regardless). With no enabled+pulled models
+    available, prints a helpful note to stderr and returns 1.
+    """
+    catalog_known = known_models()
+    catalog = _read_catalog()
+    targets = [
+        mid for mid in sorted(catalog_known)
+        if is_pulled(mid)
+        and catalog.get(mid, {}).get("enabled", True)
+    ]
+
+    if not targets:
+        print(
+            "no enabled+pulled models to probe; check `muse models list`",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not as_json:
+        n = len(targets)
+        plural = "s" if n != 1 else ""
+        print(f"Probing {n} enabled model{plural}...")
+        print()
+
+    results: list[tuple[str, int]] = []
+    for mid in targets:
+        rc = run_probe(
+            model_id=mid,
+            no_inference=no_inference,
+            device=device,
+            as_json=as_json,
+        )
+        results.append((mid, rc))
+
+    successes = [m for m, rc in results if rc == 0]
+    failures = [m for m, rc in results if rc != 0]
+
+    if not as_json:
+        print()
+        print("=" * 60)
+        print(
+            f"Probed {len(targets)} models: "
+            f"{len(successes)} succeeded, {len(failures)} failed"
+        )
+        if failures:
+            print(f"Failed: {', '.join(failures)}")
+        print()
+        print("Run `muse models list` to see updated memory column.")
+
+    return 0 if not failures else 1
+
+
 def _print_human(r: dict) -> None:
     """Format a measurement record for terminal display."""
     if "error" in r and not r.get("ran_inference"):

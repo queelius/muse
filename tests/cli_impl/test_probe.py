@@ -254,3 +254,86 @@ def test_run_probe_timeout_returns_error(tmp_catalog, capsys):
     assert rc == 3
     err = capsys.readouterr().err
     assert "timed out" in err
+
+
+def test_run_probe_all_with_no_enabled_models_returns_1(tmp_path, monkeypatch, capsys):
+    """No enabled+pulled models -> error to stderr, return 1."""
+    from muse.cli_impl.probe import run_probe_all
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    with patch("muse.cli_impl.probe.known_models", return_value={}):
+        rc = run_probe_all(no_inference=False, device=None, as_json=False)
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "no enabled" in captured.err.lower()
+
+
+def test_run_probe_all_iterates_enabled_models(tmp_path, monkeypatch):
+    """run_probe_all should call run_probe for each enabled+pulled model."""
+    from muse.core.catalog import CatalogEntry
+    from muse.cli_impl.probe import run_probe_all
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+
+    # Build fake catalog state with 3 models, 2 enabled
+    fake_known = {
+        "alpha": CatalogEntry("alpha", "audio/speech", "x:Y", "h/r", "", (), (), {}),
+        "beta": CatalogEntry("beta", "audio/speech", "x:Y", "h/r", "", (), (), {}),
+        "gamma": CatalogEntry("gamma", "audio/speech", "x:Y", "h/r", "", (), (), {}),
+    }
+
+    def fake_is_pulled(mid):
+        return mid in {"alpha", "beta"}  # gamma not pulled
+
+    fake_catalog_data = {
+        "alpha": {"enabled": True},
+        "beta": {"enabled": False},  # disabled
+    }
+
+    call_log = []
+    def fake_run_probe(*, model_id, **kwargs):
+        call_log.append(model_id)
+        return 0
+
+    with patch("muse.cli_impl.probe.known_models", return_value=fake_known), \
+         patch("muse.cli_impl.probe.is_pulled", side_effect=fake_is_pulled), \
+         patch("muse.cli_impl.probe._read_catalog", return_value=fake_catalog_data), \
+         patch("muse.cli_impl.probe.run_probe", side_effect=fake_run_probe):
+        rc = run_probe_all(no_inference=False, device=None, as_json=False)
+
+    # Only "alpha" qualifies: pulled AND enabled. beta is pulled but disabled. gamma is not pulled.
+    assert call_log == ["alpha"]
+    assert rc == 0
+
+
+def test_run_probe_all_continues_past_individual_failures(tmp_path, monkeypatch, capsys):
+    """One probe failing must not abort the loop; final return is 1."""
+    from muse.core.catalog import CatalogEntry
+    from muse.cli_impl.probe import run_probe_all
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+
+    fake_known = {
+        "alpha": CatalogEntry("alpha", "audio/speech", "x:Y", "h/r", "", (), (), {}),
+        "beta": CatalogEntry("beta", "audio/speech", "x:Y", "h/r", "", (), (), {}),
+        "gamma": CatalogEntry("gamma", "audio/speech", "x:Y", "h/r", "", (), (), {}),
+    }
+
+    fake_catalog_data = {mid: {"enabled": True} for mid in fake_known}
+
+    call_log = []
+    def fake_run_probe(*, model_id, **kwargs):
+        call_log.append(model_id)
+        return 0 if model_id != "beta" else 2  # beta fails
+
+    with patch("muse.cli_impl.probe.known_models", return_value=fake_known), \
+         patch("muse.cli_impl.probe.is_pulled", return_value=True), \
+         patch("muse.cli_impl.probe._read_catalog", return_value=fake_catalog_data), \
+         patch("muse.cli_impl.probe.run_probe", side_effect=fake_run_probe):
+        rc = run_probe_all(no_inference=False, device=None, as_json=False)
+
+    # All three got tried; only beta failed
+    assert call_log == ["alpha", "beta", "gamma"]
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "1 failed" in captured.out.lower() or "failed: beta" in captured.out.lower()

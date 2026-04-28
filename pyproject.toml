@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muse"
-version = "0.18.2"
+version = "0.18.3"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]

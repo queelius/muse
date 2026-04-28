@@ -159,11 +159,16 @@ def build_parser() -> argparse.ArgumentParser:
         "probe",
         help=(
             "measure VRAM/RAM by loading the model and (default) running "
-            "representative inference; future versions may add `--shape` "
-            "sweeps to map the full size-vs-memory curve"
+            "representative inference; omit model_id to probe every "
+            "enabled+pulled model"
         ),
     )
-    sp_probe.add_argument("model_id")
+    sp_probe.add_argument(
+        "model_id",
+        nargs="?",
+        default=None,
+        help="model to probe (omit to probe all enabled)",
+    )
     sp_probe.add_argument(
         "--no-inference",
         action="store_true",
@@ -513,7 +518,13 @@ def _cmd_models_disable(args):
 
 
 def _cmd_models_probe(args):
-    from muse.cli_impl.probe import run_probe
+    from muse.cli_impl.probe import run_probe, run_probe_all
+    if args.model_id is None:
+        return run_probe_all(
+            no_inference=args.no_inference,
+            device=args.device,
+            as_json=args.json,
+        )
     return run_probe(
         model_id=args.model_id,
         no_inference=args.no_inference,
