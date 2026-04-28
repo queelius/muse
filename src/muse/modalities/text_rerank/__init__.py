@@ -16,6 +16,7 @@ than OpenAI-compat. OpenAI has no rerank API; Cohere's /v1/rerank is
 the de-facto standard, and downstream tooling (LangChain, LlamaIndex,
 Haystack) expects it.
 """
+from muse.modalities.text_rerank.client import RerankClient
 from muse.modalities.text_rerank.protocol import (
     RerankResult,
     RerankerModel,
@@ -48,4 +49,5 @@ __all__ = [
     "build_router",
     "RerankResult",
     "RerankerModel",
+    "RerankClient",
 ]
