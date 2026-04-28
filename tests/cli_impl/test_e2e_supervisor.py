@@ -106,6 +106,23 @@ def test_supervisor_gateway_serves_empty_catalog(tmp_catalog):
         # (gateway resolves model -> worker mapping) is acceptable proof
         # the path is wired and uses our error envelope, not FastAPI's.
         assert body["error"]["code"] in ("model_not_found", "unknown_model", "model_required")
+
+        # /v1/images/animations: same modality-discovery proof for the
+        # image/animation modality (added in v0.18.0). Discovery must
+        # find the modality package and a worker must mount the router;
+        # with an unknown model, an OpenAI-style error envelope confirms
+        # the route exists (FastAPI's default for missing routes is
+        # `{"detail": "Not Found"}` with no `error` key).
+        r = httpx.post(
+            "http://127.0.0.1:18765/v1/images/animations",
+            json={"model": "no-such-model", "prompt": "a cat"},
+            timeout=5.0,
+        )
+        assert r.status_code in (404, 400), f"expected 404/400, got {r.status_code}: {r.text}"
+        body = r.json()
+        assert "error" in body, f"expected OpenAI envelope, got {body}"
+        assert "detail" not in body
+        assert body["error"]["code"] in ("model_not_found", "unknown_model", "model_required")
     finally:
         proc.terminate()
         try:
