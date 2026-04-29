@@ -248,3 +248,42 @@
     supports_point_prompts: true
     supports_box_prompts: true
     supports_automatic: true
+
+# ---------- video/generation (Wan, CogVideoX, LTX) ----------
+#
+# Video models are GPU-required. Even the smallest bundle (Wan 1.3B at fp16)
+# is tight on 8GB cards; 12GB+ recommended for headroom. CogVideoX-2b wants
+# 12GB+; LTX-Video wants 16GB+. Mochi-1 (24GB+) and HunyuanVideo (60GB+) are
+# documented but not curated; users can still pull them via
+# `muse pull hf://...` if they accept the trade-offs.
+
+- id: wan2-1-t2v-1-3b
+  bundled: true
+
+- id: cogvideox-2b
+  uri: hf://THUDM/CogVideoX-2b
+  modality: video/generation
+  size_gb: 6.0
+  description: "CogVideoX 2B: ~6GB at fp16, 6s videos at 720x480, fits 12GB, Apache 2.0"
+  capabilities:
+    memory_gb: 9.0
+    default_size: [720, 480]
+    default_duration_seconds: 6.0
+    default_fps: 8
+    default_steps: 50
+    default_guidance: 6.0
+    device: cuda
+
+- id: ltx-video
+  uri: hf://Lightricks/LTX-Video
+  modality: video/generation
+  size_gb: 13.0
+  description: "LTX-Video: ~13GB, fast generation at 30fps, requires 16GB+ GPU"
+  capabilities:
+    memory_gb: 16.0
+    default_size: [1216, 704]
+    default_fps: 30
+    default_duration_seconds: 5.0
+    default_steps: 20
+    default_guidance: 3.0
+    device: cuda
