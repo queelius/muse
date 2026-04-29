@@ -187,6 +187,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_probe.set_defaults(func=_cmd_models_probe)
 
+    # mcp (Model Context Protocol server)
+    sp_mcp = sub.add_parser(
+        "mcp",
+        help=(
+            "run an MCP (Model Context Protocol) server bridging muse "
+            "to LLM clients (Claude Desktop, Cursor, etc.)"
+        ),
+    )
+    sp_mcp.add_argument(
+        "--http", action="store_true",
+        help="run in HTTP+SSE mode instead of stdio (default: stdio for desktop apps)",
+    )
+    sp_mcp.add_argument(
+        "--port", type=int, default=8088,
+        help="port for HTTP+SSE mode (default: 8088)",
+    )
+    sp_mcp.add_argument(
+        "--server", default=None,
+        help="muse server URL (default: $MUSE_SERVER or http://localhost:8000)",
+    )
+    sp_mcp.add_argument(
+        "--admin-token", default=None,
+        help="admin bearer token for /v1/admin/* tools (default: $MUSE_ADMIN_TOKEN)",
+    )
+    sp_mcp.add_argument(
+        "--filter", default="all", dest="filter_kind",
+        choices=["all", "admin", "inference"],
+        help="restrict tool surface (default: all 29 tools)",
+    )
+    sp_mcp.set_defaults(func=_cmd_mcp)
+
     # _probe_worker (hidden; invoked by `muse models probe` via subprocess)
     sp_probe_worker = sub.add_parser(
         "_probe_worker",
@@ -606,6 +637,20 @@ def _cmd_models_probe(args):
         no_inference=args.no_inference,
         device=args.device,
         as_json=args.json,
+    )
+
+
+def _cmd_mcp(args):
+    import os as _os
+    from muse.cli_impl.mcp_server import run_mcp_server
+    server_url = args.server or _os.environ.get("MUSE_SERVER", "http://localhost:8000")
+    admin_token = args.admin_token or _os.environ.get("MUSE_ADMIN_TOKEN")
+    return run_mcp_server(
+        http=args.http,
+        port=args.port,
+        server_url=server_url,
+        admin_token=admin_token,
+        filter_kind=args.filter_kind,
     )
 
 

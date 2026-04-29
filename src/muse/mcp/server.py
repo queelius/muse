@@ -165,13 +165,48 @@ class MCPServer:
             init_opts = self._server.create_initialization_options()
             await self._server.run(read, write, init_opts)
 
+    def build_http_app(self) -> Any:
+        """Build (but don't run) the Starlette app for HTTP+SSE mode.
+
+        Factored out so tests can mount the app on a TestClient without
+        actually launching uvicorn. The session manager runs as a
+        lifespan-bound background task; tests that exercise the full
+        wire path can drive the app via httpx.AsyncClient.
+        """
+        import contextlib
+
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+
+        manager = StreamableHTTPSessionManager(app=self._server, stateless=True)
+
+        async def handle_streamable_http(scope, receive, send):
+            await manager.handle_request(scope, receive, send)
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app):
+            async with manager.run():
+                yield
+
+        return Starlette(
+            routes=[Mount("/mcp", app=handle_streamable_http)],
+            lifespan=lifespan,
+        )
+
     async def run_http(
         self,
         host: str = "127.0.0.1",
         port: int = 8088,
     ) -> None:
-        """Drive the MCP server over HTTP+SSE (lands in Task B)."""
-        raise NotImplementedError("HTTP+SSE mode lands in Task B")
+        """Drive the MCP server over HTTP+SSE via uvicorn."""
+        import uvicorn
+
+        app = self.build_http_app()
+        config = uvicorn.Config(
+            app, host=host, port=port, log_level="info",
+        )
+        await uvicorn.Server(config).serve()
 
 
 def _to_content(blocks: list[dict]) -> list[Any]:
