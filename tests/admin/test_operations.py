@@ -324,20 +324,36 @@ class TestLaunchAsync:
     def test_creates_job_and_thread(self, store):
         ran = {}
 
-        def op(*, job, store, **_kwargs):  # noqa: ARG001
+        def op(model_id, *, job, store, **_kwargs):  # noqa: ARG001
             ran["job_id"] = job.job_id
+            ran["model_id"] = model_id
 
         job = launch_async(
             op, op_name="enable", model_id="m", store=store,
         )
         job.thread.join(timeout=2.0)
         assert ran["job_id"] == job.job_id
+        assert ran["model_id"] == "m"
         assert job.thread is not None
 
     def test_thread_is_daemon(self, store):
-        def op(*, job, store, **_kwargs):  # noqa: ARG001
+        def op(model_id, *, job, store, **_kwargs):  # noqa: ARG001
             pass
 
         job = launch_async(op, op_name="enable", model_id="m", store=store)
         job.thread.join(timeout=2.0)
         assert job.thread.daemon is True
+
+    def test_op_args_override_default_positional(self, store):
+        captured = {}
+
+        def op(a, b, *, job, store):  # noqa: ARG001
+            captured["a"] = a
+            captured["b"] = b
+
+        job = launch_async(
+            op, op_name="enable", model_id="ignored",
+            store=store, op_args=("x", "y"),
+        )
+        job.thread.join(timeout=2.0)
+        assert captured == {"a": "x", "b": "y"}

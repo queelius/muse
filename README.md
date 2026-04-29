@@ -326,6 +326,79 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 
 Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (model not found) and 422 (validation). Matches OpenAI's envelope so clients written against their API work against muse.
 
+### Admin endpoints (v0.28.0+)
+
+Eleven endpoints under `/v1/admin/*` let you enable, disable, probe, pull, and remove models on a running supervisor without restarting it. The admin surface is closed-by-default: set `MUSE_ADMIN_TOKEN` to any non-empty value to enable it, then send `Authorization: Bearer <token>` on every request.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/admin/models/{id}/enable` | spawn a worker (or restart-in-place) hosting `id`; returns 202 + job_id |
+| `POST /v1/admin/models/{id}/disable` | unload `id` from its worker; sync |
+| `POST /v1/admin/models/{id}/probe` | run `muse models probe` in the model's venv; returns 202 + job_id |
+| `POST /v1/admin/models/_/pull` | pull from a curated alias or resolver URI in the body; returns 202 + job_id |
+| `DELETE /v1/admin/models/{id}?purge=bool` | remove from catalog (refuses 409 if loaded) |
+| `GET /v1/admin/models/{id}/status` | merged catalog + live worker view |
+| `GET /v1/admin/workers` | spawned workers + pid/uptime/restart-count |
+| `POST /v1/admin/workers/{port}/restart` | SIGTERM by port; auto-restart monitor handles bringup |
+| `GET /v1/admin/memory` | per-device aggregate + per-model breakdown |
+| `GET /v1/admin/jobs/{job_id}` | one async-job record (404 if reaped) |
+| `GET /v1/admin/jobs` | recent jobs newest-first |
+
+Auth setup:
+
+```bash
+export MUSE_ADMIN_TOKEN="$(openssl rand -hex 32)"  # or any non-empty value
+muse serve  # admin endpoints now active under the same port
+```
+
+Five auth scenarios:
+- env var unset, any header: `503 admin_disabled`
+- env var set, no header: `401 missing_token`
+- env var set, malformed header: `401 missing_token`
+- env var set, wrong bearer: `403 invalid_token`
+- env var set, correct bearer: route runs
+
+curl examples:
+
+```bash
+TOKEN="$MUSE_ADMIN_TOKEN"
+H="Authorization: Bearer $TOKEN"
+
+# enable a pulled model (worker spawns or joins existing venv-group)
+curl -s -X POST -H "$H" http://localhost:8000/v1/admin/models/kokoro-82m/enable
+
+# poll the returned job
+curl -s -H "$H" http://localhost:8000/v1/admin/jobs/<job_id>
+
+# disable a loaded model (sync)
+curl -s -X POST -H "$H" http://localhost:8000/v1/admin/models/kokoro-82m/disable
+
+# merged status
+curl -s -H "$H" http://localhost:8000/v1/admin/models/kokoro-82m/status
+
+# memory aggregate (psutil + pynvml)
+curl -s -H "$H" http://localhost:8000/v1/admin/memory
+```
+
+Python (use the AdminClient):
+
+```python
+from muse.admin.client import AdminClient
+
+# Reads MUSE_SERVER and MUSE_ADMIN_TOKEN from env when unset.
+admin = AdminClient()
+
+job = admin.enable("kokoro-82m")
+final = admin.wait(job["job_id"])
+print(final["state"], final.get("result"))
+
+print(admin.status("kokoro-82m"))
+print(admin.workers())
+print(admin.memory())
+```
+
+The `muse models enable/disable` CLI commands route through this admin API automatically when `MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, falling back to a catalog-only mutation (effective on next `muse serve`) otherwise.
+
 ## Architecture
 
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.

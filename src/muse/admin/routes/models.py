@@ -142,13 +142,14 @@ def build_models_router() -> APIRouter:
             )
         # The job tracks the operand under model_id even when the path
         # was the `_` placeholder; that way job.model_id is the meaningful
-        # identifier the user pulled.
+        # identifier the user pulled. op_args supplies the positional
+        # identifier argument that pull_model expects.
         job = launch_async(
             pull_model,
             op_name="pull",
             model_id=identifier,
             store=store,
-            identifier=identifier,
+            op_args=(identifier,),
         )
         return JSONResponse(
             status_code=202,

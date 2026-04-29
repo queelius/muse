@@ -28,6 +28,12 @@ path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,
 `/v1/chat/completions`, `/v1/embeddings`, `/v1/images/animations`,
 `/v1/images/generations`) for client compatibility.
 
+In addition to the per-modality routes, muse also exposes an admin
+REST API under `/v1/admin/*` (v0.28.0+) for runtime model control
+without restarting `muse serve`: enable, disable, probe, pull, remove,
+plus worker introspection and async-job tracking. Closed-by-default
+behind `MUSE_ADMIN_TOKEN`. See "Admin REST API" below.
+
 `text/rerank` is muse's first Cohere-compat modality (rather than
 OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is
 the de-facto standard that downstream tooling (LangChain, LlamaIndex,
@@ -310,6 +316,59 @@ Use `muse models disable <id>` to mark a pulled model as inactive
 (supervisor skips it at plan_workers time, freeing its venv's memory
 budget). `muse models enable <id>` re-enables it. Neither command
 restarts the server; the change takes effect next `muse serve`.
+
+When the supervisor is running and `MUSE_ADMIN_TOKEN` is set, the same
+`muse models enable/disable` commands route through the admin API
+instead, so the running gateway picks up the change live (worker spawn
+or unload). The catalog flip + worker mutation are part of the same
+operation.
+
+## Admin REST API
+
+`muse.admin/` provides eleven endpoints under `/v1/admin/*` for runtime
+model control. Admin is closed-by-default: every request returns 503
+`admin_disabled` until `MUSE_ADMIN_TOKEN` is set in the supervisor's
+environment, after which `Authorization: Bearer <token>` is required.
+
+Endpoints:
+
+| Endpoint | Sync/async | Effect |
+|---|---|---|
+| `POST /v1/admin/models/{id}/enable` | async (202+job_id) | spawn or restart-in-place |
+| `POST /v1/admin/models/{id}/disable` | sync | unload + catalog flip |
+| `POST /v1/admin/models/{id}/probe` | async | run `muse models probe` in venv |
+| `POST /v1/admin/models/_/pull` | async | run `muse pull <body.identifier>` |
+| `DELETE /v1/admin/models/{id}?purge=bool` | sync | refuses 409 if loaded |
+| `GET /v1/admin/models/{id}/status` | sync | merged catalog + worker view |
+| `GET /v1/admin/workers` | sync | list workers + pid/uptime/restarts |
+| `POST /v1/admin/workers/{port}/restart` | sync | SIGTERM; monitor handles bringup |
+| `GET /v1/admin/memory` | sync | psutil + pynvml + per-model breakdown |
+| `GET /v1/admin/jobs/{job_id}` | sync | one job; 404 once reaped |
+| `GET /v1/admin/jobs` | sync | recent jobs newest-first |
+
+State management:
+- `SupervisorState` (in `muse.cli_impl.supervisor`) is a module-level
+  singleton holding the live worker list, device flag, and an RLock.
+  `run_supervisor` registers it on boot; admin endpoints reach it via
+  `get_supervisor_state()`. The auto-restart monitor reads
+  `state.workers` directly so admin mutations show up on the next tick.
+- `JobStore` (in `muse.admin.jobs`) is an in-memory map of async jobs
+  with 10-minute retention (lazy reap on every list call). Each
+  enable/pull/probe spawns a daemon thread tracked by the JobStore;
+  `get_default_store().shutdown()` joins them on gateway exit.
+- One global RLock guards SupervisorState mutations; per-model locks
+  are deferred until contention becomes measurable.
+
+Token leakage rules: the configured token is never echoed in any
+error message, log line, or job record. `tests/admin/test_e2e_admin_router.py
+::TestAuthEnvelope::test_token_never_appears_in_error_body` is a
+regression watchdog.
+
+`muse.admin.client.AdminClient` wraps every endpoint. `wait(job_id)`
+polls `/jobs/{id}` until done/failed for "fire and block" usage. The
+CLI's `muse models enable/disable` falls back to AdminClient when
+`MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, otherwise
+to the legacy catalog-only mutation with a warning.
 
 ## Development commands
 
