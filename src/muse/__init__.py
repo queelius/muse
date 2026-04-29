@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.22.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.23.0
 the bundled modalities are:
 
   - audio/generation: /v1/audio/music, /v1/audio/sfx (Stable Audio Open 1.0; capability-gated)
@@ -11,6 +11,7 @@ the bundled modalities are:
   - chat/completion: /v1/chat/completions (llama-cpp-python over GGUF)
   - embedding/text: /v1/embeddings (sentence-transformers)
   - image/animation: /v1/images/animations (AnimateDiff)
+  - image/embedding: /v1/images/embeddings (transformers AutoModel; CLIP, SigLIP, DINOv2)
   - image/generation: /v1/images/generations, /v1/images/edits (inpaint), /v1/images/variations (diffusers)
   - text/classification: /v1/moderations (HF text-classification)
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)

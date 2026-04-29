@@ -6,13 +6,14 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
 - text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - text-to-animation on `/v1/images/animations`
+- image-to-vector on `/v1/images/embeddings`
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 - text moderation/classification on `/v1/moderations`
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `audio/generation`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`, `text/rerank`, `text/summarization`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `audio/generation`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `text/classification`, `text/rerank`, `text/summarization`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -77,6 +78,12 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 curl -X POST http://localhost:8000/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"input":"hello world","model":"all-minilm-l6-v2"}'
+
+# Image embeddings (input is data: URL or http(s):// URL; mirrors /v1/embeddings)
+IMG_B64=$(base64 -w0 cat.png)
+curl -X POST http://localhost:8000/v1/images/embeddings \
+  -H "Content-Type: application/json" \
+  -d "{\"input\":\"data:image/png;base64,${IMG_B64}\",\"model\":\"dinov2-small\"}"
 
 # Chat (OpenAI-compatible incl. tools and streaming)
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -204,6 +211,7 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `POST /v1/images/edits` | inpaint masked regions (OpenAI-compatible; multipart with image+mask+prompt) |
 | `POST /v1/images/variations` | generate alternates of one image (OpenAI-compatible; multipart, no prompt) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
+| `POST /v1/images/embeddings` | image embeddings (OpenAI-shape envelope mirroring /v1/embeddings) |
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
 | `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |
 | `POST /v1/rerank` | text rerank (Cohere-compat) |
@@ -223,6 +231,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `audio_transcription/` (MODALITY `"audio/transcription"`; multipart/form-data upload, OpenAI Whisper wire shape)
   - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)
   - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
+  - `image_embedding/` (MODALITY `"image/embedding"`; includes `runtimes/transformers_image.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
   - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
   - `text_rerank/` (MODALITY `"text/rerank"`; Cohere `/v1/rerank` wire shape)
@@ -234,6 +243,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `bge_reranker_v2_m3.py` (text/rerank)
   - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
   - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
+  - `dinov2_small.py` (image/embedding; facebook/dinov2-small, Apache 2.0, 88MB, 384-dim CPU-friendly)
 - `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
   - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.
 

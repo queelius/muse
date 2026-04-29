@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-ten modalities:
+eleven modalities:
 
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
@@ -13,6 +13,7 @@ ten modalities:
 - **chat/completion**: text-to-text LLMs via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming; powered by llama-cpp-python; any GGUF on HF via the resolver)
 - **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
 - **image/animation**: text-to-animation via `/v1/images/animations` (AnimateDiff: 16-frame loops, animated WebP/GIF/MP4 output)
+- **image/embedding**: image-to-vector via `/v1/images/embeddings` (dinov2-small bundled; CLIP, SigLIP, DINOv2 family via the resolver; OpenAI-shape wire envelope mirroring `/v1/embeddings`)
 - **image/generation**: text-to-image and img2img via `/v1/images/generations` (SD-Turbo, SDXL-Turbo, FLUX.1-schnell, any diffusers HF repo)
 - **text/classification**: text moderation/classification via `/v1/moderations` (any HuggingFace text-classification model)
 - **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
@@ -45,6 +46,24 @@ the curated `bart-cnn-samsum` (`supports_dialog_summarization=true`)
 is dialog-tuned. The HF resolver sniffs any `summarization`-tagged
 repo at priority 110 and serves it via `BartSeq2SeqRuntime` over
 `transformers.AutoModelForSeq2SeqLM` (BART, PEGASUS, T5).
+
+`image/embedding` is muse's first image-to-vector modality. The wire
+envelope at `POST /v1/images/embeddings` mirrors `/v1/embeddings`
+exactly (`{object: "list", data, model, usage}`) so OpenAI SDK clients
+that already consume embeddings can reuse helper code. Each `input`
+entry is a `data:image/...;base64,...` URL or `http(s)://...` URL
+pointing at PNG/JPEG/WEBP; image decoding goes through the shared
+`decode_image_input` helper from the image_generation modality.
+The bundled `dinov2-small` (Apache 2.0, 88MB, 384-dim, CPU-friendly)
+is the default; curated additions cover SigLIP2 and CLIP. The HF
+resolver sniffs any repo with an image-feature-extraction-class tag
+plus a `preprocessor_config.json` sibling at priority 105 (between
+embedding/text and image-generation file-pattern) and serves it via
+`ImageEmbeddingRuntime` over `transformers.AutoModel` +
+`AutoProcessor`. The runtime's `_extract_embeddings` dispatch picks
+the right pooling per architecture: CLIP `image_embeds` >
+SigLIP/DINOv2 `pooler_output` > DINOv2 base `last_hidden_state[:, 0]`
+(CLS token).
 
 `audio/generation` is muse's first modality with TWO URL routes mounted
 on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same
