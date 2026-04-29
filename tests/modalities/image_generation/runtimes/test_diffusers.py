@@ -471,3 +471,311 @@ def test_img2img_uses_from_pipe_not_from_pretrained_to_share_vram():
     # the i2i class was NOT called (would have allocated a fresh copy).
     fake_i2i_class.from_pipe.assert_called_once_with(fake_t2i_pipe)
     fake_i2i_class.from_pretrained.assert_not_called()
+
+
+# ---------------- inpaint() / vary() (#100, v0.21.0) ----------------
+
+
+def _patched_t2i_with_inp(fake_inp_class):
+    """Build a t2i + inp class pair, patched into the runtime module."""
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    return fake_t2i_class, fake_inp_class
+
+
+def test_inpaint_uses_inpainting_pipeline():
+    """When inpaint() is called, runtime calls AutoPipelineForInpainting.from_pipe."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_inp_class = MagicMock()
+    fake_inp_pipe = _patched_pipe()
+    fake_inp_class.from_pipe.return_value = fake_inp_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForInpainting",
+        fake_inp_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        m.inpaint(
+            "add a moon", init_image=init_img, mask_image=mask, strength=0.9,
+        )
+
+    fake_inp_class.from_pipe.assert_called_once()
+    fake_inp_pipe.assert_called()
+    # The pipe call carries image + mask_image kwargs.
+    call_kwargs = fake_inp_pipe.call_args.kwargs
+    assert call_kwargs["image"] is init_img
+    assert call_kwargs["mask_image"] is mask
+
+
+def test_inpaint_caches_pipeline():
+    """Second inpaint call reuses the cached pipeline (no second from_pipe)."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_inp_class = MagicMock()
+    fake_inp_class.from_pipe.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForInpainting",
+        fake_inp_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        m.inpaint("a", init_image=init_img, mask_image=mask)
+        m.inpaint("b", init_image=init_img, mask_image=mask)
+
+    assert fake_inp_class.from_pipe.call_count == 1
+
+
+def test_inpaint_uses_from_pipe_not_from_pretrained_to_share_vram():
+    """from_pipe shares weights; from_pretrained would OOM on small GPUs.
+
+    Same VRAM-sharing reasoning as the v0.17.2 img2img regression. The
+    inpaint pipeline must be loaded via from_pipe(self._pipe) so it
+    reuses the already-resident UNet/VAE/text-encoders.
+    """
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_pipe = _patched_pipe()
+    fake_t2i_class.from_pretrained.return_value = fake_t2i_pipe
+    fake_inp_class = MagicMock()
+    fake_inp_class.from_pipe.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForInpainting",
+        fake_inp_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        m.inpaint("repaint", init_image=init_img, mask_image=mask)
+
+    fake_inp_class.from_pipe.assert_called_once_with(fake_t2i_pipe)
+    fake_inp_class.from_pretrained.assert_not_called()
+
+
+def test_inpaint_normalizes_rgba_mask_to_grayscale():
+    """A non-L mask gets converted before being passed to the pipe."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_inp_class = MagicMock()
+    fake_inp_pipe = _patched_pipe()
+    fake_inp_class.from_pipe.return_value = fake_inp_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForInpainting",
+        fake_inp_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        rgba_mask = Image.new("RGBA", (64, 64), (255, 255, 255, 255))
+        m.inpaint("repaint", init_image=init_img, mask_image=rgba_mask)
+
+    passed_mask = fake_inp_pipe.call_args.kwargs["mask_image"]
+    assert passed_mask.mode == "L"
+
+
+def test_inpaint_bumps_steps_to_satisfy_strength_contract():
+    """num_inference_steps * strength must be >= 1 for diffusers pipelines.
+
+    With default_steps=1 (turbo-style) and strength=0.4 the naive math
+    gives 0.4 effective denoise steps and the VAE crashes. The runtime
+    must bump steps to ceil(1/0.4) = 3.
+    """
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_inp_class = MagicMock()
+    fake_inp_pipe = _patched_pipe()
+    fake_inp_class.from_pipe.return_value = fake_inp_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForInpainting",
+        fake_inp_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_steps=1,
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        m.inpaint("repaint", init_image=init_img, mask_image=mask, strength=0.4)
+
+    assert fake_inp_pipe.call_args.kwargs["num_inference_steps"] == 3
+    assert fake_inp_pipe.call_args.kwargs["strength"] == 0.4
+
+
+def test_inpaint_returns_imageresult_with_mode_inpaint():
+    """ImageResult.metadata.mode should be 'inpaint' for the inpaint path."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_inp_class = MagicMock()
+    fake_inp_class.from_pipe.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForInpainting",
+        fake_inp_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        result = m.inpaint("paint", init_image=init_img, mask_image=mask)
+
+    assert isinstance(result, ImageResult)
+    assert result.metadata["mode"] == "inpaint"
+
+
+def test_vary_delegates_to_img2img_with_empty_prompt_and_default_strength():
+    """vary() reuses the img2img pipeline; default strength is 0.85."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_steps=4,
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.vary(init_image=init_img)
+
+    call_kwargs = fake_i2i_pipe.call_args.kwargs
+    assert call_kwargs["prompt"] == ""
+    assert call_kwargs["strength"] == 0.85
+
+
+def test_vary_returns_imageresult_with_mode_variations():
+    """vary() overrides the underlying img2img mode label with 'variations'."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_class.from_pipe.return_value = _patched_pipe()
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        result = m.vary(init_image=init_img)
+
+    assert isinstance(result, ImageResult)
+    assert result.metadata["mode"] == "variations"
+
+
+def test_vary_honors_user_strength_override():
+    """User-supplied strength wins over the 0.85 default."""
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_steps=4,
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.vary(init_image=init_img, strength=0.6)
+
+    assert fake_i2i_pipe.call_args.kwargs["strength"] == 0.6
