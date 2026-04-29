@@ -5,6 +5,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
 - text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
+- image-to-image super-resolution on `/v1/images/upscale`
 - text-to-animation on `/v1/images/animations`
 - image-to-vector on `/v1/images/embeddings`
 - audio-to-vector on `/v1/audio/embeddings`
@@ -14,7 +15,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 
-Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `text/classification`, `text/rerank`, `text/summarization`).
+Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -149,6 +150,15 @@ curl -X POST http://localhost:8000/v1/images/variations \
   -F "model=sd-turbo" \
   -F "size=512x512" \
   -F "n=2"
+
+# Image upscale (multipart: 4x super-resolution; SD x4 supports scale=4 only)
+curl -s -X POST http://localhost:8000/v1/images/upscale \
+  -F "image=@source.png" \
+  -F "model=stable-diffusion-x4-upscaler" \
+  -F "scale=4" \
+  -F "prompt=high detail" \
+  | jq -r '.data[0].b64_json' \
+  | base64 -d > upscaled.png
 ```
 
 ```python
@@ -175,6 +185,17 @@ edited = ImageEditsClient().edit(
     "add a moon to the sky", image=src, mask=msk, model="sd-turbo",
 )
 variants = ImageVariationsClient().vary(image=src, model="sd-turbo", n=2)
+
+# Image upscale (since v0.25.0): 4x super-resolution
+from muse.modalities.image_upscale import ImageUpscaleClient
+from pathlib import Path
+upscaled = ImageUpscaleClient().upscale(
+    image=Path("source.png").read_bytes(),
+    model="stable-diffusion-x4-upscaler",
+    scale=4,
+    prompt="razor sharp detail",
+)
+Path("upscaled.png").write_bytes(upscaled[0])
 ```
 
 The OpenAI Python SDK works against muse with no modifications:

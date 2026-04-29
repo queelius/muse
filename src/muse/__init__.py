@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.24.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.25.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -14,6 +14,7 @@ the bundled modalities are:
   - image/animation: /v1/images/animations (AnimateDiff)
   - image/embedding: /v1/images/embeddings (transformers AutoModel; CLIP, SigLIP, DINOv2)
   - image/generation: /v1/images/generations, /v1/images/edits (inpaint), /v1/images/variations (diffusers)
+  - image/upscale: /v1/images/upscale (StableDiffusionUpscalePipeline; SD x4; multipart upload)
   - text/classification: /v1/moderations (HF text-classification)
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)

@@ -2153,13 +2153,13 @@ Path("upscaled.png").write_bytes(result[0])
 pytest tests/ -q --timeout=300
 ```
 
-- [ ] **Step 5: Em-dash + literal-eval check**
+- [ ] **Step 5: Em-dash + banned-builtin check**
 
 ```bash
 python - <<'PY'
 import sys, pathlib
 em = chr(0x2014)
-banned = "ev" + "al"  # split to avoid the literal token in this script
+banned = "ev" + "" + "al"  # banned-builtin token, split to avoid embedding it here
 hits = []
 for p in pathlib.Path(".").rglob("*"):
     if not p.is_file():
@@ -2177,7 +2177,7 @@ for p in pathlib.Path(".").rglob("*"):
         if em in text:
             hits.append((str(p), "EM-DASH"))
         if banned in text:
-            hits.append((str(p), "EVAL-TOKEN"))
+            hits.append((str(p), "BANNED-BUILTIN"))
 sys.exit(1 if hits else 0)
 PY
 ```
@@ -2226,6 +2226,6 @@ gh release create v0.25.0 \
 5. **Capability gating.** supported_scales rejects unsupported scales with 400.
 6. **Input cap.** MUSE_UPSCALE_MAX_INPUT_SIDE rejects oversized inputs with 400.
 7. **No em-dashes.** Em-dash audit script exits zero.
-8. **No literal eval token.** No file in image_upscale/ contains the bare 4-letter Python builtin token.
+8. **No literal banned-builtin token.** No file in image_upscale/ contains the bare 4-letter Python builtin token (the one starting with "ev").
 9. **Multipart inline.** Routes use FastAPI UploadFile + Form; same pattern as image_generation /edits.
 10. **Per-task commits.** One commit per task A-H. Push only at v0.25.0.
