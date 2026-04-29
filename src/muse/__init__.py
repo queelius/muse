@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.21.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.22.0
 the bundled modalities are:
 
   - audio/generation: /v1/audio/music, /v1/audio/sfx (Stable Audio Open 1.0; capability-gated)
@@ -14,6 +14,7 @@ the bundled modalities are:
   - image/generation: /v1/images/generations, /v1/images/edits (inpaint), /v1/images/variations (diffusers)
   - text/classification: /v1/moderations (HF text-classification)
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
+  - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
 
 Heavy backends (transformers, diffusers, faster-whisper, llama-cpp,
 sentence-transformers) are imported lazily inside per-modality runtime

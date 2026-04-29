@@ -10,8 +10,9 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 - text moderation/classification on `/v1/moderations`
 - text rerank (Cohere-compat) on `/v1/rerank`
+- text summarization (Cohere-compat) on `/v1/summarize`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `audio/generation`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`, `text/rerank`).
+Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `audio/generation`, `chat/completion`, `embedding/text`, `image/animation`, `image/generation`, `text/classification`, `text/rerank`, `text/summarization`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -95,6 +96,16 @@ curl -X POST http://localhost:8000/v1/rerank \
     "model": "bge-reranker-v2-m3",
     "top_n": 2,
     "return_documents": true
+  }'
+
+# Summarize (Cohere-compat); pulls bart-large-cnn by default
+curl -X POST http://localhost:8000/v1/summarize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "muse is a model-agnostic multi-modality generation server. It hosts text, image, audio, and video models behind a unified HTTP API that mirrors OpenAI where possible.",
+    "length": "short",
+    "format": "paragraph",
+    "model": "bart-large-cnn"
   }'
 
 # Music generation (capability-gated; default model: stable-audio-open-1.0)
@@ -196,6 +207,7 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
 | `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |
 | `POST /v1/rerank` | text rerank (Cohere-compat) |
+| `POST /v1/summarize` | text summarization (Cohere-compat) |
 | `POST /v1/audio/music` | music generation (capability-gated; muse-native shape) |
 | `POST /v1/audio/sfx` | sound-effect generation (capability-gated; muse-native shape) |
 
@@ -214,12 +226,14 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `image_generation/` (MODALITY `"image/generation"`)
   - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
   - `text_rerank/` (MODALITY `"text/rerank"`; Cohere `/v1/rerank` wire shape)
+  - `text_summarization/` (MODALITY `"text/summarization"`; Cohere `/v1/summarize` wire shape)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
   - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
   - `sd_turbo.py` (image/generation)
   - `bge_reranker_v2_m3.py` (text/rerank)
   - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
+  - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
 - `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
   - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.
 

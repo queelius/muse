@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-nine modalities:
+ten modalities:
 
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
@@ -16,6 +16,7 @@ nine modalities:
 - **image/generation**: text-to-image and img2img via `/v1/images/generations` (SD-Turbo, SDXL-Turbo, FLUX.1-schnell, any diffusers HF repo)
 - **text/classification**: text moderation/classification via `/v1/moderations` (any HuggingFace text-classification model)
 - **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
+- **text/summarization**: BART/PEGASUS seq2seq summarization via `/v1/summarize` (bart-large-cnn bundled; any summarization-tagged HF repo via the resolver; Cohere-compat wire shape)
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
 path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,
@@ -28,6 +29,22 @@ the de-facto standard that downstream tooling (LangChain, LlamaIndex,
 Haystack) expects. Response envelope mirrors Cohere's: `results[]`
 with `index` + `relevance_score`, optional `document.text`, plus
 `meta.billed_units.search_units` for SDK compatibility.
+
+`text/summarization` is muse's second Cohere-compat modality (after
+text/rerank). OpenAI has no summarization API; Cohere's `/v1/summarize`
+was the de-facto reference until its 2024 deprecation, and the wire
+shape is what summarization tooling expects. Request: `{text, length,
+format, model}`. Response: `{id, model, summary, usage, meta}`.
+`length` ("short"|"medium"|"long") deterministically maps to
+`max_new_tokens` in the runtime: short=80, medium=180, long=400.
+`format` ("paragraph"|"bullets") is recorded in `meta.format` and is
+metadata-only for non-instruction summarizers like BART-CNN; future
+instruction-tuned summarizers can consult it. The bundled
+`bart-large-cnn` (Apache 2.0, ~400MB, CPU-friendly) is the default;
+the curated `bart-cnn-samsum` (`supports_dialog_summarization=true`)
+is dialog-tuned. The HF resolver sniffs any `summarization`-tagged
+repo at priority 110 and serves it via `BartSeq2SeqRuntime` over
+`transformers.AutoModelForSeq2SeqLM` (BART, PEGASUS, T5).
 
 `audio/generation` is muse's first modality with TWO URL routes mounted
 on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same
