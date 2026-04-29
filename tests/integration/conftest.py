@@ -192,3 +192,19 @@ def image_embedding_model(remote_health) -> str:
     )
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def audio_embedding_model(remote_health) -> str:
+    """The audio/embedding model id integration tests should target.
+
+    Defaults to mert-v1-95m (smallest, CPU-friendly, music understanding).
+    Override via MUSE_AUDIO_EMBEDDING_MODEL_ID for a different bundled /
+    curated id. Skips the test if the chosen model isn't loaded on the
+    server.
+    """
+    model_id = os.environ.get(
+        "MUSE_AUDIO_EMBEDDING_MODEL_ID", "mert-v1-95m",
+    )
+    _require_model(remote_health, model_id)
+    return model_id

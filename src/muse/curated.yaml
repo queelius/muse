@@ -170,6 +170,22 @@
     device: cpu
     memory_gb: 1.5
 
+# ---------- audio/embedding (CLAP / MERT / wav2vec family) ----------
+
+- id: mert-v1-95m
+  bundled: true
+
+- id: clap-htsat-fused
+  uri: hf://laion/clap-htsat-fused
+  modality: audio/embedding
+  size_gb: 0.8
+  description: "CLAP HTSAT fused: 800MB, 512-dim audio embeddings, supports text too, BSD-3"
+  capabilities:
+    supports_text_embeddings_too: true
+    dimensions: 512
+    sample_rate: 48000
+    memory_gb: 1.5
+
 # ---------- image/embedding (CLIP / SigLIP / DINOv2 family) ----------
 
 - id: dinov2-small
