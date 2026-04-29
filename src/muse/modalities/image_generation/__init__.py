@@ -8,7 +8,11 @@ shape (b64_json bytes or data URL).
 Models declaring `modality = "image/generation"` in their MANIFEST and
 satisfying the ImageModel protocol plug into this modality.
 """
-from muse.modalities.image_generation.client import GenerationsClient
+from muse.modalities.image_generation.client import (
+    GenerationsClient,
+    ImageEditsClient,
+    ImageVariationsClient,
+)
 from muse.modalities.image_generation.protocol import ImageModel, ImageResult
 from muse.modalities.image_generation.routes import build_router
 
@@ -26,6 +30,8 @@ __all__ = [
     "PROBE_DEFAULTS",
     "build_router",
     "GenerationsClient",
+    "ImageEditsClient",
+    "ImageVariationsClient",
     "ImageResult",
     "ImageModel",
 ]
