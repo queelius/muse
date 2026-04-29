@@ -474,3 +474,64 @@ class TestStreaming:
         assert b"data: chunk1" in r.content
         assert b"data: chunk2" in r.content
         assert b"event: done" in r.content
+
+
+class TestAdminMount:
+    """Verify /v1/admin/* lands on the admin router with auth enforced."""
+
+    def test_admin_path_without_token_returns_503(self, monkeypatch):
+        from muse.admin.auth import ADMIN_TOKEN_ENV
+        monkeypatch.delenv(ADMIN_TOKEN_ENV, raising=False)
+        app = build_gateway([])
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.get("/v1/admin/workers")
+        assert r.status_code == 503
+        assert r.json()["detail"]["error"]["code"] == "admin_disabled"
+
+    def test_admin_path_with_token_passes_auth(self, monkeypatch):
+        from muse.admin.auth import ADMIN_TOKEN_ENV
+        from muse.cli_impl.supervisor import (
+            SupervisorState,
+            clear_supervisor_state,
+            set_supervisor_state,
+        )
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "tok")
+        clear_supervisor_state()
+        set_supervisor_state(SupervisorState(workers=[], device="cpu"))
+        try:
+            app = build_gateway([])
+            client = TestClient(app, raise_server_exceptions=False)
+            r = client.get(
+                "/v1/admin/workers",
+                headers={"Authorization": "Bearer tok"},
+            )
+            assert r.status_code == 200
+            assert r.json() == {"workers": []}
+        finally:
+            clear_supervisor_state()
+
+    def test_admin_path_with_wrong_token_returns_403(self, monkeypatch):
+        from muse.admin.auth import ADMIN_TOKEN_ENV
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "tok")
+        app = build_gateway([])
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.get(
+            "/v1/admin/workers",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert r.status_code == 403
+
+    def test_inference_proxy_still_works_after_admin_mount(self):
+        """Regression: /v1/* with body['model'] still hits the proxy."""
+        # Use the proxy with no actual workers; it should return 404
+        # model_not_found, NOT some admin-route shadow.
+        app = build_gateway([])
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post(
+            "/v1/audio/speech",
+            json={"input": "hi", "model": "ghost"},
+        )
+        assert r.status_code == 404
+        body = r.json()
+        # The proxy uses {"error": {...}} (not detail)
+        assert body["error"]["code"] == "model_not_found"

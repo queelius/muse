@@ -6,6 +6,7 @@ live on internal ports (9001+). The gateway:
   2. Extracts `model` from each request (body for POST, query for GET)
   3. Forwards the request to the hosting worker, streaming the response (D4)
   4. Aggregates /v1/models and /health across all workers (D3)
+  5. Mounts /v1/admin/* with bearer-token auth (v0.28.0+)
 
 Proxy routing is modality-agnostic: any request with a `model` field
 routes to the worker hosting that model, regardless of URL path. This
@@ -15,6 +16,7 @@ work without gateway changes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -95,10 +97,30 @@ def _openai_error(status: int, code: str, message: str) -> JSONResponse:
 def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
     """Build the gateway FastAPI app.
 
-    `routes` is the model-id -> worker-url table. This task (D2) implements
-    buffered forwarding; streaming support lands in D4.
+    `routes` is the model-id -> worker-url table. The app exposes:
+
+      - aggregated /v1/models, /health (registered first so the catch-all
+        proxy below doesn't shadow them)
+      - admin /v1/admin/* (registered before the proxy so admin paths win;
+        each admin route requires Authorization: Bearer <MUSE_ADMIN_TOKEN>)
+      - catch-all /{full_path:path} that forwards by `model` field to the
+        worker hosting that model.
     """
-    app = FastAPI(title="Muse Gateway")
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        # Lifecycle: when uvicorn shuts the gateway down, drain any
+        # outstanding admin job threads (pull subprocesses are SIGTERM'd
+        # via JobStore.shutdown's join loop).
+        try:
+            yield
+        finally:
+            try:
+                from muse.admin.jobs import get_default_store
+                get_default_store().shutdown(timeout=5.0)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("admin job-store shutdown failed: %s", e)
+
+    app = FastAPI(title="Muse Gateway", lifespan=_lifespan)
     app.state.routes = {r.model_id: r for r in routes}
     app.state.timeout = timeout
 
@@ -157,6 +179,18 @@ def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
             "modalities": sorted(modalities),
             "models": sorted(models),
         }
+
+    # Admin routes mounted BEFORE the catch-all so /v1/admin/* paths
+    # win the dispatch even though the proxy below would also match
+    # them. Auth is enforced on every admin route via the Depends in
+    # build_admin_router, so an anonymous /v1/admin/* request returns
+    # 503 (no token configured) or 401/403 (token mismatch) before
+    # touching any worker. Importing inside build_gateway keeps the
+    # admin module out of the import path of muse.cli_impl.worker
+    # (which loads inside per-model venvs that may not have fastapi
+    # extras installed).
+    from muse.admin.routes import build_admin_router
+    app.include_router(build_admin_router())
 
     @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(request: Request, full_path: str):
