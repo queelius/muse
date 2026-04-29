@@ -47,6 +47,31 @@ def decode_image_input(value: str, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> An
     )
 
 
+async def decode_image_file(file: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Any:
+    """Decode a multipart UploadFile into a PIL.Image.
+
+    Used by /v1/images/edits and /v1/images/variations, where the
+    image (and mask) arrive as multipart/form-data file uploads rather
+    than as data URLs in a JSON body. Mirrors the validation discipline
+    of decode_image_input: empty file rejected, oversized rejected,
+    undecodable bytes rejected. Failures raise ValueError so the route
+    layer can surface them as 400 responses with the OpenAI-shape error
+    envelope.
+
+    The argument is typed Any so this helper doesn't bind us to FastAPI
+    or Starlette at import time. Anything with an async .read() method
+    works (UploadFile, plus any test double).
+    """
+    raw = await file.read()
+    if not raw:
+        raise ValueError("empty image file")
+    if len(raw) > max_bytes:
+        raise ValueError(
+            f"image bytes exceeds max ({len(raw)} > {max_bytes})"
+        )
+    return _bytes_to_pil(raw)
+
+
 def _decode_data_url(value: str, *, max_bytes: int):
     m = _DATA_URL_RE.match(value)
     if not m:
