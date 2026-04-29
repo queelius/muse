@@ -7,13 +7,14 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - text-to-animation on `/v1/images/animations`
 - image-to-vector on `/v1/images/embeddings`
+- audio-to-vector on `/v1/audio/embeddings`
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
 - text moderation/classification on `/v1/moderations`
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 
-Modality tags are MIME-style (`audio/speech`, `audio/transcription`, `audio/generation`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `text/classification`, `text/rerank`, `text/summarization`).
+Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `text/classification`, `text/rerank`, `text/summarization`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -84,6 +85,11 @@ IMG_B64=$(base64 -w0 cat.png)
 curl -X POST http://localhost:8000/v1/images/embeddings \
   -H "Content-Type: application/json" \
   -d "{\"input\":\"data:image/png;base64,${IMG_B64}\",\"model\":\"dinov2-small\"}"
+
+# Audio embeddings (multipart upload; one or more `file` parts; mirrors /v1/embeddings envelope)
+curl -X POST http://localhost:8000/v1/audio/embeddings \
+  -F "file=@clip.wav" \
+  -F "model=mert-v1-95m"
 
 # Chat (OpenAI-compatible incl. tools and streaming)
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -212,6 +218,7 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `POST /v1/images/variations` | generate alternates of one image (OpenAI-compatible; multipart, no prompt) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
 | `POST /v1/images/embeddings` | image embeddings (OpenAI-shape envelope mirroring /v1/embeddings) |
+| `POST /v1/audio/embeddings` | audio embeddings (multipart upload + OpenAI-shape envelope mirroring /v1/embeddings) |
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
 | `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |
 | `POST /v1/rerank` | text rerank (Cohere-compat) |
@@ -226,6 +233,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
 - `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
 - `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
+  - `audio_embedding/` (MODALITY `"audio/embedding"`; multipart upload + OpenAI-shape envelope; includes `runtimes/transformers_audio.py`)
   - `audio_generation/` (MODALITY `"audio/generation"`; mounts both `/v1/audio/music` and `/v1/audio/sfx` on one MIME tag with per-route capability gates)
   - `audio_speech/` (MODALITY `"audio/speech"`)
   - `audio_transcription/` (MODALITY `"audio/transcription"`; multipart/form-data upload, OpenAI Whisper wire shape)
@@ -244,6 +252,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
   - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
   - `dinov2_small.py` (image/embedding; facebook/dinov2-small, Apache 2.0, 88MB, 384-dim CPU-friendly)
+  - `mert_v1_95m.py` (audio/embedding; m-a-p/MERT-v1-95M, MIT, 95MB, 768-dim music understanding via mean-pool over time)
 - `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
   - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.
 

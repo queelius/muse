@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-eleven modalities:
+twelve modalities:
 
+- **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
@@ -64,6 +65,29 @@ embedding/text and image-generation file-pattern) and serves it via
 the right pooling per architecture: CLIP `image_embeds` >
 SigLIP/DINOv2 `pooler_output` > DINOv2 base `last_hidden_state[:, 0]`
 (CLS token).
+
+`audio/embedding` is muse's first audio-to-vector modality. Wire shape
+is multipart-in (one or more `file` parts, mirroring
+`/v1/audio/transcriptions`) and `/v1/embeddings`-shaped JSON out
+(`{object: "list", data, model, usage}`). Audio decoding goes through
+`librosa` (already installed for Whisper) inside the runtime/script,
+which resamples on the way in to each model's preferred rate (CLAP
+48kHz, MERT 24kHz). The bundled `mert-v1-95m` (MIT, 95MB, 768-dim
+music understanding via mean-pool over time, `trust_remote_code=True`
+for the custom feature extractor) is the default; the curated
+`clap-htsat-fused` adds 512-dim audio + text-aligned embeddings
+(BSD-3, supports_text_embeddings_too=True). The HF resolver sniffs
+any repo with `feature-extraction` tag plus a name pattern matching
+`clap`, `mert`, `audio-encoder`, `wav2vec`, or `audio-embedding` at
+priority 105, and serves it via `AudioEmbeddingRuntime` over
+`transformers.AutoModel` + `AutoFeatureExtractor` (with
+`AutoProcessor` preferred for newer repos). The runtime's
+`_extract_embeddings` dispatch picks the right pooling per
+architecture: CLAP `audio_embeds` > pooler_output > MERT/wav2vec
+`last_hidden_state.mean(dim=1)` (mean-pool over time). Per-file size
+cap via `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` (default 50MB); duration
+cap via `MUSE_AUDIO_EMBEDDINGS_MAX_SECONDS` (default 60s; runtime
+truncates after decode).
 
 `audio/generation` is muse's first modality with TWO URL routes mounted
 on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same

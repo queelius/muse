@@ -2,9 +2,10 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.23.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.24.0
 the bundled modalities are:
 
+  - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
   - audio/generation: /v1/audio/music, /v1/audio/sfx (Stable Audio Open 1.0; capability-gated)
   - audio/speech: /v1/audio/speech (TTS: Soprano, Kokoro, Bark)
   - audio/transcription: /v1/audio/transcriptions, /v1/audio/translations (faster-whisper)
