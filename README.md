@@ -4,7 +4,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-speech on `/v1/audio/speech`
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
-- text-to-image on `/v1/images/generations`
+- text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - text-to-animation on `/v1/images/animations`
 - text-to-vector on `/v1/embeddings`
 - text-to-text (LLM, tool calls, streaming) on `/v1/chat/completions`
@@ -108,11 +108,30 @@ curl -X POST http://localhost:8000/v1/audio/sfx \
   -H "Content-Type: application/json" \
   -d '{"prompt":"footsteps on gravel","model":"stable-audio-open-1.0","duration":3.0}' \
   --output footsteps.wav
+
+# Image inpainting (multipart: image + mask + prompt)
+# White mask pixels are regenerated; black pixels are kept.
+curl -X POST http://localhost:8000/v1/images/edits \
+  -F "image=@scene.png" \
+  -F "mask=@mask.png" \
+  -F "prompt=add a moon to the sky" \
+  -F "model=sd-turbo" \
+  -F "size=512x512" \
+  -F "n=1"
+
+# Image variations (multipart: image only, no prompt)
+curl -X POST http://localhost:8000/v1/images/variations \
+  -F "image=@scene.png" \
+  -F "model=sd-turbo" \
+  -F "size=512x512" \
+  -F "n=2"
 ```
 
 ```python
 from muse.modalities.audio_speech import SpeechClient
-from muse.modalities.image_generation import GenerationsClient
+from muse.modalities.image_generation import (
+    GenerationsClient, ImageEditsClient, ImageVariationsClient,
+)
 from muse.modalities.embedding_text import EmbeddingsClient
 from muse.modalities.chat_completion import ChatClient
 
@@ -124,6 +143,14 @@ chat = ChatClient().chat(
     model="qwen3-8b-gguf-q4-k-m",
     messages=[{"role": "user", "content": "Capital of France?"}],
 )
+
+# Image inpainting and variations (since v0.21.0)
+src = open("scene.png", "rb").read()
+msk = open("mask.png", "rb").read()
+edited = ImageEditsClient().edit(
+    "add a moon to the sky", image=src, mask=msk, model="sd-turbo",
+)
+variants = ImageVariationsClient().vary(image=src, model="sd-turbo", n=2)
 ```
 
 The OpenAI Python SDK works against muse with no modifications:
@@ -162,7 +189,9 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `GET /v1/audio/speech/voices` | list voices for a model |
 | `POST /v1/audio/transcriptions` | transcribe audio to text (OpenAI-compatible) |
 | `POST /v1/audio/translations` | transcribe + translate audio to English (OpenAI-compatible) |
-| `POST /v1/images/generations` | generate images (OpenAI-compatible) |
+| `POST /v1/images/generations` | generate images (OpenAI-compatible; supports img2img via `image` + `strength`) |
+| `POST /v1/images/edits` | inpaint masked regions (OpenAI-compatible; multipart with image+mask+prompt) |
+| `POST /v1/images/variations` | generate alternates of one image (OpenAI-compatible; multipart, no prompt) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
 | `POST /v1/chat/completions` | chat (OpenAI-compatible incl. tools, structured output, streaming) |
 | `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |

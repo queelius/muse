@@ -291,7 +291,7 @@ def test_seed_passed_through_to_backend(client):
     """The backend should receive the seed kwarg."""
     r = client.post("/v1/images/generations", json={"prompt": "x", "seed": 42, "n": 1})
     assert r.status_code == 200
-    # Fake backend echoes seed in metadata via kwargs — we don't surface it
+    # Fake backend echoes seed in metadata via kwargs; we don't surface it
     # in the response here, but the call should succeed
 
 

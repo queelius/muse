@@ -79,7 +79,7 @@ def test_generate_omits_none_optional_fields():
         c = GenerationsClient()
         c.generate("hi")
         body = mock_post.call_args.kwargs["json"]
-        # These were not passed as kwargs — shouldn't leak as null keys
+        # These were not passed as kwargs; they shouldn't leak as null keys
         for field in ("model", "negative_prompt", "steps", "guidance", "seed"):
             assert field not in body
 
