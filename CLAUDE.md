@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-thirteen modalities:
+fourteen modalities:
 
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
@@ -16,6 +16,7 @@ thirteen modalities:
 - **image/animation**: text-to-animation via `/v1/images/animations` (AnimateDiff: 16-frame loops, animated WebP/GIF/MP4 output)
 - **image/embedding**: image-to-vector via `/v1/images/embeddings` (dinov2-small bundled; CLIP, SigLIP, DINOv2 family via the resolver; OpenAI-shape wire envelope mirroring `/v1/embeddings`)
 - **image/generation**: text-to-image and img2img via `/v1/images/generations` (SD-Turbo, SDXL-Turbo, FLUX.1-schnell, any diffusers HF repo)
+- **image/segmentation**: promptable segmentation via `/v1/images/segment` (sam2-hiera-tiny bundled; SAM-2 family via the resolver; multipart upload, mode dispatch auto/points/boxes/text gated by capability flags; masks emitted as base64 PNG or COCO RLE)
 - **image/upscale**: image-to-image super-resolution via `/v1/images/upscale` (stable-diffusion-x4-upscaler bundled; multipart upload, OpenAI-shape envelope; 4x diffusion-based upscaling; capability-gated on `supported_scales`; env-tunable input cap via `MUSE_UPSCALE_MAX_INPUT_SIDE`)
 - **text/classification**: text moderation/classification via `/v1/moderations` (any HuggingFace text-classification model)
 - **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
@@ -113,6 +114,8 @@ The `image/generation` modality also exposes `/v1/images/edits` (inpainting) and
 
 `image/upscale` (v0.25.0) is muse's super-resolution modality: a separate MIME tag from `image/generation` because the runtime backbone is different (`StableDiffusionUpscalePipeline`, not `AutoPipelineForText2Image`). Wire shape at `POST /v1/images/upscale` is multipart/form-data (mirroring `/v1/images/edits`), with `image` as the source file plus `model`, `scale`, optional `prompt`, `negative_prompt`, `steps`, `guidance`, `seed`, `n`, and `response_format` as Form fields. Output envelope mirrors `/v1/images/generations`: `{created, data: [{b64_json|url, revised_prompt}]}`. The bundled `stable-diffusion-x4-upscaler` (Apache 2.0, ~3GB, fixed 4x) is the default; the HF resolver plugin (priority 105) sniffs other diffusers-shape upscalers (`model_index.json` + `image-to-image` tag + upscaler-name allowlist). The `supported_scales` capability gates the request `scale` parameter (returns 400 for unsupported values; SD x4 supports `[4]` only). An env-tunable input-side cap (`MUSE_UPSCALE_MAX_INPUT_SIDE`, default 1024) prevents runaway VRAM use on oversized inputs; the cap is read per-request, so changes take effect on the next request, not at supervisor restart. GAN-based upscalers (AuraSR, Real-ESRGAN) need separate non-diffusers runtimes and are deferred to v1.next.
 
+`image/segmentation` (v0.26.0) is muse's promptable-segmentation modality. Wire shape at `POST /v1/images/segment` is multipart/form-data: `image` as the source file plus `model`, `mode` (auto/points/boxes/text), `prompt` (text mode), `points` (JSON-encoded `[[x, y], ...]`), `boxes` (JSON-encoded `[[x1, y1, x2, y2], ...]`), `mask_format` (`png_b64` or `rle`), and `max_masks` as Form fields. Output: `{id, model, mode, image_size, masks: [{index, score, mask, bbox, area}]}`. Mode dispatch is capability-gated end-to-end: `supports_automatic`, `supports_point_prompts`, `supports_box_prompts`, `supports_text_prompts`. A request with `mode=text` against a model declaring `supports_text_prompts: False` returns 400 before the runtime is invoked. The bundled `sam2-hiera-tiny` (Apache 2.0, ~40MB, point/box/auto, no text) is the default; curated `sam2-hiera-base-plus` and `sam2-hiera-large` extend the family. The HF resolver plugin (priority 110) sniffs `mask-generation` and `image-segmentation` tags. CLIPSeg is a deferred future: the plugin pattern recognizes it and flips `supports_text_prompts: True`, but the SAM2Runtime backbone needs a CLIPSeg-specific replacement to actually consume the text prompt. The mask format dispatch (`png_b64` for portable / viewable, `rle` for compact / pycocotools-compatible) introduces a precedent: the codec ships pure-Python RLE encode/decode that round-trips internally, with `pycocotools` as an optional faster path that produces output other COCO tooling can decode directly. Axis-order discipline at the wire layer: `image_size` is `[W, H]` (PIL convention); RLE `size` is `[H, W]` (COCO convention); `bbox` is `[x, y, w, h]` (COCO bbox convention).
+
 The package is organized around three plugin surfaces:
 
 - `src/muse/modalities/<mime_name>/`: self-contained wire contract
@@ -137,7 +140,7 @@ app factory.
 ## Architecture
 
 ```
-HTTP API (/v1/audio/speech, /v1/images/generations, /v1/images/upscale, /v1/models, /health)
+HTTP API (/v1/audio/speech, /v1/images/generations, /v1/images/segment, /v1/images/upscale, /v1/models, /health)
     |
     v
 muse.core.server   (FastAPI factory, mounts per-modality routers)

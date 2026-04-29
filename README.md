@@ -6,6 +6,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
 - text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - image-to-image super-resolution on `/v1/images/upscale`
+- promptable segmentation on `/v1/images/segment`
 - text-to-animation on `/v1/images/animations`
 - image-to-vector on `/v1/images/embeddings`
 - audio-to-vector on `/v1/audio/embeddings`
@@ -15,7 +16,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 
-Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`).
+Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -159,6 +160,29 @@ curl -s -X POST http://localhost:8000/v1/images/upscale \
   -F "prompt=high detail" \
   | jq -r '.data[0].b64_json' \
   | base64 -d > upscaled.png
+
+# Image segmentation (multipart: SAM-2 promptable masks)
+# Mode 1: automatic (sweep grid of point prompts internally)
+curl -s -X POST http://localhost:8000/v1/images/segment \
+  -F "image=@scene.png" \
+  -F "model=sam2-hiera-tiny" \
+  -F "mode=auto" \
+  -F "max_masks=8"
+
+# Mode 2: foreground click points
+curl -s -X POST http://localhost:8000/v1/images/segment \
+  -F "image=@scene.png" \
+  -F "model=sam2-hiera-tiny" \
+  -F "mode=points" \
+  -F 'points=[[150, 200]]'
+
+# Mode 3: bounding boxes
+curl -s -X POST http://localhost:8000/v1/images/segment \
+  -F "image=@scene.png" \
+  -F "model=sam2-hiera-tiny" \
+  -F "mode=boxes" \
+  -F 'boxes=[[50, 60, 250, 240]]' \
+  -F "mask_format=rle"
 ```
 
 ```python
@@ -196,6 +220,25 @@ upscaled = ImageUpscaleClient().upscale(
     prompt="razor sharp detail",
 )
 Path("upscaled.png").write_bytes(upscaled[0])
+
+# Image segmentation (since v0.26.0): SAM-2 promptable masks
+from muse.modalities.image_segmentation import ImageSegmentationClient
+seg = ImageSegmentationClient()
+src_bytes = Path("scene.png").read_bytes()
+result_auto = seg.segment(
+    image=src_bytes, model="sam2-hiera-tiny", mode="auto", max_masks=8,
+)
+result_points = seg.segment(
+    image=src_bytes, model="sam2-hiera-tiny", mode="points",
+    points=[[150, 200]],
+)
+result_boxes = seg.segment(
+    image=src_bytes, model="sam2-hiera-tiny", mode="boxes",
+    boxes=[[50, 60, 250, 240]], mask_format="rle",
+)
+# Each result is a dict {id, model, mode, image_size, masks: [...]}
+# masks[i]["mask"] is a base64 PNG (mask_format=png_b64) or
+# a {"size": [H, W], "counts": str} dict (mask_format=rle)
 ```
 
 The OpenAI Python SDK works against muse with no modifications:
