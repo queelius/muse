@@ -22,6 +22,7 @@ exposes only audio embedding. Future work may add a text route at
 existing route guarded by a `supports_text_embeddings_too` capability
 flag. Out of scope for v0.24.0.
 """
+from muse.modalities.audio_embedding.client import AudioEmbeddingsClient
 from muse.modalities.audio_embedding.protocol import (
     AudioEmbeddingModel,
     AudioEmbeddingResult,
@@ -69,4 +70,5 @@ __all__ = [
     "build_router",
     "AudioEmbeddingResult",
     "AudioEmbeddingModel",
+    "AudioEmbeddingsClient",
 ]
