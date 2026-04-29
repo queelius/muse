@@ -426,65 +426,47 @@ def _model_memory_display(extra: dict, catalog_entry: dict | None):
 
 def _cmd_models_info(args):
     from muse.core.catalog import _read_catalog, known_models
-    catalog = known_models()
-    if args.model_id not in catalog:
+    from muse.cli_impl.models_info_display import format_info
+
+    catalog_known = known_models()
+    if args.model_id not in catalog_known:
         print(f"error: unknown model {args.model_id!r}", file=sys.stderr)
         return 2
-    e = catalog[args.model_id]
-    print(f"model_id:     {e.model_id}")
-    print(f"modality:     {e.modality}")
-    print(f"hf_repo:      {e.hf_repo}")
-    print(f"backend:      {e.backend_path}")
-    print(f"pip_extras:   {list(e.pip_extras)}")
-    print(f"system_pkgs:  {list(e.system_packages)}")
-    if e.extra:
-        print(f"extra:        {e.extra}")
-
-    # Memory section: show annotation alongside any per-device probe
-    # measurement so users can compare the architecture estimate against
-    # what was actually observed on this hardware.
     catalog_data = _read_catalog().get(args.model_id, {}) or {}
-    measurements = catalog_data.get("measurements") or {}
-    annotation = e.extra.get("memory_gb") if e.extra else None
-    if annotation is not None or measurements:
-        print()
-        print("Memory:")
-        if annotation is not None:
-            try:
-                ann_gb = float(annotation)
-                print(
-                    f"  annotated peak: {ann_gb:.1f} GB "
-                    "(architecture estimate)"
-                )
-            except (TypeError, ValueError):
-                print(f"  annotated peak: {annotation!r} (architecture estimate)")
-        for device, m in measurements.items():
-            weights_gb = (m.get("weights_bytes", 0) or 0) / (1024**3)
-            peak_gb = (m.get("peak_bytes", 0) or 0) / (1024**3)
-            line = f"  measured ({device}): weights {weights_gb:.2f} GB"
-            if m.get("ran_inference"):
-                shape = m.get("shape", "?")
-                line += f", peak {peak_gb:.2f} GB at {shape}"
-            elif peak_gb > 0:
-                line += f", peak {peak_gb:.2f} GB (load only)"
-            probed_at = m.get("probed_at") or ""
-            if probed_at:
-                line += f" (probed {probed_at[:10]})"
-            print(line)
-            if m.get("error"):
-                print(f"  measured ({device}) error: {m['error']}")
-            elif m.get("inference_error"):
-                print(f"  measured ({device}) inference error: {m['inference_error']}")
-    elif annotation is None and not measurements:
-        # Pulled but no annotation and no probe yet: nudge the user.
-        if catalog_data:
-            print()
-            print("Memory:")
-            print(
-                "  no annotation; no probe measurement. "
-                f"Run `muse models probe {args.model_id}`."
-            )
+    online_status = _probe_online_worker_status(args.model_id)
+    print(format_info(
+        args.model_id,
+        catalog_known=catalog_known,
+        catalog_data=catalog_data,
+        online_status=online_status,
+    ))
     return 0
+
+
+def _probe_online_worker_status(model_id: str) -> dict | None:
+    """Best-effort lookup of live worker status via the admin API.
+
+    Returns a dict shaped like the /v1/admin/models/{id}/status response
+    on success; None when the supervisor isn't reachable, the admin
+    endpoint isn't enabled (no MUSE_ADMIN_TOKEN), or the credentials are
+    rejected. Caller treats None as "no live data; show offline view."
+    """
+    import os
+
+    try:
+        from muse.admin.client import AdminClient, AdminClientError
+    except Exception:  # noqa: BLE001
+        return None
+    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+        return None
+    client = AdminClient(timeout=2.0)
+    try:
+        return client.status(model_id)
+    except AdminClientError:
+        return None
+    except Exception:  # noqa: BLE001
+        # httpx ConnectError, etc. -> "supervisor not running" path
+        return None
 
 
 def _cmd_models_remove(args):
@@ -496,25 +478,119 @@ def _cmd_models_remove(args):
 
 
 def _cmd_models_enable(args):
+    """Enable a model.
+
+    When MUSE_ADMIN_TOKEN is set AND the supervisor is running, this
+    routes through the admin API so the running gateway picks up the
+    change live (worker spawn or restart-in-place). Otherwise it falls
+    back to mutating catalog.json directly with a warning.
+    """
+    if _try_admin_action("enable", args.model_id):
+        return 0
+
     from muse.core.catalog import set_enabled
     try:
         set_enabled(args.model_id, True)
     except KeyError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    print(f"enabled {args.model_id}")
+    print(f"enabled {args.model_id} (catalog only; supervisor will pick this up on restart)")
     return 0
 
 
 def _cmd_models_disable(args):
+    """Disable a model.
+
+    When MUSE_ADMIN_TOKEN is set AND the supervisor is running, this
+    routes through the admin API to unload the worker live. Otherwise
+    it falls back to mutating catalog.json directly with a warning.
+    """
+    if _try_admin_action("disable", args.model_id):
+        return 0
+
     from muse.core.catalog import set_enabled
     try:
         set_enabled(args.model_id, False)
     except KeyError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    print(f"disabled {args.model_id}")
+    print(f"disabled {args.model_id} (catalog only; supervisor will pick this up on restart)")
     return 0
+
+
+def _try_admin_action(action: str, model_id: str) -> bool:
+    """Try the admin-API path for enable/disable; return True iff used.
+
+    Returns False to signal the caller should fall back to the legacy
+    catalog-only mutation. The fallback runs when:
+      - MUSE_ADMIN_TOKEN isn't set (admin disabled)
+      - supervisor isn't reachable (httpx.ConnectError)
+      - server returned 503 admin_disabled (token not configured server-side)
+
+    Other errors (404 model_not_found, etc.) are treated as fatal and
+    the caller does NOT fall through.
+    """
+    import os
+
+    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+        return False
+    try:
+        from muse.admin.client import AdminClient, AdminClientError
+    except Exception:  # noqa: BLE001
+        return False
+    client = AdminClient(timeout=5.0)
+    try:
+        if action == "enable":
+            out = client.enable(model_id)
+            job_id = out.get("job_id")
+            if job_id:
+                print(f"enable job submitted: {job_id}")
+                try:
+                    final = client.wait(job_id, timeout=120.0, poll=0.5)
+                    if final.get("state") == "done":
+                        port = (final.get("result") or {}).get("worker_port")
+                        msg = f"enabled {model_id}"
+                        if port:
+                            msg += f" (worker port {port})"
+                        print(msg)
+                        return True
+                    print(
+                        f"error: enable failed: {final.get('error')}",
+                        file=sys.stderr,
+                    )
+                    return True
+                except TimeoutError:
+                    print(
+                        f"warning: enable still running; poll job {job_id} for status",
+                        file=sys.stderr,
+                    )
+                    return True
+        elif action == "disable":
+            out = client.disable(model_id)
+            print(f"disabled {model_id}")
+            if out.get("worker_terminated"):
+                print(f"  worker on port {out.get('worker_port')} stopped")
+            elif out.get("worker_port"):
+                remaining = out.get("remaining_models_in_worker") or []
+                print(
+                    f"  worker on port {out['worker_port']} restarted; "
+                    f"remaining models: {', '.join(remaining)}"
+                )
+            return True
+    except AdminClientError as e:
+        if e.status == 503 or e.code == "admin_disabled":
+            return False
+        print(f"error: {e.message}", file=sys.stderr)
+        # Treat as fatal so caller doesn't double-emit
+        return True
+    except Exception as e:  # noqa: BLE001
+        # httpx.ConnectError, etc.: supervisor not reachable -> fall back
+        print(
+            f"warning: admin API unreachable ({e}); falling back to catalog-only update",
+            file=sys.stderr,
+        )
+        return False
+    return False
 
 
 def _cmd_models_probe(args):
