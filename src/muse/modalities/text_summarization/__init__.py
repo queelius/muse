@@ -17,6 +17,7 @@ API; Cohere's /v1/summarize was the de-facto reference, and downstream
 tooling expects the {text, length, format, model} -> {id, model,
 summary, usage} shape.
 """
+from muse.modalities.text_summarization.client import SummarizationClient
 from muse.modalities.text_summarization.protocol import (
     SummarizationModel,
     SummarizationResult,
@@ -48,4 +49,5 @@ __all__ = [
     "build_router",
     "SummarizationResult",
     "SummarizationModel",
+    "SummarizationClient",
 ]
