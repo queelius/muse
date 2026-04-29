@@ -25,12 +25,18 @@ class FakeImageModel:
 
 
 class RecordingImageModel:
-    """Like FakeImageModel but records the kwargs each generate() received."""
+    """Like FakeImageModel but records the kwargs each generate() received.
+
+    Also records inpaint/vary calls so the /edits and /variations route
+    tests can assert routing reached the right method.
+    """
 
     def __init__(self, model_id="fake-i2i-model"):
         self.model_id = model_id
         self.default_size = (64, 64)
         self.calls: list[dict] = []
+        self.inpaint_calls: list[dict] = []
+        self.vary_calls: list[dict] = []
 
     def generate(self, prompt, **kwargs):
         self.calls.append({"prompt": prompt, **kwargs})
@@ -41,6 +47,28 @@ class RecordingImageModel:
             image=arr, width=w, height=h,
             seed=kwargs.get("seed", 0) or 0,
             metadata={"prompt": prompt},
+        )
+
+    def inpaint(self, prompt, **kwargs):
+        self.inpaint_calls.append({"prompt": prompt, **kwargs})
+        w = kwargs.get("width", self.default_size[0])
+        h = kwargs.get("height", self.default_size[1])
+        arr = np.zeros((h, w, 3), dtype=np.uint8)
+        return ImageResult(
+            image=arr, width=w, height=h,
+            seed=kwargs.get("seed", 0) or 0,
+            metadata={"prompt": prompt, "mode": "inpaint"},
+        )
+
+    def vary(self, **kwargs):
+        self.vary_calls.append(kwargs)
+        w = kwargs.get("width", self.default_size[0])
+        h = kwargs.get("height", self.default_size[1])
+        arr = np.zeros((h, w, 3), dtype=np.uint8)
+        return ImageResult(
+            image=arr, width=w, height=h,
+            seed=kwargs.get("seed", 0) or 0,
+            metadata={"mode": "variations"},
         )
 
 
@@ -100,6 +128,80 @@ def client_with_uncapable_model():
         routers={"image/generation": build_router(reg)},
     )
     return TestClient(app)
+
+
+@pytest.fixture
+def edits_model():
+    """Recording model registered with supports_inpainting: True."""
+    return RecordingImageModel(model_id="fake-edits-model")
+
+
+@pytest.fixture
+def client_with_edits_model(edits_model):
+    """Client whose model advertises inpainting + variations support."""
+    reg = ModalityRegistry()
+    reg.register(
+        "image/generation",
+        edits_model,
+        manifest={
+            "model_id": edits_model.model_id,
+            "modality": "image/generation",
+            "capabilities": {
+                "supports_inpainting": True,
+                "supports_variations": True,
+            },
+        },
+    )
+    app = create_app(
+        registry=reg,
+        routers={"image/generation": build_router(reg)},
+    )
+    return TestClient(app)
+
+
+@pytest.fixture
+def client_without_edits_capability():
+    """Client whose model does NOT advertise supports_inpainting/supports_variations."""
+    reg = ModalityRegistry()
+    model = RecordingImageModel(model_id="fake-edits-blocked")
+    reg.register(
+        "image/generation",
+        model,
+        manifest={
+            "model_id": model.model_id,
+            "modality": "image/generation",
+            "capabilities": {
+                "supports_inpainting": False,
+                "supports_variations": False,
+            },
+        },
+    )
+    app = create_app(
+        registry=reg,
+        routers={"image/generation": build_router(reg)},
+    )
+    return TestClient(app)
+
+
+def _png_bytes(width=32, height=32, color=(0, 128, 255)):
+    """Helper: minimal PNG bytes via PIL."""
+    import io
+    from PIL import Image
+    img = Image.new("RGB", (width, height), color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _mask_bytes(width=32, height=32, white=True):
+    """Helper: minimal grayscale-mask PNG (white = regenerate)."""
+    import io
+    from PIL import Image
+    fill = 255 if white else 0
+    img = Image.new("L", (width, height), fill)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def test_generate_returns_base64_by_default(client):
@@ -278,3 +380,293 @@ def test_post_strength_out_of_range_returns_400(client_with_capable_model):
         "strength": 1.5,  # out of [0, 1]
     })
     assert r.status_code in (400, 422)
+
+
+# ---------------- /v1/images/edits (inpainting, multipart) ----------------
+
+
+def test_post_edits_multipart_returns_envelope(
+    client_with_edits_model, edits_model,
+):
+    """Inpainting: image + mask + prompt yields the OpenAI-shape envelope."""
+    import base64
+
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("scene.png", _png_bytes(64, 64), "image/png"),
+            "mask": ("mask.png", _mask_bytes(64, 64), "image/png"),
+        },
+        data={
+            "prompt": "add a moon to the sky",
+            "model": "fake-edits-model",
+            "n": "1",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "data" in body
+    assert len(body["data"]) == 1
+    entry = body["data"][0]
+    assert "b64_json" in entry
+    decoded = base64.b64decode(entry["b64_json"])
+    assert decoded[:8] == b"\x89PNG\r\n\x1a\n"
+    # revised_prompt is the inpainting echo (matches /v1/images/generations)
+    assert entry["revised_prompt"] == "add a moon to the sky"
+    # Backend got init_image and mask_image kwargs
+    assert len(edits_model.inpaint_calls) == 1
+    call = edits_model.inpaint_calls[0]
+    assert call["prompt"] == "add a moon to the sky"
+    assert call["init_image"] is not None
+    assert call["mask_image"] is not None
+
+
+def test_post_edits_with_uncapable_model_returns_400(
+    client_without_edits_capability,
+):
+    """Inpainting on a model without supports_inpainting returns 400."""
+    r = client_without_edits_capability.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "x",
+            "model": "fake-edits-blocked",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert "error" in body
+    assert "inpainting" in body["error"]["message"].lower()
+
+
+def test_post_edits_empty_image_returns_400(client_with_edits_model):
+    """Empty image upload returns 400 (decode failure)."""
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", b"", "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "x",
+            "model": "fake-edits-model",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "invalid_parameter"
+
+
+def test_post_edits_malformed_image_returns_400(client_with_edits_model):
+    """Undecodable image bytes return 400."""
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", b"not really an image", "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "x",
+            "model": "fake-edits-model",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "invalid_parameter"
+
+
+def test_post_edits_n_creates_multiple_images(
+    client_with_edits_model, edits_model,
+):
+    """n=3 yields 3 entries; backend sees 3 inpaint() calls."""
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "y",
+            "model": "fake-edits-model",
+            "n": "3",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 200
+    assert len(r.json()["data"]) == 3
+    assert len(edits_model.inpaint_calls) == 3
+
+
+def test_post_edits_response_format_url_returns_data_url(
+    client_with_edits_model,
+):
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "y",
+            "model": "fake-edits-model",
+            "size": "64x64",
+            "response_format": "url",
+        },
+    )
+    assert r.status_code == 200
+    entry = r.json()["data"][0]
+    assert entry["url"].startswith("data:image/png;base64,")
+
+
+def test_post_edits_unknown_model_returns_404(client_with_edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "y",
+            "model": "no-such-model",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 404
+    body = r.json()
+    assert "error" in body
+    assert body["error"]["code"] == "model_not_found"
+
+
+def test_post_edits_size_out_of_range_returns_400(client_with_edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={
+            "prompt": "y",
+            "model": "fake-edits-model",
+            "size": "4096x4096",
+        },
+    )
+    assert r.status_code == 400
+
+
+# ---------------- /v1/images/variations (multipart) ----------------
+
+
+def test_post_variations_multipart_returns_envelope(
+    client_with_edits_model, edits_model,
+):
+    """Variations: image only (no prompt). Envelope has b64_json, no revised_prompt."""
+    import base64
+
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(64, 64), "image/png")},
+        data={
+            "model": "fake-edits-model",
+            "n": "1",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "data" in body and len(body["data"]) == 1
+    entry = body["data"][0]
+    assert "b64_json" in entry
+    # No prompt -> no revised_prompt
+    assert "revised_prompt" not in entry
+    decoded = base64.b64decode(entry["b64_json"])
+    assert decoded[:8] == b"\x89PNG\r\n\x1a\n"
+    # Backend's vary() got the init_image
+    assert len(edits_model.vary_calls) == 1
+    assert edits_model.vary_calls[0]["init_image"] is not None
+
+
+def test_post_variations_with_uncapable_model_returns_400(
+    client_without_edits_capability,
+):
+    r = client_without_edits_capability.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={
+            "model": "fake-edits-blocked",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert "error" in body
+    assert "variations" in body["error"]["message"].lower()
+
+
+def test_post_variations_n_creates_multiple_images(
+    client_with_edits_model, edits_model,
+):
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={
+            "model": "fake-edits-model",
+            "n": "2",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 200
+    assert len(r.json()["data"]) == 2
+    assert len(edits_model.vary_calls) == 2
+
+
+def test_post_variations_unknown_model_returns_404(client_with_edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={
+            "model": "no-such-model",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 404
+    body = r.json()
+    assert body["error"]["code"] == "model_not_found"
+
+
+def test_post_variations_empty_image_returns_400(client_with_edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", b"", "image/png")},
+        data={
+            "model": "fake-edits-model",
+            "size": "64x64",
+        },
+    )
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "invalid_parameter"
+
+
+def test_post_variations_response_format_url_returns_data_url(
+    client_with_edits_model,
+):
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={
+            "model": "fake-edits-model",
+            "size": "64x64",
+            "response_format": "url",
+        },
+    )
+    assert r.status_code == 200
+    entry = r.json()["data"][0]
+    assert entry["url"].startswith("data:image/png;base64,")
+    assert "revised_prompt" not in entry

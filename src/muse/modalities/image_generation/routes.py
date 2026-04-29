@@ -19,13 +19,16 @@ import logging
 import time
 from threading import Lock
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.image_generation.codec import to_bytes, to_data_url
-from muse.modalities.image_generation.image_input import decode_image_input
+from muse.modalities.image_generation.image_input import (
+    decode_image_file,
+    decode_image_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +120,173 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         for r in results:
             entry = {"revised_prompt": r.metadata.get("prompt", req.prompt)}
             if req.response_format == "url":
+                entry["url"] = to_data_url(r.image, fmt="png")
+            else:
+                entry["b64_json"] = base64.b64encode(to_bytes(r.image, fmt="png")).decode()
+            data.append(entry)
+
+        return {"created": int(time.time()), "data": data}
+
+    # ---------------- /v1/images/edits (inpainting, multipart) ----------------
+
+    @router.post("/edits")
+    async def edits(
+        image: UploadFile = File(...),
+        mask: UploadFile = File(...),
+        prompt: str = Form(...),
+        model: str | None = Form(None),
+        n: int = Form(1),
+        size: str = Form("512x512"),
+        response_format: str = Form("b64_json"),
+    ):
+        # Validate Form fields by hand. Pydantic's BaseModel can't validate
+        # a multipart body directly; we mirror the GenerationRequest range
+        # checks here so /edits returns the same 400 envelopes.
+        if not (1 <= len(prompt) <= 4000):
+            return error_response(
+                400, "invalid_parameter",
+                "prompt must be 1 to 4000 characters",
+            )
+        if not (1 <= n <= 10):
+            return error_response(
+                400, "invalid_parameter", "n must be in [1, 10]",
+            )
+        if response_format not in ("b64_json", "url"):
+            return error_response(
+                400, "invalid_parameter",
+                "response_format must be 'b64_json' or 'url'",
+            )
+        try:
+            w, h = map(int, size.split("x"))
+        except Exception:  # noqa: BLE001
+            return error_response(
+                400, "invalid_parameter",
+                f"size must be 'WIDTHxHEIGHT'; got {size!r}",
+            )
+        if not (64 <= w <= 2048 and 64 <= h <= 2048):
+            return error_response(
+                400, "invalid_parameter",
+                f"size {size} out of supported range (64-2048 per side)",
+            )
+
+        try:
+            backend = registry.get(MODALITY, model)
+        except KeyError:
+            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+
+        effective_id = getattr(backend, "model_id", None) or (model or "<default>")
+        manifest = registry.manifest(MODALITY, effective_id) or {}
+        if not manifest.get("capabilities", {}).get("supports_inpainting"):
+            return error_response(
+                400, "invalid_parameter",
+                f"model {effective_id!r} does not support inpainting",
+            )
+
+        try:
+            init_image = await decode_image_file(image)
+            mask_image = await decode_image_file(mask)
+        except ValueError as e:
+            return error_response(
+                400, "invalid_parameter", f"image decode failed: {e}",
+            )
+
+        def _call_one():
+            kwargs: dict = {
+                "width": w,
+                "height": h,
+                "init_image": init_image,
+                "mask_image": mask_image,
+            }
+            with _inference_lock:
+                return backend.inpaint(prompt, **kwargs)
+
+        results = []
+        for _ in range(n):
+            result = await asyncio.to_thread(_call_one)
+            results.append(result)
+
+        data = []
+        for r in results:
+            entry = {"revised_prompt": r.metadata.get("prompt", prompt)}
+            if response_format == "url":
+                entry["url"] = to_data_url(r.image, fmt="png")
+            else:
+                entry["b64_json"] = base64.b64encode(to_bytes(r.image, fmt="png")).decode()
+            data.append(entry)
+
+        return {"created": int(time.time()), "data": data}
+
+    # ---------------- /v1/images/variations (multipart) ----------------
+
+    @router.post("/variations")
+    async def variations(
+        image: UploadFile = File(...),
+        model: str | None = Form(None),
+        n: int = Form(1),
+        size: str = Form("512x512"),
+        response_format: str = Form("b64_json"),
+    ):
+        if not (1 <= n <= 10):
+            return error_response(
+                400, "invalid_parameter", "n must be in [1, 10]",
+            )
+        if response_format not in ("b64_json", "url"):
+            return error_response(
+                400, "invalid_parameter",
+                "response_format must be 'b64_json' or 'url'",
+            )
+        try:
+            w, h = map(int, size.split("x"))
+        except Exception:  # noqa: BLE001
+            return error_response(
+                400, "invalid_parameter",
+                f"size must be 'WIDTHxHEIGHT'; got {size!r}",
+            )
+        if not (64 <= w <= 2048 and 64 <= h <= 2048):
+            return error_response(
+                400, "invalid_parameter",
+                f"size {size} out of supported range (64-2048 per side)",
+            )
+
+        try:
+            backend = registry.get(MODALITY, model)
+        except KeyError:
+            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+
+        effective_id = getattr(backend, "model_id", None) or (model or "<default>")
+        manifest = registry.manifest(MODALITY, effective_id) or {}
+        if not manifest.get("capabilities", {}).get("supports_variations"):
+            return error_response(
+                400, "invalid_parameter",
+                f"model {effective_id!r} does not support variations",
+            )
+
+        try:
+            init_image = await decode_image_file(image)
+        except ValueError as e:
+            return error_response(
+                400, "invalid_parameter", f"image decode failed: {e}",
+            )
+
+        def _call_one():
+            kwargs: dict = {
+                "width": w,
+                "height": h,
+                "init_image": init_image,
+            }
+            with _inference_lock:
+                return backend.vary(**kwargs)
+
+        results = []
+        for _ in range(n):
+            result = await asyncio.to_thread(_call_one)
+            results.append(result)
+
+        # Variations envelope: no revised_prompt (no prompt).
+        data = []
+        for r in results:
+            entry: dict = {}
+            if response_format == "url":
                 entry["url"] = to_data_url(r.image, fmt="png")
             else:
                 entry["b64_json"] = base64.b64encode(to_bytes(r.image, fmt="png")).decode()
