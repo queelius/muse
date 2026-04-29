@@ -86,6 +86,20 @@ def test_resolve_advertises_supports_img2img():
     assert result.manifest["capabilities"]["supports_img2img"] is True
 
 
+def test_resolve_advertises_supports_inpainting_and_variations():
+    """Resolver-pulled diffusers models advertise inpainting + variations by default.
+
+    Both flags default True since AutoPipelineForInpainting and
+    AutoPipelineForImage2Image work on essentially any diffusers t2i
+    checkpoint via from_pipe.
+    """
+    info = _fake_info(siblings=["model_index.json"], tags=["text-to-image"])
+    result = HF_PLUGIN["resolve"]("org/anything", None, info)
+    caps = result.manifest["capabilities"]
+    assert caps["supports_inpainting"] is True
+    assert caps["supports_variations"] is True
+
+
 def test_search_yields_results_with_modality_tag():
     fake_api = MagicMock()
     fake_repo = MagicMock(id="org/repo", downloads=42)

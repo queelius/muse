@@ -101,6 +101,12 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "supports_negative_prompt": True,
         "supports_seeded_generation": True,
         "supports_img2img": True,
+        # Most diffusers text-to-image checkpoints support inpainting and
+        # variations via from_pipe(...) on the AutoPipelineForInpainting /
+        # AutoPipelineForImage2Image factories. Default both to True; rare
+        # exceptions can be overridden per-curated-entry.
+        "supports_inpainting": True,
+        "supports_variations": True,
     }
     manifest = {
         "model_id": _model_id(repo_id),
