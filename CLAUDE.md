@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-fourteen modalities:
+fifteen modalities:
 
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
@@ -21,6 +21,7 @@ fourteen modalities:
 - **text/classification**: text moderation/classification via `/v1/moderations` (any HuggingFace text-classification model)
 - **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
 - **text/summarization**: BART/PEGASUS seq2seq summarization via `/v1/summarize` (bart-large-cnn bundled; any summarization-tagged HF repo via the resolver; Cohere-compat wire shape)
+- **video/generation**: text-to-video via `/v1/video/generations` (wan2-1-t2v-1-3b bundled; Wan / CogVideoX / LTX-Video families via the resolver; narrative clips up to 30s; mp4/webm/frames_b64 output; GPU-required, 8GB+ VRAM tight, 12GB+ recommended)
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
 path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,
@@ -116,6 +117,8 @@ The `image/generation` modality also exposes `/v1/images/edits` (inpainting) and
 
 `image/segmentation` (v0.26.0) is muse's promptable-segmentation modality. Wire shape at `POST /v1/images/segment` is multipart/form-data: `image` as the source file plus `model`, `mode` (auto/points/boxes/text), `prompt` (text mode), `points` (JSON-encoded `[[x, y], ...]`), `boxes` (JSON-encoded `[[x1, y1, x2, y2], ...]`), `mask_format` (`png_b64` or `rle`), and `max_masks` as Form fields. Output: `{id, model, mode, image_size, masks: [{index, score, mask, bbox, area}]}`. Mode dispatch is capability-gated end-to-end: `supports_automatic`, `supports_point_prompts`, `supports_box_prompts`, `supports_text_prompts`. A request with `mode=text` against a model declaring `supports_text_prompts: False` returns 400 before the runtime is invoked. The bundled `sam2-hiera-tiny` (Apache 2.0, ~40MB, point/box/auto, no text) is the default; curated `sam2-hiera-base-plus` and `sam2-hiera-large` extend the family. The HF resolver plugin (priority 110) sniffs `mask-generation` and `image-segmentation` tags. CLIPSeg is a deferred future: the plugin pattern recognizes it and flips `supports_text_prompts: True`, but the SAM2Runtime backbone needs a CLIPSeg-specific replacement to actually consume the text prompt. The mask format dispatch (`png_b64` for portable / viewable, `rle` for compact / pycocotools-compatible) introduces a precedent: the codec ships pure-Python RLE encode/decode that round-trips internally, with `pycocotools` as an optional faster path that produces output other COCO tooling can decode directly. Axis-order discipline at the wire layer: `image_size` is `[W, H]` (PIL convention); RLE `size` is `[H, W]` (COCO convention); `bbox` is `[x, y, w, h]` (COCO bbox convention).
 
+`video/generation` (v0.27.0) is muse's narrative-clip modality, the heaviest yet. Wire shape at `POST /v1/video/generations` is JSON-only (no multipart) with `prompt` plus optional `model`, `duration_seconds` (0.5 to 30), `fps` (1 to 60), `size` (WxH string), `seed`, `negative_prompt`, `steps`, `guidance`, `response_format` (`mp4` default, `webm`, or `frames_b64`), and `n` (capped at 2 because each video is heavy). Output envelope mirrors `/v1/images/animations`: `{data: [{b64_json}], model, metadata: {frames, fps, duration_seconds, format, size}}`. Two distinct runtimes ship under the same MIME tag: `WanRuntime` (`diffusers.WanPipeline` or `DiffusionPipeline` fallback) and `CogVideoXRuntime` (`diffusers.CogVideoXPipeline`); the HF resolver dispatches per architecture. The bundled `wan2-1-t2v-1-3b` (Apache 2.0, ~3GB at fp16, 5s clips at 832x480) targets 8GB cards but is tight; 12GB+ recommended. Curated additions: `cogvideox-2b` (~6GB at fp16, 6s at 720x480, fits 12GB) and `ltx-video` (~13GB, 30fps at 1216x704, requires 16GB+). The HF plugin (priority 105) sniffs `text-to-video`-tagged repos whose name matches one of `wan`, `cogvideox`, `ltx-video`, `mochi`, or `hunyuan`. LTX/Mochi/Hunyuan currently fall back to `WanRuntime`; their dedicated runtimes ship in v1.next. Distinction from `image/animation`: animation is short looping clips (16 frames @ 8fps = 2s, default `loop=true`, animated WebP), video is narrative clips (5s+, single play, no loop field, mp4). The codec includes vp9 webm with vp8 fallback (when ffmpeg lacks vp9) and an explicit `UnsupportedFormatError` when neither codec is available. All bundled video models declare `device: "cuda"`; CPU inference would take 10 to 30 minutes per clip and isn't a useful default.
+
 The package is organized around three plugin surfaces:
 
 - `src/muse/modalities/<mime_name>/`: self-contained wire contract
@@ -140,7 +143,7 @@ app factory.
 ## Architecture
 
 ```
-HTTP API (/v1/audio/speech, /v1/images/generations, /v1/images/segment, /v1/images/upscale, /v1/models, /health)
+HTTP API (/v1/audio/speech, /v1/images/generations, /v1/images/segment, /v1/images/upscale, /v1/video/generations, /v1/models, /health)
     |
     v
 muse.core.server   (FastAPI factory, mounts per-modality routers)

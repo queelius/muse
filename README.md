@@ -8,6 +8,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - image-to-image super-resolution on `/v1/images/upscale`
 - promptable segmentation on `/v1/images/segment`
 - text-to-animation on `/v1/images/animations`
+- text-to-video on `/v1/video/generations`
 - image-to-vector on `/v1/images/embeddings`
 - audio-to-vector on `/v1/audio/embeddings`
 - text-to-vector on `/v1/embeddings`
@@ -16,7 +17,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 
-Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`).
+Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `video/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -183,6 +184,21 @@ curl -s -X POST http://localhost:8000/v1/images/segment \
   -F "mode=boxes" \
   -F 'boxes=[[50, 60, 250, 240]]' \
   -F "mask_format=rle"
+
+# Video generation (since v0.27.0; GPU-required, 8GB+ VRAM tight)
+# Default response_format=mp4; "webm" and "frames_b64" also supported.
+curl -s -X POST http://localhost:8000/v1/video/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a flag waving in the wind",
+    "model": "wan2-1-t2v-1-3b",
+    "duration_seconds": 5.0,
+    "fps": 5,
+    "size": "832x480",
+    "steps": 30
+  }' \
+  | jq -r '.data[0].b64_json' \
+  | base64 -d > flag.mp4
 ```
 
 ```python
@@ -239,7 +255,24 @@ result_boxes = seg.segment(
 # Each result is a dict {id, model, mode, image_size, masks: [...]}
 # masks[i]["mask"] is a base64 PNG (mask_format=png_b64) or
 # a {"size": [H, W], "counts": str} dict (mask_format=rle)
+
+# Video generation (since v0.27.0): GPU-required, 8GB+ VRAM tight
+# Wan2.1 T2V 1.3B (~3GB at fp16) is the default low-VRAM bundle;
+# CogVideoX-2b (~9GB) and LTX-Video (~16GB) are curated additions.
+from muse.modalities.video_generation import VideoGenerationClient
+vid = VideoGenerationClient()
+mp4_bytes = vid.generate(
+    "a flag waving in the wind",
+    model="wan2-1-t2v-1-3b",
+    duration_seconds=5.0,
+    fps=5,
+    size="832x480",
+    steps=30,
+)
+Path("flag.mp4").write_bytes(mp4_bytes)
 ```
+
+VRAM caveats for `video/generation`: even Wan 1.3B at fp16 is tight on 8GB cards; 12GB+ recommended for headroom. CogVideoX-2b realistically wants 16GB. LTX-Video needs 16GB+. Mochi-1 (24GB+) and HunyuanVideo (60GB+) are documented but not curated; their dedicated runtimes ship in v1.next.
 
 The OpenAI Python SDK works against muse with no modifications:
 
@@ -289,6 +322,7 @@ No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be har
 | `POST /v1/summarize` | text summarization (Cohere-compat) |
 | `POST /v1/audio/music` | music generation (capability-gated; muse-native shape) |
 | `POST /v1/audio/sfx` | sound-effect generation (capability-gated; muse-native shape) |
+| `POST /v1/video/generations` | text-to-video generation (mp4/webm/frames_b64; GPU-required) |
 
 Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (model not found) and 422 (validation). Matches OpenAI's envelope so clients written against their API work against muse.
 
@@ -308,6 +342,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
   - `text_rerank/` (MODALITY `"text/rerank"`; Cohere `/v1/rerank` wire shape)
   - `text_summarization/` (MODALITY `"text/summarization"`; Cohere `/v1/summarize` wire shape)
+  - `video_generation/` (MODALITY `"video/generation"`; includes `runtimes/wan_runtime.py` and `runtimes/cogvideox_runtime.py`)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
   - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
@@ -317,6 +352,7 @@ Error shape is uniform: `{"error": {"code", "message", "type"}}` across 404 (mod
   - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
   - `dinov2_small.py` (image/embedding; facebook/dinov2-small, Apache 2.0, 88MB, 384-dim CPU-friendly)
   - `mert_v1_95m.py` (audio/embedding; m-a-p/MERT-v1-95M, MIT, 95MB, 768-dim music understanding via mean-pool over time)
+  - `wan2_1_t2v_1_3b.py` (video/generation; Wan-AI/Wan2.1-T2V-1.3B, Apache 2.0, ~3GB at fp16, 5s clips at 832x480, GPU-required)
 - `muse.core.resolvers`: URI -> ResolvedModel dispatch for `muse pull hf://...`.
   - `resolvers_hf` registers the `hf://` resolver for HuggingFace GGUF + sentence-transformers repos.
 

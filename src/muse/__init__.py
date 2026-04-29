@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.26.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.27.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -11,7 +11,7 @@ the bundled modalities are:
   - audio/transcription: /v1/audio/transcriptions, /v1/audio/translations (faster-whisper)
   - chat/completion: /v1/chat/completions (llama-cpp-python over GGUF)
   - embedding/text: /v1/embeddings (sentence-transformers)
-  - image/animation: /v1/images/animations (AnimateDiff)
+  - image/animation: /v1/images/animations (AnimateDiff; short looping clips, animated WebP/GIF/MP4)
   - image/embedding: /v1/images/embeddings (transformers AutoModel; CLIP, SigLIP, DINOv2)
   - image/generation: /v1/images/generations, /v1/images/edits (inpaint), /v1/images/variations (diffusers)
   - image/segmentation: /v1/images/segment (SAM-2; multipart upload, mode-aware: auto/points/boxes/text; PNG or COCO RLE masks)
@@ -19,6 +19,7 @@ the bundled modalities are:
   - text/classification: /v1/moderations (HF text-classification)
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
+  - video/generation: /v1/video/generations (Wan, CogVideoX; narrative clips, mp4/webm/frames_b64; GPU-required)
 
 Heavy backends (transformers, diffusers, faster-whisper, llama-cpp,
 sentence-transformers) are imported lazily inside per-modality runtime
