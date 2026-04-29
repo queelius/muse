@@ -177,3 +177,18 @@ def summarization_model(remote_health) -> str:
     )
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def image_embedding_model(remote_health) -> str:
+    """The image/embedding model id integration tests should target.
+
+    Defaults to dinov2-small (smallest, CPU-friendly). Override via
+    MUSE_IMAGE_EMBEDDING_MODEL_ID for a different bundled / curated id.
+    Skips the test if the chosen model isn't loaded on the server.
+    """
+    model_id = os.environ.get(
+        "MUSE_IMAGE_EMBEDDING_MODEL_ID", "dinov2-small",
+    )
+    _require_model(remote_health, model_id)
+    return model_id

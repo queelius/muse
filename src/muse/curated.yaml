@@ -169,3 +169,30 @@
     supports_dialog_summarization: true
     device: cpu
     memory_gb: 1.5
+
+# ---------- image/embedding (CLIP / SigLIP / DINOv2 family) ----------
+
+- id: dinov2-small
+  bundled: true
+
+- id: siglip2-base
+  uri: hf://google/siglip2-base-patch16-256
+  modality: image/embedding
+  size_gb: 0.4
+  description: "SigLIP2 base: 370MB, supports text embeddings too, Apache 2.0"
+  capabilities:
+    supports_text_embeddings_too: true
+    dimensions: 768
+    image_size: 256
+    memory_gb: 1.0
+
+- id: clip-vit-base-patch32
+  uri: hf://openai/clip-vit-base-patch32
+  modality: image/embedding
+  size_gb: 0.6
+  description: "CLIP ViT-B/32: 600MB, classic cross-modal, MIT"
+  capabilities:
+    supports_text_embeddings_too: true
+    dimensions: 512
+    image_size: 224
+    memory_gb: 1.2
