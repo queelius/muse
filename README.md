@@ -297,6 +297,7 @@ Individual model failures don't take down the server or other modalities.
 | `muse models remove <model-id>` | unregister from catalog |
 | `muse models enable <model-id>` | mark a pulled model active (load on next serve) |
 | `muse models disable <model-id>` | mark a pulled model inactive (skip on next serve) |
+| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (29 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.
 
@@ -398,6 +399,43 @@ print(admin.memory())
 ```
 
 The `muse models enable/disable` CLI commands route through this admin API automatically when `MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, falling back to a catalog-only mutation (effective on next `muse serve`) otherwise.
+
+## MCP server (since v0.29.0)
+
+`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 29 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 18 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
+
+```bash
+muse mcp                                  # stdio mode
+muse mcp --http --port 8088               # HTTP+SSE
+muse mcp --filter inference               # only inference tools (no admin)
+muse mcp --filter admin                   # only admin tools (control panel)
+muse mcp --server http://other:8000       # connect to a remote muse server
+```
+
+Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "muse": {
+      "command": "muse",
+      "args": ["mcp"],
+      "env": {
+        "MUSE_SERVER": "http://localhost:8000",
+        "MUSE_ADMIN_TOKEN": "your-admin-token-here"
+      }
+    }
+  }
+}
+```
+
+Tools split into two groups:
+
+**Admin (11):** `muse_list_models`, `muse_get_model_info`, `muse_search_models`, `muse_pull_model`, `muse_remove_model`, `muse_enable_model`, `muse_disable_model`, `muse_probe_model`, `muse_get_memory_status`, `muse_get_workers`, `muse_get_jobs`. Long-running ops (pull, probe, enable) return a `job_id` and the LLM polls `muse_get_jobs` to track progress.
+
+**Inference (18):** `muse_chat`, `muse_summarize`, `muse_rerank`, `muse_classify`, `muse_embed_text`, `muse_generate_image`, `muse_edit_image`, `muse_vary_image`, `muse_upscale_image`, `muse_segment_image`, `muse_generate_animation`, `muse_embed_image`, `muse_speak`, `muse_transcribe`, `muse_generate_music`, `muse_generate_sfx`, `muse_embed_audio`, `muse_generate_video`.
+
+Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or `<name>_path` (local file). Image and audio outputs return as MCP `ImageContent` / `AudioContent` blocks plus a JSON summary.
 
 ## Architecture
 

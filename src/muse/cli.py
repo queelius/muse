@@ -1,4 +1,4 @@
-"""`muse` CLI — admin commands only.
+"""`muse` CLI -- admin commands only.
 
 The CLI surface is deliberately minimal and modality-agnostic:
 
@@ -12,7 +12,7 @@ Generation endpoints are reached via HTTP (the canonical interface):
     - Python: muse.modalities.audio_speech.SpeechClient,
               muse.modalities.image_generation.GenerationsClient
     - Shell:  curl -X POST http://host:8000/v1/audio/speech ...
-    - LLMs:   muse mcp (future — MCP server over HTTP)
+    - LLMs:   muse mcp (MCP server bridging muse to LLM clients)
 
 Deliberate non-goals:
     - Per-modality CLI subcommands (e.g., `muse speak`, `muse audio ...`).

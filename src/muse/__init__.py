@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.28.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.29.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -21,7 +21,15 @@ the bundled modalities are:
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
   - video/generation: /v1/video/generations (Wan, CogVideoX; narrative clips, mp4/webm/frames_b64; GPU-required)
 
-v0.28.0 adds an admin REST API under `/v1/admin/*` for runtime model
+v0.29.0 adds `muse mcp`: an MCP (Model Context Protocol) server that
+exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 29
+structured tools. 11 admin tools wrap `/v1/admin/*` (gated by
+`MUSE_ADMIN_TOKEN`); 18 inference tools wrap the generation routes.
+Stdio mode is the default; HTTP+SSE mode is available for remote /
+web embedders. Filter mode lets ops pin to admin-only or
+inference-only. See CLAUDE.md "Using muse from Claude Desktop".
+
+v0.28.0 added an admin REST API under `/v1/admin/*` for runtime model
 control (enable/disable/probe/pull/remove without restarting `muse
 serve`). Closed-by-default behind `MUSE_ADMIN_TOKEN`. See README.md
 "Admin endpoints" and CLAUDE.md "Admin REST API" for the full surface.

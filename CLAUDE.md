@@ -370,6 +370,96 @@ CLI's `muse models enable/disable` falls back to AdminClient when
 `MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, otherwise
 to the legacy catalog-only mutation with a warning.
 
+## MCP server (Using muse from Claude Desktop)
+
+`muse mcp` runs an MCP (Model Context Protocol) server that exposes
+muse's capabilities to LLM clients (Claude Desktop, Cursor, etc.) as
+29 structured tools: 11 admin tools (wrap `/v1/admin/*`) and 18
+inference tools (one per generation route).
+
+The package layout:
+
+```
+src/muse/mcp/
+  server.py     MCPServer wrapping mcp.server.lowlevel.Server
+  client.py     MuseClient aggregating httpx calls + AdminClient delegation
+  binary_io.py  tri-modal binary input resolution (b64 / url / path) + output packers
+  tools/
+    admin.py             11 admin tools
+    inference_text.py    chat / summarize / rerank / classify / embed_text
+    inference_image.py   generate / edit / vary / upscale / segment / animation / embed_image
+    inference_audio.py   speak / transcribe / music / sfx / embed_audio
+    inference_video.py   video generation
+src/muse/cli_impl/mcp_server.py  CLI entry (boots stdio or HTTP+SSE transport)
+```
+
+Two transport modes:
+- **Stdio (default).** For desktop apps that spawn the MCP server as a
+  child process. `muse mcp` reads JSON-RPC framing from stdin and
+  writes to stdout.
+- **HTTP+SSE.** `muse mcp --http --port 8088` runs a Starlette app
+  with an `/mcp` mount via `StreamableHTTPSessionManager`. Useful
+  for remote / web embedders.
+
+Filter mode pins the tool surface:
+- `--filter all` (default): 29 tools.
+- `--filter admin`: 11 tools, only useful with `MUSE_ADMIN_TOKEN`.
+- `--filter inference`: 18 tools, no admin-token needed.
+
+Auth: `--admin-token` (or `$MUSE_ADMIN_TOKEN`) is forwarded as the
+bearer token for admin tool calls. Inference tools don't need a token.
+
+Long-running ops (pull, probe, enable) return a `job_id` and a
+`poll_with` hint. The LLM polls `muse_get_jobs` to track progress.
+
+Claude Desktop config example
+(`~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "muse": {
+      "command": "muse",
+      "args": ["mcp"],
+      "env": {
+        "MUSE_SERVER": "http://localhost:8000",
+        "MUSE_ADMIN_TOKEN": "your-admin-token-here"
+      }
+    }
+  }
+}
+```
+
+Inference-only setup (no admin tools, no token needed):
+
+```json
+{
+  "mcpServers": {
+    "muse-inference": {
+      "command": "muse",
+      "args": ["mcp", "--filter", "inference"],
+      "env": {"MUSE_SERVER": "http://localhost:8000"}
+    }
+  }
+}
+```
+
+After saving the config, restart Claude Desktop. Tools appear in the
+"Search and tools" menu. Test with prompts like:
+- "Generate an image of a sunset over a mountain lake."
+- "List all enabled models in muse."
+- "Transcribe this audio file: /path/to/audio.wav"
+
+Binary I/O conventions:
+- Inputs accept three mutually-exclusive fields per slot:
+  `<name>_b64` (base64), `<name>_url` (data: or http URL), or
+  `<name>_path` (local filesystem). Tool descriptions tell the LLM
+  which form is appropriate.
+- Outputs return MCP `ImageContent` (image bytes) or `AudioContent`
+  (audio bytes) plus a `TextContent` summary. Video bytes return
+  inside the JSON envelope (no SDK VideoContent type yet).
+
 ## Development commands
 
 ```bash
@@ -410,6 +500,10 @@ muse models info <id>
 muse models enable <id> / disable <id>
 muse models remove <id>
 muse serve --device cuda
+muse mcp                                       # MCP server for LLM clients (stdio mode)
+muse mcp --http --port 8088                    # MCP server in HTTP+SSE mode
+muse mcp --filter admin                        # only the 11 admin tools
+muse mcp --filter inference                    # only the 18 inference tools
 
 # Python clients (HTTP)
 python - <<'PY'
