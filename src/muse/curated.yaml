@@ -217,3 +217,34 @@
 
 - id: stable-diffusion-x4-upscaler
   bundled: true
+
+# ---------- image/segmentation (SAM-2 promptable segmenters) ----------
+
+- id: sam2-hiera-tiny
+  bundled: true
+
+- id: sam2-hiera-base-plus
+  uri: hf://facebook/sam2-hiera-base-plus
+  modality: image/segmentation
+  size_gb: 0.15
+  description: "SAM-2 Hiera base-plus: balanced quality, 150MB, Apache 2.0"
+  capabilities:
+    max_masks: 64
+    memory_gb: 1.5
+    supports_text_prompts: false
+    supports_point_prompts: true
+    supports_box_prompts: true
+    supports_automatic: true
+
+- id: sam2-hiera-large
+  uri: hf://facebook/sam2-hiera-large
+  modality: image/segmentation
+  size_gb: 0.25
+  description: "SAM-2 Hiera large: best quality, 225MB, Apache 2.0"
+  capabilities:
+    max_masks: 64
+    memory_gb: 2.5
+    supports_text_prompts: false
+    supports_point_prompts: true
+    supports_box_prompts: true
+    supports_automatic: true

@@ -223,3 +223,18 @@ def upscale_model(remote_health) -> str:
     )
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def segmentation_model(remote_health) -> str:
+    """The image/segmentation model id integration tests should target.
+
+    Defaults to sam2-hiera-tiny (smallest, CPU-friendly). Override via
+    MUSE_SEGMENTATION_MODEL_ID. Skips the test if the chosen model
+    isn't loaded on the server.
+    """
+    model_id = os.environ.get(
+        "MUSE_SEGMENTATION_MODEL_ID", "sam2-hiera-tiny",
+    )
+    _require_model(remote_health, model_id)
+    return model_id
