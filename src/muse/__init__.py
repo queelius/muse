@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.27.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.28.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -20,6 +20,11 @@ the bundled modalities are:
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
   - video/generation: /v1/video/generations (Wan, CogVideoX; narrative clips, mp4/webm/frames_b64; GPU-required)
+
+v0.28.0 adds an admin REST API under `/v1/admin/*` for runtime model
+control (enable/disable/probe/pull/remove without restarting `muse
+serve`). Closed-by-default behind `MUSE_ADMIN_TOKEN`. See README.md
+"Admin endpoints" and CLAUDE.md "Admin REST API" for the full surface.
 
 Heavy backends (transformers, diffusers, faster-whisper, llama-cpp,
 sentence-transformers) are imported lazily inside per-modality runtime
