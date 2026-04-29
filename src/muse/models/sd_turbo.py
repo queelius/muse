@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 torch: Any = None
 AutoPipelineForText2Image: Any = None
 AutoPipelineForImage2Image: Any = None
+AutoPipelineForInpainting: Any = None
 
 
 def _ensure_deps() -> None:
@@ -41,6 +42,7 @@ def _ensure_deps() -> None:
     `torch`) still get the real unpatched symbol for the others.
     """
     global torch, AutoPipelineForText2Image, AutoPipelineForImage2Image
+    global AutoPipelineForInpainting
     if torch is None:
         try:
             import torch as _t
@@ -62,6 +64,12 @@ def _ensure_deps() -> None:
             AutoPipelineForImage2Image = _p
         except Exception as e:  # noqa: BLE001
             logger.debug("sd-turbo AutoPipelineForImage2Image unavailable: %s", e)
+    if AutoPipelineForInpainting is None:
+        try:
+            from diffusers import AutoPipelineForInpainting as _p
+            AutoPipelineForInpainting = _p
+        except Exception as e:  # noqa: BLE001
+            logger.debug("sd-turbo AutoPipelineForInpainting unavailable: %s", e)
 
 
 MANIFEST = {
@@ -90,6 +98,8 @@ MANIFEST = {
         "supports_negative_prompt": True,
         "supports_seeded_generation": True,
         "supports_img2img": True,
+        "supports_inpainting": True,
+        "supports_variations": True,
         # Conservative VRAM/RAM peak estimate (fp16, default 512x512).
         # Annotation feeds `muse models list`; `muse models probe sd-turbo`
         # measures the real number on this hardware.
@@ -144,11 +154,12 @@ class Model:
                 "float32": _torch.float32,
                 "bfloat16": _torch.bfloat16,
             }[dtype]
-        # Stash for lazy img2img pipeline load (same checkpoint + dtype).
+        # Stash for lazy img2img / inpaint pipeline loads (same checkpoint + dtype).
         self._src = local_dir or hf_repo
         self._dtype = dtype
         self._torch_dtype = torch_dtype
         self._i2i_pipe = None
+        self._inp_pipe = None
         logger.info(
             "loading SD-Turbo from %s (device=%s, dtype=%s)",
             self._src, self._device, dtype,
@@ -307,6 +318,141 @@ class Model:
                 "mode": "img2img",
             },
         )
+
+    def inpaint(
+        self,
+        prompt: str,
+        *,
+        init_image: Any,
+        mask_image: Any,
+        negative_prompt: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        steps: int | None = None,
+        guidance: float | None = None,
+        seed: int | None = None,
+        strength: float | None = None,
+        **_: Any,
+    ) -> ImageResult:
+        """Inpainting: regenerate the masked region per prompt.
+
+        Mirrors the pattern in
+        muse.modalities.image_generation.runtimes.diffusers. White mask
+        pixels are regenerated; black are preserved. RGBA masks are
+        normalized to single-channel (mode L) before being passed to
+        diffusers.
+
+        Lazy-loads AutoPipelineForInpainting via from_pipe(self._pipe)
+        to share VRAM with the loaded t2i pipeline.
+        """
+        if self._inp_pipe is None:
+            import muse.models.sd_turbo as _self_mod
+            _inp = _self_mod.AutoPipelineForInpainting
+            if _inp is None:
+                raise RuntimeError(
+                    "diffusers AutoPipelineForInpainting is not available; "
+                    "run `muse pull sd-turbo`"
+                )
+            logger.info(
+                "loading SD-Turbo inpaint pipeline from %s (device=%s, dtype=%s)",
+                self._src, self._device, self._dtype,
+            )
+            self._inp_pipe = _inp.from_pipe(self._pipe)
+
+        # Normalize mask to grayscale (mode L). Diffusers accepts L or
+        # RGB; mode L is the documented contract. RGBA masks (alpha as
+        # the regenerate region) get flattened by .convert("L").
+        try:
+            mask_mode = getattr(mask_image, "mode", None)
+        except Exception:  # noqa: BLE001
+            mask_mode = None
+        if mask_mode is not None and mask_mode != "L":
+            mask_image = mask_image.convert("L")
+
+        n_steps = steps if steps is not None else 1
+        cfg = guidance if guidance is not None else 0.0
+        s = strength if strength is not None else 0.99
+
+        # Same steps * strength >= 1 contract as img2img.
+        min_steps_for_strength = max(1, math.ceil(1.0 / max(s, 0.01)))
+        if n_steps < min_steps_for_strength:
+            logger.info(
+                "inpaint bumping num_inference_steps from %d to %d to satisfy "
+                "strength=%.2f * steps >= 1 contract",
+                n_steps, min_steps_for_strength, s,
+            )
+            n_steps = min_steps_for_strength
+
+        gen = None
+        if seed is not None:
+            import muse.models.sd_turbo as _self_mod
+            _torch = _self_mod.torch
+            if _torch is not None:
+                gen = _torch.Generator(device=self._device).manual_seed(seed)
+
+        call_kwargs: dict = {
+            "prompt": prompt,
+            "image": init_image,
+            "mask_image": mask_image,
+            "strength": s,
+            "num_inference_steps": n_steps,
+            "guidance_scale": cfg,
+        }
+        if negative_prompt is not None:
+            call_kwargs["negative_prompt"] = negative_prompt
+        if width is not None:
+            call_kwargs["width"] = width
+        if height is not None:
+            call_kwargs["height"] = height
+        if gen is not None:
+            call_kwargs["generator"] = gen
+
+        out = self._inp_pipe(**call_kwargs)
+        img = out.images[0]
+        return ImageResult(
+            image=img,
+            width=img.size[0],
+            height=img.size[1],
+            seed=seed if seed is not None else -1,
+            metadata={
+                "prompt": prompt,
+                "steps": n_steps,
+                "guidance": cfg,
+                "strength": s,
+                "model": self.model_id,
+                "mode": "inpaint",
+            },
+        )
+
+    def vary(
+        self,
+        *,
+        init_image: Any,
+        width: int | None = None,
+        height: int | None = None,
+        steps: int | None = None,
+        guidance: float | None = None,
+        seed: int | None = None,
+        strength: float | None = None,
+        **_: Any,
+    ) -> ImageResult:
+        """Variations: img2img with empty prompt and high strength.
+
+        Reuses the existing img2img path. OpenAI's variations route
+        carries no prompt, so we pass empty string. Default strength
+        0.85 hits the "recognizable but visibly different" zone.
+        """
+        result = self._generate_img2img(
+            prompt="",
+            init_image=init_image,
+            strength=strength if strength is not None else 0.85,
+            negative_prompt=None,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+        )
+        result.metadata["mode"] = "variations"
+        return result
 
 
 def _select_device(device: str) -> str:

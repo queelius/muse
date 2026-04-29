@@ -269,3 +269,163 @@ def test_sd_turbo_img2img_uses_from_pipe_not_from_pretrained_to_share_vram():
     # the i2i class was NOT called (would have allocated a fresh copy).
     fake_i2i.from_pipe.assert_called_once_with(fake_t2i_pipe)
     fake_i2i.from_pretrained.assert_not_called()
+
+
+# ---------------- inpaint() / vary() (#100, v0.21.0) ----------------
+
+
+def test_manifest_advertises_supports_inpainting():
+    """sd-turbo MANIFEST capabilities advertise inpainting support."""
+    from muse.models.sd_turbo import MANIFEST
+    assert MANIFEST["capabilities"].get("supports_inpainting") is True
+
+
+def test_manifest_advertises_supports_variations():
+    """sd-turbo MANIFEST capabilities advertise variations support."""
+    from muse.models.sd_turbo import MANIFEST
+    assert MANIFEST["capabilities"].get("supports_variations") is True
+
+
+def test_sd_turbo_inpaint_uses_from_pipe():
+    """sd_turbo's bundled Model loads inpaint pipeline via from_pipe."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_inp = MagicMock()
+    fake_inp.from_pipe.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForInpainting", fake_inp), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        m.inpaint("add a moon", init_image=init_img, mask_image=mask)
+
+    fake_inp.from_pipe.assert_called_once()
+    fake_inp.from_pretrained.assert_not_called()
+
+
+def test_sd_turbo_inpaint_caches_pipeline():
+    """Second inpaint call reuses the cached pipeline."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_inp = MagicMock()
+    fake_inp.from_pipe.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForInpainting", fake_inp), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        m.inpaint("a", init_image=init_img, mask_image=mask)
+        m.inpaint("b", init_image=init_img, mask_image=mask)
+
+    assert fake_inp.from_pipe.call_count == 1
+
+
+def test_sd_turbo_inpaint_normalizes_rgba_mask_to_grayscale():
+    """A non-L mask is converted before being passed to the inpaint pipe."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_inp = MagicMock()
+    fake_inp_pipe = _patched_pipe()
+    fake_inp.from_pipe.return_value = fake_inp_pipe
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForInpainting", fake_inp), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        rgba_mask = Image.new("RGBA", (64, 64), (255, 255, 255, 255))
+        m.inpaint("repaint", init_image=init_img, mask_image=rgba_mask)
+
+    passed_mask = fake_inp_pipe.call_args.kwargs["mask_image"]
+    assert passed_mask.mode == "L"
+
+
+def test_sd_turbo_inpaint_returns_imageresult_with_mode_inpaint():
+    """ImageResult.metadata.mode should be 'inpaint' for the inpaint path."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_inp = MagicMock()
+    fake_inp.from_pipe.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForInpainting", fake_inp), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+        result = m.inpaint("paint", init_image=init_img, mask_image=mask)
+
+    assert isinstance(result, ImageResult)
+    assert result.metadata["mode"] == "inpaint"
+
+
+def test_sd_turbo_vary_delegates_to_img2img_with_empty_prompt():
+    """vary() reuses the img2img path; passes prompt='' and strength=0.85."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i.from_pipe.return_value = fake_i2i_pipe
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.vary(init_image=init_img)
+
+    call_kwargs = fake_i2i_pipe.call_args.kwargs
+    assert call_kwargs["prompt"] == ""
+    assert call_kwargs["strength"] == 0.85
+
+
+def test_sd_turbo_vary_returns_imageresult_with_mode_variations():
+    """ImageResult.metadata.mode should be 'variations' on vary()."""
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+    fake_i2i.from_pipe.return_value = _patched_pipe()
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        result = m.vary(init_image=init_img)
+
+    assert isinstance(result, ImageResult)
+    assert result.metadata["mode"] == "variations"
