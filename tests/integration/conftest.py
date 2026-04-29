@@ -163,3 +163,17 @@ def audio_generation_model(remote_health) -> str:
     )
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def summarization_model(remote_health) -> str:
+    """The text/summarization model id integration tests should target.
+
+    Defaults to bart-large-cnn. Override via MUSE_SUMMARIZATION_MODEL_ID.
+    Skips the test if the chosen model isn't loaded on the server.
+    """
+    model_id = os.environ.get(
+        "MUSE_SUMMARIZATION_MODEL_ID", "bart-large-cnn",
+    )
+    _require_model(remote_health, model_id)
+    return model_id

@@ -154,3 +154,18 @@
 
 - id: stable-audio-open-1.0
   bundled: true
+
+# ---------- text/summarization (BART / PEGASUS seq2seq) ----------
+
+- id: bart-large-cnn
+  bundled: true
+
+- id: bart-cnn-samsum
+  uri: hf://philschmid/bart-large-cnn-samsum
+  modality: text/summarization
+  size_gb: 0.4
+  description: "BART CNN samsum: dialog summarization (meetings, chats), ~400MB"
+  capabilities:
+    supports_dialog_summarization: true
+    device: cpu
+    memory_gb: 1.5

@@ -291,6 +291,27 @@ def test_load_curated_includes_stable_audio_open_1_0():
     assert e.uri is None  # bundled entries don't have URIs
 
 
+def test_load_curated_includes_summarization_entries():
+    """v0.22.0 adds bart-large-cnn (bundled) and bart-cnn-samsum (URI) under
+    text/summarization."""
+    entries = load_curated()
+    by_id = {e.id: e for e in entries}
+
+    assert "bart-large-cnn" in by_id
+    bart = by_id["bart-large-cnn"]
+    assert bart.bundled is True
+    assert bart.uri is None  # bundled entries don't have URIs
+
+    assert "bart-cnn-samsum" in by_id
+    samsum = by_id["bart-cnn-samsum"]
+    assert samsum.modality == "text/summarization"
+    assert samsum.uri == "hf://philschmid/bart-large-cnn-samsum"
+    # Capabilities overlay carries the dialog flag and CPU annotation.
+    assert samsum.capabilities.get("supports_dialog_summarization") is True
+    assert samsum.capabilities.get("device") == "cpu"
+    assert samsum.capabilities.get("memory_gb") == 1.5
+
+
 def test_load_curated_includes_text_moderation_entry():
     """Curated text-moderation alias exists and points at KoalaAI.
 
