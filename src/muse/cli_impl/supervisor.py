@@ -9,7 +9,10 @@ Responsibilities (across E1-E4):
   6. Build gateway routes + run gateway uvicorn (E3)
   7. On shutdown: SIGTERM workers, wait for exit (E3)
 
-This task (E1) implements steps 1-3 only; the rest land in E2-E3.
+A module-level SupervisorState singleton holds the worker list and shared
+metadata. Admin endpoints (muse.admin.*) read and mutate the state under
+its RLock; the auto-restart monitor reads `state.workers` directly. The
+state is registered by `run_supervisor` and cleared on its way out.
 """
 from __future__ import annotations
 
@@ -48,6 +51,59 @@ class WorkerSpec:
     failure_count: int = 0
     last_spawn_at: float = 0.0
     status: str = "pending"
+
+
+@dataclass
+class SupervisorState:
+    """Runtime state shared across the supervisor and admin endpoints.
+
+    `workers` is the live list of spawned WorkerSpec records. Admin
+    operations (enable/disable) mutate it; the monitor thread reads it.
+
+    `device` is the supervisor-wide device flag (cuda/cpu/auto/mps).
+    Admin-spawned workers inherit it unless their MANIFEST capability
+    pins a specific device.
+
+    `started_at` is monotonic seconds at supervisor boot; admin uptime
+    queries can subtract this to report worker uptimes.
+
+    `lock` is a reentrant lock guarding all mutations of `workers`. v1
+    uses one global lock; per-model locks are deferred until contention
+    becomes measurable.
+    """
+    workers: list[WorkerSpec] = field(default_factory=list)
+    device: str = "auto"
+    started_at: float = field(default_factory=time.monotonic)
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+
+# Module-level singleton; admin routes reach this through
+# get_supervisor_state. Tests build their own SupervisorState instances
+# and either set it via set_supervisor_state or pass it directly.
+_state: "SupervisorState | None" = None
+
+
+def get_supervisor_state() -> SupervisorState:
+    """Return the active SupervisorState, or an empty sentinel.
+
+    The sentinel is fresh on every call when nothing is set; this means
+    admin endpoints loaded outside a running supervisor (e.g. unit tests
+    spinning up the gateway in isolation) get a coherent empty state
+    instead of a None that crashes the routes.
+    """
+    return _state if _state is not None else SupervisorState()
+
+
+def set_supervisor_state(state: SupervisorState) -> None:
+    """Register a SupervisorState as the active singleton."""
+    global _state
+    _state = state
+
+
+def clear_supervisor_state() -> None:
+    """Test hook + supervisor shutdown: drop the active singleton."""
+    global _state
+    _state = None
 
 
 def plan_workers(port_start: int = 9001, port_end: int = 9999) -> list[WorkerSpec]:
@@ -299,6 +355,12 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     Plans workers from catalog, spawns them, waits for ready, then starts
     the auto-restart monitor thread + gateway. Guarantees clean shutdown
     of workers and monitor on exit.
+
+    Registers a SupervisorState singleton so admin endpoints under
+    `/v1/admin/*` can inspect and mutate the worker list. The monitor
+    thread reads `state.workers` directly so admin-triggered worker
+    additions/removals are picked up on the next polling tick without
+    extra synchronization.
     """
     from muse.cli_impl.gateway import WorkerRoute, build_gateway
 
@@ -308,6 +370,9 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
             "no pulled models with a venv - server will start empty. "
             "Pull a model first: `muse pull <model-id>`"
         )
+
+    state = SupervisorState(workers=specs, device=device)
+    set_supervisor_state(state)
 
     stop_event = threading.Event()
     monitor_thread: threading.Thread | None = None
@@ -323,11 +388,12 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
 
         # Start the auto-restart monitor AFTER all workers are ready so
         # the initial wait_for_ready isn't racing with the monitor's own
-        # readiness tracking.
+        # readiness tracking. The monitor reads state.workers (a live
+        # reference) so admin-triggered enable/disable show up here.
         if specs:
             monitor_thread = threading.Thread(
                 target=_monitor_workers,
-                args=(specs, stop_event),
+                args=(state.workers, stop_event),
                 daemon=True,
                 name="muse-monitor",
             )
@@ -354,5 +420,14 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         stop_event.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=5.0)
-        _shutdown_workers(specs)
+        _shutdown_workers(state.workers)
+        clear_supervisor_state()
+        # Best-effort: join admin job threads so a Ctrl+C during a pull
+        # doesn't leave dangling daemons. Import lazily to keep the
+        # supervisor's startup path free of admin concerns.
+        try:
+            from muse.admin.jobs import get_default_store
+            get_default_store().shutdown()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("admin job-store shutdown failed: %s", e)
     return 0

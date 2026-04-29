@@ -6,9 +6,20 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 from muse.cli_impl.supervisor import (
+    SupervisorState,
     WorkerSpec,
+    clear_supervisor_state,
+    get_supervisor_state,
     plan_workers,
+    set_supervisor_state,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_supervisor_state():
+    clear_supervisor_state()
+    yield
+    clear_supervisor_state()
 
 
 @pytest.fixture
@@ -563,3 +574,96 @@ class TestRunSupervisorMonitor:
         # The shutdown Event was set
         assert captured_events, "no threading.Event was created"
         assert any(e.is_set() for e in captured_events)
+
+
+class TestSupervisorState:
+    def test_default_state_has_empty_workers(self):
+        s = SupervisorState()
+        assert s.workers == []
+        assert s.device == "auto"
+        assert s.started_at >= 0.0
+
+    def test_default_state_has_rlock(self):
+        import threading
+        s = SupervisorState()
+        # An RLock can be acquired twice from the same thread without deadlock
+        with s.lock:
+            with s.lock:
+                pass
+
+    def test_get_supervisor_state_returns_sentinel_when_unset(self):
+        clear_supervisor_state()
+        s = get_supervisor_state()
+        assert isinstance(s, SupervisorState)
+        assert s.workers == []
+
+    def test_set_and_get_singleton_round_trip(self):
+        s = SupervisorState(device="cuda")
+        set_supervisor_state(s)
+        assert get_supervisor_state() is s
+
+    def test_clear_supervisor_state_drops_singleton(self):
+        s = SupervisorState(device="mps")
+        set_supervisor_state(s)
+        clear_supervisor_state()
+        # Subsequent get yields a fresh sentinel, not the cleared one
+        out = get_supervisor_state()
+        assert out is not s
+
+
+class TestRunSupervisorRegistersState:
+    def test_run_supervisor_registers_state_during_run(self, tmp_catalog):
+        """run_supervisor should set the singleton before uvicorn.run."""
+        _seed_catalog({
+            "model-a": {
+                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
+                "venv_path": "/venvs/a",
+                "python_path": "/venvs/a/bin/python",
+                "enabled": True,
+            },
+        })
+        from muse.cli_impl.supervisor import run_supervisor
+
+        seen_state = {"value": None}
+
+        def capture_state(*args, **kwargs):
+            seen_state["value"] = get_supervisor_state()
+            raise KeyboardInterrupt()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_uvicorn.run.side_effect = capture_state
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        # State was non-None during the run
+        assert seen_state["value"] is not None
+        assert seen_state["value"].device == "cpu"
+        assert len(seen_state["value"].workers) == 1
+        # And it's been cleared on exit
+        cleared = get_supervisor_state()
+        assert cleared.workers == []
+
+    def test_run_supervisor_clears_state_on_exception(self, tmp_catalog):
+        """Crash path: state must still get cleared in the finally block."""
+        _seed_catalog({
+            "model-a": {
+                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
+                "venv_path": "/venvs/a",
+                "python_path": "/venvs/a/bin/python",
+                "enabled": True,
+            },
+        })
+        from muse.cli_impl.supervisor import run_supervisor
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_uvicorn.run.side_effect = RuntimeError("uvicorn boom")
+            with pytest.raises(RuntimeError):
+                run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        cleared = get_supervisor_state()
+        assert cleared.workers == []
