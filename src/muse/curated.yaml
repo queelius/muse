@@ -212,3 +212,8 @@
     dimensions: 512
     image_size: 224
     memory_gb: 1.2
+
+# ---------- image/upscale (super-resolution) ----------
+
+- id: stable-diffusion-x4-upscaler
+  bundled: true
