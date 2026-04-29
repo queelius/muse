@@ -22,6 +22,7 @@ exposes only image embedding. Future work may add a text route at
 existing route guarded by a `supports_text_embeddings_too` capability
 flag. Out of scope for v0.23.0.
 """
+from muse.modalities.image_embedding.client import ImageEmbeddingsClient
 from muse.modalities.image_embedding.protocol import (
     ImageEmbeddingModel,
     ImageEmbeddingResult,
@@ -55,4 +56,5 @@ __all__ = [
     "build_router",
     "ImageEmbeddingResult",
     "ImageEmbeddingModel",
+    "ImageEmbeddingsClient",
 ]
