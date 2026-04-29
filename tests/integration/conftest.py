@@ -208,3 +208,18 @@ def audio_embedding_model(remote_health) -> str:
     )
     _require_model(remote_health, model_id)
     return model_id
+
+
+@pytest.fixture(scope="session")
+def upscale_model(remote_health) -> str:
+    """The image/upscale model id integration tests should target.
+
+    Defaults to stable-diffusion-x4-upscaler. Override via
+    MUSE_UPSCALE_MODEL_ID. Skips the test if the chosen model isn't
+    loaded on the server.
+    """
+    model_id = os.environ.get(
+        "MUSE_UPSCALE_MODEL_ID", "stable-diffusion-x4-upscaler",
+    )
+    _require_model(remote_health, model_id)
+    return model_id
