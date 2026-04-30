@@ -187,6 +187,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_probe.set_defaults(func=_cmd_models_probe)
 
+    # refresh: re-install muse[server,<extras>] into per-model venvs
+    sp_refresh = models_sub.add_parser(
+        "refresh",
+        help=(
+            "re-install muse[server,<modality-extras>] + the model's "
+            "pip_extras into one or more per-model venvs (use after "
+            "`pip install -U muse` to propagate new server-side deps)"
+        ),
+    )
+    sp_refresh.add_argument(
+        "model_id", nargs="?", default=None,
+        help="model to refresh (omit if using --all or --enabled)",
+    )
+    sp_refresh.add_argument(
+        "--all", action="store_true", dest="all_",
+        help="refresh every pulled venv",
+    )
+    sp_refresh.add_argument(
+        "--enabled", action="store_true", dest="enabled_only",
+        help="only refresh enabled venvs",
+    )
+    sp_refresh.add_argument(
+        "--no-extras", action="store_true", dest="no_extras",
+        help="only refresh muse[server]; skip the model's pip_extras",
+    )
+    sp_refresh.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="machine-readable output instead of human-readable summary",
+    )
+    sp_refresh.set_defaults(func=_cmd_models_refresh)
+
     # mcp (Model Context Protocol server)
     sp_mcp = sub.add_parser(
         "mcp",
@@ -637,6 +668,17 @@ def _cmd_models_probe(args):
         no_inference=args.no_inference,
         device=args.device,
         as_json=args.json,
+    )
+
+
+def _cmd_models_refresh(args):
+    from muse.cli_impl.refresh import run_refresh
+    return run_refresh(
+        model_id=args.model_id,
+        all_=args.all_,
+        enabled_only=args.enabled_only,
+        no_extras=args.no_extras,
+        as_json=args.as_json,
     )
 
 
