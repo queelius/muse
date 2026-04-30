@@ -563,6 +563,42 @@ PY
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 
+## Fresh-venv smoke test (CI)
+
+Bundled scripts under `src/muse/models/` declare `pip_extras` covering the
+deps the runtime source-imports. The dev environment installs broad
+extras (`muse[dev,server,audio,images,embeddings]`), so transitive deps
+that `from_pretrained` (or sentence-transformers, or diffusers) ALSO
+imports at load time happen to be present. Per-model venvs created via
+`muse pull <id>` install only `muse[server]` plus the model's declared
+`pip_extras`; transitive holes show up as ImportError when the worker
+tries to load the model.
+
+The v0.30.0 audit (#110, `tests/models/test_pip_extras_audit.py`)
+catches direct-import gaps via AST scan but cannot see transitive
+imports that `from_pretrained` triggers. v0.32.0 closes that gap with
+a CI workflow:
+
+- `.github/workflows/fresh-venv-smoke.yml` runs on every push to main
+  and every PR. Matrix-tests five lightweight models (`kokoro-82m`,
+  `dinov2-small`, `bart-large-cnn`, `bge-reranker-v2-m3`,
+  `mert-v1-95m`).
+- Each job creates a fresh venv, installs only what `muse pull` would
+  install, then runs the in-venv probe worker (`muse _probe_worker
+  --no-inference`) to verify load. Failure surfaces a structured label
+  like `kokoro-82m: FAIL (missing dep: librosa)`.
+- Heavy / GPU-only models (sd-turbo, animatediff, stable-audio, wan,
+  large LLMs) are deferred until paid runner budget allows.
+
+Local repro: `python scripts/smoke_fresh_venv.py --model_id <id>`.
+Use `--json` for machine-readable output.
+
+When you add a new bundled script and the smoke matrix should cover it,
+add the id to the matrix in `.github/workflows/fresh-venv-smoke.yml`.
+Lightweight models (under ~1 GB on disk, CPU-friendly) are good
+candidates; heavier models need GPU runners and are out of scope for
+the free-tier CI matrix.
+
 ## Memory accounting
 
 Three sources of truth, in order of fidelity:

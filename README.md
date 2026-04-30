@@ -1,5 +1,7 @@
 # Muse
 
+![fresh-venv-smoke](https://github.com/queelius/muse/actions/workflows/fresh-venv-smoke.yml/badge.svg)
+
 Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface:
 - text-to-speech on `/v1/audio/speech`
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
