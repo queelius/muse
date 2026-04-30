@@ -285,6 +285,13 @@ client.chat.completions.create(model="qwen3-8b-gguf-q4-k-m", messages=[...])
 `muse serve` auto-restarts crashed worker processes with exponential backoff.
 Individual model failures don't take down the server or other modalities.
 
+As of v0.30.0 the gateway boots as soon as the FIRST worker passes
+`/health`; remaining workers promote on a daemon thread and join
+`/v1/models` progressively. With six-plus enabled models, this turns
+30-60s of dead-air startup into useful warm-up time: clients can hit
+the fast workers immediately while slow ones (large GGUFs, big
+diffusion models) finish loading.
+
 ## CLI (admin-only)
 
 | Command | Description |
@@ -297,6 +304,7 @@ Individual model failures don't take down the server or other modalities.
 | `muse models remove <model-id>` | unregister from catalog |
 | `muse models enable <model-id>` | mark a pulled model active (load on next serve) |
 | `muse models disable <model-id>` | mark a pulled model inactive (skip on next serve) |
+| `muse models refresh <id> \| --all \| --enabled` | re-install muse[server,extras] into per-model venv(s) (after `pip install -U muse`) |
 | `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (29 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.

@@ -292,7 +292,14 @@ Each pulled model gets its own venv at `~/.muse/venvs/<model-id>/`
 with exactly the pip_extras it declares. Workers run the existing
 `muse.cli_impl.worker.run_worker` logic via `muse _worker`
 (hidden subcommand). The supervisor spawns them with each venv's
-Python interpreter, polls `/health` until ready, then runs the gateway.
+Python interpreter, polls `/health` until the FIRST one is ready, then
+runs the gateway. Remaining workers promote on a daemon thread
+(`_promote_workers`) that flips `WorkerSpec.status` from `pending` to
+`running` under `state.lock` once each one passes `/health`. Models on
+pending workers are filtered out of `/v1/models` and the proxy's
+routing table until they promote, so clients don't hit a partially
+loaded worker. With six-plus enabled models, this turns the historical
+30-60s of dead-air startup into useful warm-up time (v0.30.0).
 
 The gateway extracts `model` from the request body (POST) or query
 (GET), looks up which worker hosts it, and forwards the request,
@@ -499,6 +506,11 @@ muse pull kokoro-82m                           # bundled bare id
 muse models info <id>
 muse models enable <id> / disable <id>
 muse models remove <id>
+muse models refresh <id>                       # re-install muse[server,extras] into one venv
+muse models refresh --all                      # all pulled venvs, alphabetical
+muse models refresh --enabled                  # only enabled venvs
+muse models refresh <id> --no-extras           # skip the model's pip_extras (only refresh muse[server])
+muse models refresh --all --json               # machine-readable output
 muse serve --device cuda
 muse mcp                                       # MCP server for LLM clients (stdio mode)
 muse mcp --http --port 8088                    # MCP server in HTTP+SSE mode

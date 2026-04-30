@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.29.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.30.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -20,6 +20,19 @@ the bundled modalities are:
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
   - video/generation: /v1/video/generations (Wan, CogVideoX; narrative clips, mp4/webm/frames_b64; GPU-required)
+
+v0.30.0 bundles three operational improvements:
+  - the supervisor starts the gateway after the FIRST worker is healthy
+    (was: ALL workers), so clients can hit the fast workers while slow
+    ones still load. Remaining workers promote on a daemon thread.
+  - bundled scripts in `muse/models/` got a `pip_extras` audit; missing
+    transitive deps (torch, numpy) added to seven manifests; a static
+    regression-guard test parametrized over every bundled script
+    catches future gaps.
+  - new `muse models refresh <id> | --all | --enabled` re-installs
+    `muse[server,<extras>]` plus the model's `pip_extras` into per-model
+    venvs; use after `pip install -U muse` to propagate new server-side
+    deps.
 
 v0.29.0 adds `muse mcp`: an MCP (Model Context Protocol) server that
 exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 29
