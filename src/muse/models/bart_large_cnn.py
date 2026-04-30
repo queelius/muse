@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from muse.core.runtime_helpers import select_device, set_inference_mode
 from muse.modalities.text_summarization.protocol import SummarizationResult
 
 
@@ -90,23 +91,13 @@ MANIFEST = {
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
 
 
 def _set_inference_mode(model: Any) -> None:
-    """Switch the model to no-grad inference mode if the method exists."""
-    fn = getattr(model, "eval", None)
-    if callable(fn):
-        fn()
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    set_inference_mode(model)
 
 
 class Model:

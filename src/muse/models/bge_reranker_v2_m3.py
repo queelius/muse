@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from muse.core.runtime_helpers import select_device
 from muse.modalities.text_rerank.protocol import RerankResult
 
 
@@ -70,16 +71,8 @@ MANIFEST = {
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
 
 
 class Model:

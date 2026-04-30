@@ -16,6 +16,7 @@ import logging
 import math
 from typing import Any
 
+from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.image_generation import ImageResult
 
 logger = logging.getLogger(__name__)
@@ -147,13 +148,7 @@ class Model:
         # Access the module-level `torch` name so tests can patch it.
         import muse.models.sd_turbo as _self_mod
         _torch = _self_mod.torch
-        torch_dtype = None
-        if _torch is not None:
-            torch_dtype = {
-                "float16": _torch.float16,
-                "float32": _torch.float32,
-                "bfloat16": _torch.bfloat16,
-            }[dtype]
+        torch_dtype = dtype_for_name(dtype, _torch)
         # Stash for lazy img2img / inpaint pipeline loads (same checkpoint + dtype).
         self._src = local_dir or hf_repo
         self._dtype = dtype
@@ -456,12 +451,5 @@ class Model:
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
