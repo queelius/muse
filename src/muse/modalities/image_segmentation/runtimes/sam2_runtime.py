@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.image_segmentation.protocol import (
     MaskRecord, SegmentationResult,
 )
@@ -67,29 +68,13 @@ def _ensure_deps() -> None:
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
 
 
 def _resolve_dtype(dtype: str) -> Any:
-    if torch is None:
-        return None
-    return {
-        "float16": torch.float16,
-        "fp16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "bf16": torch.bfloat16,
-        "float32": torch.float32,
-        "fp32": torch.float32,
-    }.get(dtype, torch.float32)
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return dtype_for_name(dtype, torch)
 
 
 def _bbox_area(mask: Any) -> tuple[tuple[int, int, int, int], int]:

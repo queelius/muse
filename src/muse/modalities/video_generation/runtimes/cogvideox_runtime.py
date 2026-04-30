@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.video_generation.protocol import VideoResult
 
 
@@ -40,15 +41,8 @@ def _ensure_deps() -> None:
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
 
 
 class CogVideoXRuntime:
@@ -95,13 +89,7 @@ class CogVideoXRuntime:
 
         import muse.modalities.video_generation.runtimes.cogvideox_runtime as _mod
         _torch = _mod.torch
-        torch_dtype = None
-        if _torch is not None:
-            torch_dtype = {
-                "float16": _torch.float16,
-                "float32": _torch.float32,
-                "bfloat16": _torch.bfloat16,
-            }[dtype]
+        torch_dtype = dtype_for_name(dtype, _torch)
 
         src = local_dir or hf_repo
         logger.info(

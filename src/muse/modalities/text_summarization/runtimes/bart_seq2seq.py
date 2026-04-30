@@ -18,6 +18,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from muse.core.runtime_helpers import (
+    dtype_for_name,
+    select_device,
+    set_inference_mode,
+)
 from muse.modalities.text_summarization.protocol import SummarizationResult
 
 
@@ -64,42 +69,18 @@ def _ensure_deps() -> None:
 
 
 def _resolve_dtype(dtype: str) -> Any:
-    """Map a string dtype to the torch dtype object, or None when torch
-    isn't available (caller will skip dtype kwargs)."""
-    if torch is None:
-        return None
-    return {
-        "float16": torch.float16,
-        "fp16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "bf16": torch.bfloat16,
-        "float32": torch.float32,
-        "fp32": torch.float32,
-    }.get(dtype, torch.float32)
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return dtype_for_name(dtype, torch)
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
 
 
 def _set_inference_mode(model: Any) -> None:
-    """Switch model to inference (no-grad) mode if the method exists.
-
-    Wrapped in a helper so the runtime body stays readable and tests
-    can patch this without intercepting the model object's attribute.
-    """
-    fn = getattr(model, "eval", None)
-    if callable(fn):
-        fn()
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    set_inference_mode(model)
 
 
 class BartSeq2SeqRuntime:

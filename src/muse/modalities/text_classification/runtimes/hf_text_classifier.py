@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from muse.core.runtime_helpers import select_device, set_inference_mode
 from muse.modalities.text_classification.protocol import ClassificationResult
 
 
@@ -80,10 +81,10 @@ class HFTextClassifier:
         self._tokenizer = AutoTokenizer.from_pretrained(src)
         self._model = AutoModelForSequenceClassification.from_pretrained(src)
         self._model = self._model.to(self._device)
-        # Set inference mode via the PyTorch model's .eval() method (not
-        # Python's built-in eval); this disables dropout and batch-norm
-        # training behaviour without requiring a context manager.
-        self._model = self._model.eval()
+        # Switch to inference mode via the shared helper, which keeps the
+        # literal method-name token out of this file (security pre-commit
+        # hook policy; see CLAUDE.md "No literal eval token").
+        set_inference_mode(self._model)
 
         cfg = self._model.config
         self._id2label: dict[int, str] = dict(getattr(cfg, "id2label", {}))
@@ -129,13 +130,5 @@ class HFTextClassifier:
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)

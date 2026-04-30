@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.audio_generation.protocol import AudioGenerationResult
 
 
@@ -48,16 +49,8 @@ def _ensure_deps() -> None:
 
 
 def _select_device(device: str) -> str:
-    if device != "auto":
-        return device
-    if torch is None:
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
-    return "cpu"
+    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
+    return select_device(device, torch_module=torch)
 
 
 def _normalize_pipeline_output(audio: Any) -> tuple[np.ndarray, int]:
@@ -145,13 +138,7 @@ class StableAudioRuntime:
         # Access torch through this module so tests' patches survive.
         import muse.modalities.audio_generation.runtimes.stable_audio as _mod
         _torch = _mod.torch
-        torch_dtype = None
-        if _torch is not None:
-            torch_dtype = {
-                "float16": _torch.float16,
-                "float32": _torch.float32,
-                "bfloat16": _torch.bfloat16,
-            }[dtype]
+        torch_dtype = dtype_for_name(dtype, _torch)
         self._dtype = dtype
         self._torch_dtype = torch_dtype
 

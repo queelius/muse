@@ -2,6 +2,9 @@ from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from muse.core.runtime_helpers import set_inference_mode
+
 from .base import BaseModel
 
 
@@ -28,7 +31,7 @@ class TransformersModel(BaseModel):
             attn_implementation="sdpa",
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        self.model.eval()
+        set_inference_mode(self.model)
         self.model = self.model.to(device)
 
         if quantize and device == 'cpu':
