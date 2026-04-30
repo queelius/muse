@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.30.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.31.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -20,6 +20,16 @@ the bundled modalities are:
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
   - video/generation: /v1/video/generations (Wan, CogVideoX; narrative clips, mp4/webm/frames_b64; GPU-required)
+
+v0.31.0 consolidates cross-runtime utilities into
+`muse.core.runtime_helpers`: `select_device` (cuda/mps/cpu auto-detect),
+`dtype_for_name` (string-to-torch.dtype map with `fp16`/`bf16`/`fp32`
+aliases), `set_inference_mode` (no-grad switch with the literal
+method-name token kept out of caller bodies), and `LoadTimer` (opt-in
+load-time logging context). Removes ~30 per-runtime copies; an AST-based
+meta-test (`tests/core/test_runtime_helpers_meta.py`) walks every
+runtime and bundled script to flag re-implementations. Behavior-
+preserving; the existing 2150 fast-lane tests pass without modification.
 
 v0.30.0 bundles three operational improvements:
   - the supervisor starts the gateway after the FIRST worker is healthy

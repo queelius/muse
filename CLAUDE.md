@@ -228,13 +228,14 @@ Each modality subpackage (`src/muse/modalities/<mime_name>/`) contains:
 - `audio_transcription/` was muse's first modality with multipart/form-data uploads (OpenAI Whisper wire shape). `routes.py` handles UploadFile + Form fields inline. As of v0.21.0, `image_generation/` is the second multipart consumer (`/v1/images/edits` + `/v1/images/variations`); v0.25.0 adds `image_upscale/` (`/v1/images/upscale`) as the third. All three implement multipart inline; if a fourth multipart modality lands, factor out to `muse.modalities._common.uploads`.
 - `text_classification/` is muse's first modality whose internal MIME tag (`text/classification`) is broader than its primary URL route (`/v1/moderations`). The wire path is OpenAI-specific; the modality tag is broad enough to host future routes (`/v1/text/classifications` for sentiment/intent) sharing the same runtime + dataclasses without a new modality package.
 
-Three distinct concepts worth keeping straight:
+Four distinct concepts worth keeping straight:
 
 | Surface | Who writes it | Purpose |
 |---|---|---|
 | `muse/models/*.py` | bundled muse + users | public model scripts, one per model, discoverable |
 | `modalities/*/runtimes/*.py` | muse internal | generic runtimes, one class serves many models (GGUF, ST) |
 | `modalities/*/backends/*.py` | muse internal | private helpers shared inside a modality |
+| `muse.core.runtime_helpers` | muse internal | cross-modality utilities every runtime imports: `select_device` (cuda/mps/cpu auto-detect), `dtype_for_name` (string-to-torch.dtype map with `fp16`/`bf16`/`fp32` aliases), `set_inference_mode` (no-grad switch; literal token kept out of caller bodies via shared helper), `LoadTimer` (opt-in load-time logging context). Added v0.31.0; consolidated ~30 per-runtime copies. The meta-test `tests/core/test_runtime_helpers_meta.py` AST-walks every runtime and bundled script to flag re-implementations |
 
 Each model script (`src/muse/models/<id>.py`) contains:
 - Top-level `MANIFEST: dict` with required keys `model_id`, `modality`, `hf_repo` and optional `description`, `license`, `pip_extras`, `system_packages`, `capabilities`. Anything else passes through.
@@ -664,7 +665,13 @@ If you do:
    so no relative imports.
 5. Add bundled model scripts under `src/muse/models/` (or rely on
    the resolver alone for uniform-shape modalities).
-6. Add tests under `tests/modalities/<mime_name>/` (route + plugin)
+6. Inside the new runtime / bundled script, import device + dtype
+   utilities from `muse.core.runtime_helpers` rather than rolling
+   your own. The four utilities (`select_device`, `dtype_for_name`,
+   `set_inference_mode`, `LoadTimer`) cover the common needs and the
+   meta-test (`tests/core/test_runtime_helpers_meta.py`) AST-walks
+   every runtime to flag re-implementations.
+7. Add tests under `tests/modalities/<mime_name>/` (route + plugin)
    and `tests/models/test_<new_model>.py`.
 
 No edits to `worker.py`, `catalog.py`, `registry.py`, `server.py`,
