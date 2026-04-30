@@ -72,6 +72,9 @@ MANIFEST = {
         "torch>=2.1.0",
         "transformers>=4.36.0",
         "librosa>=0.10.0",
+        # numpy is pulled by librosa but the runtime imports it directly;
+        # listing it keeps the manifest self-describing (#110).
+        "numpy",
     ),
     "system_packages": (),
     "capabilities": {

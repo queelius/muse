@@ -48,7 +48,15 @@ MANIFEST = {
     "hf_repo": "hexgrad/Kokoro-82M",
     "description": "Lightweight TTS, 54 voices, 24kHz",
     "license": "Apache 2.0",
-    "pip_extras": ("kokoro", "soundfile", "misaki[en]"),
+    # kokoro pulls torch + numpy transitively; declared explicitly so
+    # the manifest stays self-describing for fresh-venv installs (#110).
+    "pip_extras": (
+        "torch>=2.1.0",
+        "numpy",
+        "kokoro",
+        "soundfile",
+        "misaki[en]",
+    ),
     "system_packages": ("espeak-ng",),
     "capabilities": {
         "sample_rate": KOKORO_SAMPLE_RATE,

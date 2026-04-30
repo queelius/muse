@@ -76,6 +76,9 @@ MANIFEST = {
         "transformers>=4.42.4",
         "sentence-transformers>=2.7.0",
         "einops",
+        # numpy is pulled by transformers but the runtime imports it
+        # directly for the L2-normalize step on encode output (#110).
+        "numpy",
     ),
     "system_packages": (),
     "capabilities": {

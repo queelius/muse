@@ -26,7 +26,17 @@ MANIFEST = {
     "hf_repo": "ekwek/Soprano-1.1-80M",
     "description": "Qwen3 LLM backbone + Vocos decoder, 32kHz, 80M params",
     "license": "Apache 2.0",
-    "pip_extras": ("transformers>=4.36.0", "scipy", "inflect", "unidecode"),
+    # Soprano delegates to muse.modalities.audio_speech.tts.Narro which
+    # imports torch + numpy unconditionally; declared explicitly for
+    # fresh-venv install correctness (#110).
+    "pip_extras": (
+        "torch>=2.1.0",
+        "numpy",
+        "transformers>=4.36.0",
+        "scipy",
+        "inflect",
+        "unidecode",
+    ),
     "system_packages": (),
     "capabilities": {
         "sample_rate": 32000,

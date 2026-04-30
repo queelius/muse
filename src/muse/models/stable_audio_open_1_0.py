@@ -74,6 +74,9 @@ MANIFEST = {
         "transformers>=4.36.0",
         "accelerate",
         "soundfile",  # FLAC encoding in the codec layer.
+        # numpy is pulled by torch but the runtime imports it directly
+        # for waveform shaping (#110).
+        "numpy",
     ),
     # ffmpeg is optional; only needed for mp3/opus response_format.
     # Declaring it here lets `muse pull` ensure it's available, but

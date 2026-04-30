@@ -58,6 +58,9 @@ MANIFEST = {
         "torch>=2.1.0",
         "transformers>=4.36.0",
         "Pillow>=9.1.0",
+        # numpy is pulled by transformers but the runtime imports it
+        # directly for embedding postprocessing (#110).
+        "numpy",
     ),
     "system_packages": (),
     "capabilities": {

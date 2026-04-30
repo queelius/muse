@@ -48,7 +48,15 @@ MANIFEST = {
     "hf_repo": "suno/bark-small",
     "description": "Multilingual TTS with voice cloning, 24kHz",
     "license": "MIT",
-    "pip_extras": ("transformers>=4.36.0", "scipy"),
+    # transformers pulls torch + numpy transitively, but declaring them
+    # explicitly keeps the contract self-contained for fresh-venv
+    # installs (#110).
+    "pip_extras": (
+        "torch>=2.1.0",
+        "numpy",
+        "transformers>=4.36.0",
+        "scipy",
+    ),
     "system_packages": (),
     "capabilities": {
         "sample_rate": BARK_SAMPLE_RATE,
