@@ -1,0 +1,91 @@
+name: fresh-venv-smoke
+
+# Smoke-test the fresh-venv install path for each lightweight bundled
+# model. Catches the failure mode where a script's pip_extras misses a
+# transitive dep that from_pretrained pulls in at load time. See
+# docs/superpowers/specs/2026-04-30-fresh-venv-smoke-test-design.md.
+#
+# All matrix.model values are author-controlled (the list below), so
+# there is no injection vector from issue/PR titles or commits.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: smoke-${{ matrix.model }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - kokoro-82m
+          - dinov2-small
+          - bart-large-cnn
+          - bge-reranker-v2-m3
+          - mert-v1-95m
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: cache HF model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-${{ hashFiles('pyproject.toml') }}-${{ matrix.model }}
+          restore-keys: |
+            ${{ runner.os }}-hf-${{ hashFiles('pyproject.toml') }}-
+            ${{ runner.os }}-hf-
+
+      - name: install host muse
+        env:
+          PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: system deps for kokoro
+        if: matrix.model == 'kokoro-82m'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y espeak-ng
+
+      - name: smoke-test fresh venv
+        env:
+          PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+          MODEL_ID: ${{ matrix.model }}
+          VENV_ROOT: ${{ runner.temp }}/muse-smoke-${{ matrix.model }}
+        run: |
+          mkdir -p "$VENV_ROOT"
+          python scripts/smoke_fresh_venv.py \
+            --model_id "$MODEL_ID" \
+            --venv_root "$VENV_ROOT" \
+            --json | tee smoke-result.json
+
+      - name: upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.model }}-logs
+          path: |
+            smoke-result.json
+          if-no-files-found: ignore
