@@ -100,8 +100,9 @@ class Model:
         import torch
         from kokoro import KPipeline
 
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        from muse.core.runtime_helpers import select_device
+
+        device = select_device(device, torch_module=torch)
 
         # `local_dir` is accepted for catalog-loader compatibility but
         # NOT forwarded to KPipeline. Kokoro's KPipeline validates

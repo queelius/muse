@@ -99,8 +99,9 @@ class Model:
         import torch
         from transformers import AutoProcessor, AutoModel
 
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        from muse.core.runtime_helpers import select_device
+
+        device = select_device(device, torch_module=torch)
 
         repo = local_dir or hf_repo
         self._is_small = small or "small" in repo
