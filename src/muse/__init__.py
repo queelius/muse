@@ -2,7 +2,7 @@
 
 The authoritative list of supported modalities lives in
 `muse.core.discovery.discover_modalities()`, which scans
-`src/muse/modalities/` plus any user-configured dirs. As of v0.31.0
+`src/muse/modalities/` plus any user-configured dirs. As of v0.32.0
 the bundled modalities are:
 
   - audio/embedding: /v1/audio/embeddings (transformers AutoModel + librosa; MERT, CLAP, wav2vec; multipart upload, OpenAI-shape envelope)
@@ -20,6 +20,20 @@ the bundled modalities are:
   - text/rerank: /v1/rerank (sentence-transformers CrossEncoder; Cohere-compat)
   - text/summarization: /v1/summarize (transformers AutoModelForSeq2SeqLM; Cohere-compat)
   - video/generation: /v1/video/generations (Wan, CogVideoX; narrative clips, mp4/webm/frames_b64; GPU-required)
+
+v0.32.0 adds CI smoke-tests of fresh per-model venvs (#124). The
+workflow `.github/workflows/fresh-venv-smoke.yml` matrix-tests five
+lightweight bundled models (kokoro-82m, dinov2-small, bart-large-cnn,
+bge-reranker-v2-m3, mert-v1-95m) on every push to main and every PR;
+each job creates a fresh venv, installs only what `muse pull` would
+install, and verifies the model loads via the in-venv probe worker
+(no inference; that's GPU-bound and out of scope). Catches the
+production failure mode where a bundled script's `pip_extras` misses
+a transitive dep that `from_pretrained` (or sentence-transformers, or
+diffusers) pulls in at load time, complementing the v0.30.0 static
+audit (#110) which can only flag direct-import gaps via AST scan.
+Heavy / GPU-only models deferred until paid runner budget allows.
+Local repro: `python scripts/smoke_fresh_venv.py --model_id <id>`.
 
 v0.31.0 consolidates cross-runtime utilities into
 `muse.core.runtime_helpers`: `select_device` (cuda/mps/cpu auto-detect),
