@@ -94,10 +94,26 @@ def _openai_error(status: int, code: str, message: str) -> JSONResponse:
     )
 
 
-def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
+def build_gateway(
+    routes: list[WorkerRoute] | None = None,
+    timeout: float = 300.0,
+    *,
+    state: "object | None" = None,
+) -> FastAPI:
     """Build the gateway FastAPI app.
 
-    `routes` is the model-id -> worker-url table. The app exposes:
+    Two routing modes:
+
+      - state-driven (preferred for `muse serve`): pass `state`, a
+        SupervisorState. Routes are re-derived per request from
+        state.workers, filtered to status=='running'. Late-promoting
+        workers join the routing table without an app rebuild and
+        pending workers don't surface in /v1/models. The
+        SupervisorState's lock guards each snapshot.
+      - static: pass `routes`, a fixed list of WorkerRoute. Used by
+        tests that want a frozen routing table.
+
+    The app exposes:
 
       - aggregated /v1/models, /health (registered first so the catch-all
         proxy below doesn't shadow them)
@@ -121,21 +137,49 @@ def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
                 logger.warning("admin job-store shutdown failed: %s", e)
 
     app = FastAPI(title="Muse Gateway", lifespan=_lifespan)
-    app.state.routes = {r.model_id: r for r in routes}
+    app.state.routes_state = state
+    app.state.static_routes = (
+        {r.model_id: r for r in routes} if routes is not None else {}
+    )
     app.state.timeout = timeout
+
+    def _routes_now() -> dict[str, WorkerRoute]:
+        """Return the current routing table.
+
+        State-driven: filter state.workers to status=='running' and build
+        the table fresh; this means a worker that promotes after gateway
+        boot becomes routable on the next request.
+        Static: return the frozen dict captured at build_gateway time.
+        """
+        if app.state.routes_state is not None:
+            out: dict[str, WorkerRoute] = {}
+            s = app.state.routes_state
+            with s.lock:
+                for spec in s.workers:
+                    if getattr(spec, "status", None) != "running":
+                        continue
+                    url = f"http://127.0.0.1:{spec.port}"
+                    for m in spec.models:
+                        out[m] = WorkerRoute(model_id=m, worker_url=url)
+            return out
+        return dict(app.state.static_routes)
+
+    app.state.routes_now = _routes_now
 
     @app.get("/_gateway-info")
     def info():
+        cur = app.state.routes_now()
         return {
             "routes": [
                 {"model_id": r.model_id, "worker_url": r.worker_url}
-                for r in app.state.routes.values()
+                for r in cur.values()
             ],
         }
 
     @app.get("/v1/models")
     async def list_models():
-        worker_urls = {r.worker_url for r in app.state.routes.values()}
+        cur = app.state.routes_now()
+        worker_urls = {r.worker_url for r in cur.values()}
         aggregated: list[dict] = []
         async with httpx.AsyncClient(timeout=5.0) as client:
             async def _one(url: str) -> list[dict]:
@@ -154,7 +198,8 @@ def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        worker_urls = {r.worker_url for r in app.state.routes.values()}
+        cur = app.state.routes_now()
+        worker_urls = {r.worker_url for r in cur.values()}
         modalities: set[str] = set()
         models: set[str] = set()
         any_down = False
@@ -205,12 +250,13 @@ def build_gateway(routes: list[WorkerRoute], timeout: float = 300.0) -> FastAPI:
                 "request is missing a `model` field (required for gateway routing)",
             )
 
-        route = app.state.routes.get(model_id)
+        cur = app.state.routes_now()
+        route = cur.get(model_id)
         if route is None:
             return _openai_error(
                 404, "model_not_found",
                 f"model {model_id!r} is not registered with any worker; "
-                f"known: {sorted(app.state.routes)}",
+                f"known: {sorted(cur)}",
             )
 
         target_url = f"{route.worker_url}/{full_path}"

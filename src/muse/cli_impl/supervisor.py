@@ -200,6 +200,80 @@ def wait_for_ready(
     )
 
 
+def _wait_for_first_ready(
+    specs: list[WorkerSpec],
+    *,
+    timeout: float = 60.0,
+    poll_interval: float = 0.5,
+) -> WorkerSpec:
+    """Block until ANY spec's /health returns 200; return that spec.
+
+    Round-robin polling across all specs in each tick. A worker that
+    responds 200 first wins, regardless of position in the list. This
+    means the gateway can boot as soon as the fastest worker is up,
+    independent of slower workers buried earlier in the list.
+
+    Raises TimeoutError if no spec passes within timeout. The caller
+    treats this as a fatal supervisor-bringup failure: every spawned
+    worker is sick, gateway should not start.
+    """
+    if not specs:
+        raise ValueError("_wait_for_first_ready called with no specs")
+    deadline = time.monotonic() + timeout
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        for spec in specs:
+            try:
+                r = httpx.get(
+                    f"http://127.0.0.1:{spec.port}/health", timeout=2.0,
+                )
+                if r.status_code == 200:
+                    return spec
+            except httpx.HTTPError as e:
+                last_err = e
+        time.sleep(poll_interval)
+    raise TimeoutError(
+        f"no worker became ready within {timeout}s "
+        f"(spawned {len(specs)}; last error: {last_err})"
+    )
+
+
+def _promote_workers(
+    specs: list[WorkerSpec],
+    state: SupervisorState,
+    *,
+    timeout: float = 120.0,
+) -> None:
+    """Background-thread target: poll /health for late-loading workers.
+
+    For each spec, polls /health via wait_for_ready. On success, sets
+    spec.status = 'running' under state.lock. On timeout, sets
+    'unhealthy' so the auto-restart monitor's next tick triggers a
+    respawn.
+
+    Failures here are non-fatal: the gateway is already serving the
+    first-ready worker, so a slow late-boot doesn't keep clients
+    from reaching healthy workers.
+    """
+    for spec in specs:
+        try:
+            wait_for_ready(port=spec.port, timeout=timeout)
+            with state.lock:
+                spec.status = "running"
+            logger.info(
+                "late-promote: worker on port %d (%s) ready",
+                spec.port, spec.models,
+            )
+        except TimeoutError:
+            with state.lock:
+                spec.status = "unhealthy"
+            logger.warning(
+                "late-promote: worker on port %d did not become ready in %ds; "
+                "auto-restart monitor will retry",
+                spec.port, timeout,
+            )
+
+
 def check_worker_health(*, port: int, timeout: float = 2.0) -> bool:
     """Single /health poll. Returns True iff the worker responds 200.
 
@@ -352,9 +426,11 @@ def _shutdown_workers(specs: list[WorkerSpec], grace: float = 5.0) -> None:
 def run_supervisor(*, host: str, port: int, device: str) -> int:
     """Entry point for `muse serve`.
 
-    Plans workers from catalog, spawns them, waits for ready, then starts
-    the auto-restart monitor thread + gateway. Guarantees clean shutdown
-    of workers and monitor on exit.
+    Plans workers from catalog, spawns them, waits for the FIRST one to
+    pass /health, then starts the gateway. Remaining workers promote on
+    a background daemon thread; their models join /v1/models when ready.
+    This means the gateway is reachable in seconds even when a slow
+    worker (large GGUF, big diffusion model) is still loading.
 
     Registers a SupervisorState singleton so admin endpoints under
     `/v1/admin/*` can inspect and mutate the worker list. The monitor
@@ -362,7 +438,7 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     additions/removals are picked up on the next polling tick without
     extra synchronization.
     """
-    from muse.cli_impl.gateway import WorkerRoute, build_gateway
+    from muse.cli_impl.gateway import build_gateway
 
     specs = plan_workers()
     if not specs:
@@ -381,16 +457,33 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         for spec in specs:
             spawn_worker(spec, device=device)
 
-        for spec in specs:
-            logger.info("waiting for worker on port %d (%s)", spec.port, spec.models)
-            wait_for_ready(port=spec.port)
-            spec.status = "running"
-
-        # Start the auto-restart monitor AFTER all workers are ready so
-        # the initial wait_for_ready isn't racing with the monitor's own
-        # readiness tracking. The monitor reads state.workers (a live
-        # reference) so admin-triggered enable/disable show up here.
         if specs:
+            # Wait for the FIRST worker only. With one spec the loop
+            # terminates immediately; with N it returns the moment any
+            # single worker passes /health. The remaining workers
+            # promote on the boot thread (below) so the gateway can
+            # serve fast workers while slow ones load.
+            first_ready = _wait_for_first_ready(specs)
+            with state.lock:
+                first_ready.status = "running"
+            logger.info(
+                "first worker ready on port %d (%s); gateway will start now; "
+                "remaining %d worker(s) will promote in the background",
+                first_ready.port, first_ready.models, len(specs) - 1,
+            )
+
+            remaining = [s for s in specs if s is not first_ready]
+            if remaining:
+                threading.Thread(
+                    target=_promote_workers,
+                    args=(remaining, state),
+                    daemon=True,
+                    name="muse-late-boot",
+                ).start()
+
+            # Auto-restart monitor reads state.workers (a live
+            # reference) so admin-triggered enable/disable plus the
+            # late-boot thread's promotions all show up here.
             monitor_thread = threading.Thread(
                 target=_monitor_workers,
                 args=(state.workers, stop_event),
@@ -403,12 +496,11 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
                 _MONITOR_INTERVAL, _FAILURE_THRESHOLD, _MAX_RESTARTS,
             )
 
-        routes: list[WorkerRoute] = []
-        for spec in specs:
-            worker_url = f"http://127.0.0.1:{spec.port}"
-            for m in spec.models:
-                routes.append(WorkerRoute(model_id=m, worker_url=worker_url))
-        app = build_gateway(routes)
+        # Build gateway with a live SupervisorState reference. Routes
+        # are derived per-request from state.workers (running-only) so
+        # late-promoting workers join the routing table without an
+        # app rebuild.
+        app = build_gateway(state=state)
 
         logger.info("starting gateway on %s:%d", host, port)
         uvicorn.run(app, host=host, port=port, log_config=None)
@@ -420,6 +512,8 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         stop_event.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=5.0)
+        # boot_thread is daemon=True so it dies with the process; it
+        # uses short httpx timeouts so it exits naturally on its own.
         _shutdown_workers(state.workers)
         clear_supervisor_state()
         # Best-effort: join admin job threads so a Ctrl+C during a pull

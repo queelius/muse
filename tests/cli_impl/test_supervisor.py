@@ -221,7 +221,12 @@ class TestWaitForReady:
 
 
 class TestRunSupervisor:
-    def test_supervisor_spawns_all_workers_and_waits_for_all_ready(self, tmp_catalog):
+    def test_supervisor_spawns_all_workers_and_waits_for_first(self, tmp_catalog):
+        """All workers spawn, but only the FIRST is waited on synchronously.
+
+        Remaining workers promote on the boot thread (mocked out here so
+        the test doesn't actually poll httpx).
+        """
         _seed_catalog({
             "model-a": {
                 "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
@@ -237,17 +242,21 @@ class TestRunSupervisor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
-             patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait, \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
+             patch("muse.cli_impl.supervisor._promote_workers") as mock_promote, \
+             patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
+            # _wait_for_first_ready returns the first spec passed in.
+            mock_first.side_effect = lambda specs, **kw: specs[0]
             # Simulate graceful shutdown by raising KeyboardInterrupt from uvicorn.run
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-            # Two workers planned, so spawn + wait called twice
+            # Two workers planned: both spawned, but only ONE _wait call.
             assert mock_spawn.call_count == 2
-            assert mock_wait.call_count == 2
+            mock_first.assert_called_once()
             mock_uvicorn.run.assert_called_once()
             mock_shutdown.assert_called_once()
 
@@ -262,9 +271,10 @@ class TestRunSupervisor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
+            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = RuntimeError("uvicorn died")
 
             with pytest.raises(RuntimeError, match="uvicorn died"):
@@ -525,22 +535,25 @@ class TestRunSupervisorMonitor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread") as mock_thread_cls:
+            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
             mock_thread = MagicMock()
             mock_thread_cls.return_value = mock_thread
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-            # A daemon thread was created and started
-            mock_thread_cls.assert_called_once()
-            kwargs = mock_thread_cls.call_args.kwargs
-            assert kwargs.get("daemon") is True
-            assert kwargs.get("target") is not None
-            mock_thread.start.assert_called_once()
+            # At least one daemon thread (the monitor) was created and started.
+            # When there are remaining workers, a second daemon thread (the
+            # boot promoter) is also created; with one model only the monitor.
+            assert mock_thread_cls.call_count >= 1
+            for call in mock_thread_cls.call_args_list:
+                assert call.kwargs.get("daemon") is True
+                assert call.kwargs.get("target") is not None
+            mock_thread.start.assert_called()
 
     def test_run_supervisor_sets_stop_event_on_exit(self, tmp_catalog):
         """On shutdown path, the monitor must be told to stop."""
@@ -563,11 +576,12 @@ class TestRunSupervisorMonitor:
             return e
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"), \
              patch("muse.cli_impl.supervisor.threading.Event", side_effect=capture_event), \
              patch("muse.cli_impl.supervisor.threading.Thread"):
+            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -631,9 +645,10 @@ class TestRunSupervisorRegistersState:
             raise KeyboardInterrupt()
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = capture_state
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -658,12 +673,279 @@ class TestRunSupervisorRegistersState:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.wait_for_ready"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = RuntimeError("uvicorn boom")
             with pytest.raises(RuntimeError):
                 run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         cleared = get_supervisor_state()
         assert cleared.workers == []
+
+
+class TestWaitForFirstReady:
+    def test_returns_first_ready_spec(self):
+        """Round-robin polling: a fast spec buried behind a slow one wins."""
+        from muse.cli_impl.supervisor import _wait_for_first_ready
+        import httpx
+
+        slow = WorkerSpec(models=["slow"], python_path="/p", port=9001)
+        fast = WorkerSpec(models=["fast"], python_path="/p", port=9002)
+
+        def side_effect(url, **kw):
+            if "9002" in url:
+                return MagicMock(status_code=200)
+            raise httpx.ConnectError("not yet", request=None)
+
+        with patch("muse.cli_impl.supervisor.httpx.get", side_effect=side_effect):
+            result = _wait_for_first_ready([slow, fast], timeout=2.0,
+                                           poll_interval=0.01)
+        assert result is fast
+
+    def test_returns_immediately_on_first_ready(self):
+        """When the first spec is the one that responds, no extra polls."""
+        from muse.cli_impl.supervisor import _wait_for_first_ready
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            result = _wait_for_first_ready([spec], timeout=2.0,
+                                           poll_interval=0.01)
+        assert result is spec
+
+    def test_raises_when_no_worker_ready(self):
+        from muse.cli_impl.supervisor import _wait_for_first_ready
+        import httpx
+
+        a = WorkerSpec(models=["a"], python_path="/p", port=9001)
+        b = WorkerSpec(models=["b"], python_path="/p", port=9002)
+        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
+            mock_get.side_effect = httpx.ConnectError("nope", request=None)
+            with pytest.raises(TimeoutError, match="no worker became ready"):
+                _wait_for_first_ready([a, b], timeout=0.05,
+                                      poll_interval=0.01)
+
+    def test_raises_on_empty_specs(self):
+        from muse.cli_impl.supervisor import _wait_for_first_ready
+        with pytest.raises(ValueError, match="no specs"):
+            _wait_for_first_ready([], timeout=1.0)
+
+
+class TestPromoteWorkers:
+    def test_promotes_each_to_running(self):
+        from muse.cli_impl.supervisor import _promote_workers
+
+        a = WorkerSpec(models=["a"], python_path="/p", port=9001,
+                       status="pending")
+        b = WorkerSpec(models=["b"], python_path="/p", port=9002,
+                       status="pending")
+        state = SupervisorState(workers=[a, b])
+
+        with patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait:
+            _promote_workers([a, b], state, timeout=1.0)
+
+        assert a.status == "running"
+        assert b.status == "running"
+        assert mock_wait.call_count == 2
+
+    def test_marks_unhealthy_on_timeout(self):
+        from muse.cli_impl.supervisor import _promote_workers
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001,
+                          status="pending")
+        state = SupervisorState(workers=[spec])
+        with patch("muse.cli_impl.supervisor.wait_for_ready",
+                   side_effect=TimeoutError("never ready")):
+            _promote_workers([spec], state, timeout=0.1)
+        assert spec.status == "unhealthy"
+
+    def test_continues_past_failed_promotions(self):
+        """One spec failing should not block promotion of the others."""
+        from muse.cli_impl.supervisor import _promote_workers
+
+        a = WorkerSpec(models=["a"], python_path="/p", port=9001,
+                       status="pending")
+        b = WorkerSpec(models=["b"], python_path="/p", port=9002,
+                       status="pending")
+        state = SupervisorState(workers=[a, b])
+
+        # First call (for a) raises; second (for b) returns
+        call_log: list[int] = []
+
+        def side_effect(*args, **kw):
+            port = kw.get("port") or args[0]
+            call_log.append(port)
+            if port == 9001:
+                raise TimeoutError("a never ready")
+
+        with patch("muse.cli_impl.supervisor.wait_for_ready",
+                   side_effect=side_effect):
+            _promote_workers([a, b], state, timeout=0.1)
+
+        assert a.status == "unhealthy"
+        assert b.status == "running"
+        assert 9001 in call_log and 9002 in call_log
+
+
+class TestRunSupervisorFirstReadyOrdering:
+    def test_gateway_starts_after_first_ready_and_before_remaining(self, tmp_catalog):
+        """The gateway must boot once the first spec is healthy; remaining
+        specs promote in the background after that."""
+        _seed_catalog({
+            "fast": {
+                "pulled_at": "...", "hf_repo": "f", "local_dir": "/f",
+                "venv_path": "/venvs/fast",
+                "python_path": "/venvs/fast/bin/python",
+                "enabled": True,
+            },
+            "slow": {
+                "pulled_at": "...", "hf_repo": "s", "local_dir": "/s",
+                "venv_path": "/venvs/slow",
+                "python_path": "/venvs/slow/bin/python",
+                "enabled": True,
+            },
+        })
+        from muse.cli_impl.supervisor import run_supervisor
+
+        events: list[str] = []
+
+        def first_ready_side(specs, **kw):
+            events.append("first_ready_returned")
+            return specs[0]
+
+        def gateway_side(*a, **kw):
+            events.append("gateway_started")
+            raise KeyboardInterrupt()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready",
+                   side_effect=first_ready_side), \
+             patch("muse.cli_impl.supervisor._promote_workers"), \
+             patch("muse.cli_impl.supervisor._monitor_workers"), \
+             patch("muse.cli_impl.supervisor.threading.Thread"), \
+             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_uvicorn.run.side_effect = gateway_side
+
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        assert "first_ready_returned" in events
+        assert "gateway_started" in events
+        # First-ready must precede gateway-start
+        assert events.index("first_ready_returned") < events.index("gateway_started")
+
+    def test_first_ready_failure_propagates(self, tmp_catalog):
+        """If no worker comes up, run_supervisor raises and gateway is never started."""
+        _seed_catalog({
+            "x": {
+                "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
+                "venv_path": "/venvs/x",
+                "python_path": "/venvs/x/bin/python",
+                "enabled": True,
+            },
+        })
+        from muse.cli_impl.supervisor import run_supervisor
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready",
+                   side_effect=TimeoutError("nobody ready")), \
+             patch("muse.cli_impl.supervisor._monitor_workers"), \
+             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            with pytest.raises(TimeoutError, match="nobody ready"):
+                run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+            mock_uvicorn.run.assert_not_called()
+
+    def test_late_workers_promote_in_background_thread(self, tmp_catalog):
+        """The remaining-specs list is handed to _promote_workers."""
+        _seed_catalog({
+            "fast": {
+                "pulled_at": "...", "hf_repo": "f", "local_dir": "/f",
+                "venv_path": "/venvs/fast",
+                "python_path": "/venvs/fast/bin/python",
+                "enabled": True,
+            },
+            "slow1": {
+                "pulled_at": "...", "hf_repo": "s1", "local_dir": "/s1",
+                "venv_path": "/venvs/slow1",
+                "python_path": "/venvs/slow1/bin/python",
+                "enabled": True,
+            },
+            "slow2": {
+                "pulled_at": "...", "hf_repo": "s2", "local_dir": "/s2",
+                "venv_path": "/venvs/slow2",
+                "python_path": "/venvs/slow2/bin/python",
+                "enabled": True,
+            },
+        })
+        from muse.cli_impl.supervisor import run_supervisor
+
+        seen_thread_targets: list = []
+
+        def fake_thread_init(*args, **kw):
+            target = kw.get("target")
+            if target is not None:
+                seen_thread_targets.append(target.__name__)
+            t = MagicMock()
+            t.start = MagicMock()
+            return t
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
+             patch("muse.cli_impl.supervisor.threading.Thread",
+                   side_effect=fake_thread_init), \
+             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_first.side_effect = lambda specs, **kw: specs[0]
+            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        # _promote_workers AND _monitor_workers were both wired as thread
+        # targets when remaining specs exist.
+        assert "_promote_workers" in seen_thread_targets
+        assert "_monitor_workers" in seen_thread_targets
+
+
+class TestGatewayStateRoutes:
+    def test_routes_only_running_workers(self):
+        """Gateway derives routes from state.workers, filters out non-running."""
+        from muse.cli_impl.gateway import build_gateway
+
+        running = WorkerSpec(models=["a"], python_path="/p", port=9001,
+                             status="running")
+        pending = WorkerSpec(models=["b"], python_path="/p", port=9002,
+                             status="pending")
+        state = SupervisorState(workers=[running, pending])
+
+        app = build_gateway(state=state)
+        routes = app.state.routes_now()
+        assert "a" in routes
+        assert "b" not in routes
+
+    def test_routes_update_when_pending_promotes(self):
+        """A pending spec that becomes running shows up in routes_now."""
+        from muse.cli_impl.gateway import build_gateway
+
+        slow = WorkerSpec(models=["slow"], python_path="/p", port=9001,
+                          status="pending")
+        state = SupervisorState(workers=[slow])
+
+        app = build_gateway(state=state)
+        assert "slow" not in app.state.routes_now()
+
+        with state.lock:
+            slow.status = "running"
+        assert "slow" in app.state.routes_now()
+
+    def test_static_routes_still_supported(self):
+        """When state= isn't passed, build_gateway uses the legacy routes list."""
+        from muse.cli_impl.gateway import build_gateway, WorkerRoute
+
+        routes = [WorkerRoute(model_id="m", worker_url="http://127.0.0.1:9001")]
+        app = build_gateway(routes=routes)
+        cur = app.state.routes_now()
+        assert "m" in cur
+        assert cur["m"].worker_url == "http://127.0.0.1:9001"
