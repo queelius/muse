@@ -14,6 +14,11 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+# 30 minutes: matches the timeout used by refresh.py and venv.py so
+# the three pip-install pathways have consistent failure semantics.
+_PIP_TIMEOUT = 1800
+
+
 def install_pip_extras(packages: list[str]) -> None:
     """Install pip packages that aren't already importable.
 
@@ -26,6 +31,7 @@ def install_pip_extras(packages: list[str]) -> None:
     subprocess.run(
         [sys.executable, "-m", "pip", "install", *missing],
         check=True,
+        timeout=_PIP_TIMEOUT,
     )
 
 

@@ -216,6 +216,52 @@ class TestRefreshOne:
         assert "pip_extras install failed" in result.message
         assert "kokoro install failed" in result.pip_output
 
+    def test_pip_install_timeout_returns_failed(self, tmp_catalog, tmp_path):
+        """A hung PyPI mirror must surface as a failed RefreshResult,
+        not block the parent process indefinitely."""
+        import subprocess
+        py = _make_python_path(tmp_path, "x")
+        _seed_catalog({
+            "x": {
+                "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
+                "python_path": py,
+                "enabled": True,
+            },
+        })
+        with patch("muse.cli_impl.refresh.get_manifest",
+                   return_value={"modality": "", "pip_extras": ()}), \
+             patch(
+                 "muse.cli_impl.refresh.subprocess.run",
+                 side_effect=subprocess.TimeoutExpired(cmd="pip", timeout=1800),
+             ):
+            result = refresh_one("x")
+        assert result.state == "failed"
+        assert "timed out" in result.message
+        assert "1800" in result.message
+
+    def test_pip_subprocess_called_with_timeout(self, tmp_catalog, tmp_path):
+        """Regression guard: subprocess.run MUST receive a `timeout=` kwarg.
+
+        The pre-fix code omitted timeout, so a hung mirror would never
+        surface."""
+        py = _make_python_path(tmp_path, "x")
+        _seed_catalog({
+            "x": {
+                "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
+                "python_path": py,
+                "enabled": True,
+            },
+        })
+        with patch("muse.cli_impl.refresh.get_manifest",
+                   return_value={"modality": "", "pip_extras": ()}), \
+             patch("muse.cli_impl.refresh.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            refresh_one("x")
+        assert mock_run.call_count >= 1
+        kwargs = mock_run.call_args_list[0].kwargs
+        assert "timeout" in kwargs, f"refresh subprocess.run lacks timeout kwarg: {kwargs}"
+        assert kwargs["timeout"] >= 60
+
     def test_no_pip_extras_in_manifest_skips_second_step(self, tmp_catalog, tmp_path):
         py = _make_python_path(tmp_path, "x")
         _seed_catalog({

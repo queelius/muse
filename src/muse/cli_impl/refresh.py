@@ -29,6 +29,13 @@ from muse.core.catalog import _read_catalog, get_manifest, is_enabled
 logger = logging.getLogger(__name__)
 
 
+# 30 minutes: long enough for a slow PyPI mirror to complete a full
+# torch+diffusers install, short enough that a hung mirror is detected
+# before the operator gives up. Probe and admin/operations.refresh use
+# the same value.
+_PIP_TIMEOUT = 1800
+
+
 # Map a modality tag to the muse-side optional-deps extras names.
 # `server` is added unconditionally on top of these. The map is
 # hand-maintained: each entry corresponds to a pyproject [project.
@@ -136,7 +143,17 @@ def refresh_one(
 
     cmd = [python_path, "-m", "pip", "install", "--upgrade", "-e", target]
     logger.info("refresh %s: %s", model_id, " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_PIP_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return RefreshResult(
+            model_id,
+            "failed",
+            f"muse[server] install timed out after {_PIP_TIMEOUT}s",
+            extras=muse_extras,
+        )
     if proc.returncode != 0:
         return RefreshResult(
             model_id,
@@ -149,7 +166,17 @@ def refresh_one(
     if not no_extras and pip_extras_list:
         cmd2 = [python_path, "-m", "pip", "install", "--upgrade", *pip_extras_list]
         logger.info("refresh %s extras: %s", model_id, " ".join(cmd2))
-        proc2 = subprocess.run(cmd2, capture_output=True, text=True)
+        try:
+            proc2 = subprocess.run(
+                cmd2, capture_output=True, text=True, timeout=_PIP_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return RefreshResult(
+                model_id,
+                "failed",
+                f"pip_extras install timed out after {_PIP_TIMEOUT}s",
+                extras=muse_extras,
+            )
         if proc2.returncode != 0:
             return RefreshResult(
                 model_id,

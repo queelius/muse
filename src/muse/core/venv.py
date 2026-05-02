@@ -15,6 +15,14 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+# 30 minutes: long enough for a slow PyPI mirror to finish a torch
+# install on a fresh venv; short enough to detect a hung mirror before
+# the user gives up. TimeoutExpired propagates to the catalog.pull
+# caller, which surfaces it as a pull failure.
+_PIP_TIMEOUT = 1800
+_VENV_CREATE_TIMEOUT = 120
+
+
 def venv_python(venv_path: Path) -> Path:
     """Return the Python interpreter path inside a venv.
 
@@ -36,6 +44,7 @@ def create_venv(target: Path) -> None:
     subprocess.run(
         [sys.executable, "-m", "venv", str(target)],
         check=True,
+        timeout=_VENV_CREATE_TIMEOUT,
     )
 
 
@@ -52,6 +61,7 @@ def install_into_venv(venv_path: Path, packages: list[str]) -> None:
     subprocess.run(
         [str(py), "-m", "pip", "install", *packages],
         check=True,
+        timeout=_PIP_TIMEOUT,
     )
 
 
