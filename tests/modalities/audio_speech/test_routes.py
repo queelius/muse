@@ -124,3 +124,36 @@ def test_streaming_yields_multiple_events_progressively(client):
     data_event_count = text.count("data: ")  # each SSE event starts with "data: "
     assert data_event_count >= 3
     assert "event: done" in text
+
+
+def test_encoding_failure_returns_openai_error_envelope(monkeypatch):
+    """When wav encoding fails, the response uses the {error:{...}}
+    envelope, not FastAPI's {detail:...}.
+
+    The earlier code raised HTTPException(detail=str(e)) which yielded
+    {"detail": "..."}, violating CLAUDE.md's stated convention.
+    """
+    from muse.modalities.audio_speech import routes as routes_mod
+    from muse.modalities.audio_speech.codec import AudioFormatError
+
+    def _boom(*a, **kw):
+        raise AudioFormatError("PCM out of range")
+
+    monkeypatch.setattr(routes_mod, "audio_to_wav_bytes", _boom)
+
+    reg = ModalityRegistry()
+    reg.register("audio/speech", FakeTTS())
+    app = create_app(registry=reg, routers={"audio/speech": routes_mod.build_router(reg)})
+    client_local = TestClient(app)
+
+    r = client_local.post("/v1/audio/speech", json={
+        "input": "hi", "model": "fake-tts",
+    })
+    assert r.status_code == 500
+    body = r.json()
+    assert "error" in body
+    assert "detail" not in body
+    err = body["error"]
+    assert err["code"] == "encoding_failed"
+    assert "PCM out of range" in err["message"]
+    assert err["type"] == "invalid_request_error"
