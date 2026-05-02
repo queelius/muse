@@ -96,6 +96,69 @@ def test_streaming_returns_sse(client):
     assert parsed[2]["choices"][0]["finish_reason"] == "stop"
 
 
+def test_streaming_backend_error_emits_sse_error_event():
+    """When chat_stream raises mid-stream, the route emits an SSE
+    `event: error` carrying the OpenAI error envelope, followed by
+    [DONE]. The earlier behavior was to swallow the exception and emit
+    only [DONE], indistinguishable from a clean empty completion.
+    """
+    reg = ModalityRegistry()
+
+    class _BoomModel:
+        model_id = "boom"
+
+        def chat(self, messages, **kwargs):
+            raise NotImplementedError
+
+        def chat_stream(self, messages, **kwargs):
+            yield ChatChunk(
+                id="x", model_id=self.model_id, created=0,
+                choice_index=0, delta={"role": "assistant"}, finish_reason=None,
+            )
+            raise RuntimeError("backend exploded")
+
+    reg.register("chat/completion", _BoomModel())
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+    client = TestClient(app)
+
+    with client.stream(
+        "POST", "/v1/chat/completions",
+        json={
+            "model": "boom",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = r.read().decode()
+
+    # Parse the SSE stream into (event, data) pairs by walking blank-
+    # line-separated blocks. sse-starlette emits CRLF line endings.
+    events: list[tuple[str | None, str]] = []
+    normalized = body.replace("\r\n", "\n")
+    for block in normalized.split("\n\n"):
+        if not block.strip():
+            continue
+        event_name: str | None = None
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event_name = line[len("event: "):]
+            elif line.startswith("data: "):
+                data_lines.append(line[len("data: "):])
+        events.append((event_name, "\n".join(data_lines)))
+
+    # Expected sequence: at least one normal data chunk, then an error
+    # event, then [DONE].
+    assert events[-1] == (None, "[DONE]"), f"final event was {events[-1]!r}"
+    error_events = [e for e in events if e[0] == "error"]
+    assert len(error_events) == 1, f"expected one error event, got {events}"
+    payload = json.loads(error_events[0][1])
+    assert payload["error"]["code"] == "internal"
+    assert "backend exploded" in payload["error"]["message"]
+    assert payload["error"]["type"] == "server_error"
+
+
 def test_unknown_model_returns_404_with_openai_envelope(client):
     r = client.post(
         "/v1/chat/completions",

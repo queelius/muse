@@ -14,6 +14,7 @@ do not buffer tokens on the server. Every token dispatches as produced.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from typing import Any
@@ -129,13 +130,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         loop = asyncio.get_running_loop()
 
         def _producer():
+            # call_soon_threadsafe + put_nowait avoids blocking the
+            # producer thread on the event loop's scheduler. The earlier
+            # run_coroutine_threadsafe(...).result() pattern would
+            # deadlock if the loop was busy. Mirrors audio_speech.
             try:
                 for chunk in model.chat_stream(req.messages, **kwargs):
-                    asyncio.run_coroutine_threadsafe(queue.put(chunk), loop).result()
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
             except Exception as e:
-                asyncio.run_coroutine_threadsafe(queue.put(e), loop).result()
+                loop.call_soon_threadsafe(queue.put_nowait, e)
             finally:
-                asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+                loop.call_soon_threadsafe(queue.put_nowait, None)
 
         threading.Thread(target=_producer, daemon=True).start()
 
@@ -146,7 +151,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     yield {"data": DONE_SENTINEL}
                     return
                 if isinstance(item, Exception):
+                    # Surface the failure to the client as an SSE
+                    # `event: error` carrying the OpenAI error envelope.
+                    # Without this, a backend crash mid-stream is
+                    # indistinguishable from a clean empty completion.
                     logger.error("chat_stream backend error: %s", item)
+                    err_payload = {"error": {
+                        "code": "internal",
+                        "message": str(item),
+                        "type": "server_error",
+                    }}
+                    yield {"event": "error", "data": json.dumps(err_payload)}
                     yield {"data": DONE_SENTINEL}
                     return
                 yield {"data": chunk_to_sse_data(item)}
