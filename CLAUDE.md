@@ -557,7 +557,10 @@ PY
 - **Streaming uses producer thread + `asyncio.Queue`**, not `list(generator)`.
   Synthesis chunks must dispatch as they're produced, not after full generation.
 - **Env vars:** `MUSE_SERVER` (client base URL), `MUSE_CATALOG_DIR` (catalog
-  location, defaults `~/.muse/`), `MUSE_HOME` (voices dir base).
+  location, defaults `~/.muse/`), `MUSE_HOME` (voices dir base),
+  `MUSE_ALLOW_PRIVATE_FETCH=1` (opt-in escape hatch for the SSRF guard
+  on `_fetch_http_url`; needed only when operators on a trusted
+  network want `image` URLs to reach internal services).
 - **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.
 - **Enable/disable is catalog state**, not runtime state. `muse serve` reads the catalog at startup. Changing a model's enabled bit while the server is running has no effect until the next restart.
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
