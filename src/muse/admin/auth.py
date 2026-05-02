@@ -10,6 +10,7 @@ The token is never echoed in error messages or logs.
 from __future__ import annotations
 
 import os
+import secrets
 
 from fastapi import Header, HTTPException
 
@@ -56,5 +57,7 @@ def verify_admin_token(authorization: str | None = Header(default=None)) -> None
             "Authorization: Bearer <token> required",
         )
     presented = authorization[len("Bearer "):]
-    if presented != expected:
+    # Constant-time compare prevents recovering the token byte-by-byte
+    # via response-time variance.
+    if not secrets.compare_digest(presented, expected):
         raise _err(403, "invalid_token", "Bad admin token")

@@ -83,3 +83,28 @@ class TestVerifyAdminToken:
         assert r.status_code == 401
         body = r.json()
         assert body["detail"]["error"]["type"] == "invalid_request_error"
+
+    def test_token_uses_constant_time_compare(self, client, monkeypatch):
+        """Token comparison MUST go through secrets.compare_digest, not `!=`.
+
+        A naive `!=` short-circuits on first byte mismatch, leaking the
+        prefix one byte at a time via response-time variance. Even though
+        the timing window is small for an in-process test, the regression
+        guard here is structural: assert the constant-time API is the one
+        being called.
+        """
+        from muse.admin import auth as auth_mod
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret-correct")
+        calls: list[tuple[str, str]] = []
+        original = auth_mod.secrets.compare_digest
+
+        def spy(a, b):
+            calls.append((a, b))
+            return original(a, b)
+
+        monkeypatch.setattr(auth_mod.secrets, "compare_digest", spy)
+        r = client.get("/protected", headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 403
+        assert calls, "secrets.compare_digest was not called"
+        # The two arguments should be presented bearer + expected env value.
+        assert calls[0] == ("wrong", "secret-correct")
