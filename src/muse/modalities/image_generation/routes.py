@@ -86,7 +86,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"use one of the diffusers-resolved models or sd-turbo",
                 )
             try:
-                init_image = decode_image_input(req.image)
+                init_image = await decode_image_input(req.image)
             except ValueError as e:
                 return error_response(
                     400,

@@ -67,7 +67,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"use a model with supports_image_to_animation=True",
                 )
             try:
-                init_image = decode_image_input(req.image)
+                init_image = await decode_image_input(req.image)
             except ValueError as e:
                 return error_response(
                     400, "invalid_parameter", f"image decode failed: {e}",

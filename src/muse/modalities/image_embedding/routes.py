@@ -100,7 +100,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # 400s with the OpenAI-shape error envelope; one bad input
         # nukes the whole batch (consistent with /v1/embeddings).
         try:
-            images = [decode_image_input(item) for item in items]
+            images = [await decode_image_input(item) for item in items]
         except ValueError as e:
             return error_response(
                 400, "invalid_parameter",
