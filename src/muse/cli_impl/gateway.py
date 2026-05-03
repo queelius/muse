@@ -289,7 +289,14 @@ async def _forward(request: Request, target_url: str, timeout: float) -> Respons
         content=body,
         params=dict(request.query_params),
     )
-    response = await stream_ctx.__aenter__()
+    try:
+        response = await stream_ctx.__aenter__()
+    except Exception:
+        # __aenter__ raised: stream_ctx is not entered, so __aexit__
+        # is not appropriate. Close the client to release the
+        # underlying connection pool slot, then re-raise.
+        await client.aclose()
+        raise
 
     content_type = response.headers.get("content-type", "")
     is_stream = "text/event-stream" in content_type

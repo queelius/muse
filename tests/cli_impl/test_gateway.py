@@ -476,6 +476,44 @@ class TestStreaming:
         assert b"event: done" in r.content
 
 
+class TestAsyncClientLifecycle:
+    """v0.34.0 finding #9: gateway must close httpx.AsyncClient when
+    stream open fails so file descriptors don't leak under flaky workers."""
+
+    def test_stream_open_failure_aclose_client(self):
+        """If client.stream(...).__aenter__ raises, AsyncClient.aclose
+        MUST be awaited so the connection-pool slot is released."""
+        import httpx
+        from muse.cli_impl import gateway as gateway_mod
+
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.aclose = AsyncMock()
+
+            stream_ctx = MagicMock()
+            stream_ctx.__aenter__ = AsyncMock(
+                side_effect=httpx.ConnectError("worker died"),
+            )
+            stream_ctx.__aexit__ = AsyncMock(return_value=None)
+            mock_client.stream = MagicMock(return_value=stream_ctx)
+            mock_client_cls.return_value = mock_client
+
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "soprano-80m"},
+            )
+
+            # The gateway re-raises; FastAPI surfaces as 500.
+            assert r.status_code == 500
+            # Critical: aclose must have been awaited exactly once so
+            # the AsyncClient does not leak its connection pool.
+            mock_client.aclose.assert_awaited_once()
+
+
 class TestAdminMount:
     """Verify /v1/admin/* lands on the admin router with auth enforced."""
 
