@@ -75,10 +75,27 @@ def enable_model(
 ) -> None:
     """Async operation: ensure `model_id` is loaded in some worker.
 
-    Updates `job` with state transitions. Three terminal paths:
-      1. Already loaded -> done with spawned_new=False, loaded=True.
-      2. Joins an existing venv-group worker -> restart-in-place.
-      3. Spawns a brand-new worker for this model's python_path.
+    Plan-then-execute: state.lock is held only across state.workers
+    mutations + planning. The slow steps (spawn_worker + wait_for_ready,
+    or _restart_worker_inplace) run outside the lock so other admin
+    endpoints don't block for the full 120s readiness window.
+
+    Concurrent enables for the same model coalesce onto the first
+    caller's job_id: the second caller observes the existing pending
+    spec and returns its job_id rather than spawning a duplicate
+    worker. Both poll the same JobStore entry as the first caller's
+    spawn drives.
+
+    Terminal paths:
+      1. already_running: model is hosted in a worker with status="running"
+         (or status="pending" but no job_id, the legacy / test shape).
+         Result: loaded=True, spawned_new=False.
+      2. coalesce: model is in an in-flight pending spec with a job_id.
+         Result: loaded=False, spawned_new=False, coalesced_job_id set.
+      3. restart_sibling: a venv-group sibling exists and is running;
+         join it via restart-in-place. Slow step runs outside the lock.
+      4. spawn_new: brand-new worker for this model's python_path.
+         Slow step runs outside the lock.
     """
     store.update(job.job_id, state="running")
     try:
@@ -103,63 +120,141 @@ def enable_model(
                 status=409,
             )
 
+        # Phase 1: plan + claim under a brief lock.
+        plan: str | None = None
+        spec_ref: WorkerSpec | None = None
+        coalesced_job_id: str | None = None
+
         with state.lock:
             set_enabled(model_id, True)
 
-            existing = find_worker_for_model(state, model_id)
-            if existing is not None:
-                store.update(
-                    job.job_id, state="done",
-                    result={
-                        "model_id": model_id,
-                        "worker_port": existing.port,
-                        "loaded": True,
-                        "spawned_new": False,
-                    },
-                )
-                return
-
-            # Look for a venv-group sibling we can join (restart-in-place
-            # adds the new model to the existing worker's load list).
-            target = next(
-                (s for s in state.workers if s.python_path == python_path),
+            existing = next(
+                (s for s in state.workers if model_id in s.models),
                 None,
             )
-            if target is not None:
-                target.models = sorted(set(target.models) | {model_id})
-                _restart_worker_inplace(target, device=state.device)
-                store.update(
-                    job.job_id, state="done",
-                    result={
-                        "model_id": model_id,
-                        "worker_port": target.port,
-                        "loaded": True,
-                        "spawned_new": False,
-                    },
+            if existing is not None:
+                if existing.status == "running" or existing.job_id is None:
+                    # Either truly running, or a legacy / test-built spec
+                    # without a job_id. Both treated as "already loaded".
+                    plan = "already_running"
+                    spec_ref = existing
+                else:
+                    # In-flight on someone else's job: coalesce.
+                    plan = "coalesce"
+                    spec_ref = existing
+                    coalesced_job_id = existing.job_id
+            else:
+                sibling = next(
+                    (s for s in state.workers if s.python_path == python_path),
+                    None,
                 )
-                return
+                if sibling is not None and (
+                    sibling.status == "running" or sibling.job_id is None
+                ):
+                    # Restart-in-place candidate: either truly running,
+                    # or a legacy / test-built spec with no in-flight
+                    # job. Claim it.
+                    sibling.models = sorted(set(sibling.models) | {model_id})
+                    sibling.status = "restarting"
+                    sibling.job_id = job.job_id
+                    plan = "restart_sibling"
+                    spec_ref = sibling
+                elif sibling is not None and sibling.job_id is not None:
+                    # Sibling already mid-restart for someone else: append
+                    # our model so the in-flight restart picks it up,
+                    # then coalesce onto that job.
+                    sibling.models = sorted(set(sibling.models) | {model_id})
+                    plan = "coalesce"
+                    spec_ref = sibling
+                    coalesced_job_id = sibling.job_id
+                else:
+                    new_port = find_free_port(start=9001, end=9999)
+                    new_spec = WorkerSpec(
+                        models=[model_id],
+                        python_path=python_path,
+                        port=new_port,
+                        device=state.device,
+                    )
+                    new_spec.status = "pending"
+                    new_spec.job_id = job.job_id
+                    state.workers.append(new_spec)
+                    plan = "spawn_new"
+                    spec_ref = new_spec
 
-            # Spawn a brand-new worker.
-            new_port = find_free_port(start=9001, end=9999)
-            spec = WorkerSpec(
-                models=[model_id],
-                python_path=python_path,
-                port=new_port,
-                device=state.device,
-            )
-            state.workers.append(spec)
-            spawn_worker(spec, device=state.device)
-            wait_for_ready(port=spec.port, timeout=120.0)
-            spec.status = "running"
+        # Phase 2: execute outside the lock. The slow steps (spawn,
+        # wait_for_ready, restart-in-place) run here so other admin
+        # endpoints don't block. Status flips happen under brief
+        # reacquisitions of state.lock.
+        assert spec_ref is not None and plan is not None  # for type checker
+
+        if plan == "already_running":
             store.update(
                 job.job_id, state="done",
                 result={
                     "model_id": model_id,
-                    "worker_port": spec.port,
+                    "worker_port": spec_ref.port,
+                    "loaded": True,
+                    "spawned_new": False,
+                },
+            )
+            return
+
+        if plan == "coalesce":
+            store.update(
+                job.job_id, state="done",
+                result={
+                    "model_id": model_id,
+                    "worker_port": spec_ref.port,
+                    "loaded": False,
+                    "spawned_new": False,
+                    "coalesced_job_id": coalesced_job_id,
+                },
+            )
+            return
+
+        if plan == "restart_sibling":
+            try:
+                _restart_worker_inplace(spec_ref, device=state.device)
+            except Exception:
+                with state.lock:
+                    spec_ref.status = "dead"
+                    spec_ref.job_id = None
+                raise
+            with state.lock:
+                spec_ref.job_id = None
+            store.update(
+                job.job_id, state="done",
+                result={
+                    "model_id": model_id,
+                    "worker_port": spec_ref.port,
+                    "loaded": True,
+                    "spawned_new": False,
+                },
+            )
+            return
+
+        if plan == "spawn_new":
+            try:
+                spawn_worker(spec_ref, device=state.device)
+                wait_for_ready(port=spec_ref.port, timeout=120.0)
+            except Exception:
+                with state.lock:
+                    spec_ref.status = "dead"
+                    spec_ref.job_id = None
+                raise
+            with state.lock:
+                spec_ref.status = "running"
+                spec_ref.job_id = None
+            store.update(
+                job.job_id, state="done",
+                result={
+                    "model_id": model_id,
+                    "worker_port": spec_ref.port,
                     "loaded": True,
                     "spawned_new": True,
                 },
             )
+            return
     except OperationError as e:
         store.update(job.job_id, state="failed", error=e.message)
     except Exception as e:  # noqa: BLE001

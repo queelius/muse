@@ -51,6 +51,12 @@ class WorkerSpec:
     failure_count: int = 0
     last_spawn_at: float = 0.0
     status: str = "pending"
+    # Job that owns the in-flight transition (if any). Set when the
+    # admin enable / restart-in-place op claims the spec; cleared
+    # when the op finishes. Other concurrent enable requests for the
+    # same model coalesce onto this job_id rather than launching a
+    # duplicate spawn.
+    job_id: str | None = None
 
 
 @dataclass

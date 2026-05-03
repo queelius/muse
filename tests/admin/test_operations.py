@@ -163,6 +163,133 @@ class TestEnableModel:
         assert job.state == "failed"
         assert "not pulled" in job.error
 
+    def test_concurrent_enable_coalesces_to_one_spawn(
+        self, tmp_catalog, state, store, monkeypatch,
+    ):
+        """Two concurrent enables for the same model MUST NOT spawn two
+        workers. The second caller observes the first caller's pending
+        spec and coalesces onto its job_id (γ-flavor idempotency).
+
+        Closes findings #7 + #8 from the v0.32.0 review.
+        """
+        import threading
+        import time
+
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": False,
+            },
+        })
+
+        spawn_count = {"n": 0}
+
+        def _slow_spawn(spec, device):
+            spawn_count["n"] += 1
+            # Simulate a slow GGUF load. The fix releases state.lock
+            # before this point, so the second concurrent enable can
+            # observe spec.status == "pending" + job_id and coalesce.
+            time.sleep(0.3)
+
+        monkeypatch.setattr("muse.admin.operations.spawn_worker", _slow_spawn)
+        monkeypatch.setattr(
+            "muse.admin.operations.wait_for_ready", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "muse.admin.operations.find_free_port", lambda *a, **k: 9123,
+        )
+
+        job1 = store.create("enable", "kokoro-82m")
+        job2 = store.create("enable", "kokoro-82m")
+
+        def _call(j):
+            enable_model("kokoro-82m", state=state, store=store, job=j)
+
+        t1 = threading.Thread(target=_call, args=(job1,))
+        t1.start()
+        # Brief delay so t1 grabs state.lock first and appends the
+        # pending spec before t2 enters the planning block.
+        time.sleep(0.05)
+        t2 = threading.Thread(target=_call, args=(job2,))
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert spawn_count["n"] == 1, (
+            f"expected 1 spawn (coalesce), got {spawn_count['n']}"
+        )
+        assert len(state.workers) == 1
+        # Both jobs are done. The first did the spawn; the second
+        # coalesced and surfaces the first's job_id.
+        assert job1.state == "done"
+        assert job2.state == "done"
+        assert job2.result.get("coalesced_job_id") == job1.job_id
+        assert job2.result["spawned_new"] is False
+
+    def test_state_lock_released_during_spawn(
+        self, tmp_catalog, state, store, monkeypatch,
+    ):
+        """Other admin ops (e.g. /v1/admin/workers, /v1/admin/memory)
+        must not block while enable_model's spawn is in flight. Hold
+        time on the lock during the slow spawn window must be near-zero.
+
+        Closes finding #7 from the v0.32.0 review.
+        """
+        import threading
+        import time
+
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": False,
+            },
+        })
+
+        def _slow_spawn(spec, device):
+            time.sleep(0.4)
+
+        monkeypatch.setattr("muse.admin.operations.spawn_worker", _slow_spawn)
+        monkeypatch.setattr(
+            "muse.admin.operations.wait_for_ready", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "muse.admin.operations.find_free_port", lambda *a, **k: 9234,
+        )
+
+        job = store.create("enable", "kokoro-82m")
+        enable_done = threading.Event()
+
+        def _enable():
+            enable_model("kokoro-82m", state=state, store=store, job=job)
+            enable_done.set()
+
+        threading.Thread(target=_enable).start()
+        # Give the enable thread a head start so it's mid-spawn.
+        time.sleep(0.1)
+
+        # Grab the lock and time it. With the bug, this would block
+        # for the full slow-spawn duration (0.3s+).
+        t0 = time.perf_counter()
+        with state.lock:
+            snapshot = list(state.workers)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.05, (
+            f"state.lock was held during spawn for {elapsed:.3f}s; "
+            "should release between append-pending and spawn"
+        )
+        # The pending spec is visible to readers during the spawn
+        # window (auto-restart monitor and admin reads filter by
+        # status; pending workers are harmless).
+        assert len(snapshot) == 1
+        assert snapshot[0].status == "pending"
+
+        enable_done.wait(timeout=2.0)
+        assert job.state == "done"
+        assert state.workers[0].status == "running"
+        assert state.workers[0].job_id is None
+
 
 class TestDisableModel:
     def test_unknown_raises_operation_error(self, tmp_catalog, state):
