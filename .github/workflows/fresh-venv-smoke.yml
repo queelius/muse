@@ -29,6 +29,8 @@ jobs:
           - bart-large-cnn
           - bge-reranker-v2-m3
           - mert-v1-95m
+          - twitter-roberta-base-sentiment-latest
+          - deberta-v3-base-zeroshot-v2.0
 
     steps:
       - name: checkout
