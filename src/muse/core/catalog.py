@@ -501,25 +501,45 @@ def remove(model_id: str, *, purge: bool = False) -> None:
     """Unregister `model_id` from the catalog.
 
     By default this only edits `catalog.json`; the per-model venv at
-    `~/.muse/venvs/<model_id>/` and any HF weight cache stay on disk.
-    Mirrors `apt remove`'s "metadata only" semantics.
+    `~/.muse/venvs/<model_id>/` stays on disk. Mirrors `apt remove`'s
+    "metadata only" semantics.
 
-    When `purge=True`, also `shutil.rmtree` the venv directory.
-    Tolerates the venv being already gone. Does NOT touch the HF
-    weights cache, which is shared across muse pulls and other tools;
-    use `huggingface-cli delete-cache` for that.
+    When `purge=True`:
+      - rmtree the venv directory.
+      - rmtree the resolver weights cache at `~/.muse/weights/<dir>/`
+        IF the entry's `local_dir` resolves under the muse-owned
+        weights tree. Bundled-pulled models that store weights in the
+        shared HF cache (`~/.cache/huggingface`) are left alone; muse
+        does not own that, and `huggingface-cli delete-cache` is the
+        right tool for it.
+
+    Tolerates either path being already gone.
     """
+    import shutil
     catalog = _read_catalog()
-    venv_path = catalog.get(model_id, {}).get("venv_path")
+    entry = catalog.get(model_id, {}) or {}
+    venv_path = entry.get("venv_path")
+    local_dir = entry.get("local_dir")
     catalog.pop(model_id, None)
     _write_catalog(catalog)
     # Resolver-pulled entries appear in known_models() via the persisted
     # manifest path; once removed, that cache must drop them too or
     # `muse models list` keeps reporting a model that no longer exists.
     _reset_known_models_cache()
-    if purge and venv_path:
-        import shutil
+    if not purge:
+        return
+    if venv_path:
         shutil.rmtree(venv_path, ignore_errors=True)
+    if local_dir:
+        weights_root = (_catalog_dir() / "weights").resolve()
+        try:
+            local_path = Path(local_dir).resolve()
+            local_path.relative_to(weights_root)
+        except (ValueError, OSError):
+            # local_dir lives outside the muse-owned weights tree
+            # (typically the HF cache). Leave it alone.
+            return
+        shutil.rmtree(local_path, ignore_errors=True)
 
 
 def is_enabled(model_id: str) -> bool:

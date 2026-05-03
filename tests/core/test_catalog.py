@@ -263,6 +263,125 @@ def test_remove_with_purge_tolerates_missing_venv(tmp_catalog):
     assert not is_pulled("soprano-80m")
 
 
+# ---- v0.34.0 finding #15: purge cleans resolver weights cache ----
+
+
+def test_remove_with_purge_cleans_resolver_weights(tmp_catalog):
+    """v0.34.0 finding #15: remove(purge=True) MUST also rmtree the
+    resolver weights cache when local_dir lives under the muse-owned
+    ~/.muse/weights/ tree. Otherwise a user pulling and removing 10
+    large models accumulates 100GB+ of orphans the muse CLI cannot
+    clean up."""
+    from muse.core.catalog import _catalog_path, _read_catalog, _write_catalog
+
+    weights_root = tmp_catalog / "weights"
+    weights_dir = weights_root / "resolver-pulled-x"
+    weights_dir.mkdir(parents=True)
+    (weights_dir / "model.safetensors").write_bytes(b"x" * 100)
+
+    venv_path = tmp_catalog / "venvs" / "x"
+    venv_path.mkdir(parents=True)
+    (venv_path / "marker").write_text("v")
+
+    # Hand-build a catalog entry shaped like a resolver pull.
+    _write_catalog({
+        "x": {
+            "pulled_at": "2026-05-02T00:00:00Z",
+            "hf_repo": "fake/x",
+            "local_dir": str(weights_dir),
+            "venv_path": str(venv_path),
+            "python_path": str(venv_path / "bin" / "python"),
+            "enabled": False,
+        },
+    })
+
+    remove("x", purge=True)
+
+    assert not weights_dir.exists(), "purge must rmtree resolver weights"
+    assert not venv_path.exists(), "purge must rmtree venv"
+    assert "x" not in _read_catalog()
+
+
+def test_remove_with_purge_leaves_external_weights(tmp_catalog):
+    """A local_dir outside ~/.muse/weights/ (typically the HF shared
+    cache at ~/.cache/huggingface) must NOT be rmtree'd, even under
+    purge=True. muse does not own that cache."""
+    from muse.core.catalog import _read_catalog, _write_catalog
+
+    # Outside the weights tree.
+    external_weights = tmp_catalog / "outside" / "hf_cache" / "models--foo"
+    external_weights.mkdir(parents=True)
+    (external_weights / "model.safetensors").write_bytes(b"y" * 50)
+
+    venv_path = tmp_catalog / "venvs" / "y"
+    venv_path.mkdir(parents=True)
+
+    _write_catalog({
+        "y": {
+            "pulled_at": "2026-05-02T00:00:00Z",
+            "hf_repo": "fake/y",
+            "local_dir": str(external_weights),
+            "venv_path": str(venv_path),
+            "enabled": False,
+        },
+    })
+
+    remove("y", purge=True)
+
+    assert external_weights.exists(), \
+        "external cache must be left alone (not under ~/.muse/weights/)"
+    assert (external_weights / "model.safetensors").exists()
+    assert not venv_path.exists(), "venv still gets purged"
+
+
+def test_remove_with_purge_tolerates_missing_weights_dir(tmp_catalog):
+    """purge=True must not raise if the resolver weights dir is
+    already gone (caller may have rm-rf'd it manually)."""
+    from muse.core.catalog import _write_catalog
+
+    weights_root = tmp_catalog / "weights"
+    weights_dir = weights_root / "z"
+    # Don't create it; it's missing.
+
+    _write_catalog({
+        "z": {
+            "pulled_at": "2026-05-02T00:00:00Z",
+            "hf_repo": "fake/z",
+            "local_dir": str(weights_dir),
+            "venv_path": str(tmp_catalog / "venvs" / "z"),
+            "enabled": False,
+        },
+    })
+
+    # Should not raise even though the dir doesn't exist.
+    remove("z", purge=True)
+
+
+def test_remove_default_leaves_resolver_weights(tmp_catalog):
+    """Without purge=True, weights persist (mirrors apt-remove semantics)."""
+    from muse.core.catalog import _read_catalog, _write_catalog
+
+    weights_root = tmp_catalog / "weights"
+    weights_dir = weights_root / "w"
+    weights_dir.mkdir(parents=True)
+    (weights_dir / "marker").write_bytes(b"keep me")
+
+    _write_catalog({
+        "w": {
+            "pulled_at": "2026-05-02T00:00:00Z",
+            "hf_repo": "fake/w",
+            "local_dir": str(weights_dir),
+            "venv_path": str(tmp_catalog / "venvs" / "w"),
+            "enabled": False,
+        },
+    })
+
+    remove("w")  # default: no purge
+
+    assert weights_dir.exists(), "default remove must leave weights on disk"
+    assert (weights_dir / "marker").exists()
+
+
 def test_load_backend_raises_when_not_pulled(tmp_catalog):
     with pytest.raises(RuntimeError, match="not pulled"):
         load_backend("soprano-80m")
