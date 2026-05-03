@@ -168,3 +168,77 @@ def test_encode_envelope_threads_safe_labels():
     res0 = body["results"][0]
     assert res0["flagged"] is False
     assert res0["categories"] == {"OK": False, "H": False}
+
+
+# ----- v0.35.0: encode_classifications for /v1/text/classifications -----
+
+
+def test_encode_classifications_sorts_by_score_desc():
+    """Each per-input list of {label, score} pairs is sorted descending."""
+    from muse.modalities.text_classification.codec import encode_classifications
+    results = [ClassificationResult(
+        scores={"a": 0.1, "b": 0.6, "c": 0.3}, multi_label=False,
+    )]
+    body = encode_classifications(results, model_id="x")
+    assert body["model"] == "x"
+    assert body["id"].startswith("classify-")
+    pairs = body["results"][0]
+    assert [p["label"] for p in pairs] == ["b", "c", "a"]
+    assert pairs[0]["score"] == 0.6
+
+
+def test_encode_classifications_top_k_truncates_per_input():
+    from muse.modalities.text_classification.codec import encode_classifications
+    results = [ClassificationResult(
+        scores={f"l{i}": 0.1 * i for i in range(5)}, multi_label=False,
+    )]
+    body = encode_classifications(results, model_id="x", top_k=2)
+    pairs = body["results"][0]
+    assert len(pairs) == 2
+    # Top two by score (l4=0.4, l3=0.3)
+    assert [p["label"] for p in pairs] == ["l4", "l3"]
+
+
+def test_encode_classifications_top_k_none_keeps_all():
+    from muse.modalities.text_classification.codec import encode_classifications
+    results = [ClassificationResult(
+        scores={f"l{i}": 0.1 for i in range(7)}, multi_label=True,
+    )]
+    body = encode_classifications(results, model_id="x", top_k=None)
+    assert len(body["results"][0]) == 7
+
+
+def test_encode_classifications_zero_top_k_treated_as_no_truncation():
+    """top_k=0 is degenerate; codec defaults to keeping all rather than
+    returning empty lists. Route layer should reject 0 via Pydantic."""
+    from muse.modalities.text_classification.codec import encode_classifications
+    results = [ClassificationResult(
+        scores={"a": 0.5, "b": 0.4}, multi_label=False,
+    )]
+    body = encode_classifications(results, model_id="x", top_k=0)
+    assert len(body["results"][0]) == 2
+
+
+def test_encode_classifications_list_inputs_become_list_of_lists():
+    """One input per ClassificationResult -> one inner list per input."""
+    from muse.modalities.text_classification.codec import encode_classifications
+    results = [
+        ClassificationResult(scores={"a": 0.9}, multi_label=False),
+        ClassificationResult(scores={"a": 0.4, "b": 0.6}, multi_label=False),
+    ]
+    body = encode_classifications(results, model_id="x")
+    assert len(body["results"]) == 2
+    assert body["results"][0][0]["label"] == "a"
+    assert body["results"][1][0]["label"] == "b"
+
+
+def test_encode_classifications_float_coercion():
+    """Scores from numpy / torch tensors get coerced to plain Python float
+    so json.dumps doesn't choke."""
+    from muse.modalities.text_classification.codec import encode_classifications
+    results = [ClassificationResult(
+        scores={"a": 0.9, "b": 0.1}, multi_label=False,
+    )]
+    body = encode_classifications(results, model_id="x")
+    for pair in body["results"][0]:
+        assert isinstance(pair["score"], float)

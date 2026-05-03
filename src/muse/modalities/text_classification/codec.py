@@ -1,4 +1,4 @@
-"""Encoding for /v1/moderations responses.
+"""Encoding for /v1/moderations and /v1/text/classifications responses.
 
 Pure functions: ClassificationResult + threshold to OpenAI envelope dict.
 Tested without FastAPI.
@@ -46,6 +46,36 @@ def encode_moderations(
         "id": f"modr-{uuid.uuid4().hex[:24]}",
         "model": model_id,
         "results": out_results,
+    }
+
+
+def encode_classifications(
+    results: list[ClassificationResult],
+    *,
+    model_id: str,
+    top_k: int | None = None,
+) -> dict[str, Any]:
+    """Build the wire envelope for /v1/text/classifications.
+
+    The fine-tuned-classifier path and the zero-shot path both produce
+    list[ClassificationResult]; this codec converts the per-input
+    {label: score} dict into a sorted list of {label, score} dicts. The
+    top_k parameter truncates each per-input list after sort.
+
+    Sort is stable: ties preserve the runtime's original order.
+    """
+    rows: list[list[dict[str, Any]]] = []
+    for r in results:
+        sorted_pairs = sorted(
+            r.scores.items(), key=lambda kv: kv[1], reverse=True,
+        )
+        if top_k is not None and top_k > 0:
+            sorted_pairs = sorted_pairs[:top_k]
+        rows.append([{"label": k, "score": float(v)} for k, v in sorted_pairs])
+    return {
+        "id": f"classify-{uuid.uuid4().hex[:24]}",
+        "model": model_id,
+        "results": rows,
     }
 
 
