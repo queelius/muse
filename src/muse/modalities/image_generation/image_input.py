@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import io
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -26,6 +27,9 @@ from typing import Any
 import httpx
 
 
+logger = logging.getLogger(__name__)
+
+
 _DATA_URL_RE = re.compile(
     r"^data:([a-zA-Z0-9.+/-]+);base64,(.*)$",
     re.DOTALL,
@@ -33,27 +37,54 @@ _DATA_URL_RE = re.compile(
 _ALLOWED_IMAGE_MIME = frozenset({
     "image/png", "image/jpeg", "image/jpg", "image/webp",
 })
-_DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10MB
+_HARD_DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 _HTTP_TIMEOUT = 30.0
 
 
-async def decode_image_input(value: str, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Any:
+def _default_max_bytes() -> int:
+    """Read MUSE_IMAGE_INPUT_MAX_BYTES per call so operators can raise
+    the cap without a server restart. Falls back to 10MB on missing or
+    unparseable values, with a one-time-per-call warning logged on
+    parse failure (operators see the misconfiguration in worker logs)."""
+    raw = os.environ.get("MUSE_IMAGE_INPUT_MAX_BYTES")
+    if raw is None:
+        return _HARD_DEFAULT_MAX_BYTES
+    try:
+        n = int(raw)
+        if n <= 0:
+            raise ValueError("must be positive")
+        return n
+    except ValueError as e:
+        logger.warning(
+            "MUSE_IMAGE_INPUT_MAX_BYTES=%r is not a positive integer (%s); "
+            "falling back to %d-byte cap",
+            raw, e, _HARD_DEFAULT_MAX_BYTES,
+        )
+        return _HARD_DEFAULT_MAX_BYTES
+
+
+async def decode_image_input(value: str, *, max_bytes: int | None = None) -> Any:
     """Parse a data URL or HTTP(S) URL into a PIL.Image.
 
     Async because the http path uses `httpx.AsyncClient` and must not
     block the event loop. The data-URL path is in-memory and stays sync
     internally; awaiting an already-resolved coroutine is cheap.
+
+    `max_bytes` may be passed by the caller (e.g. an upscale route that
+    wants a larger cap) or left None to read MUSE_IMAGE_INPUT_MAX_BYTES
+    per request.
     """
+    cap = max_bytes if max_bytes is not None else _default_max_bytes()
     if value.startswith("data:"):
-        return _decode_data_url(value, max_bytes=max_bytes)
+        return _decode_data_url(value, max_bytes=cap)
     if value.startswith(("http://", "https://")):
-        return await _fetch_http_url(value, max_bytes=max_bytes)
+        return await _fetch_http_url(value, max_bytes=cap)
     raise ValueError(
         f"image must be a data: URL or http(s):// URL; got {value[:30]!r}..."
     )
 
 
-async def decode_image_file(file: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Any:
+async def decode_image_file(file: Any, *, max_bytes: int | None = None) -> Any:
     """Decode a multipart UploadFile into a PIL.Image.
 
     Used by /v1/images/edits and /v1/images/variations, where the
@@ -70,13 +101,16 @@ async def decode_image_file(file: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -
 
     Reads at most `max_bytes + 1` so a malicious giant upload doesn't
     fully buffer into worker memory before being rejected.
+
+    `max_bytes` defaults to MUSE_IMAGE_INPUT_MAX_BYTES (or 10MB).
     """
-    raw = await file.read(max_bytes + 1)
+    cap = max_bytes if max_bytes is not None else _default_max_bytes()
+    raw = await file.read(cap + 1)
     if not raw:
         raise ValueError("empty image file")
-    if len(raw) > max_bytes:
+    if len(raw) > cap:
         raise ValueError(
-            f"image bytes exceeds max ({len(raw)} > {max_bytes})"
+            f"image bytes exceeds max ({len(raw)} > {cap})"
         )
     return _bytes_to_pil(raw)
 

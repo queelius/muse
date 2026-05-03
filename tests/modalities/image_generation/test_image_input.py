@@ -281,3 +281,60 @@ async def test_decode_image_file_rejects_undecodable():
     upload = _FakeUploadFile(b"not really an image at all")
     with pytest.raises(ValueError, match="decode"):
         await decode_image_file(upload)
+
+
+# ---------------- v0.34.0 finding #11: MUSE_IMAGE_INPUT_MAX_BYTES ----------------
+
+
+@pytest.mark.asyncio
+async def test_decode_image_file_honors_env_cap(monkeypatch):
+    """Operators can raise the cap via MUSE_IMAGE_INPUT_MAX_BYTES
+    without a server restart. A 13000-byte upload past a 12345-byte
+    cap is rejected; the cap is read per-call so changes take effect
+    immediately on the next request."""
+    from muse.modalities.image_generation.image_input import decode_image_file
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "12345")
+    payload = b"\x00" * 13000
+    upload = _FakeUploadFile(payload)
+    with pytest.raises(ValueError, match="exceeds"):
+        await decode_image_file(upload)
+    # Read was bounded to env-derived cap + 1; not the full payload.
+    assert upload.read_size == 12345 + 1
+
+
+@pytest.mark.asyncio
+async def test_decode_image_file_falls_back_on_unparseable_env(monkeypatch):
+    """A garbled MUSE_IMAGE_INPUT_MAX_BYTES falls back to the 10MB
+    hardcoded default. Operators see a warning in the worker log."""
+    from muse.modalities.image_generation.image_input import decode_image_file
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "not-an-int")
+    payload = b"\x00" * (11 * 1024 * 1024)
+    upload = _FakeUploadFile(payload)
+    with pytest.raises(ValueError, match="exceeds"):
+        await decode_image_file(upload)
+
+
+@pytest.mark.asyncio
+async def test_decode_image_file_falls_back_on_zero_env(monkeypatch):
+    """A non-positive value (0 or negative) falls back to the 10MB
+    default. Zero would otherwise reject every upload."""
+    from muse.modalities.image_generation.image_input import decode_image_file
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "0")
+    payload = _png_bytes(width=8, height=8)
+    upload = _FakeUploadFile(payload)
+    img = await decode_image_file(upload)  # 10MB default lets this through
+    assert img.size == (8, 8)
+
+
+def test_default_max_bytes_helper_returns_default_when_unset(monkeypatch):
+    from muse.modalities.image_generation.image_input import (
+        _default_max_bytes, _HARD_DEFAULT_MAX_BYTES,
+    )
+    monkeypatch.delenv("MUSE_IMAGE_INPUT_MAX_BYTES", raising=False)
+    assert _default_max_bytes() == _HARD_DEFAULT_MAX_BYTES
+
+
+def test_default_max_bytes_helper_reads_env(monkeypatch):
+    from muse.modalities.image_generation.image_input import _default_max_bytes
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "20971520")  # 20MB
+    assert _default_max_bytes() == 20 * 1024 * 1024
