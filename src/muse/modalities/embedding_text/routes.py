@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from threading import Lock
+
 from typing import Union
 
 from fastapi import APIRouter
@@ -37,7 +37,7 @@ from muse.modalities.embedding_text.codec import embedding_to_base64
 logger = logging.getLogger(__name__)
 
 MODALITY = "embedding/text"
-_inference_lock = Lock()
+
 
 # See text_classification/routes for the rationale (finite caps to
 # prevent worker OOM on giant batches). Embedding caps are higher
@@ -103,7 +103,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         def _call():
-            with _inference_lock:
+            with model._inference_lock:
                 return model.embed(req.input, dimensions=req.dimensions)
 
         result = await asyncio.to_thread(_call)

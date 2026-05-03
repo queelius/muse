@@ -150,3 +150,55 @@ def test_registry_exposes_manifest_after_register():
 def test_registry_manifest_returns_none_for_unknown_model():
     reg = ModalityRegistry()
     assert reg.manifest("text/classification", "nope") is None
+
+
+# -- v0.34.0 finding #14: per-backend inference lock ---------------------
+
+
+def test_register_attaches_inference_lock_per_backend():
+    """Each registered backend gets its own _inference_lock; two
+    backends do NOT share one. Replaces the older module-global
+    per-modality lock that serialized unrelated models on the same
+    worker."""
+    import threading
+
+    class _FakeA:
+        model_id = "a"
+
+    class _FakeB:
+        model_id = "b"
+
+    reg = ModalityRegistry()
+    a, b = _FakeA(), _FakeB()
+    reg.register("test/modality", a)
+    reg.register("test/modality", b)
+
+    assert hasattr(a, "_inference_lock")
+    assert hasattr(b, "_inference_lock")
+    assert a._inference_lock is not b._inference_lock
+    # Both should be threading.Lock instances (or whatever returns from
+    # threading.Lock; the type is private so we acquire/release as a
+    # functional check).
+    assert a._inference_lock.acquire(blocking=False)
+    a._inference_lock.release()
+    assert b._inference_lock.acquire(blocking=False)
+    b._inference_lock.release()
+
+
+def test_register_preserves_existing_lock():
+    """A backend declaring its own _inference_lock keeps it (idempotent
+    attachment). This lets a backend with internal synchronization
+    requirements expose the lock it already uses."""
+    import threading
+
+    class _FakeWithLock:
+        model_id = "x"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+
+    reg = ModalityRegistry()
+    f = _FakeWithLock()
+    original_lock = f._inference_lock
+    reg.register("test/modality", f)
+    assert f._inference_lock is original_lock

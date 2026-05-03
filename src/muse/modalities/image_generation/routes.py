@@ -17,7 +17,6 @@ import asyncio
 import base64
 import logging
 import time
-from threading import Lock
 
 from fastapi import APIRouter, File, Form, UploadFile
 from pydantic import BaseModel, Field, field_validator
@@ -33,7 +32,6 @@ from muse.modalities.image_generation.image_input import (
 logger = logging.getLogger(__name__)
 
 MODALITY = "image/generation"
-_inference_lock = Lock()
 
 
 class GenerationRequest(BaseModel):
@@ -108,7 +106,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             }
             if req.seed is not None:
                 kwargs["seed"] = req.seed + seed_offset
-            with _inference_lock:
+            with model._inference_lock:
                 return model.generate(req.prompt, **kwargs)
 
         results = []
@@ -197,7 +195,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "init_image": init_image,
                 "mask_image": mask_image,
             }
-            with _inference_lock:
+            with backend._inference_lock:
                 return backend.inpaint(prompt, **kwargs)
 
         results = []
@@ -274,7 +272,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "height": h,
                 "init_image": init_image,
             }
-            with _inference_lock:
+            with backend._inference_lock:
                 return backend.vary(**kwargs)
 
         results = []

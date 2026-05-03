@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from threading import Lock
+
 from typing import Union
 
 from fastapi import APIRouter
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 MODALITY = "image/embedding"
-_inference_lock = Lock()
+
 
 
 # Conservative caps: a request with input=[10MB image] x 100 entries
@@ -111,7 +111,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # inference doesn't block sibling /health, /v1/models, or other
         # in-flight requests on the same worker.
         def _call():
-            with _inference_lock:
+            with backend._inference_lock:
                 return backend.embed(images, dimensions=req.dimensions)
 
         result = await asyncio.to_thread(_call)

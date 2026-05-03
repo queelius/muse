@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from threading import Lock
+
 
 from fastapi import APIRouter, File, Form, UploadFile
 
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 MODALITY = "audio/embedding"
-_inference_lock = Lock()
+
 
 
 def _max_upload_bytes() -> int:
@@ -109,7 +109,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # offload so a slow inference doesn't block sibling /health,
         # /v1/models, or other in-flight requests on the same worker.
         def _call():
-            with _inference_lock:
+            with backend._inference_lock:
                 return backend.embed(audio_bytes_list)
 
         try:

@@ -10,7 +10,7 @@ import asyncio
 import base64
 import json
 import logging
-from threading import Lock
+
 
 import numpy as np
 from fastapi import APIRouter, Response
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 MODALITY = "audio/speech"
 MAX_INPUT_LENGTH = 50_000
-_inference_lock = Lock()
+
 
 
 class SpeechRequest(BaseModel):
@@ -66,7 +66,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
 async def _non_stream(model, req: SpeechRequest) -> Response:
     def _synth():
-        with _inference_lock:
+        with model._inference_lock:
             return model.synthesize(
                 req.input,
                 voice=req.voice,
@@ -108,7 +108,7 @@ async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
 
         def _produce():
             try:
-                with _inference_lock:
+                with model._inference_lock:
                     for chunk in model.synthesize_stream(
                         req.input, voice=req.voice, speed=req.speed,
                     ):

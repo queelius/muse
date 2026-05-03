@@ -16,7 +16,7 @@ import base64
 import logging
 import os
 import time
-from threading import Lock
+
 
 from fastapi import APIRouter, File, Form, UploadFile
 
@@ -28,7 +28,7 @@ from muse.modalities.image_upscale.codec import to_bytes, to_data_url
 logger = logging.getLogger(__name__)
 
 MODALITY = "image/upscale"
-_inference_lock = Lock()
+
 
 
 def _max_input_side() -> int:
@@ -133,7 +133,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             }
             if seed is not None:
                 kwargs["seed"] = seed + seed_offset
-            with _inference_lock:
+            with backend._inference_lock:
                 return backend.upscale(init_image, **kwargs)
 
         results = []

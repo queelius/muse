@@ -26,7 +26,7 @@ import asyncio
 import json
 import logging
 import os
-from threading import Lock
+
 
 from fastapi import APIRouter, File, Form, UploadFile
 
@@ -39,7 +39,7 @@ from muse.modalities.image_segmentation.codec import encode_segmentation
 logger = logging.getLogger(__name__)
 
 MODALITY = "image/segmentation"
-_inference_lock = Lock()
+
 
 
 _VALID_MODES = ("auto", "points", "boxes", "text")
@@ -215,7 +215,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         def _call() -> object:
-            with _inference_lock:
+            with backend._inference_lock:
                 return backend.segment(
                     pil_image,
                     mode=mode,

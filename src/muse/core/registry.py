@@ -11,6 +11,7 @@ API response; nothing is gathered by hardcoded attribute allowlist.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +55,14 @@ class ModalityRegistry:
         stub `{"model_id", "modality"}` is used so ModelInfo consumers
         always see the two required keys.
         """
+        # Attach a per-backend inference lock so route handlers can
+        # serialize calls into one backend without blocking siblings on
+        # the same worker. Idempotent: backends declaring their own
+        # lock keep it. Replaces the older module-global per-modality
+        # _inference_lock pattern.
+        if not hasattr(model, "_inference_lock"):
+            model._inference_lock = threading.Lock()
+
         models = self._models.setdefault(modality, {})
         models[model.model_id] = model
         self._manifests.setdefault(modality, {})[model.model_id] = (
