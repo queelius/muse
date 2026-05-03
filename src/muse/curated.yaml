@@ -120,7 +120,7 @@
   capabilities:
     memory_gb: 3.0
 
-# ---------- text/classification (moderation) ----------
+# ---------- text/classification (moderation, sentiment, zero-shot) ----------
 
 - id: text-moderation
   uri: hf://KoalaAI/Text-Moderation
@@ -128,9 +128,40 @@
   size_gb: 0.14
   description: "9-category text moderation (S/H/V/HR/SH/S3/H2/V2/OK), CPU-friendly"
   capabilities:
+    supports_classification: true
+    supports_zero_shot: false
     safe_labels: ["OK"]
     device: cpu
     memory_gb: 0.5
+
+# Bundled aliases (script-backed). Both join the CI smoke matrix.
+- id: twitter-roberta-base-sentiment-latest
+  bundled: true
+
+- id: deberta-v3-base-zeroshot-v2.0
+  bundled: true
+
+# Multilingual sentiment alternative. 8 languages.
+- id: twitter-xlm-roberta-base-sentiment
+  uri: hf://cardiffnlp/twitter-xlm-roberta-base-sentiment
+  modality: text/classification
+  size_gb: 0.6
+  description: "Twitter XLM-RoBERTa sentiment: 125M, 8 langs, 3-label, MIT"
+  capabilities:
+    supports_classification: true
+    supports_zero_shot: false
+    memory_gb: 0.6
+
+# Multilingual zero-shot. 100 languages.
+- id: mdeberta-v3-base-mnli-xnli
+  uri: hf://MoritzLaurer/mDeBERTa-v3-base-mnli-xnli
+  modality: text/classification
+  size_gb: 1.1
+  description: "mDeBERTa v3 zero-shot NLI: 276M, 100 langs, MIT"
+  capabilities:
+    supports_classification: false
+    supports_zero_shot: true
+    memory_gb: 1.6
 
 # ---------- text/rerank (cross-encoder rerankers) ----------
 
