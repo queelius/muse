@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import threading
 
 
 import numpy as np
@@ -118,7 +119,13 @@ async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
-        loop.run_in_executor(None, _produce)
+        # threading.Thread (not loop.run_in_executor) so the producer's
+        # lifecycle is explicit and decoupled from the asyncio default
+        # executor's bounded thread pool. Matches chat_completion. The
+        # earlier run_in_executor pattern discarded the returned Future,
+        # so executor saturation could silently hang the consumer on
+        # an empty queue.
+        threading.Thread(target=_produce, daemon=True).start()
 
         while True:
             item = await queue.get()
