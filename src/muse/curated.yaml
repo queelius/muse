@@ -137,6 +137,54 @@
 - id: bge-reranker-v2-m3
   bundled: true
 
+# Tiny CPU baseline. ~22M params, English-only, 512 ctx. Useful when
+# the BGE v2-m3 default is overkill (latency-sensitive, single-language,
+# small-corpus use cases). Apache 2.0.
+- id: ms-marco-minilm-l-6-v2
+  uri: hf://cross-encoder/ms-marco-MiniLM-L-6-v2
+  modality: text/rerank
+  size_gb: 0.1
+  description: "MS MARCO MiniLM-L6: 22M params, English-only, 512 ctx, CPU-friendly classic baseline"
+  capabilities:
+    device: cpu
+    memory_gb: 0.2
+    max_length: 512
+
+# Lighter multilingual alternative to the bundled BGE v2-m3 (568M).
+# 278M params, 100+ languages, 512 ctx. Same lineage, lower memory.
+- id: bge-reranker-base
+  uri: hf://BAAI/bge-reranker-base
+  modality: text/rerank
+  size_gb: 0.6
+  description: "BGE Reranker base: 278M, multilingual (100+ langs), 512 ctx, MIT"
+  capabilities:
+    memory_gb: 1.4
+    max_length: 512
+
+# Top English quality. 435M params, 512 ctx. Apache 2.0. The BGE
+# v2-m3 default beats it on multilingual; this wins on English-only
+# benchmarks.
+- id: mxbai-rerank-large-v1
+  uri: hf://mixedbread-ai/mxbai-rerank-large-v1
+  modality: text/rerank
+  size_gb: 1.7
+  description: "Mixedbread mxbai-rerank-large: 435M, English-only, top BEIR scores, Apache 2.0"
+  capabilities:
+    memory_gb: 2.0
+    max_length: 512
+
+# Multilingual with a longer context window than BGE-base. 278M
+# params, 1024 ctx, 100+ languages. Apache 2.0.
+- id: jina-reranker-v2-base-multilingual
+  uri: hf://jinaai/jina-reranker-v2-base-multilingual
+  modality: text/rerank
+  size_gb: 0.6
+  description: "Jina Reranker v2 base: 278M, 100+ langs, 1024 ctx, faster than BGE v2-m3"
+  capabilities:
+    trust_remote_code: true
+    memory_gb: 1.5
+    max_length: 1024
+
 # ---------- image/animation (AnimateDiff) ----------
 
 - id: animatediff-motion-v3
