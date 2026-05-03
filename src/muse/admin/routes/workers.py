@@ -71,6 +71,13 @@ def build_workers_router() -> APIRouter:
                     409, "worker_not_running",
                     f"worker on port {port} is not currently running",
                 )
+            # Reset the restart budget. An operator's explicit restart
+            # is the documented escape hatch for a worker stuck at
+            # _MAX_RESTARTS=10; without this reset the auto-restart
+            # monitor would mark the worker dead on the very next
+            # failure even though the operator just re-armed it.
+            spec.restart_count = 0
+            spec.failure_count = 0
             try:
                 proc.terminate()
             except Exception as e:  # noqa: BLE001
@@ -82,6 +89,7 @@ def build_workers_router() -> APIRouter:
             "port": port,
             "signal": "SIGTERM",
             "message": "auto-restart monitor will respawn the worker",
+            "restart_count_reset": True,
         }
 
     return router

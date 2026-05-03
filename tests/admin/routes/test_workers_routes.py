@@ -99,3 +99,24 @@ class TestRestartWorker:
         assert r.status_code == 200
         assert r.json()["signal"] == "SIGTERM"
         spec.process.terminate.assert_called_once()
+
+    def test_resets_restart_and_failure_counters(self, client, headers):
+        """v0.34.0 finding #12: an operator's explicit restart must
+        re-arm the restart budget. Without this, a worker 9-deep into
+        the 10-restart cap would die permanently on the next failure
+        even though the operator just intervened."""
+        spec = WorkerSpec(
+            models=["x"], python_path="/p", port=9001,
+        )
+        spec.process = MagicMock()
+        spec.restart_count = 9
+        spec.failure_count = 3
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["restart_count_reset"] is True
+        assert spec.restart_count == 0
+        assert spec.failure_count == 0
+        spec.process.terminate.assert_called_once()
