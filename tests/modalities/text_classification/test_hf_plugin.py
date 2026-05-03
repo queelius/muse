@@ -6,11 +6,15 @@ from muse.core.discovery import REQUIRED_HF_PLUGIN_KEYS
 from muse.core.resolvers import ResolvedModel
 
 
-def _fake_info(siblings=None, tags=None):
+def _fake_info(siblings=None, tags=None, repo_id="org/repo"):
     info = MagicMock()
     info.siblings = [MagicMock(rfilename=f) for f in (siblings or [])]
     info.tags = tags or []
     info.card_data = MagicMock(license=None)
+    # info.id is the repo path ("owner/name"); the v0.35.0 zero-shot
+    # dispatch reads it for fallback name-based matching, so the
+    # default must be a real string (not a MagicMock auto-attr).
+    info.id = repo_id
     return info
 
 
@@ -49,3 +53,83 @@ def test_search_yields_results():
     rows = list(HF_PLUGIN["search"](fake_api, "moderation", sort="downloads", limit=20))
     assert len(rows) == 1
     assert rows[0].modality == "text/classification"
+
+
+# ---- v0.35.0: zero-shot dispatch ----
+
+
+def test_sniff_true_on_zero_shot_classification_tag():
+    """Repos tagged zero-shot-classification (without text-classification)
+    are claimed by this plugin so they resolve to HFZeroShotPipeline."""
+    info = _fake_info(tags=["zero-shot-classification"])
+    assert HF_PLUGIN["sniff"](info) is True
+
+
+def test_sniff_true_on_nli_repo_name_fallback():
+    """Some NLI checkpoints ship without our preferred tags but the
+    repo name makes intent clear."""
+    info = _fake_info(tags=[], repo_id="MoritzLaurer/some-zero-shot-model")
+    assert HF_PLUGIN["sniff"](info) is True
+    info = _fake_info(tags=[], repo_id="some-org/mnli-roberta")
+    assert HF_PLUGIN["sniff"](info) is True
+
+
+def test_resolve_zero_shot_dispatches_to_zero_shot_pipeline():
+    """A zero-shot-classification-tagged repo resolves to the NLI
+    runtime with supports_zero_shot=True, supports_classification=False."""
+    info = _fake_info(
+        tags=["zero-shot-classification", "text-classification"],
+        repo_id="MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+    )
+    result = HF_PLUGIN["resolve"](
+        "MoritzLaurer/deberta-v3-base-zeroshot-v2.0", None, info,
+    )
+    assert "HFZeroShotPipeline" in result.backend_path
+    caps = result.manifest["capabilities"]
+    assert caps["supports_zero_shot"] is True
+    assert caps["supports_classification"] is False
+    assert "Zero-shot" in result.manifest["description"]
+
+
+def test_resolve_classifier_dispatches_to_text_classifier():
+    """A repo with only text-classification (no zero-shot) resolves
+    to HFTextClassifier with supports_classification=True."""
+    info = _fake_info(
+        tags=["text-classification"],
+        repo_id="cardiffnlp/twitter-roberta-base-sentiment-latest",
+    )
+    result = HF_PLUGIN["resolve"](
+        "cardiffnlp/twitter-roberta-base-sentiment-latest", None, info,
+    )
+    assert "HFTextClassifier" in result.backend_path
+    caps = result.manifest["capabilities"]
+    assert caps["supports_classification"] is True
+    assert caps["supports_zero_shot"] is False
+
+
+def test_resolve_zero_shot_via_repo_name_fallback():
+    """A repo without the zero-shot-classification tag but with NLI
+    keywords in its id still dispatches to the NLI runtime."""
+    info = _fake_info(
+        tags=["text-classification"],  # only the generic tag
+        repo_id="cross-encoder/nli-deberta-v3-large",
+    )
+    result = HF_PLUGIN["resolve"](
+        "cross-encoder/nli-deberta-v3-large", None, info,
+    )
+    assert "HFZeroShotPipeline" in result.backend_path
+    assert result.manifest["capabilities"]["supports_zero_shot"] is True
+
+
+def test_existing_text_moderation_resolves_to_classifier():
+    """Regression: KoalaAI/Text-Moderation has 'text-classification'
+    tag and a name with no NLI hint, so it must keep resolving to
+    HFTextClassifier (not HFZeroShotPipeline) so existing curated
+    moderation entries continue to work."""
+    info = _fake_info(
+        tags=["text-classification"],
+        repo_id="KoalaAI/Text-Moderation",
+    )
+    result = HF_PLUGIN["resolve"]("KoalaAI/Text-Moderation", None, info)
+    assert "HFTextClassifier" in result.backend_path
+    assert result.manifest["capabilities"]["supports_classification"] is True

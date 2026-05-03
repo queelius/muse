@@ -1,6 +1,15 @@
 """HF resolver plugin for HF text-classification models.
 
-Tag-only sniff: any repo with the `text-classification` tag is claimed.
+Tag-based sniff with two-way dispatch:
+
+  - Repos tagged `zero-shot-classification` (or whose name suggests
+    NLI: 'zero-shot', 'mnli', 'nli', 'xnli') resolve to the
+    HFZeroShotPipeline runtime with supports_zero_shot=True.
+  - Repos tagged `text-classification` (or whose name suggests
+    sentiment / classification heads, after the zero-shot check
+    fails) resolve to HFTextClassifier with
+    supports_classification=True.
+
 Priority 200 so this plugin runs LAST after more specific shapes
 (GGUF file pattern, faster-whisper CT2 shape, sentence-transformers
 config) have had their chance.
@@ -17,9 +26,13 @@ from huggingface_hub import HfApi, snapshot_download
 from muse.core.resolvers import ResolvedModel, SearchResult
 
 
-_RUNTIME_PATH = (
+_CLASSIFIER_RUNTIME = (
     "muse.modalities.text_classification.runtimes.hf_text_classifier"
     ":HFTextClassifier"
+)
+_ZERO_SHOT_RUNTIME = (
+    "muse.modalities.text_classification.runtimes.hf_zero_shot"
+    ":HFZeroShotPipeline"
 )
 _PIP_EXTRAS = ("transformers>=4.36.0", "torch>=2.1.0")
 
@@ -37,19 +50,50 @@ def _repo_license(info) -> str | None:
 
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
-    return "text-classification" in tags
+    if "text-classification" in tags or "zero-shot-classification" in tags:
+        return True
+    # Some NLI checkpoints ship under generic 'text-classification' or
+    # without our preferred tags but the repo name makes intent clear.
+    repo_id = (getattr(info, "id", "") or "").lower()
+    if any(s in repo_id for s in ("zero-shot", "mnli", "nli", "xnli")):
+        return True
+    return False
+
+
+def _is_zero_shot(info) -> bool:
+    """Return True if this repo should resolve to HFZeroShotPipeline.
+
+    Zero-shot-classification tag wins. Fallback: repo name pattern,
+    since some NLI checkpoints carry only the generic
+    `text-classification` tag.
+    """
+    tags = getattr(info, "tags", None) or []
+    if "zero-shot-classification" in tags:
+        return True
+    repo_id = (getattr(info, "id", "") or "").lower()
+    return any(s in repo_id for s in ("zero-shot", "mnli", "nli", "xnli"))
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
+    is_zs = _is_zero_shot(info)
+    runtime_path = _ZERO_SHOT_RUNTIME if is_zs else _CLASSIFIER_RUNTIME
+    capabilities: dict = {
+        "supports_classification": not is_zs,
+        "supports_zero_shot": is_zs,
+    }
+    description = (
+        f"Zero-shot classifier (NLI): {repo_id}" if is_zs
+        else f"Text classifier: {repo_id}"
+    )
     manifest = {
         "model_id": _model_id(repo_id),
         "modality": "text/classification",
         "hf_repo": repo_id,
-        "description": f"Text classifier: {repo_id}",
+        "description": description,
         "license": _repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
-        "capabilities": {},
+        "capabilities": capabilities,
     }
 
     def _download(cache_root: Path) -> Path:
@@ -73,7 +117,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
     return ResolvedModel(
         manifest=manifest,
-        backend_path=_RUNTIME_PATH,
+        backend_path=runtime_path,
         download=_download,
     )
 
@@ -97,7 +141,9 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
 
 HF_PLUGIN = {
     "modality": "text/classification",
-    "runtime_path": _RUNTIME_PATH,
+    # Top-level runtime_path metadata is the catch-all classifier;
+    # _resolve() picks the zero-shot variant per-repo when appropriate.
+    "runtime_path": _CLASSIFIER_RUNTIME,
     "pip_extras": _PIP_EXTRAS,
     "system_packages": (),
     "priority": 200,
