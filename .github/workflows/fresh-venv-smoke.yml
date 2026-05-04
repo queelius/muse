@@ -31,6 +31,7 @@ jobs:
           - mert-v1-95m
           - twitter-roberta-base-sentiment-latest
           - deberta-v3-base-zeroshot-v2.0
+          - trocr-base-printed
 
     steps:
       - name: checkout
