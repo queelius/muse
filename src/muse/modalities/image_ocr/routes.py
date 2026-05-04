@@ -1,17 +1,94 @@
 """FastAPI routes for /v1/images/ocr.
 
-Stub: replaced in Task C. Defined here so `__init__.py` can import
-`build_router` without an ImportError during the staged build.
+Multipart in (image file + optional model/prompt/max_new_tokens),
+JSON out (id, model, text, usage). Mirrors /v1/audio/transcriptions.
+
+Reuses decode_image_file from image_generation/image_input.py for
+the multipart upload; MUSE_IMAGE_INPUT_MAX_BYTES env cap (v0.34.0)
+applies. Per-backend _inference_lock from v0.34.0 serializes calls
+into one model.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+import asyncio
+import logging
 
+from fastapi import APIRouter, File, Form, UploadFile
+from fastapi.responses import JSONResponse
+
+from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities.image_generation.image_input import decode_image_file
+from muse.modalities.image_ocr.codec import encode_ocr
 
 
 MODALITY = "image/ocr"
 
 
+logger = logging.getLogger(__name__)
+
+
+# Hard ceiling on per-request decoder budget. Far above any sensible
+# OCR (Nougat full-page is ~2-3K tokens). Beyond this is either a
+# misuse or a budget-burner; reject with 400.
+_HARD_MAX_NEW_TOKENS = 4096
+
+
 def build_router(registry: ModalityRegistry) -> APIRouter:
-    return APIRouter()
+    router = APIRouter()
+
+    @router.post("/v1/images/ocr")
+    async def images_ocr(
+        image: UploadFile = File(...),
+        model: str | None = Form(None),
+        prompt: str | None = Form(None),
+        max_new_tokens: int | None = Form(None),
+    ):
+        # Cap validation: positive integer, bounded.
+        if max_new_tokens is not None:
+            if max_new_tokens < 1 or max_new_tokens > _HARD_MAX_NEW_TOKENS:
+                return error_response(
+                    400, "invalid_parameter",
+                    f"max_new_tokens must be in [1, {_HARD_MAX_NEW_TOKENS}]; "
+                    f"got {max_new_tokens}",
+                )
+
+        # Decode the multipart upload (size-capped via decode_image_file;
+        # MUSE_IMAGE_INPUT_MAX_BYTES env cap applies).
+        try:
+            pil_image = await decode_image_file(image)
+        except ValueError as e:
+            return error_response(400, "invalid_parameter", str(e))
+
+        try:
+            backend = registry.get(MODALITY, model)
+        except KeyError:
+            raise ModelNotFoundError(
+                model_id=model or "<default>", modality=MODALITY,
+            )
+
+        effective_id = backend.model_id
+
+        def _call():
+            with backend._inference_lock:
+                kwargs = {}
+                if prompt is not None:
+                    kwargs["prompt"] = prompt
+                if max_new_tokens is not None:
+                    kwargs["max_new_tokens"] = max_new_tokens
+                return backend.ocr(pil_image, **kwargs)
+
+        try:
+            result = await asyncio.to_thread(_call)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("ocr call failed")
+            return error_response(500, "internal_error", str(e))
+
+        body = encode_ocr(result)
+        # Override result.model_id with the effective registry id in
+        # case the runtime's model_id drifted (paranoia guard, mirrors
+        # the moderation route's pattern).
+        body["model"] = effective_id
+        return JSONResponse(content=body)
+
+    return router
