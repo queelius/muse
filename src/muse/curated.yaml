@@ -216,6 +216,47 @@
     memory_gb: 1.5
     max_length: 1024
 
+# ---------- image/ocr (vision-encoder + text-decoder) ----------
+
+- id: trocr-base-printed
+  bundled: true
+
+# Academic paper OCR including math and LaTeX. License is CC-BY-NC-4.0
+# (NON-COMMERCIAL): fine for personal research; not suitable for
+# distribution in commercial products. Pull explicitly via
+# `muse pull nougat-base`; muse does not silently ship CC-BY-NC weights.
+- id: nougat-base
+  uri: hf://facebook/nougat-base
+  modality: image/ocr
+  size_gb: 0.5
+  description: "Nougat base: 250M, academic papers (math/LaTeX), CC-BY-NC-4.0 (non-commercial)"
+  capabilities:
+    memory_gb: 1.0
+    max_new_tokens: 4096
+    supports_math: true
+
+# Math-formula-only LaTeX OCR. MIT license.
+- id: texteller
+  uri: hf://OleehyO/TexTeller
+  modality: image/ocr
+  size_gb: 0.8
+  description: "TexTeller: 400M, math-formula -> LaTeX, MIT"
+  capabilities:
+    memory_gb: 1.4
+    max_new_tokens: 1024
+    supports_math: true
+
+# Handwriting recognition. ~558M; bigger than the bundled printed model.
+- id: trocr-large-handwritten
+  uri: hf://microsoft/trocr-large-handwritten
+  modality: image/ocr
+  size_gb: 1.1
+  description: "TrOCR large handwritten: 558M, handwritten English text, MIT"
+  capabilities:
+    memory_gb: 1.5
+    max_new_tokens: 256
+    supports_handwritten: true
+
 # ---------- image/animation (AnimateDiff) ----------
 
 - id: animatediff-motion-v3
