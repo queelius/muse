@@ -40,6 +40,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # unknown-model KeyErrors without touching catalog state on disk.
 from muse.core.catalog import get_manifest
 
+# OperationError lives at module-top because `_route_via_director` must
+# trap director.acquire() failures; importing inside a hot-path function
+# pays a re-import cost on every request even though Python caches the
+# module object.
+from muse.admin.operations import OperationError
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,9 +116,12 @@ def _openai_error(
     """OpenAI-compatible error envelope.
 
     `error_type` defaults to `invalid_request_error` (the OpenAI shape for
-    400 / 404). Lazy-load 503s ("model_unservable", "model_too_large_for_device")
-    pass `service_unavailable` so SDK clients that branch on type can
-    distinguish "this request is malformed" from "this server is full."
+    400 / 404). 5xx paths (lazy-load 503 "model_unservable" and
+    "model_too_large_for_device", or any director-raised OperationError
+    with status >= 500) pass `server_error` so SDK clients that branch on
+    type can distinguish "this request is malformed" from "this server is
+    full." This matches the chat_completion router's `server_error` choice
+    for backend-stream failures (`muse.modalities.chat_completion.routes`).
     """
     return JSONResponse(
         status_code=status,
@@ -347,12 +356,15 @@ async def _route_via_director(
             503,
             "model_unservable",
             f"model {model_id!r} cannot be served: {unservable_reason}",
-            error_type="service_unavailable",
+            error_type="server_error",
         )
 
-    # 2. Resolve manifest. Per-request lookup is cheap (the catalog is
-    # cached in `known_models`) and keeps us safe against catalog edits
-    # that landed since boot. KeyError -> 404 model_not_found.
+    # 2. Resolve manifest. Per-request lookup is cheap: `known_models()`
+    # is process-cached, and `_read_catalog()` is mtime-cached against the
+    # backing file (so unchanged catalog.json reads return immediately
+    # without re-parsing JSON). The mtime invalidation keeps us safe
+    # against catalog edits that landed since boot. KeyError -> 404
+    # model_not_found.
     try:
         manifest = get_manifest(model_id)
     except KeyError:
@@ -365,15 +377,13 @@ async def _route_via_director(
     # short-circuit (already loaded). It returns the worker port hosting
     # the model. OperationError carries an explicit (status, code,
     # message) to surface back to the client.
-    from muse.admin.operations import OperationError
-
     try:
         worker_port = state.director.acquire(model_id, manifest=manifest)
     except OperationError as exc:
         return _openai_error(
             exc.status, exc.code, exc.message,
             error_type=(
-                "service_unavailable" if exc.status >= 500
+                "server_error" if exc.status >= 500
                 else "invalid_request_error"
             ),
         )
@@ -432,18 +442,33 @@ async def _forward_with_release(
     try:
         response = await stream_ctx.__aenter__()
     except Exception:
-        # __aenter__ raised: release the refcount and the AsyncClient
-        # before propagating. Without this, refcount would stay incremented
-        # forever and the AsyncClient's connection-pool slot would leak
-        # (regression watchdog: tests/cli_impl/test_gateway.py
-        # ::TestAsyncClientLifecycle::test_stream_open_failure_aclose_client).
-        await client.aclose()
+        # __aenter__ raised: release the refcount FIRST, then aclose
+        # the AsyncClient. Order matters for cascading failure: if we
+        # awaited aclose() first and IT raised, control would exit via
+        # the new exception and director.release(model_id) would never
+        # run. Refcount leaks, eviction wedges. By releasing the
+        # director slot first we guarantee the refcount returns to
+        # baseline regardless of what aclose() does. The aclose() call
+        # below is wrapped so any failure there is logged but does not
+        # mask the original stream-open exception we re-raise.
+        # Regression watchdog: tests/cli_impl/test_gateway.py
+        # ::TestAsyncClientLifecycle::test_stream_open_failure_aclose_client
+        # (aclose runs); tests/cli_impl/test_gateway_lazy.py
+        # ::TestAcquireRelease::test_release_runs_even_when_aclose_raises_during_stream_open_failure
+        # (release runs even when aclose explodes).
         try:
             director.release(model_id)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "director.release(%r) raised during stream-open cleanup",
                 model_id, exc_info=True,
+            )
+        try:
+            await client.aclose()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "AsyncClient.aclose() raised during stream-open cleanup",
+                exc_info=True,
             )
         raise
 
@@ -461,23 +486,36 @@ async def _forward_with_release(
             # the upstream iteration completes (full body sent) OR when
             # it raises (worker died, client disconnected). Either way,
             # the model's refcount drops back to baseline at end-of-life.
+            #
+            # Order: release FIRST, then close the stream and client.
+            # If aexit / aclose raised before release, the refcount would
+            # leak. Putting release at the top of the finally chain
+            # decouples it from cascading failures in the cleanup path.
             try:
                 async for chunk in response.aiter_raw():
                     yield chunk
             finally:
                 try:
+                    director.release(model_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "director.release(%r) raised at stream-close",
+                        model_id, exc_info=True,
+                    )
+                try:
                     await stream_ctx.__aexit__(None, None, None)
-                finally:
-                    try:
-                        await client.aclose()
-                    finally:
-                        try:
-                            director.release(model_id)
-                        except Exception:  # noqa: BLE001
-                            logger.warning(
-                                "director.release(%r) raised at stream-close",
-                                model_id, exc_info=True,
-                            )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "stream_ctx.__aexit__ raised at stream-close",
+                        exc_info=True,
+                    )
+                try:
+                    await client.aclose()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "AsyncClient.aclose() raised at stream-close",
+                        exc_info=True,
+                    )
 
         return StreamingResponse(
             relay(),
@@ -486,27 +524,36 @@ async def _forward_with_release(
             media_type=content_type,
         )
 
-    # Non-streaming: read once, release the model, close stream + client.
-    # The order matters: aread first (under the active stream context),
-    # then release the director slot, then aexit the stream + close the
-    # client. A failure in aread propagates after release runs in the
-    # finally, so refcount is never stranded.
+    # Non-streaming: read the buffered body, then release the director
+    # slot FIRST, then aexit the stream and aclose the client. The
+    # release-first order matches the stream-open-failure branch and
+    # the relay generator: no cleanup-cascading failure can strand the
+    # refcount. A failure in aread propagates after release runs in the
+    # finally chain.
     try:
         content = await response.aread()
     finally:
         try:
+            director.release(model_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "director.release(%r) raised during buffered-response cleanup",
+                model_id, exc_info=True,
+            )
+        try:
             await stream_ctx.__aexit__(None, None, None)
-        finally:
-            try:
-                await client.aclose()
-            finally:
-                try:
-                    director.release(model_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "director.release(%r) raised during buffered-response cleanup",
-                        model_id, exc_info=True,
-                    )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "stream_ctx.__aexit__ raised during buffered-response cleanup",
+                exc_info=True,
+            )
+        try:
+            await client.aclose()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "AsyncClient.aclose() raised during buffered-response cleanup",
+                exc_info=True,
+            )
 
     return Response(
         content=content,

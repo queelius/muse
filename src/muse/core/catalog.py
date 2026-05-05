@@ -215,10 +215,49 @@ def _catalog_path() -> Path:
     return _catalog_dir() / "catalog.json"
 
 
+# mtime-based cache for _read_catalog. The catalog is consulted on the
+# gateway hot path (every request: get_manifest -> _read_catalog) and by
+# admin / CLI flows. Cache stores (path_str, mtime_ns, parsed_dict);
+# invalidates whenever the file's mtime advances (writes go through
+# `_write_catalog`'s atomic rename, which updates mtime). A path-keyed
+# lookup means tests using `tmp_path` + the MUSE_CATALOG_DIR env var
+# don't accidentally hit cache from a prior run; first read after path
+# change is always a fresh disk read.
+_read_catalog_cache: tuple[str, int, dict] | None = None
+
+
 def _read_catalog() -> dict:
+    """Return the parsed catalog.json contents, with mtime-based caching.
+
+    Hot path. Returns a fresh dict each call (deep copy of the cached
+    parse) so callers can mutate without polluting the cache.
+    """
+    global _read_catalog_cache
     p = _catalog_path()
     if not p.exists():
+        # Drop any cached state from a prior pulled+removed cycle so a
+        # subsequent write produces a cache-miss instead of returning a
+        # stale dict.
+        _read_catalog_cache = None
         return {}
+    try:
+        mtime_ns = p.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = -1
+    path_str = str(p)
+
+    cached = _read_catalog_cache
+    if (
+        cached is not None
+        and cached[0] == path_str
+        and cached[1] == mtime_ns
+        and mtime_ns != -1
+    ):
+        # Deep copy: callers (`pull`, `remove`, `set_enabled`) mutate the
+        # returned dict in-place, then write back. Sharing the cached
+        # reference would let those mutations bleed into later cache hits.
+        return _deep_copy_catalog(cached[2])
+
     try:
         data = json.loads(p.read_text())
     except json.JSONDecodeError:
@@ -228,7 +267,28 @@ def _read_catalog() -> dict:
     # Non-destructive: only affects the in-memory dict on read.
     for entry in data.values():
         entry.setdefault("enabled", True)
+    if mtime_ns != -1:
+        _read_catalog_cache = (path_str, mtime_ns, _deep_copy_catalog(data))
     return data
+
+
+def _deep_copy_catalog(data: dict) -> dict:
+    """Shallow-then-shallow copy of the catalog dict-of-dicts.
+
+    Catalog entries are plain JSON shapes (str/number/bool/None plus dicts
+    and lists). The persisted `manifest` field is the deepest structure,
+    and callers mutate it (e.g. `_pull_via_resolver` does
+    `manifest = dict(resolved.manifest)` before storing). So a top-level
+    deep copy via `json.loads(json.dumps(data))` is the most defensive
+    cheap option; profile if this becomes a hot spot.
+    """
+    return json.loads(json.dumps(data))
+
+
+def _reset_read_catalog_cache() -> None:
+    """Test hook: clear the catalog read cache."""
+    global _read_catalog_cache
+    _read_catalog_cache = None
 
 
 def _write_catalog(data: dict) -> None:
@@ -236,12 +296,21 @@ def _write_catalog(data: dict) -> None:
 
     Rename within the same filesystem is atomic on POSIX and near-atomic
     on Windows (Python 3.3+ Path.replace wraps MoveFileEx with REPLACE_EXISTING).
+
+    Invalidates the read cache so the next `_read_catalog()` sees this
+    write. The mtime check would catch this on its own under normal
+    filesystems, but explicit invalidation removes a class of race that
+    surfaces on coarse-mtime filesystems (e.g. some FAT, network mounts):
+    consecutive writes within the same mtime tick would otherwise serve
+    stale data on the read between them.
     """
+    global _read_catalog_cache
     p = _catalog_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2))
     tmp.replace(p)
+    _read_catalog_cache = None
 
 
 def is_pulled(model_id: str) -> bool:

@@ -232,6 +232,50 @@ class TestAcquireRelease:
         # Director acquire was called too.
         state.director.acquire.assert_called_once()
 
+    def test_release_runs_even_when_aclose_raises_during_stream_open_failure(self):
+        """Cascading-failure regression: stream-open raises AND aclose
+        raises during cleanup. release MUST still fire so the refcount
+        does not leak.
+
+        Without the fix in `_forward_with_release`, a `aclose()` that
+        raises would propagate before `director.release(...)` runs,
+        stranding the refcount forever and (eventually) wedging the
+        director's refcount-based eviction.
+        """
+        state = _make_state_with_director(acquire_port=9001)
+        app = build_gateway(state=state)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        with _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            # aclose() itself raises during cleanup. Without the fix,
+            # this exception would skip past director.release(...).
+            mock_client.aclose = AsyncMock(
+                side_effect=RuntimeError("aclose blew up"),
+            )
+
+            stream_ctx = MagicMock()
+            stream_ctx.__aenter__ = AsyncMock(
+                side_effect=httpx.ConnectError("worker died"),
+            )
+            stream_ctx.__aexit__ = AsyncMock(return_value=None)
+            mock_client.stream = MagicMock(return_value=stream_ctx)
+            mock_cls.return_value = mock_client
+
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        # The forward raised; FastAPI surfaces 500.
+        assert r.status_code == 500
+        # The cascading failure must NOT have stolen the release call.
+        state.director.release.assert_called_once_with("fake-model")
+        state.director.acquire.assert_called_once()
+
 
 # =============================================================================
 # F2: unservable short-circuit (BEFORE acquire)

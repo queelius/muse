@@ -14,21 +14,24 @@ from muse.core.catalog import (
     remove,
     _read_catalog,
     _reset_known_models_cache,
+    _reset_read_catalog_cache,
 )
 from muse.core.discovery import modality_tags
 
 
 @pytest.fixture(autouse=True)
 def _isolate_catalog_cache():
-    """Reset the known-models cache around every test.
+    """Reset the known-models AND read-catalog mtime caches around every test.
 
-    The cache persists in process memory and would otherwise bleed
-    state between tests. Bundled-only discovery is cheap, so re-running
-    it per test is fine.
+    Both caches persist in process memory and would otherwise bleed state
+    across tests. Bundled-only discovery is cheap and the catalog file is
+    tiny, so re-running each per test is fine.
     """
     _reset_known_models_cache()
+    _reset_read_catalog_cache()
     yield
     _reset_known_models_cache()
+    _reset_read_catalog_cache()
 
 
 @pytest.fixture
@@ -709,6 +712,122 @@ def test_get_manifest_falls_back_to_script_module_for_bundled(tmp_catalog):
     m = get_manifest("kokoro-82m")
     assert m["model_id"] == "kokoro-82m"
     assert m["modality"] == "audio/speech"
+
+
+# --- _read_catalog mtime cache ---------------------------------------------
+#
+# `get_manifest` runs on the gateway hot path (every request). Without
+# caching, each request re-reads catalog.json + re-parses JSON, which adds
+# unnecessary file I/O per request. The cache stores (mtime, parsed_dict)
+# keyed by catalog path; invalidates when the file's mtime changes (writes
+# go through `_write_catalog`'s atomic rename, which updates mtime).
+
+
+def test_read_catalog_caches_consecutive_reads(tmp_catalog):
+    """Two consecutive _read_catalog() calls hit disk only once.
+
+    The cache uses mtime invalidation, so back-to-back reads against an
+    unchanged file return the cached result without re-parsing.
+    """
+    from unittest.mock import patch
+    from muse.core.catalog import (
+        _read_catalog,
+        _reset_read_catalog_cache,
+        _write_catalog,
+    )
+
+    _write_catalog({"alpha": {"hf_repo": "x/y", "enabled": True}})
+    _reset_read_catalog_cache()
+
+    real_path_read_text = type(tmp_catalog).read_text
+    call_count = {"n": 0}
+
+    def counting_read_text(self, *a, **kw):
+        call_count["n"] += 1
+        return real_path_read_text(self, *a, **kw)
+
+    with patch.object(type(tmp_catalog), "read_text", counting_read_text):
+        c1 = _read_catalog()
+        c2 = _read_catalog()
+        c3 = _read_catalog()
+
+    assert c1 == c2 == c3
+    # Three calls, exactly ONE disk read. Cache hits skip Path.read_text.
+    assert call_count["n"] == 1, (
+        f"_read_catalog hit disk {call_count['n']} times across 3 calls; "
+        "expected 1 (mtime cache)"
+    )
+
+
+def test_read_catalog_cache_invalidates_on_mtime_change(tmp_catalog):
+    """Writing through `_write_catalog` updates mtime; next read sees new data."""
+    import os
+    import time
+    from muse.core.catalog import (
+        _read_catalog,
+        _reset_read_catalog_cache,
+        _catalog_path,
+        _write_catalog,
+    )
+
+    _write_catalog({"alpha": {"hf_repo": "x/y", "enabled": True}})
+    _reset_read_catalog_cache()
+
+    first = _read_catalog()
+    assert "alpha" in first
+    assert "beta" not in first
+
+    # mtime resolution can be coarse (1s on some filesystems); bump
+    # explicitly so the cache invalidates even on fast back-to-back writes.
+    time.sleep(0.01)
+    _write_catalog({"alpha": {"hf_repo": "x/y", "enabled": True},
+                    "beta": {"hf_repo": "p/q", "enabled": True}})
+    p = _catalog_path()
+    now = time.time()
+    os.utime(p, (now, now + 1.0))
+
+    second = _read_catalog()
+    assert "beta" in second, "_read_catalog cache failed to invalidate after _write_catalog"
+
+
+def test_get_manifest_does_not_re_read_catalog_each_call(tmp_catalog):
+    """get_manifest is on the gateway hot path; back-to-back calls must
+    hit the catalog file only once thanks to the mtime cache.
+    """
+    from unittest.mock import patch
+    from muse.core.catalog import (
+        get_manifest,
+        _reset_known_models_cache,
+        _reset_read_catalog_cache,
+    )
+
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="q3-gguf-q4",
+        capabilities={"gguf_file": "q4.gguf"},
+    )
+    _reset_known_models_cache()
+    _reset_read_catalog_cache()
+
+    real_path_read_text = type(tmp_catalog).read_text
+    call_count = {"n": 0}
+
+    def counting_read_text(self, *a, **kw):
+        call_count["n"] += 1
+        return real_path_read_text(self, *a, **kw)
+
+    with patch.object(type(tmp_catalog), "read_text", counting_read_text):
+        get_manifest("q3-gguf-q4")
+        baseline = call_count["n"]
+        # Second call MUST be a cache hit. Without the cache, this would
+        # re-read the catalog file from disk (the bug Issue 2 flagged).
+        get_manifest("q3-gguf-q4")
+        after_second = call_count["n"]
+
+    assert after_second == baseline, (
+        f"second get_manifest call hit disk {after_second - baseline} extra times; "
+        "expected 0 (cached)"
+    )
 
 
 # --- F2: pull() dispatch on URI vs bare id ----------------------------------
