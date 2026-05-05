@@ -174,7 +174,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             with backend._inference_lock:
                 return backend.classify(req.input)
 
-        results = await asyncio.to_thread(_call_moderation)
+        try:
+            results = await asyncio.to_thread(_call_moderation)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("moderations classify failed")
+            return error_response(500, "internal_error", str(e))
         body = encode_moderations(
             results, model_id=effective_id, threshold=threshold,
             safe_labels=safe_labels,

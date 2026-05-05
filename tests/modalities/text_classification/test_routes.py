@@ -493,3 +493,22 @@ def test_classifications_misconfigured_model_returns_500():
     assert r.status_code == 500
     body = r.json()
     assert body["error"]["code"] == "internal_error"
+
+
+def test_moderations_runtime_exception_returns_500():
+    """A backend.classify that raises must surface as 500 with the
+    OpenAI envelope, not as a raw uvicorn 500 with a traceback page.
+    Mirrors the same wrap on /v1/text/classifications.
+    """
+    backend = MagicMock()
+    backend.model_id = "boom"
+    backend.classify = MagicMock(side_effect=RuntimeError("simulated"))
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": "boom"})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app)
+    r = client.post("/v1/moderations", json={"input": "hello", "model": "boom"})
+    assert r.status_code == 500
+    body = r.json()
+    assert body["error"]["code"] == "internal_error"
+    assert "simulated" in body["error"]["message"]
