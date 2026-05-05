@@ -2,11 +2,20 @@
 
 The gateway is the user-facing process (port 8000 by default). Workers
 live on internal ports (9001+). The gateway:
-  1. Reads catalog + venv map at startup, builds a model-id -> worker-url table
+  1. (v0.40.0+) Routes requests via state.director.acquire(model_id, manifest=...).
+     The director may load the model on demand if it isn't currently
+     loaded (lazy load), evict an LRU model under memory pressure, or
+     short-circuit 503 if the requested model exceeds device capacity.
   2. Extracts `model` from each request (body for POST, query for GET)
   3. Forwards the request to the hosting worker, streaming the response (D4)
   4. Aggregates /v1/models and /health across all workers (D3)
   5. Mounts /v1/admin/* with bearer-token auth (v0.28.0+)
+
+The legacy static-routes path (build_gateway(routes=...)) survives for
+tests that pre-date the lazy-load wiring. When `state.director` is set,
+the proxy skips the static map entirely and calls director.acquire on
+every request; release fires on completion in a finally clause that
+spans both buffered and streaming responses.
 
 Proxy routing is modality-agnostic: any request with a `model` field
 routes to the worker hosting that model, regardless of URL path. This
@@ -25,6 +34,11 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+# Imported at module-top so tests can patch
+# `muse.cli_impl.gateway.get_manifest` to inject manifests or simulate
+# unknown-model KeyErrors without touching catalog state on disk.
+from muse.core.catalog import get_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +100,23 @@ async def extract_model_from_request(request: Any) -> str | None:
     return None
 
 
-def _openai_error(status: int, code: str, message: str) -> JSONResponse:
-    """OpenAI-compatible error envelope."""
+def _openai_error(
+    status: int,
+    code: str,
+    message: str,
+    *,
+    error_type: str = "invalid_request_error",
+) -> JSONResponse:
+    """OpenAI-compatible error envelope.
+
+    `error_type` defaults to `invalid_request_error` (the OpenAI shape for
+    400 / 404). Lazy-load 503s ("model_unservable", "model_too_large_for_device")
+    pass `service_unavailable` so SDK clients that branch on type can
+    distinguish "this request is malformed" from "this server is full."
+    """
     return JSONResponse(
         status_code=status,
-        content={"error": {"code": code, "message": message, "type": "invalid_request_error"}},
+        content={"error": {"code": code, "message": message, "type": error_type}},
     )
 
 
@@ -250,6 +276,21 @@ def build_gateway(
                 "request is missing a `model` field (required for gateway routing)",
             )
 
+        # Director-driven path (v0.40.0+ lazy load). When the SupervisorState
+        # carries a LoadDirector, every request acquires the worker port
+        # via director.acquire and releases on completion. The director
+        # transparently handles cold load, LRU eviction, and singleton-
+        # load coordination. Static-routes mode (build_gateway(routes=...)
+        # with no state.director) still works for the legacy test path.
+        s = app.state.routes_state
+        if s is not None and getattr(s, "director", None) is not None:
+            return await _route_via_director(
+                request, full_path, model_id, s, app.state.timeout,
+            )
+
+        # Legacy static-routes path: look up the worker URL in a frozen
+        # dict and forward. No acquire/release. Used by tests that
+        # pre-date Task F.
         cur = app.state.routes_now()
         route = cur.get(model_id)
         if route is None:
@@ -263,6 +304,215 @@ def build_gateway(
         return await _forward(request, target_url, app.state.timeout)
 
     return app
+
+
+async def _route_via_director(
+    request: Request,
+    full_path: str,
+    model_id: str,
+    state: Any,
+    timeout: float,
+) -> Response:
+    """Director-driven request routing for v0.40.0 lazy load.
+
+    Order of operations:
+
+      1. Check `state.unservable_reasons[model_id]`. If set, return 503
+         with the reason text. The director is NOT called for unservable
+         models: the boot-validation step already decided they cannot be
+         served, so attempting a load would only stall the request before
+         failing.
+      2. Resolve the manifest via `muse.core.catalog.get_manifest`. The
+         director's load + eviction decisions read `capabilities.memory_gb`
+         and `capabilities.device` from this dict. KeyError (model not in
+         catalog) -> 404 model_not_found.
+      3. Call `state.director.acquire(model_id, manifest=...)`. This may
+         block on cold load + eviction. On `OperationError` (the director's
+         user-facing failure type, e.g. model_too_large_for_device), map
+         to the corresponding HTTP status. Other exceptions propagate to
+         FastAPI's default 500 path.
+      4. On a successful acquire, forward the request to the returned port.
+         The release call MUST fire on completion regardless of outcome.
+         For non-streaming responses, the finally clause covers it. For
+         streaming responses, the relay generator's own finally clause
+         calls release at end-of-iteration (NOT at first-chunk dispatch).
+    """
+    # 1. Unservable short-circuit (BEFORE acquire). Reading
+    # state.unservable_reasons under the state lock keeps it consistent
+    # with concurrent admin operations that mutate the dict.
+    with state.lock:
+        unservable_reason = state.unservable_reasons.get(model_id)
+    if unservable_reason is not None:
+        return _openai_error(
+            503,
+            "model_unservable",
+            f"model {model_id!r} cannot be served: {unservable_reason}",
+            error_type="service_unavailable",
+        )
+
+    # 2. Resolve manifest. Per-request lookup is cheap (the catalog is
+    # cached in `known_models`) and keeps us safe against catalog edits
+    # that landed since boot. KeyError -> 404 model_not_found.
+    try:
+        manifest = get_manifest(model_id)
+    except KeyError:
+        return _openai_error(
+            404, "model_not_found",
+            f"model {model_id!r} is not in the catalog",
+        )
+
+    # 3. Acquire. The director may load (cold), evict (LRU), or
+    # short-circuit (already loaded). It returns the worker port hosting
+    # the model. OperationError carries an explicit (status, code,
+    # message) to surface back to the client.
+    from muse.admin.operations import OperationError
+
+    try:
+        worker_port = state.director.acquire(model_id, manifest=manifest)
+    except OperationError as exc:
+        return _openai_error(
+            exc.status, exc.code, exc.message,
+            error_type=(
+                "service_unavailable" if exc.status >= 500
+                else "invalid_request_error"
+            ),
+        )
+
+    # 4. Forward. The release call is wired into the response shape:
+    # for buffered responses, fire in a finally clause once the body is
+    # read; for SSE streams, fire from inside the relay generator's
+    # finally clause when the upstream iteration ends (or raises). Both
+    # paths converge in `_forward_with_release`.
+    target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
+    return await _forward_with_release(
+        request, target_url, timeout,
+        director=state.director, model_id=model_id,
+    )
+
+
+async def _forward_with_release(
+    request: Request,
+    target_url: str,
+    timeout: float,
+    *,
+    director: Any,
+    model_id: str,
+) -> Response:
+    """Forward + release variant: same shape as `_forward`, but wires the
+    director.release call into the response lifecycle.
+
+    Buffered (non-stream) response: release runs after `aread()` and
+    before the Response is returned. The TestClient consumes the buffer
+    before its `client.post` call returns, so the release fires inside
+    the request lifecycle.
+
+    Streaming (SSE) response: release runs inside the relay generator's
+    `finally` clause. The clause executes only after the FastAPI runtime
+    finishes iterating (full body sent) or the iteration raises (worker
+    died, client disconnected). This matches the spec's "release on
+    stream-close" requirement: a release on first-chunk dispatch would
+    decrement refcount before the request actually finished, opening a
+    window where the model could be evicted mid-response.
+
+    Both paths also call director.release on the early-failure branches
+    (stream-open raise, body-aread raise), so refcount is never stranded.
+    """
+    body = await request.body()
+    excluded = {"host", "content-length", "transfer-encoding", "connection"}
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded}
+
+    client = httpx.AsyncClient(timeout=timeout)
+    stream_ctx = client.stream(
+        method=request.method,
+        url=target_url,
+        headers=fwd_headers,
+        content=body,
+        params=dict(request.query_params),
+    )
+    try:
+        response = await stream_ctx.__aenter__()
+    except Exception:
+        # __aenter__ raised: release the refcount and the AsyncClient
+        # before propagating. Without this, refcount would stay incremented
+        # forever and the AsyncClient's connection-pool slot would leak
+        # (regression watchdog: tests/cli_impl/test_gateway.py
+        # ::TestAsyncClientLifecycle::test_stream_open_failure_aclose_client).
+        await client.aclose()
+        try:
+            director.release(model_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "director.release(%r) raised during stream-open cleanup",
+                model_id, exc_info=True,
+            )
+        raise
+
+    content_type = response.headers.get("content-type", "")
+    is_stream = "text/event-stream" in content_type
+
+    resp_headers = {
+        k: v for k, v in response.headers.items()
+        if k.lower() not in excluded
+    }
+
+    if is_stream:
+        async def relay():
+            # The relay generator owns the release call: it fires when
+            # the upstream iteration completes (full body sent) OR when
+            # it raises (worker died, client disconnected). Either way,
+            # the model's refcount drops back to baseline at end-of-life.
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                try:
+                    await stream_ctx.__aexit__(None, None, None)
+                finally:
+                    try:
+                        await client.aclose()
+                    finally:
+                        try:
+                            director.release(model_id)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "director.release(%r) raised at stream-close",
+                                model_id, exc_info=True,
+                            )
+
+        return StreamingResponse(
+            relay(),
+            status_code=response.status_code,
+            headers=resp_headers,
+            media_type=content_type,
+        )
+
+    # Non-streaming: read once, release the model, close stream + client.
+    # The order matters: aread first (under the active stream context),
+    # then release the director slot, then aexit the stream + close the
+    # client. A failure in aread propagates after release runs in the
+    # finally, so refcount is never stranded.
+    try:
+        content = await response.aread()
+    finally:
+        try:
+            await stream_ctx.__aexit__(None, None, None)
+        finally:
+            try:
+                await client.aclose()
+            finally:
+                try:
+                    director.release(model_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "director.release(%r) raised during buffered-response cleanup",
+                        model_id, exc_info=True,
+                    )
+
+    return Response(
+        content=content,
+        status_code=response.status_code,
+        headers=resp_headers,
+    )
 
 
 async def _forward(request: Request, target_url: str, timeout: float) -> Response:
