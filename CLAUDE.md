@@ -503,10 +503,18 @@ pytest tests/core/test_resolvers.py::test_register_and_get_resolver -v
 # Coverage
 pytest tests/ -m "not slow" --cov=muse
 
-# CLI: admin surface (no per-modality verbs; generation is HTTP)
-muse --help                                    # top-level help
+# CLI: admin surface (no per-modality verbs; generation is HTTP).
+# Built on typer + rich since v0.39.0; `muse --help` and the per-
+# subcommand help are auto-generated, color-coded, and respect
+# NO_COLOR env. The list / search / refresh outputs auto-detect TTY:
+# pretty rich.Table when interactive; plain text (no ANSI, no
+# truncation) when piped or redirected, so `muse models list | grep`
+# always sees full content. `--json` flag on list / probe / refresh
+# emits machine-readable output.
+muse --help                                    # top-level help (typer-styled)
 muse models list                               # bundled + curated + pulled
 muse models list --available --modality chat/completion
+muse models list --json                        # deterministic JSON output
 muse search qwen3 --modality chat/completion --max-size-gb 10
 muse pull qwen3.5-4b-q4                        # curated alias
 muse pull hf://unsloth/Qwen3.5-9B-GGUF@q4_k_m  # resolver URI
@@ -575,6 +583,7 @@ PY
 - **Enable/disable is catalog state**, not runtime state. `muse serve` reads the catalog at startup. Changing a model's enabled bit while the server is running has no effect until the next restart.
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
+- **CLI is typer + rich (v0.39.0+).** Per-subcommand parameter binding lives in `src/muse/cli.py` as typer command functions; the heavy logic lives in `src/muse/cli_impl/<command>.py`. New subcommands add a `@app.command(...)` plus a sibling `cli_impl/*.py` module; do not put logic in `cli.py`. Long-form output that goes to a TTY is rendered via `rich.Table` from `cli_impl/console.py`'s shared `Console`; non-TTY output (subprocess, pipe, redirect) is plain text with no ANSI and no truncation, so `muse models list | grep` always sees full content. Status encoding for `models list` and `refresh --all` uses single colored glyphs (`STATUS_STYLE` in `cli_impl/console.py`): `●` enabled, `○` disabled, `★` recommended, `·` available; `✓` ok, `✗` failed for refresh outcomes. `--json` is the canonical machine-readable output across `list` / `probe` / `refresh`.
 
 ## Fresh-venv smoke test (CI)
 
