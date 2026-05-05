@@ -8,10 +8,16 @@ catalog.json. The breakdown is grouped by device:
 
 Live system totals come from psutil (CPU) and pynvml (GPU). Both are
 optional: when neither is installed, the corresponding section is null.
+
+`recent_decisions` (v0.40.0+) surfaces the LoadDirector's last 20
+load/evict decisions for operator visibility into lazy-load behavior.
+Empty list when no director is bound (supervisor not booted, or running
+the gateway in isolation for tests).
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
@@ -28,9 +34,53 @@ def build_memory_router() -> APIRouter:
     def memory_status():
         gpu = _gpu_summary()
         cpu = _cpu_summary()
-        return {"gpu": gpu, "cpu": cpu}
+        return {
+            "gpu": gpu,
+            "cpu": cpu,
+            "recent_decisions": _recent_decisions(),
+        }
 
     return router
+
+
+def _recent_decisions() -> list[dict]:
+    """Return the LoadDirector's recent decisions as JSON-serializable dicts.
+
+    Returns an empty list when no director is bound to the supervisor
+    state (supervisor not yet booted, or test harness driving routes
+    in isolation). The deque is iterated under the director's lock so
+    a concurrent append cannot interleave with our snapshot.
+
+    Each DecisionLogEntry's `timestamp` field is wall-clock seconds
+    (time.time(), recorded inside the director). We convert it to an
+    ISO-8601 string (UTC) here so the wire shape is operator-friendly
+    and round-trips through JSON cleanly.
+    """
+    state = get_supervisor_state()
+    director = state.director
+    if director is None:
+        return []
+
+    out: list[dict] = []
+    with director.lock:
+        for entry in director.recent_decisions:
+            ts = entry.timestamp
+            iso = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                if isinstance(ts, (int, float))
+                else str(ts)
+            )
+            out.append({
+                "timestamp": iso,
+                "model_id": entry.model_id,
+                "action": entry.action,
+                "memory_gb": entry.memory_gb,
+                "free_before_gb": entry.free_before_gb,
+                "free_after_gb": entry.free_after_gb,
+                "reason": entry.reason,
+                "evicted": list(entry.evicted),
+            })
+    return out
 
 
 def _enabled_loaded_model_ids() -> set[str]:

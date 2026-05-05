@@ -73,7 +73,7 @@ class TestMemoryRoute:
         r = client.get("/v1/admin/memory", headers=headers)
         assert r.status_code == 200
         body = r.json()
-        assert body == {"gpu": None, "cpu": None}
+        assert body == {"gpu": None, "cpu": None, "recent_decisions": []}
 
     def test_per_model_breakdown_unit(self, tmp_catalog):
         """Direct call into the helper; bypasses psutil/pynvml entirely."""
@@ -126,3 +126,176 @@ class TestMemoryRoute:
         assert all(r["model_id"] != "sd-turbo" for r in out_cpu)
         # GPU model present in GPU bucket
         assert any(r["model_id"] == "sd-turbo" for r in out_gpu)
+
+
+class TestRecentDecisions:
+    """Task G: /v1/admin/memory exposes the director's recent_decisions
+    deque (last 20 load/evict events) for operational visibility.
+
+    Each entry is a dict shaped like the serialized DecisionLogEntry
+    with an ISO-8601 timestamp string instead of the raw float.
+    """
+
+    def test_no_director_returns_empty_recent_decisions(
+        self, client, headers, monkeypatch,
+    ):
+        # Bare SupervisorState (no director) should still produce a
+        # well-formed envelope; recent_decisions = [] keeps clients
+        # from having to guard against missing fields.
+        monkeypatch.setitem(sys.modules, "psutil", None)
+        monkeypatch.setitem(sys.modules, "pynvml", None)
+        set_supervisor_state(SupervisorState(workers=[], device="cpu"))
+
+        r = client.get("/v1/admin/memory", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert "recent_decisions" in body
+        assert body["recent_decisions"] == []
+
+    def test_director_recent_decisions_serialized(
+        self, client, headers, monkeypatch,
+    ):
+        # Populate the director with a couple decisions and verify they
+        # land in the response with the right shape.
+        from muse.cli_impl.load_director import DecisionLogEntry, LoadDirector
+
+        monkeypatch.setitem(sys.modules, "psutil", None)
+        monkeypatch.setitem(sys.modules, "pynvml", None)
+
+        director = LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: 32.0),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        director.recent_decisions.append(DecisionLogEntry(
+            timestamp=1700000000.0,
+            model_id="kokoro-82m",
+            action="load",
+            memory_gb=0.5,
+            free_before_gb=10.0,
+            free_after_gb=9.5,
+            reason="fit",
+            evicted=[],
+        ))
+        director.recent_decisions.append(DecisionLogEntry(
+            timestamp=1700000001.5,
+            model_id="sd-turbo",
+            action="evict",
+            memory_gb=4.0,
+            free_before_gb=2.0,
+            free_after_gb=6.0,
+            reason="evicted_for_newcomer",
+            evicted=["sd-turbo"],
+        ))
+
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+        set_supervisor_state(state)
+
+        r = client.get("/v1/admin/memory", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+
+        decisions = body["recent_decisions"]
+        assert len(decisions) == 2
+
+        d0 = decisions[0]
+        assert d0["model_id"] == "kokoro-82m"
+        assert d0["action"] == "load"
+        assert d0["memory_gb"] == 0.5
+        assert d0["free_before_gb"] == 10.0
+        assert d0["free_after_gb"] == 9.5
+        assert d0["reason"] == "fit"
+        assert d0["evicted"] == []
+        # ISO-format timestamp string, not a raw float.
+        assert isinstance(d0["timestamp"], str)
+        assert "T" in d0["timestamp"]  # ISO-8601 with T separator
+
+        d1 = decisions[1]
+        assert d1["model_id"] == "sd-turbo"
+        assert d1["action"] == "evict"
+        assert d1["evicted"] == ["sd-turbo"]
+
+    def test_recent_decisions_limited_to_last_20(
+        self, client, headers, monkeypatch,
+    ):
+        # The deque is maxlen=20 by construction; even if we push 25
+        # entries, the response should only contain the most recent 20.
+        from muse.cli_impl.load_director import DecisionLogEntry, LoadDirector
+
+        monkeypatch.setitem(sys.modules, "psutil", None)
+        monkeypatch.setitem(sys.modules, "pynvml", None)
+
+        director = LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: 32.0),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        for i in range(25):
+            director.recent_decisions.append(DecisionLogEntry(
+                timestamp=1700000000.0 + i,
+                model_id=f"model-{i}",
+                action="load",
+                memory_gb=0.5,
+                free_before_gb=10.0,
+                free_after_gb=9.5,
+                reason="fit",
+                evicted=[],
+            ))
+
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+        set_supervisor_state(state)
+
+        r = client.get("/v1/admin/memory", headers=headers)
+        body = r.json()
+
+        # Deque maxlen=20 caps the count; we get the most recent 20.
+        assert len(body["recent_decisions"]) == 20
+        # First in the response is model-5 (the oldest of the surviving 20).
+        assert body["recent_decisions"][0]["model_id"] == "model-5"
+        # Last is model-24.
+        assert body["recent_decisions"][-1]["model_id"] == "model-24"
+
+    def test_handles_none_free_after_gb(self, client, headers, monkeypatch):
+        # During an eviction round the partial DecisionLogEntry has
+        # free_after_gb=None (set later when the poll completes). The
+        # serializer must handle None without crashing.
+        from muse.cli_impl.load_director import DecisionLogEntry, LoadDirector
+
+        monkeypatch.setitem(sys.modules, "psutil", None)
+        monkeypatch.setitem(sys.modules, "pynvml", None)
+
+        director = LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: 32.0),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        director.recent_decisions.append(DecisionLogEntry(
+            timestamp=1700000000.0,
+            model_id="evicting",
+            action="evict",
+            memory_gb=4.0,
+            free_before_gb=1.0,
+            free_after_gb=None,
+            reason="evicted_for_newcomer",
+            evicted=["evicting"],
+        ))
+
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+        set_supervisor_state(state)
+
+        r = client.get("/v1/admin/memory", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["recent_decisions"][0]["free_after_gb"] is None

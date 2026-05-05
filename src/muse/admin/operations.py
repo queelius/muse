@@ -28,6 +28,7 @@ from muse.cli_impl.supervisor import (
 )
 from muse.core.catalog import (
     _read_catalog,
+    get_manifest,
     is_pulled,
     known_models,
     remove as catalog_remove,
@@ -563,6 +564,51 @@ def disable_model(model_id: str, *, state: SupervisorState) -> dict:
         "worker_port": spec_to_restart.port,
         "remaining_models_in_worker": list(spec_to_restart.models),
     }
+
+
+def warmup_model(model_id: str, *, state: SupervisorState) -> dict:
+    """Sync operation: pre-load `model_id` via the LoadDirector without
+    serving a request.
+
+    Lazy-load companion to `enable_model`. Differs from
+    `load_model_into_worker` (the director's enable_fn) in that it goes
+    through the director's full warmup pathway: decide / load / commit
+    with on-demand LRU eviction, but with the loaded LoadEntry's
+    refcount=0 so the model is immediately eligible for eviction if
+    pressure arrives before any request lands.
+
+    The route handler returns this dict inline (no JobStore wrapping)
+    because warmup is a simple synchronous operation from the caller's
+    perspective: either it succeeds (returns a port) or it raises an
+    OperationError that the route maps to an HTTP status. The director
+    internally may take 10-60 seconds during a cold load, but that's
+    just the duration of one HTTP request.
+
+    Returns: {"model_id": ..., "worker_port": int}.
+
+    Raises:
+      OperationError("model_not_found", status=404): unknown model id.
+      OperationError("director_unavailable", status=503): supervisor
+        state has no director (supervisor not booted).
+      OperationError("model_too_large_for_device", status=503): from
+        the director when on-demand LRU eviction can't free enough.
+    """
+    catalog_known = known_models()
+    if model_id not in catalog_known:
+        raise OperationError(
+            "model_not_found", f"unknown model {model_id!r}", status=404,
+        )
+
+    if state.director is None:
+        raise OperationError(
+            "director_unavailable",
+            "supervisor director is not initialized; warmup requires a running `muse serve`",
+            status=503,
+        )
+
+    manifest = get_manifest(model_id)
+    worker_port = state.director.warmup(model_id, manifest=manifest)
+    return {"model_id": model_id, "worker_port": worker_port}
 
 
 def remove_model(model_id: str, *, state: SupervisorState, purge: bool) -> dict:

@@ -33,6 +33,7 @@ from muse.admin.operations import (
     probe_model,
     pull_model,
     remove_model,
+    warmup_model,
 )
 from muse.cli_impl.supervisor import SupervisorState, get_supervisor_state
 from muse.core.catalog import _read_catalog, known_models
@@ -94,6 +95,23 @@ def build_models_router() -> APIRouter:
         state = _resolve_state()
         try:
             return disable_model(model_id, state=state)
+        except OperationError as e:
+            return _operation_error_to_response(e)
+
+    @router.post("/models/{model_id}/warmup")
+    def warmup(model_id: str, _body: dict | None = Body(default=None)):
+        """Pre-load `model_id` via the LoadDirector without serving traffic.
+
+        Synchronous: the route returns the {"model_id", "worker_port"}
+        dict inline once the director's warmup completes. Cold loads
+        can take 10-60 seconds; the request blocks for that duration.
+        For async warmup with progress polling, the future async-job
+        wrapper (deferred to v1.next) would mirror the enable route's
+        202 + job_id pattern.
+        """
+        state = _resolve_state()
+        try:
+            return warmup_model(model_id, state=state)
         except OperationError as e:
             return _operation_error_to_response(e)
 

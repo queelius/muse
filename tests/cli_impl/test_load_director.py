@@ -1455,3 +1455,144 @@ class TestColdLoadCommitFiresWriteback:
         catalog = _read_catalog()
         m = catalog["fake-model"]["measurements"]["cpu"]
         assert m["peak_bytes"] == 2 * 1024**3
+
+
+# ----------------------------------------------------------------------
+# Task G: warmup
+# ----------------------------------------------------------------------
+
+class TestWarmup:
+    """LoadDirector.warmup: like acquire but does NOT increment refcount.
+
+    Spec semantic: "load this model now without serving a request" so
+    subsequent requests are hot. The loaded entry has refcount=0 from the
+    start, making it immediately eligible for LRU eviction if pressure
+    arises before the first real request.
+    """
+
+    def test_warmup_cold_load_returns_port(self):
+        enable_fn = MagicMock(return_value=9001)
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        port = director.warmup("fake-model", manifest=_manifest())
+
+        assert port == 9001
+        enable_fn.assert_called_once_with("fake-model")
+
+    def test_warmup_does_not_increment_refcount(self):
+        # The defining characteristic: warmup leaves refcount at 0 so
+        # the entry is immediately evictable. (acquire would set it to 1.)
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        director.warmup("fake-model", manifest=_manifest())
+
+        snapshot = director.status()
+        assert "fake-model" in snapshot
+        assert snapshot["fake-model"]["refcount"] == 0
+        assert snapshot["fake-model"]["loaded"] is True
+
+    def test_warmup_when_already_loaded_returns_port_no_op(self):
+        # Hot warmup: model is already loaded. Don't double-load,
+        # don't bump refcount, just return the existing port.
+        enable_fn = MagicMock(return_value=9001)
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        director.acquire("fake-model", manifest=_manifest())
+        director.release("fake-model")
+        assert director.status()["fake-model"]["refcount"] == 0
+        enable_fn.reset_mock()
+
+        port = director.warmup("fake-model", manifest=_manifest())
+
+        assert port == 9001
+        enable_fn.assert_not_called()
+        # Refcount must still be 0 (warmup must not bump).
+        assert director.status()["fake-model"]["refcount"] == 0
+
+    def test_warmup_when_already_loaded_with_inflight_request(self):
+        # If the model is loaded with refcount > 0 (a live request),
+        # warmup must not interfere: just return the port.
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        director.acquire("fake-model", manifest=_manifest())
+        assert director.status()["fake-model"]["refcount"] == 1
+
+        port = director.warmup("fake-model", manifest=_manifest())
+
+        assert port == 9001
+        # refcount unchanged (still 1 from the live acquire).
+        assert director.status()["fake-model"]["refcount"] == 1
+
+    def test_warmup_records_decision_log_on_load(self):
+        # Warmup should still be observable via recent_decisions.
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        director.warmup("fake-model", manifest=_manifest())
+
+        decisions = list(director.recent_decisions)
+        assert len(decisions) == 1
+        assert decisions[0].model_id == "fake-model"
+        assert decisions[0].action == "load"
+
+    def test_warmup_evicts_lru_when_no_room(self):
+        # Same eviction loop as cold acquire. The newcomer's warmup
+        # forces an LRU eviction since memory is tight.
+        cpu_free_state = {"value": 10.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "victim":
+                cpu_free_state["value"] = 4.0
+                return 9001
+            if model_id == "newcomer":
+                return 9002
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+
+        def disable_side_effect(model_id: str) -> None:
+            cpu_free_state["value"] = 9.0
+
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
+        )
+
+        director.acquire("victim", manifest=_manifest(memory_gb=5.0, device="cpu"))
+        director.release("victim")
+
+        port = director.warmup("newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"))
+
+        assert port == 9002
+        disable_fn.assert_called_once_with("victim")
+        snapshot = director.status()
+        assert "newcomer" in snapshot
+        # Newcomer at refcount=0 (warmup default).
+        assert snapshot["newcomer"]["refcount"] == 0
+        assert "victim" not in snapshot

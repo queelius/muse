@@ -200,6 +200,53 @@ class LoadDirector:
             cleaning up the in-flight Event so concurrent waiters wake
             and re-enter the decision phase.
         """
+        return self._acquire_or_warmup(
+            model_id, manifest=manifest, bump_refcount=True,
+        )
+
+    def warmup(self, model_id: str, *, manifest: dict) -> int:
+        """Pre-load a model without serving a request.
+
+        Like `acquire` but does NOT increment refcount on either the hot
+        or cold path. The semantic is "load this model now so subsequent
+        requests are hot." The loaded entry's initial refcount is 0,
+        making it immediately eligible for LRU eviction if pressure
+        arises before any request lands.
+
+        Hot path (model already loaded): returns the existing port
+        without touching refcount or last_touched_at. The intent is
+        idempotency: repeated warmup calls must not skew LRU ordering
+        or pin the model artificially.
+
+        Cold path: runs the full decide / load / commit cycle including
+        on-demand LRU eviction. The committed LoadEntry has refcount=0,
+        which is the only behavioral difference from acquire.
+
+        Returns the worker_port hosting `model_id` after the warmup.
+
+        Raises:
+          OperationError("model_too_large_for_device", status=503): when
+            memory doesn't fit and on-demand LRU eviction can't free
+            enough (same as acquire).
+          Exception: re-raises any exception from enable_fn after
+            cleaning up the in-flight Event so concurrent waiters wake
+            and re-enter the decision phase.
+        """
+        return self._acquire_or_warmup(
+            model_id, manifest=manifest, bump_refcount=False,
+        )
+
+    def _acquire_or_warmup(
+        self, model_id: str, *, manifest: dict, bump_refcount: bool,
+    ) -> int:
+        """Shared body for acquire (bump_refcount=True) and warmup (False).
+
+        The two operations differ only in:
+          - Hot path: acquire bumps refcount + last_touched; warmup
+            doesn't.
+          - Cold commit: acquire seeds the LoadEntry refcount at 1;
+            warmup seeds at 0.
+        """
         # Loop because a thread that lost the singleton race and waited
         # on an in_flight Event may wake to find that the winner failed
         # (no LoadEntry was inserted). On wake, we re-enter the decision
@@ -212,7 +259,9 @@ class LoadDirector:
         # the model already, or stolen our victim, or pushed yet more
         # memory pressure. Re-decide is the correct recovery.
         while True:
-            decision = self._decide(model_id, manifest=manifest)
+            decision = self._decide(
+                model_id, manifest=manifest, bump_refcount=bump_refcount,
+            )
             phase = decision[0]
 
             if phase == "hot":
@@ -252,7 +301,10 @@ class LoadDirector:
             # phase == "load": this thread won the singleton race.
             # The Event is already in self.in_flight_loads under our name.
             # Run the (long) load phase outside the lock, then commit.
-            return self._load_and_commit(model_id, manifest=manifest)
+            initial_refcount = 1 if bump_refcount else 0
+            return self._load_and_commit(
+                model_id, manifest=manifest, initial_refcount=initial_refcount,
+            )
 
     def release(self, model_id: str) -> None:
         """Decrement refcount + bump last_touched_at.
@@ -426,14 +478,15 @@ class LoadDirector:
     # ------------------------------------------------------------------
 
     def _decide(
-        self, model_id: str, *, manifest: dict,
+        self, model_id: str, *, manifest: dict, bump_refcount: bool = True,
     ) -> tuple:
         """First phase, under the lock.
 
         Returns one of these tuple shapes:
           ("hot", port): entry already loaded; refcount + last_touched
-            bumped under the lock; port is the worker_port read under
-            the same lock (no TOCTOU window for an evictor to race in).
+            bumped under the lock (when bump_refcount=True); port is the
+            worker_port read under the same lock (no TOCTOU window for
+            an evictor to race in).
           ("wait",): another thread owns the load; caller awaits the Event.
           ("load",): we just claimed ownership; run load phase + commit.
           ("evict_and_retry", shortfall_gb, device): the model does not
@@ -441,6 +494,10 @@ class LoadDirector:
             the lock and re-calls _decide. No in-flight slot is claimed
             on this path so the eviction loop's lock-release-and-reacquire
             pattern is safe across the boundary.
+
+        `bump_refcount` is True for acquire (refcount drives in-flight
+        request accounting) and False for warmup (load idempotently
+        without skewing LRU ordering or pinning the model).
 
         On the ("load",) return path, an Event has been stashed in
         self.in_flight_loads[model_id]. The caller is responsible for
@@ -450,8 +507,9 @@ class LoadDirector:
         with self.lock:
             entry = self.loaded.get(model_id)
             if entry is not None:
-                entry.refcount += 1
-                entry.last_touched_at = time.monotonic()
+                if bump_refcount:
+                    entry.refcount += 1
+                    entry.last_touched_at = time.monotonic()
                 # Read port under the same lock that classified the
                 # entry; an evictor cannot race between the classification
                 # and this read.
@@ -493,11 +551,16 @@ class LoadDirector:
         with self.lock:
             return self.in_flight_loads.get(model_id)
 
-    def _load_and_commit(self, model_id: str, *, manifest: dict) -> int:
+    def _load_and_commit(
+        self, model_id: str, *, manifest: dict, initial_refcount: int = 1,
+    ) -> int:
         """Run the load phase outside the lock, then commit.
 
         On exception, performs cleanup so concurrent waiters wake up,
         no stale LoadEntry exists, and the exception propagates.
+
+        `initial_refcount` is 1 for acquire (a request is being served)
+        and 0 for warmup (no request, just pre-load).
 
         After a successful commit, schedules the observed-peak writeback
         (Task D): a daemon thread compares the observed `free_before -
@@ -526,7 +589,7 @@ class LoadDirector:
                 model_id=model_id,
                 worker_port=worker_port,
                 memory_gb=memory_gb,
-                refcount=1,
+                refcount=initial_refcount,
                 last_touched_at=now,
                 loaded_at=now,
             )

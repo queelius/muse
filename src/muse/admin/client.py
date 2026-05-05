@@ -92,6 +92,16 @@ class AdminClient:
     def disable(self, model_id: str) -> dict:
         return self._request("POST", f"/v1/admin/models/{model_id}/disable", json={})
 
+    def warmup(self, model_id: str) -> dict:
+        """Pre-load a model via the supervisor's LoadDirector.
+
+        Synchronous on the wire: returns once the director's warmup
+        completes (cold load duration: 10-60s for real models). Returns
+        {"model_id", "worker_port"} on success; raises AdminClientError
+        on 4xx/5xx.
+        """
+        return self._request("POST", f"/v1/admin/models/{model_id}/warmup", json={})
+
     def probe(
         self,
         model_id: str,
