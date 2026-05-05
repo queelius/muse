@@ -114,14 +114,23 @@ class HFVision2SeqRuntime:
             "max_new_tokens": max_new,
             "num_beams": num_beams,
         }
+        # Track the decoder prompt length so completion_tokens reflects
+        # only the newly generated tokens. Without prompt, the model
+        # uses a single bos/decoder_start token; with prompt, the
+        # tokenized prompt prepends.
+        prompt_len = 1
         if prompt is not None:
             tok_ids = self._processor.tokenizer(
                 prompt, return_tensors="pt",
             ).input_ids.to(self._device)
             gen_kwargs["decoder_input_ids"] = tok_ids
+            prompt_len = int(tok_ids.shape[-1])
 
         outputs = self._model.generate(**inputs, **gen_kwargs)
-        completion_tokens = int(outputs.shape[-1])
+        # Subtract the prompt length so completion_tokens reports
+        # newly-generated tokens, not the full sequence (mirrors the
+        # OpenAI usage.completion_tokens semantics).
+        completion_tokens = max(0, int(outputs.shape[-1]) - prompt_len)
 
         decoded = self._processor.batch_decode(
             outputs, skip_special_tokens=True,

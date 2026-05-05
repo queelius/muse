@@ -50,9 +50,13 @@ def _wire_basic_runtime(mod, *, decoded_text="hello world", token_count=10):
     processor.return_value = encoded
     processor.batch_decode = MagicMock(return_value=[decoded_text])
     # tokenizer().input_ids.to(device) chain for prompt encoding.
+    # The .to() return value needs a .shape so the runtime can
+    # compute prompt_len for completion_tokens accounting.
+    tok_moved = MagicMock()
+    tok_moved.shape = (1, 5)  # batch=1, prompt_seq_len=5
     tok_out = MagicMock()
     tok_out.input_ids = MagicMock()
-    tok_out.input_ids.to = MagicMock(return_value="decoder-input-ids")
+    tok_out.input_ids.to = MagicMock(return_value=tok_moved)
     processor.tokenizer = MagicMock(return_value=tok_out)
     # No post_process_generation by default.
     if hasattr(processor, "post_process_generation"):
@@ -86,7 +90,10 @@ def test_ocr_returns_extracted_text():
     result = runtime.ocr(MagicMock(name="pil_image"))
     assert result.text == "hello world"
     assert result.model_id == "trocr-test"
-    assert result.completion_tokens == 10
+    # completion_tokens is the new tokens only, not the full sequence.
+    # _make_outputs returned token_count=10; decoder bos prepends 1;
+    # so completion_tokens == 10 - 1 == 9.
+    assert result.completion_tokens == 9
 
 
 def test_ocr_max_new_tokens_override():
@@ -128,7 +135,35 @@ def test_ocr_prompt_forwards_decoder_input_ids():
     )
     gen_kwargs = model_obj.generate.call_args.kwargs
     assert "decoder_input_ids" in gen_kwargs
-    assert gen_kwargs["decoder_input_ids"] == "decoder-input-ids"
+    # Forwarded value is the .to() result of the tokenizer's input_ids.
+    expected = processor.tokenizer.return_value.input_ids.to.return_value
+    assert gen_kwargs["decoder_input_ids"] is expected
+
+
+def test_ocr_completion_tokens_excludes_prompt():
+    """Regression: completion_tokens must report newly-generated
+    tokens only, not the full sequence including the decoder prompt.
+    Wrong accounting was inflating Nougat usage by 5x+."""
+    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+    # token_count=20: 5 prompt tokens + 15 newly generated.
+    _wire_basic_runtime(mod, token_count=20)
+    runtime = mod.HFVision2SeqRuntime(
+        model_id="nougat", hf_repo="x", device="cpu",
+    )
+    result = runtime.ocr(MagicMock(), prompt="<s_doc>")
+    # 20 total - 5 prompt = 15 newly-generated tokens.
+    assert result.completion_tokens == 15
+
+
+def test_ocr_completion_tokens_no_prompt_subtracts_bos():
+    """Without prompt, decoder_start adds 1 token; subtract it."""
+    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+    _wire_basic_runtime(mod, token_count=10)
+    runtime = mod.HFVision2SeqRuntime(
+        model_id="trocr", hf_repo="x", device="cpu",
+    )
+    result = runtime.ocr(MagicMock())
+    assert result.completion_tokens == 9
 
 
 def test_ocr_prompt_none_skips_decoder_input_ids():
