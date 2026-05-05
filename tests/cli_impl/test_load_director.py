@@ -1316,6 +1316,60 @@ class TestObservedPeakWriteback:
         assert m["peak_bytes"] == 2 * 1024**3
         assert "source" not in m
 
+    def test_auto_device_resolves_to_cuda_when_gpu_available(self, catalog_dir):
+        """Manifests with `device: "auto"` must NOT split-brain against
+        probe records that always write the resolved device name.
+        When pynvml reports a free-VRAM number, "auto" -> "cuda"."""
+        _seed_catalog("fake-model", device="cuda", peak_bytes=None)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(gpu_free=32.0, cpu_free=64.0),
+        )
+
+        thread = director.observed_peak(
+            "fake-model",
+            observed_peak_bytes=3 * 1024**3,
+            device="auto",
+        )
+        assert thread is not None
+        thread.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        # Bucket key must be "cuda", NOT "auto".
+        assert "cuda" in catalog["fake-model"]["measurements"]
+        assert "auto" not in catalog["fake-model"]["measurements"]
+        assert catalog["fake-model"]["measurements"]["cuda"]["peak_bytes"] == 3 * 1024**3
+
+    def test_auto_device_resolves_to_cpu_when_no_gpu(self, catalog_dir):
+        """When pynvml is unavailable (gpu_free_gb returns None),
+        "auto" -> "cpu". Mirrors the runtime's actual fallback."""
+        _seed_catalog("fake-model", device="cpu", peak_bytes=None)
+
+        # gpu_free=None simulates pynvml-missing / CPU-only host.
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 64.0
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+
+        thread = director.observed_peak(
+            "fake-model",
+            observed_peak_bytes=2 * 1024**3,
+            device="auto",
+        )
+        assert thread is not None
+        thread.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        assert "cpu" in catalog["fake-model"]["measurements"]
+        assert "auto" not in catalog["fake-model"]["measurements"]
+        assert catalog["fake-model"]["measurements"]["cpu"]["peak_bytes"] == 2 * 1024**3
+
 
 class TestColdLoadCommitFiresWriteback:
     """The wired callsite: a successful cold load fires the writeback

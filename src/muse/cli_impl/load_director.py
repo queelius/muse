@@ -323,17 +323,28 @@ class LoadDirector:
 
         `device` is the catalog measurements bucket key. Existing probe
         records use "cuda" / "cpu" / "mps"; the alias "gpu" normalizes
-        to "cuda" so callers don't need to know the convention.
+        to "cuda", and the manifest convention "auto" / "" is resolved
+        to the device the load actually consumed (cuda if a GPU is
+        available, else cpu) so the bucket key matches the probe's.
         """
         if observed_peak_bytes <= 0:
             return None
 
-        # Normalize gpu -> cuda for catalog consistency. The probe writes
-        # "cuda" via _resolve_device; the supervisor will pass through
-        # whatever capabilities.device declares. Folding here avoids a
-        # split-brain measurements bucket where both keys exist for the
-        # same physical device.
-        device_key = "cuda" if device == "gpu" else device
+        # Normalize the bucket key. Three cases:
+        #   "gpu" -> "cuda": legacy alias.
+        #   "auto" / "": resolved to "cuda" if memory_probe reports a
+        #     GPU is available, else "cpu". Without this, manifests
+        #     declaring `device: "auto"` would split-brain against
+        #     probe records that always write the resolved name.
+        #   anything else: passed through verbatim ("cpu", "cuda",
+        #     "mps", etc.).
+        if device == "gpu":
+            device_key = "cuda"
+        elif device in ("auto", ""):
+            gpu_free = self.memory_probe.gpu_free_gb()
+            device_key = "cuda" if gpu_free is not None else "cpu"
+        else:
+            device_key = device
 
         thread = threading.Thread(
             target=self._observed_peak_writeback,
