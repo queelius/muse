@@ -257,6 +257,64 @@
     max_new_tokens: 256
     supports_handwritten: true
 
+# ---------- image/cv (depth, keypoints, detection) ----------
+
+# Bundled aliases (script-backed). Each joins the CI smoke matrix.
+- id: depth-anything-v2-small
+  bundled: true
+
+- id: vitpose-base-simple
+  bundled: true
+
+- id: detr-resnet-50
+  bundled: true
+
+# Larger Depth-Anything for better quality. Same architecture as
+# the bundled small; ~390MB, Apache 2.0.
+- id: depth-anything-v2-base
+  uri: hf://depth-anything/Depth-Anything-V2-Base-hf
+  modality: image/cv
+  size_gb: 0.4
+  description: "Depth-Anything V2 Base: 97M, relative depth, Apache 2.0"
+  capabilities:
+    supports_depth: true
+    metric_depth: false
+    memory_gb: 1.0
+
+# Metric depth (meters from camera). Useful when downstream code
+# needs real-world distances.
+- id: zoedepth-nyu-kitti
+  uri: hf://Intel/zoedepth-nyu-kitti
+  modality: image/cv
+  size_gb: 0.35
+  description: "ZoeDepth NYU+KITTI: ~340MB, METRIC depth (meters), MIT"
+  capabilities:
+    supports_depth: true
+    metric_depth: true
+    memory_gb: 1.2
+
+# Classic relative-depth baseline. Robust on outdoor scenes.
+- id: dpt-large
+  uri: hf://Intel/dpt-large
+  modality: image/cv
+  size_gb: 0.35
+  description: "DPT Large: ~340MB, relative depth, classic, MIT"
+  capabilities:
+    supports_depth: true
+    metric_depth: false
+    memory_gb: 1.2
+
+# Faster object detection alternative to bundled DETR. Real-time-
+# capable on CPU; matches DETR on accuracy.
+- id: rtdetr-r50vd
+  uri: hf://PekingU/rtdetr_r50vd
+  modality: image/cv
+  size_gb: 0.17
+  description: "RT-DETR ResNet-50: ~167MB, faster than DETR, Apache 2.0"
+  capabilities:
+    supports_detection: true
+    memory_gb: 0.6
+
 # ---------- image/animation (AnimateDiff) ----------
 
 - id: animatediff-motion-v3

@@ -32,6 +32,9 @@ jobs:
           - twitter-roberta-base-sentiment-latest
           - deberta-v3-base-zeroshot-v2.0
           - trocr-base-printed
+          - depth-anything-v2-small
+          - vitpose-base-simple
+          - detr-resnet-50
 
     steps:
       - name: checkout
