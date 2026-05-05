@@ -52,6 +52,9 @@ class TestWarmupOperation:
             "muse.admin.operations.known_models",
             return_value={"fake-model": MagicMock()},
         ), patch(
+            "muse.admin.operations.is_pulled",
+            return_value=True,
+        ), patch(
             "muse.admin.operations.get_manifest",
             return_value={
                 "model_id": "fake-model",
@@ -78,6 +81,31 @@ class TestWarmupOperation:
         assert err.status == 404
         director.warmup.assert_not_called()
 
+    def test_known_but_unpulled_model_raises_409_before_director(self):
+        # warmup_model must mirror enable_model's preflight: validate
+        # is_pulled upfront, BEFORE invoking the director. Otherwise the
+        # error surfaces only after the director's load phase via its
+        # exception cleanup path, which is harder to read in logs.
+        director = MagicMock()
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+
+        with patch(
+            "muse.admin.operations.known_models",
+            return_value={"fake-model": MagicMock()},
+        ), patch(
+            "muse.admin.operations.is_pulled",
+            return_value=False,
+        ):
+            with pytest.raises(OperationError) as exc_info:
+                warmup_model("fake-model", state=state)
+
+        err = exc_info.value
+        assert err.code == "model_not_pulled"
+        assert err.status == 409
+        # Director must not have been touched; the upfront check fired.
+        director.warmup.assert_not_called()
+
     def test_propagates_director_OperationError(self):
         # When director.warmup raises (e.g. model_too_large_for_device),
         # warmup_model should let the exception propagate so the route
@@ -94,6 +122,9 @@ class TestWarmupOperation:
         with patch(
             "muse.admin.operations.known_models",
             return_value={"fake-model": MagicMock()},
+        ), patch(
+            "muse.admin.operations.is_pulled",
+            return_value=True,
         ), patch(
             "muse.admin.operations.get_manifest",
             return_value={
@@ -118,6 +149,9 @@ class TestWarmupOperation:
         with patch(
             "muse.admin.operations.known_models",
             return_value={"fake-model": MagicMock()},
+        ), patch(
+            "muse.admin.operations.is_pulled",
+            return_value=True,
         ), patch(
             "muse.admin.operations.get_manifest",
             return_value={
@@ -307,3 +341,60 @@ class TestAdminClientWarmup:
         err = exc_info.value
         assert err.status == 503
         assert err.code == "model_too_large_for_device"
+
+    def test_warmup_per_call_timeout_overrides_constructor_default(
+        self, monkeypatch,
+    ):
+        # Constructor default is 30s, which is too short for many cold
+        # loads (SDXL ~30s, FLUX ~45s, video ~60s+). The per-call
+        # timeout argument lets callers (the CLI verb, programmatic
+        # users) raise it without touching the constructor.
+        monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+        monkeypatch.delenv("MUSE_SERVER", raising=False)
+        client = AdminClient(
+            base_url="http://test.example.com",
+            token="tok",
+            timeout=30.0,
+        )
+        with patch("muse.admin.client.httpx.Client") as cls:
+            ctx = MagicMock()
+            cls.return_value = ctx
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=None)
+            r = MagicMock()
+            r.status_code = 200
+            r.json.return_value = {"model_id": "sdxl", "worker_port": 9002}
+            ctx.request.return_value = r
+
+            client.warmup("sdxl", timeout=300.0)
+
+        # The httpx.Client(...) constructor receives the per-call value,
+        # NOT the AdminClient constructor's default.
+        cls.assert_called_once_with(timeout=300.0)
+
+    def test_warmup_default_timeout_uses_constructor_value(
+        self, monkeypatch,
+    ):
+        # When the per-call `timeout` is omitted (None), the constructor's
+        # value applies. This protects existing call sites that don't
+        # know about the new parameter.
+        monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+        monkeypatch.delenv("MUSE_SERVER", raising=False)
+        client = AdminClient(
+            base_url="http://test.example.com",
+            token="tok",
+            timeout=42.0,
+        )
+        with patch("muse.admin.client.httpx.Client") as cls:
+            ctx = MagicMock()
+            cls.return_value = ctx
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=None)
+            r = MagicMock()
+            r.status_code = 200
+            r.json.return_value = {"model_id": "sdxl", "worker_port": 9002}
+            ctx.request.return_value = r
+
+            client.warmup("sdxl")  # no per-call timeout
+
+        cls.assert_called_once_with(timeout=42.0)

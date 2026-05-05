@@ -63,7 +63,14 @@ class AdminClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         url = f"{self.base_url}{path}"
-        with httpx.Client(timeout=self._timeout) as client:
+        # Per-call `timeout` overrides the constructor's default. None
+        # means "use the constructor's value." This is the escape hatch
+        # for slow operations like warmup, whose cold-load duration
+        # (10-60s) routinely exceeds the constructor default of 30s.
+        timeout = kwargs.pop("timeout", None)
+        if timeout is None:
+            timeout = self._timeout
+        with httpx.Client(timeout=timeout) as client:
             r = client.request(
                 method,
                 url,
@@ -92,15 +99,26 @@ class AdminClient:
     def disable(self, model_id: str) -> dict:
         return self._request("POST", f"/v1/admin/models/{model_id}/disable", json={})
 
-    def warmup(self, model_id: str) -> dict:
+    def warmup(self, model_id: str, *, timeout: float | None = None) -> dict:
         """Pre-load a model via the supervisor's LoadDirector.
 
         Synchronous on the wire: returns once the director's warmup
-        completes (cold load duration: 10-60s for real models). Returns
-        {"model_id", "worker_port"} on success; raises AdminClientError
-        on 4xx/5xx.
+        completes (cold load duration: 10-60s for real models, longer
+        for video / large diffusion models). Returns {"model_id",
+        "worker_port"} on success; raises AdminClientError on 4xx/5xx.
+
+        `timeout` overrides the constructor's default for this call
+        only. The default constructor timeout (30s) is too short for
+        most cold loads; callers driving warmup should pass a more
+        generous value (e.g. 300s) or set timeout via the constructor.
+        None means "use the constructor's value."
         """
-        return self._request("POST", f"/v1/admin/models/{model_id}/warmup", json={})
+        return self._request(
+            "POST",
+            f"/v1/admin/models/{model_id}/warmup",
+            json={},
+            timeout=timeout,
+        )
 
     def probe(
         self,

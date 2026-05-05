@@ -588,6 +588,10 @@ def warmup_model(model_id: str, *, state: SupervisorState) -> dict:
 
     Raises:
       OperationError("model_not_found", status=404): unknown model id.
+      OperationError("model_not_pulled", status=409): the model is in
+        the catalog but its weights/venv haven't been pulled yet.
+        Validated upfront, before involving the director, to mirror
+        `enable_model`'s preflight behavior.
       OperationError("director_unavailable", status=503): supervisor
         state has no director (supervisor not booted).
       OperationError("model_too_large_for_device", status=503): from
@@ -597,6 +601,12 @@ def warmup_model(model_id: str, *, state: SupervisorState) -> dict:
     if model_id not in catalog_known:
         raise OperationError(
             "model_not_found", f"unknown model {model_id!r}", status=404,
+        )
+    if not is_pulled(model_id):
+        raise OperationError(
+            "model_not_pulled",
+            f"model {model_id!r} not pulled; run pull first",
+            status=409,
         )
 
     if state.director is None:
