@@ -35,6 +35,7 @@ jobs:
           - depth-anything-v2-small
           - vitpose-base-simple
           - detr-resnet-50
+          - ast-audioset
 
     steps:
       - name: checkout

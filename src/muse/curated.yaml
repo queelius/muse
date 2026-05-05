@@ -163,6 +163,48 @@
     supports_zero_shot: true
     memory_gb: 1.6
 
+# ---------- audio/classification (events, emotion, language ID) ----------
+
+- id: ast-audioset
+  bundled: true
+
+# English speech-emotion recognition (8 classes). Larger than the
+# bundled AST model.
+- id: wav2vec2-emotion-en
+  uri: hf://ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition
+  modality: audio/classification
+  size_gb: 1.2
+  description: "wav2vec2 emotion (English): 8 classes, ~1.2GB, Apache 2.0"
+  capabilities:
+    memory_gb: 1.5
+
+# Smaller emotion alternative (HuBERT base). Apache 2.0.
+- id: hubert-superb-er
+  uri: hf://superb/hubert-base-superb-er
+  modality: audio/classification
+  size_gb: 0.36
+  description: "HuBERT SUPERB emotion: 4 classes, ~360MB, Apache 2.0"
+  capabilities:
+    memory_gb: 0.7
+
+# 35-class speech command recognition. Small footprint.
+- id: ast-speech-commands
+  uri: hf://MIT/ast-finetuned-speech-commands-v2
+  modality: audio/classification
+  size_gb: 0.34
+  description: "AST speech-commands v2: 35 commands, ~340MB, BSD-3-Clause"
+  capabilities:
+    memory_gb: 0.7
+
+# 126-language spoken language identification.
+- id: mms-lid-126
+  uri: hf://facebook/mms-lid-126
+  modality: audio/classification
+  size_gb: 0.7
+  description: "MMS Language ID: 126 spoken languages, ~700MB, CC-BY-NC-4.0"
+  capabilities:
+    memory_gb: 1.0
+
 # ---------- text/rerank (cross-encoder rerankers) ----------
 
 - id: bge-reranker-v2-m3
