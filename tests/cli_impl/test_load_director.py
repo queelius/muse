@@ -482,6 +482,222 @@ class TestColdAcquireEvictsLRU:
         # No stranded Event keeps a future acquire from progressing.
         assert director.in_flight_loads == {}
 
+    def test_disable_fn_failure_reinserts_victim_in_loaded_set(self):
+        # If disable_fn raises while evicting an LRU victim, the director
+        # must NOT count that victim's memory_gb toward cumulative_freed_gb
+        # (the worker is still alive holding memory). The victim's
+        # LoadEntry must be re-inserted into self.loaded so the directory's
+        # accounting stays consistent with reality. The eviction loop
+        # then proceeds to the next candidate.
+        cpu_free_state = {"value": 12.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        # Two evictable victims. First disable_fn call raises (worker
+        # stuck); second succeeds. The director must skip the failed
+        # victim and evict the next one.
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "stuck":
+                cpu_free_state["value"] -= 4.0
+                return 9001
+            if model_id == "good":
+                cpu_free_state["value"] -= 4.0
+                return 9002
+            if model_id == "newcomer":
+                return 9003
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+
+        # disable_fn fails on the first call ("stuck"), succeeds on
+        # the second ("good") and frees 4 GB.
+        def disable_side_effect(model_id: str) -> None:
+            if model_id == "stuck":
+                raise RuntimeError("worker stuck")
+            cpu_free_state["value"] += 4.0
+
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=1.0,
+        )
+
+        # Pre-load "stuck" first (older), release. cpu_free 12 -> 8.
+        director.acquire("stuck", manifest=_manifest(memory_gb=4.0, device="cpu"))
+        director.release("stuck")
+        assert director.status()["stuck"]["refcount"] == 0
+        time.sleep(0.01)
+        # Pre-load "good" newer, release. cpu_free 8 -> 4.
+        director.acquire("good", manifest=_manifest(memory_gb=4.0, device="cpu"))
+        director.release("good")
+        assert director.status()["good"]["refcount"] == 0
+
+        # Now cpu_free=4, headroom=1, available=3. Cold-acquire newcomer
+        # at 6 GB. shortfall=3. LRU is "stuck"; disable_fn raises;
+        # director must re-insert "stuck" and proceed to "good".
+        # disable_fn("good") frees 4 GB; cumulative_freed=4 >= 3; fits.
+        port = director.acquire("newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"))
+
+        assert port == 9003
+        # Both disable_fn invocations happened, in LRU order.
+        assert disable_fn.call_args_list[0][0] == ("stuck",)
+        assert disable_fn.call_args_list[1][0] == ("good",)
+        assert disable_fn.call_count == 2
+
+        snapshot = director.status()
+        # Newcomer loaded.
+        assert "newcomer" in snapshot
+        # The first victim ("stuck") was re-inserted because disable_fn
+        # raised. Its refcount was preserved at 0.
+        assert "stuck" in snapshot
+        assert snapshot["stuck"]["refcount"] == 0
+        # The second victim ("good") was successfully evicted.
+        assert "good" not in snapshot
+
+        # The decision log records the failure with action="evict" and
+        # a "disable_fn_raised" reason.
+        decisions = list(director.recent_decisions)
+        raised_entries = [
+            d for d in decisions
+            if d.action == "evict" and d.reason.startswith("disable_fn_raised")
+        ]
+        assert len(raised_entries) == 1
+        e = raised_entries[0]
+        assert e.model_id == "stuck"
+        assert e.evicted == []
+        assert e.memory_gb == 4.0
+        # free_after_gb is None because the poll never happened.
+        assert e.free_after_gb is None
+
+    def test_eviction_does_not_block_concurrent_hot_acquire(self):
+        # Central correctness claim of the eviction design: while a
+        # cold-acquire thread is inside _evict_lru_until_fits running
+        # the slow disable_fn + poll, OTHER threads can still hot-acquire
+        # already-loaded models without serializing on the eviction.
+        #
+        # This test pre-loads X (LRU) and Y. Thread A cold-acquires Z;
+        # its disable_fn(X) blocks on an event so we can synchronize.
+        # Thread B hot-acquires Y. B must complete quickly (well under
+        # the 1-second disable_fn delay), proving the lock is released
+        # during eviction.
+
+        # Probe state: starts with 12 GB, drops 4 per load, restores
+        # 4 per disable_fn.
+        cpu_free_state = {"value": 12.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "X":
+                cpu_free_state["value"] -= 4.0
+                return 9001
+            if model_id == "Y":
+                cpu_free_state["value"] -= 4.0
+                return 9002
+            if model_id == "Z":
+                return 9003
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+
+        # disable_fn waits on eviction_block (up to 1 second). During
+        # that wait, another thread (B) must be able to hot-acquire Y.
+        eviction_in_progress = threading.Event()
+        eviction_block = threading.Event()
+
+        def disable_side_effect(model_id: str) -> None:
+            assert model_id == "X"
+            eviction_in_progress.set()
+            eviction_block.wait(timeout=1.0)
+            cpu_free_state["value"] += 4.0
+
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=1.0,
+        )
+
+        # Pre-load X first (older), then Y. Both refcount=0 after release
+        # so both are evictable; X is LRU.
+        director.acquire("X", manifest=_manifest(memory_gb=4.0, device="cpu"))
+        director.release("X")
+        time.sleep(0.01)
+        # Y will stay loaded after thread B re-acquires it; we release
+        # it for now so the LRU pick during A's eviction picks X.
+        director.acquire("Y", manifest=_manifest(memory_gb=4.0, device="cpu"))
+        director.release("Y")
+        # cpu_free=4, headroom=1, available=3.
+
+        # Synchronize thread A's "I'm in eviction now" via eviction_in_progress.
+
+        a_results: list[int] = []
+        a_errors: list[BaseException] = []
+        b_results: list[int] = []
+        b_errors: list[BaseException] = []
+        b_elapsed: list[float] = []
+
+        def thread_a():
+            try:
+                # Cold-acquire Z at 6 GB. cpu_free=4, available=3,
+                # shortfall=3. Director enters _evict_lru_until_fits;
+                # disable_fn(X) blocks until eviction_block is set.
+                p = director.acquire(
+                    "Z", manifest=_manifest(memory_gb=6.0, device="cpu"),
+                )
+                a_results.append(p)
+            except BaseException as exc:  # noqa: BLE001
+                a_errors.append(exc)
+
+        def thread_b():
+            try:
+                # Wait for A to be inside disable_fn before starting.
+                assert eviction_in_progress.wait(timeout=2.0)
+                start = time.monotonic()
+                # Hot-acquire Y. Y is already loaded; this should NOT
+                # serialize on A's eviction lock.
+                p = director.acquire(
+                    "Y", manifest=_manifest(memory_gb=4.0, device="cpu"),
+                )
+                elapsed = time.monotonic() - start
+                b_results.append(p)
+                b_elapsed.append(elapsed)
+            except BaseException as exc:  # noqa: BLE001
+                b_errors.append(exc)
+
+        a = threading.Thread(target=thread_a)
+        b = threading.Thread(target=thread_b)
+        a.start()
+        b.start()
+
+        # B is waiting on eviction_in_progress. Once it sees that, it
+        # times its hot-acquire and we expect the call to return well
+        # under 200ms despite A's disable_fn delay.
+        b.join(timeout=3.0)
+
+        # Now release A's eviction_block so A can finish.
+        eviction_block.set()
+        a.join(timeout=5.0)
+
+        assert not a_errors, a_errors
+        assert not b_errors, b_errors
+        # B got Y's worker_port without waiting for A.
+        assert b_results == [9002]
+        # B's elapsed time well under A's 1s disable_fn delay; we use
+        # 200ms as a generous bound that still proves the point.
+        assert b_elapsed[0] < 0.2, (
+            f"hot-acquire serialized on eviction; took {b_elapsed[0]:.3f}s"
+        )
+        # A eventually completes too.
+        assert a_results == [9003]
+
 
 # ----------------------------------------------------------------------
 # release: refcount decrement, no auto-evict

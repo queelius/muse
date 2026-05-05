@@ -441,6 +441,13 @@ class LoadDirector:
         post-poll commit.
         """
         cumulative_freed_gb = 0.0
+        # Track victims whose disable_fn raised so we don't re-pick them
+        # on the next iteration. A re-inserted victim retains its
+        # last_touched_at and would otherwise sort back to LRU position
+        # and loop forever. The set is local to this call: a future
+        # acquire is welcome to retry the failed victim, since the
+        # worker may have died on its own by then.
+        failed_victims: set[str] = set()
 
         while cumulative_freed_gb < shortfall_gb:
             # ---- under-lock: pick + pop a victim ----
@@ -450,7 +457,7 @@ class LoadDirector:
                 # evictable.
                 candidates = [
                     e for e in self.loaded.values()
-                    if e.refcount == 0
+                    if e.refcount == 0 and e.model_id not in failed_victims
                 ]
                 if not candidates:
                     # Pop the in-flight Event for the requested model in
@@ -501,18 +508,46 @@ class LoadDirector:
             # ---- lock released: slow steps ----
             try:
                 self.disable_fn(victim_id)
-            except Exception:  # noqa: BLE001
-                # The worker may already be dead, the disable_fn may
-                # raise on a missing PID, etc. Log and proceed to the
-                # poll: the OS may still release memory even on partial
-                # disable. The admin endpoint sees the eviction entry
-                # but free_after may equal free_before, signaling the
-                # poll didn't observe a release.
-                logger.warning(
-                    "disable_fn(%r) raised during eviction; proceeding to poll",
+            except Exception as exc:  # noqa: BLE001
+                # disable_fn raised. The worker is still alive holding
+                # memory: the OS has NOT reclaimed its slot. Polling for
+                # release would observe ~0 freed and the loop would
+                # iterate to the next victim, but the orphan worker
+                # would persist indefinitely with no remediation path.
+                #
+                # Remediation: re-insert the victim's LoadEntry into
+                # self.loaded so accounting matches reality (worker
+                # alive, slot occupied). Append a structured "evict"
+                # decision log entry recording the failure for the
+                # admin endpoint. Skip cumulative_freed_gb (the slot
+                # did not free). Continue to the next candidate.
+                #
+                # KeyboardInterrupt + SystemExit pass through (we catch
+                # Exception, not BaseException) so the user can still
+                # Ctrl-C out of a stuck eviction.
+                logger.error(
+                    "disable_fn failed for evicted victim %r; re-inserted into loaded set",
                     victim_id,
                     exc_info=True,
                 )
+                with self.lock:
+                    # Re-insert the popped LoadEntry. refcount was 0 at
+                    # eviction time (only refcount==0 entries are
+                    # candidates) and we preserve that.
+                    self.loaded[victim_id] = victim
+                    # Update the existing decision entry's reason
+                    # in-place. The deque already holds it; mutating
+                    # the dataclass is sufficient. evicted=[] because
+                    # nothing was actually evicted.
+                    decision.reason = f"disable_fn_raised: {exc}"
+                    decision.evicted = []
+                    # free_after_gb stays None: no poll, no measurement.
+                # Mark this victim as off-limits for the rest of this
+                # eviction call. Re-picking would loop forever (the
+                # re-inserted victim still has the oldest
+                # last_touched_at and would sort to LRU position).
+                failed_victims.add(victim_id)
+                continue
 
             freed_this_round = self._wait_for_memory_release(
                 min_freed_gb=victim_memory_gb,
