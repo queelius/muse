@@ -14,11 +14,14 @@ Three-phase acquire (decide / load / commit):
       same model_id see the Event, drop the lock, and wait. When woken,
       they re-enter the decision phase to read the freshly populated
       LoadEntry.
-    - Eviction: deferred to Task C. If the requested memory does not fit
-      live free (minus headroom), this raises NotImplementedError with a
-      "Task C" marker. Cleanup of the in-flight Event happens before the
-      raise so a later acquire under different memory conditions is not
-      blocked.
+    - Eviction (Task C): if the requested memory does not fit live free
+      (minus headroom), the decision phase returns ("evict_and_retry",
+      shortfall_gb, device) WITHOUT claiming an in-flight slot. The
+      acquire outer loop runs eviction outside the lock and re-calls
+      _decide, which may classify the entry as hot (another thread
+      loaded it during our eviction window), or cold-fits, or raise 503
+      if eviction can't free enough memory. Re-decide on every retry
+      protects against TOCTOU windows during the unlocked eviction.
 
   Load (lock NOT held)
     - Capture free_before via memory_probe.
@@ -33,9 +36,11 @@ Three-phase acquire (decide / load / commit):
       DecisionLogEntry, set() the Event so any concurrent waiters wake.
 
 This module does NOT import enable_model / disable_model from
-muse.admin.operations. The callable injection seam (enable_fn,
-disable_fn, memory_probe) is what tests use; production wiring (Task E)
-will inject the real supervisor's spawn / shutdown callables.
+muse.admin.operations at import time (it does lazy-import OperationError
+inside the eviction failure path). The callable injection seam
+(enable_fn, disable_fn, memory_probe) is what tests use; production
+wiring (Task E) will inject the real supervisor's spawn / shutdown
+callables.
 """
 from __future__ import annotations
 
@@ -66,8 +71,8 @@ class LoadEntry:
     reality as cold loads happen.
 
     `last_touched_at` is monotonic seconds, updated on each acquire and
-    release. Task C's eviction sorts evictable candidates by this field
-    ascending (LRU first).
+    release. Eviction sorts evictable candidates (refcount == 0) by this
+    field ascending (LRU first).
     """
     model_id: str
     worker_port: int
@@ -106,9 +111,10 @@ class LoadDirector:
         spawn (or wake) the per-model worker. In production this is a
         thin wrapper around `muse.admin.operations.enable_model`; in
         tests it's a MagicMock returning a fixed port.
-      - disable_fn(model_id) -> None: complement to enable_fn. Used by
-        Task C's eviction loop. Task B never calls this, but stores it
-        for Task C.
+      - disable_fn(model_id) -> None: complement to enable_fn. Called
+        by the eviction loop on each LRU victim. The OS reclaims the
+        worker's memory after SIGTERM; the director polls free memory
+        with a 2s budget per victim before retrying the fit check.
       - memory_probe: any object with .gpu_free_gb() and .cpu_free_gb()
         methods. In production this is a `muse.core.memory_probe.MemoryProbe`;
         in tests it's a MagicMock with .return_value set on each method.
@@ -161,9 +167,10 @@ class LoadDirector:
         Returns the worker_port hosting `model_id`.
 
         Raises:
-          NotImplementedError: when memory does not fit live free minus
-            headroom. Task C will replace this with an LRU-eviction
-            attempt and (if that fails) an OperationError(503).
+          OperationError("model_too_large_for_device", status=503): when
+            memory doesn't fit and on-demand LRU eviction can't free
+            enough (no evictable candidates, or sum of evictable memory
+            < shortfall).
           Exception: re-raises any exception from enable_fn after
             cleaning up the in-flight Event so concurrent waiters wake
             and re-enter the decision phase.
@@ -172,17 +179,25 @@ class LoadDirector:
         # on an in_flight Event may wake to find that the winner failed
         # (no LoadEntry was inserted). On wake, we re-enter the decision
         # phase rather than blindly trusting the winner.
+        #
+        # The same loop also handles the "evict_and_retry" cycle: when
+        # _decide reports the model doesn't fit, we run eviction OUTSIDE
+        # the lock, then re-decide. The state may have changed during
+        # the unlocked eviction window: another thread may have loaded
+        # the model already, or stolen our victim, or pushed yet more
+        # memory pressure. Re-decide is the correct recovery.
         while True:
-            phase_decision, port = self._decide(model_id, manifest=manifest)
+            decision = self._decide(model_id, manifest=manifest)
+            phase = decision[0]
 
-            if phase_decision == "hot":
+            if phase == "hot":
                 # _decide returns the port read under the same lock that
                 # classified the entry as loaded. No TOCTOU window: an
-                # eviction (Task C) cannot race between classification
-                # and read because both happen inside the lock.
-                return port
+                # eviction cannot race between classification and read
+                # because both happen inside the lock.
+                return decision[1]
 
-            if phase_decision == "wait":
+            if phase == "wait":
                 # We did not own the load; another thread did. Wait for
                 # its Event to fire and then re-decide.
                 event = self._get_in_flight_event(model_id)
@@ -193,7 +208,23 @@ class LoadDirector:
                 # thread will become the new winner.
                 continue
 
-            # phase_decision == "load": this thread won the singleton race.
+            if phase == "evict_and_retry":
+                # Run eviction outside the lock so concurrent acquires
+                # for already-loaded models can hot-acquire during the
+                # disable_fn + memory-release-poll window. Eviction
+                # raises OperationError(503) if it can't free enough.
+                _, shortfall_gb, device = decision
+                self._evict_lru_until_fits(
+                    model_id=model_id,
+                    shortfall_gb=shortfall_gb,
+                    device=device,
+                )
+                # Re-enter the decision phase. State may have changed:
+                # another thread may have loaded our model, or evicted
+                # additional models, or grown the memory pressure.
+                continue
+
+            # phase == "load": this thread won the singleton race.
             # The Event is already in self.in_flight_loads under our name.
             # Run the (long) load phase outside the lock, then commit.
             return self._load_and_commit(model_id, manifest=manifest)
@@ -201,8 +232,11 @@ class LoadDirector:
     def release(self, model_id: str) -> None:
         """Decrement refcount + bump last_touched_at.
 
-        Task B does NOT auto-evict on release: eviction is on-demand,
-        triggered only from a cold acquire that needs room (Task C).
+        Release does NOT auto-evict: eviction is on-demand, triggered
+        only from a cold acquire that needs room. The release call
+        merely flips the refcount toward 0 (making the entry eligible
+        for eviction on the next pressure point) and updates the LRU
+        timestamp so traffic recency drives the eviction order.
 
         Releasing an unknown model_id is a no-op (defensive: an evicted
         model whose final request just finished should not crash the
@@ -239,17 +273,22 @@ class LoadDirector:
 
     def _decide(
         self, model_id: str, *, manifest: dict,
-    ) -> tuple[str, int | None]:
+    ) -> tuple:
         """First phase, under the lock.
 
-        Returns a (phase, port_or_none) tuple:
+        Returns one of these tuple shapes:
           ("hot", port): entry already loaded; refcount + last_touched
             bumped under the lock; port is the worker_port read under
             the same lock (no TOCTOU window for an evictor to race in).
-          ("wait", None): another thread owns the load; caller awaits the Event.
-          ("load", None): we just claimed ownership; run load phase + commit.
+          ("wait",): another thread owns the load; caller awaits the Event.
+          ("load",): we just claimed ownership; run load phase + commit.
+          ("evict_and_retry", shortfall_gb, device): the model does not
+            fit live free minus headroom. Caller runs eviction OUTSIDE
+            the lock and re-calls _decide. No in-flight slot is claimed
+            on this path so the eviction loop's lock-release-and-reacquire
+            pattern is safe across the boundary.
 
-        On the ("load", None) return path, an Event has been stashed in
+        On the ("load",) return path, an Event has been stashed in
         self.in_flight_loads[model_id]. The caller is responsible for
         either committing (success) or popping + setting the Event
         (failure). _commit and _abort cover both cases.
@@ -260,12 +299,12 @@ class LoadDirector:
                 entry.refcount += 1
                 entry.last_touched_at = time.monotonic()
                 # Read port under the same lock that classified the
-                # entry; an evictor (Task C) cannot race between the
-                # classification and this read.
+                # entry; an evictor cannot race between the classification
+                # and this read.
                 return ("hot", entry.worker_port)
 
             if model_id in self.in_flight_loads:
-                return ("wait", None)
+                return ("wait",)
 
             # We're going to do this load. Decide whether it fits before
             # we claim the in-flight slot, so that if the answer is "no"
@@ -273,33 +312,22 @@ class LoadDirector:
             memory_gb = float(manifest.get("capabilities", {}).get("memory_gb", 0.0) or 0.0)
             device = str(manifest.get("capabilities", {}).get("device", "cpu")).lower()
 
-            free_before_gb, available_gb = self._available_for_device(device)
+            _, available_gb = self._available_for_device(device)
             if memory_gb > available_gb:
-                # TODO(Task C): replace this raise with an LRU-eviction
-                # loop. The eviction loop should:
-                #   - identify candidates: loaded entries with refcount == 0
-                #   - sort by last_touched_at ascending (LRU first)
-                #   - call disable_fn(victim) for each, polling the
-                #     memory_probe until freed_gb >= shortfall (or 2s
-                #     timeout per eviction)
-                #   - log a DecisionLogEntry per eviction with action="evict"
-                #     and reason=f"evicted_for_{model_id}"
-                #   - if we run out of candidates and still don't fit:
-                #     raise OperationError("model_too_large_for_device", 503)
-                # The decision above (memory_gb, available_gb, free_before_gb)
-                # is what the eviction loop needs as input; preserve those
-                # locals when implementing.
-                raise NotImplementedError(
-                    "model %r needs %.2f GB but only %.2f GB available on %s; "
-                    "eviction handled in Task C of v0.40.0" % (
-                        model_id, memory_gb, available_gb, device,
-                    )
-                )
+                shortfall_gb = memory_gb - available_gb
+                # Defer eviction to acquire(), which runs it outside the
+                # lock so concurrent hot-acquires keep working during
+                # the (potentially multi-second) disable_fn + poll
+                # window. We do NOT claim an in_flight_loads slot here:
+                # if eviction fails (503), there's nothing to clean up;
+                # if eviction succeeds, the retry will re-decide and
+                # claim the slot then.
+                return ("evict_and_retry", shortfall_gb, device)
 
             # Claim ownership of the load.
             event = threading.Event()
             self.in_flight_loads[model_id] = event
-            return ("load", None)
+            return ("load",)
 
     def _get_in_flight_event(self, model_id: str) -> threading.Event | None:
         """Read the current in-flight Event under the lock.
@@ -377,6 +405,164 @@ class LoadDirector:
             event = self.in_flight_loads.pop(model_id, None)
         if event is not None:
             event.set()
+
+    # ------------------------------------------------------------------
+    # Eviction (Task C)
+    # ------------------------------------------------------------------
+
+    def _evict_lru_until_fits(
+        self,
+        *,
+        model_id: str,
+        shortfall_gb: float,
+        device: str,
+    ) -> None:
+        """Evict refcount==0 models in LRU order until shortfall is met.
+
+        Lock discipline (the critical detail of Task C):
+          1. Acquire the lock briefly to snapshot evictable candidates
+             and pop the LRU victim from self.loaded. Append a partial
+             DecisionLogEntry under the lock so the admin endpoint sees
+             the in-progress eviction as soon as it commits to one.
+          2. RELEASE the lock for the slow steps (disable_fn invocation
+             + memory release polling). Other threads can hot-acquire
+             during this window: their _decide call takes the lock,
+             observes the (still-loaded) other entries, and proceeds.
+             Cold acquires that race here will see a smaller free pool
+             until our poll completes, but that's accurate.
+          3. REACQUIRE the lock to update the DecisionLogEntry's
+             free_after_gb once the poll returns.
+          4. If the cumulative freed memory still falls short of the
+             original shortfall, loop and pick the next victim. If no
+             candidates remain: lazy-import OperationError and raise 503.
+
+        The reacquire step is intentionally minimal (just the entry
+        mutation), so other admin endpoints don't stall behind the
+        post-poll commit.
+        """
+        cumulative_freed_gb = 0.0
+
+        while cumulative_freed_gb < shortfall_gb:
+            # ---- under-lock: pick + pop a victim ----
+            with self.lock:
+                # Re-snapshot every iteration: another thread may have
+                # released a model since the last pass, making it newly
+                # evictable.
+                candidates = [
+                    e for e in self.loaded.values()
+                    if e.refcount == 0
+                ]
+                if not candidates:
+                    # Pop the in-flight Event for the requested model in
+                    # case anything stranded one (defensive: the current
+                    # _decide path doesn't, but a future path might).
+                    self.in_flight_loads.pop(model_id, None)
+                    # Lazy import to avoid a cycle: load_director ->
+                    # admin.operations -> supervisor -> load_director
+                    # (Task E will wire the supervisor to LoadDirector).
+                    from muse.admin.operations import OperationError
+                    raise OperationError(
+                        "model_too_large_for_device",
+                        (
+                            f"cannot fit {model_id!r} on {device}: "
+                            f"shortfall {shortfall_gb:.2f} GB; "
+                            f"no evictable candidates remain "
+                            f"(all loaded models have refcount > 0)"
+                        ),
+                        status=503,
+                    )
+
+                # LRU first.
+                candidates.sort(key=lambda e: e.last_touched_at)
+                victim = candidates[0]
+                victim_id = victim.model_id
+                victim_memory_gb = victim.memory_gb
+
+                # Pop from loaded so other threads see the eviction
+                # commitment immediately. If disable_fn raises, the
+                # state is already consistent (no zombie LoadEntry
+                # claiming a worker port that isn't running).
+                self.loaded.pop(victim_id, None)
+
+                free_before_gb = self._free_for_device(device)
+
+                decision = DecisionLogEntry(
+                    timestamp=time.time(),
+                    model_id=victim_id,
+                    action="evict",
+                    memory_gb=victim_memory_gb,
+                    free_before_gb=free_before_gb,
+                    free_after_gb=None,
+                    reason=f"evicted_for_{model_id}",
+                    evicted=[victim_id],
+                )
+                self.recent_decisions.append(decision)
+
+            # ---- lock released: slow steps ----
+            try:
+                self.disable_fn(victim_id)
+            except Exception:  # noqa: BLE001
+                # The worker may already be dead, the disable_fn may
+                # raise on a missing PID, etc. Log and proceed to the
+                # poll: the OS may still release memory even on partial
+                # disable. The admin endpoint sees the eviction entry
+                # but free_after may equal free_before, signaling the
+                # poll didn't observe a release.
+                logger.warning(
+                    "disable_fn(%r) raised during eviction; proceeding to poll",
+                    victim_id,
+                    exc_info=True,
+                )
+
+            freed_this_round = self._wait_for_memory_release(
+                min_freed_gb=victim_memory_gb,
+                free_at_eviction_start_gb=free_before_gb,
+                device=device,
+            )
+
+            # ---- reacquire the lock briefly: writeback free_after ----
+            with self.lock:
+                free_after_gb = self._free_for_device(device)
+                decision.free_after_gb = free_after_gb
+
+            cumulative_freed_gb += freed_this_round
+
+    def _wait_for_memory_release(
+        self,
+        *,
+        min_freed_gb: float,
+        free_at_eviction_start_gb: float,
+        device: str,
+        timeout: float = 2.0,
+        poll: float = 0.05,
+    ) -> float:
+        """Poll memory_probe until enough memory has freed (or timeout).
+
+        Returns the actual freed_gb observed at exit. The caller compares
+        this against the expected per-victim freeing to decide whether
+        to evict another victim.
+
+        The director lock is NOT held while this runs. Other threads can
+        progress through their own decision phases during the poll.
+
+        Negative `freed_gb` is clamped to 0.0: if memory pressure grew
+        during the poll (another process allocated VRAM, or our own
+        eviction observation lagged), we don't double-count it as a
+        freeing.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            current_free_gb = self._free_for_device(device)
+            freed = current_free_gb - free_at_eviction_start_gb
+            if freed < 0.0:
+                freed = 0.0
+
+            if freed >= min_freed_gb:
+                return freed
+            if time.monotonic() >= deadline:
+                return freed
+
+            time.sleep(poll)
 
     # ------------------------------------------------------------------
     # Memory accounting helpers

@@ -1,8 +1,11 @@
-"""Tests for LoadDirector: hot/cold acquire, refcount, singleton-load coordination.
+"""Tests for LoadDirector: hot/cold acquire, refcount, singleton-load coordination,
+on-demand LRU eviction.
 
-Task B of the v0.40.0 lazy-load plan. Eviction is Task C and is exercised here
-only as a placeholder watchdog: a cold acquire that does NOT fit must raise
-NotImplementedError until Task C lands.
+Task B and Task C of the v0.40.0 lazy-load plan. Task B covers the three-phase
+acquire (decide / load / commit). Task C adds the on-demand LRU eviction loop:
+when a cold acquire does not fit, the director picks the least-recently-used
+loaded model with refcount == 0, calls the injected disable_fn, polls the
+memory probe for release, and retries the fit check.
 
 Concurrency tests use threading.Barrier to make two sync threads enter the
 decision phase as close to simultaneously as the GIL allows. Both threads
@@ -17,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from muse.admin.operations import OperationError
 from muse.cli_impl.load_director import (
     DecisionLogEntry,
     LoadDirector,
@@ -170,63 +174,312 @@ class TestColdAcquireFits:
 
 
 # ----------------------------------------------------------------------
-# B4 (cont.): cold path that does NOT fit (placeholder for Task C)
+# C: on-demand LRU eviction
 # ----------------------------------------------------------------------
 
-class TestColdAcquireDoesNotFitPlaceholder:
-    """When the model needs more than (free - headroom), Task C will run an
-    eviction loop. Until that lands, LoadDirector raises NotImplementedError
-    so the lack of eviction is visible (no silent success).
+class TestColdAcquireEvictsLRU:
+    """Cold acquire on a tight budget evicts an LRU candidate via disable_fn,
+    polls memory_probe for release, then loads the new model in the freed slot.
     """
 
-    def test_raises_not_implemented_for_now(self):
-        # 100 GB model demanded, only 32 GB GPU free, 64 GB CPU free.
-        # Even with default headrooms, this can't fit.
-        director = LoadDirector(
-            enable_fn=MagicMock(return_value=9001),
-            disable_fn=MagicMock(),
-            memory_probe=_make_probe(gpu_free=32.0, cpu_free=64.0),
-        )
+    def test_evicts_one_lru_candidate_to_make_room(self):
+        # Set up: probe whose CPU-free reading mutates as loads + evicts
+        # happen, simulating live memory pressure. Initially the host has
+        # 10 GB free; the victim load drops it to 4 GB; the eviction
+        # disable_fn restores it to 9 GB.
+        cpu_free_state = {"value": 10.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
 
-        with pytest.raises(NotImplementedError, match="Task C"):
-            director.acquire("huge-model", manifest=_manifest(memory_gb=100.0, device="cpu"))
+        # enable_fn returns distinct ports per model and consumes memory.
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "victim":
+                cpu_free_state["value"] = 4.0
+                return 9001
+            if model_id == "newcomer":
+                return 9002
+            raise AssertionError(f"unexpected enable: {model_id}")
 
-    def test_raises_for_gpu_oversize_too(self):
-        director = LoadDirector(
-            enable_fn=MagicMock(return_value=9001),
-            disable_fn=MagicMock(),
-            memory_probe=_make_probe(gpu_free=4.0, cpu_free=64.0),
-        )
+        enable_fn = MagicMock(side_effect=enable_side_effect)
 
-        with pytest.raises(NotImplementedError, match="Task C"):
-            director.acquire("huge-gpu-model", manifest=_manifest(memory_gb=20.0, device="cuda"))
+        # disable_fn flips the probe so the next poll shows freed memory.
+        def disable_side_effect(model_id: str) -> None:
+            cpu_free_state["value"] = 9.0
 
-    def test_does_not_call_enable_fn_when_no_fit(self):
-        enable_fn = MagicMock(return_value=9001)
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
         director = LoadDirector(
             enable_fn=enable_fn,
-            disable_fn=MagicMock(),
-            memory_probe=_make_probe(gpu_free=4.0, cpu_free=8.0),
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
         )
 
-        with pytest.raises(NotImplementedError):
-            director.acquire("huge", manifest=_manifest(memory_gb=100.0, device="cpu"))
+        # Pre-load "victim" with a manifest claiming 5 GB. cpu_free=10,
+        # headroom=2, available=8, fits. enable_fn drops cpu_free to 4.
+        # After release, refcount goes to 0 (evictable).
+        director.acquire("victim", manifest=_manifest(memory_gb=5.0, device="cpu"))
+        director.release("victim")
+        assert director.status()["victim"]["refcount"] == 0
 
-        enable_fn.assert_not_called()
+        # Now cold-acquire "newcomer" at 6 GB. cpu_free=4, headroom=2,
+        # available=2, shortfall=4. Director must evict "victim".
+        # disable_fn restores cpu_free to 9; available=7; fits.
+        port = director.acquire("newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"))
 
-    def test_no_in_flight_event_left_behind_on_no_fit(self):
+        assert port == 9002
+        disable_fn.assert_called_once_with("victim")
+        snapshot = director.status()
+        assert "newcomer" in snapshot
+        assert "victim" not in snapshot
+
+    def test_evicts_multiple_in_lru_order_until_fits(self):
+        # Two evictable victims with different last_touched_at. Shortfall
+        # larger than either alone forces both out, oldest first.
+        cpu_free_state = {"value": 12.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        evict_calls: list[str] = []
+
+        # Each load consumes 4 GB; each evict releases 4 GB.
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "oldest":
+                cpu_free_state["value"] -= 4.0
+                return 9001
+            if model_id == "middle":
+                cpu_free_state["value"] -= 4.0
+                return 9002
+            if model_id == "newcomer":
+                return 9003
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+
+        def disable_side_effect(model_id: str) -> None:
+            evict_calls.append(model_id)
+            cpu_free_state["value"] += 4.0
+
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=1.0,
+        )
+
+        # Pre-load "oldest" first, then "middle". cpu_free goes 12 -> 8
+        # -> 4 across the two loads. Touch them so monotonic timestamps
+        # differ.
+        director.acquire("oldest", manifest=_manifest(memory_gb=4.0, device="cpu"))
+        director.release("oldest")
+        time.sleep(0.01)
+        director.acquire("middle", manifest=_manifest(memory_gb=4.0, device="cpu"))
+        director.release("middle")
+
+        # Now cpu_free=4, headroom=1, available=3. Cold-acquire newcomer
+        # at 10 GB. shortfall=7. Evicting one frees 4 (cumulative 4 < 7);
+        # second eviction brings cumulative to 8 >= 7; fits.
+        port = director.acquire("newcomer", manifest=_manifest(memory_gb=10.0, device="cpu"))
+
+        assert port == 9003
+        # Both victims evicted, oldest first.
+        assert evict_calls == ["oldest", "middle"]
+        snapshot = director.status()
+        assert "newcomer" in snapshot
+        assert "oldest" not in snapshot
+        assert "middle" not in snapshot
+
+    def test_raises_503_when_no_evictable_candidates(self):
+        # All loaded models have refcount > 0. The new acquire can't evict
+        # anyone and must raise OperationError(model_too_large_for_device).
+        probe = _make_probe(gpu_free=32.0, cpu_free=4.0)
+        disable_fn = MagicMock()
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
+        )
+
+        # Pre-load a model and DO NOT release it. refcount stays at 1.
+        director.acquire("busy", manifest=_manifest(memory_gb=1.0, device="cpu"))
+        assert director.status()["busy"]["refcount"] == 1
+
+        with pytest.raises(OperationError) as exc_info:
+            director.acquire("oversized", manifest=_manifest(memory_gb=100.0, device="cpu"))
+
+        err = exc_info.value
+        assert err.code == "model_too_large_for_device"
+        assert err.status == 503
+        # No eviction happened: refcount > 0 protected the only candidate.
+        disable_fn.assert_not_called()
+        # Busy model still loaded.
+        assert "busy" in director.status()
+
+    def test_skips_refcount_positive_candidates(self):
+        # Mix of evictable + non-evictable candidates. Only the evictable
+        # one is used for eviction; refcount > 0 model stays put.
+        cpu_free_state = {"value": 8.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        evict_calls: list[str] = []
+
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "busy":
+                cpu_free_state["value"] -= 2.0
+                return 9001
+            if model_id == "evictable":
+                cpu_free_state["value"] -= 2.0
+                return 9002
+            if model_id == "newcomer":
+                return 9003
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+
+        def disable_side_effect(model_id: str) -> None:
+            evict_calls.append(model_id)
+            cpu_free_state["value"] += 2.0
+
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=1.0,
+        )
+
+        # Load "busy" first (older), keep refcount at 1. cpu_free 8 -> 6.
+        director.acquire("busy", manifest=_manifest(memory_gb=2.0, device="cpu"))
+        time.sleep(0.01)
+        # Load "evictable" newer, then release: refcount = 0. cpu_free 6 -> 4.
+        director.acquire("evictable", manifest=_manifest(memory_gb=2.0, device="cpu"))
+        director.release("evictable")
+
+        # cpu_free=4, headroom=1, available=3. Cold-acquire newcomer at
+        # 4 GB. shortfall=1. Evicting "evictable" frees 2; fits. "busy"
+        # stays put even though it is older, because refcount > 0.
+        port = director.acquire("newcomer", manifest=_manifest(memory_gb=4.0, device="cpu"))
+
+        assert port == 9003
+        assert evict_calls == ["evictable"]
+        snapshot = director.status()
+        assert "busy" in snapshot
+        assert snapshot["busy"]["refcount"] == 1
+        assert "evictable" not in snapshot
+
+    def test_memory_release_polling_converges(self):
+        # gpu_free_gb returns rising values across calls, simulating
+        # asynchronous SIGTERM -> VRAM-release on the GPU driver.
+        # The eviction loop's _wait_for_memory_release should converge
+        # once enough memory frees up.
+        #
+        # Sequence: pre-load reads 10 (fits), 9 (post-load capture), then
+        # decide for newcomer reads 2 (oversize), then the eviction
+        # snapshot reads 2 (free_before of eviction), then poll reads
+        # rising values (2, 2, 5, 5...). Use an iterator with a long tail
+        # of 5.0 so subsequent reads keep showing freed memory.
+        gpu_free_seq = iter([10.0, 9.0, 2.0, 2.0, 2.0, 2.0, 5.0] + [5.0] * 50)
+        probe = MagicMock()
+        probe.gpu_free_gb.side_effect = lambda: next(gpu_free_seq)
+        probe.cpu_free_gb.return_value = 64.0
+
+        disable_fn = MagicMock()
+        enable_results = {"victim": 9001, "newcomer": 9002}
+        enable_fn = MagicMock(side_effect=lambda mid: enable_results[mid])
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            gpu_headroom_gb=0.5,
+        )
+
+        # Pre-load victim. gpu_free=10, headroom=0.5, available=9.5, fits.
+        director.acquire("victim", manifest=_manifest(memory_gb=1.0, device="cuda"))
+        director.release("victim")
+
+        # Cold-acquire newcomer at 4 GB on cuda.
+        # Decision-phase reads gpu_free_gb (2.0), available=1.5, shortfall=2.5.
+        # Evict victim -> disable_fn called -> poll loop consumes more
+        # iterations until rises to 5.0; freed = 5.0 - 2.0 = 3.0 >= 2.5;
+        # converges; retry decide; available=4.5; fits.
+        port = director.acquire("newcomer", manifest=_manifest(memory_gb=4.0, device="cuda"))
+        assert port == 9002
+        disable_fn.assert_called_once_with("victim")
+
+    def test_eviction_records_decision_log_entries(self):
+        # Each eviction produces a DecisionLogEntry with action="evict".
+        cpu_free_state = {"value": 10.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "victim":
+                cpu_free_state["value"] = 4.0
+                return 9001
+            if model_id == "newcomer":
+                return 9002
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+
+        def disable_side_effect(model_id: str) -> None:
+            cpu_free_state["value"] = 9.0
+
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
+        )
+
+        director.acquire("victim", manifest=_manifest(memory_gb=5.0, device="cpu"))
+        director.release("victim")
+
+        director.acquire("newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"))
+
+        # The recent_decisions deque must have an "evict" entry for victim
+        # plus "load" entries for both models.
+        decisions = list(director.recent_decisions)
+        evict_entries = [d for d in decisions if d.action == "evict"]
+        assert len(evict_entries) == 1
+
+        e = evict_entries[0]
+        assert e.model_id == "victim"
+        assert e.evicted == ["victim"]
+        assert e.reason == "evicted_for_newcomer"
+        # memory_gb on the evict entry is the victim's memory, not the
+        # incoming model's.
+        assert e.memory_gb == 5.0
+        # free_after_gb populated once the post-eviction poll completed.
+        assert e.free_after_gb is not None
+        assert e.free_before_gb <= e.free_after_gb
+
+    def test_no_in_flight_event_after_503_oversize(self):
+        # Even when eviction fails to find candidates, the in-flight event
+        # for the requested model must not be left behind.
         director = LoadDirector(
             enable_fn=MagicMock(return_value=9001),
             disable_fn=MagicMock(),
             memory_probe=_make_probe(gpu_free=4.0, cpu_free=8.0),
         )
 
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(OperationError):
             director.acquire("huge", manifest=_manifest(memory_gb=100.0, device="cpu"))
 
-        # After the failed decision, in_flight_loads must be empty so a
-        # later acquire (e.g. once Task C lands and budget changes) is
-        # not blocked by a stale Event.
+        # No stranded Event keeps a future acquire from progressing.
         assert director.in_flight_loads == {}
 
 
