@@ -1,53 +1,71 @@
 """Tests for the `muse mcp` CLI subcommand.
 
-Builds the argparse tree and asserts the subcommand exists, has the
-expected flags, and dispatches to the right entry point. The actual
-asyncio.run is mocked.
+The CLI is typer-based as of v0.39.0; these tests exercise the
+argument-binding behavior by invoking the typer app with a mocked
+`run_mcp_server` and asserting the kwargs that arrived. The actual
+asyncio.run is mocked out below.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from muse.cli import build_parser
+from typer.testing import CliRunner
+
+from muse.cli import app
 
 
-class TestArgparse:
-    def test_mcp_subcommand_present(self):
-        parser = build_parser()
-        # Parse with no args lands on no subcommand (argparse with
-        # required=False); ensure 'mcp' parses cleanly.
-        args = parser.parse_args(["mcp"])
-        assert args.cmd == "mcp"
-        # Defaults
-        assert args.http is False
-        assert args.port == 8088
-        assert args.filter_kind == "all"
+class TestTyperBindings:
+    """Verify typer command parameter binding for `muse mcp`.
+
+    Each test invokes the CLI with argv and asserts the kwargs the
+    subcommand received via a patched run_mcp_server stub.
+    """
+
+    @staticmethod
+    def _invoke(argv):
+        captured: dict = {}
+
+        def _stub(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        runner = CliRunner()
+        with patch("muse.cli_impl.mcp_server.run_mcp_server", side_effect=_stub):
+            result = runner.invoke(app, argv)
+        return result, captured
+
+    def test_mcp_defaults(self):
+        result, kw = self._invoke(["mcp"])
+        assert result.exit_code == 0, result.output
+        assert kw["http"] is False
+        assert kw["port"] == 8088
+        assert kw["filter_kind"] == "all"
 
     def test_mcp_http_flag(self):
-        parser = build_parser()
-        args = parser.parse_args(["mcp", "--http", "--port", "9999"])
-        assert args.http is True
-        assert args.port == 9999
+        result, kw = self._invoke(["mcp", "--http", "--port", "9999"])
+        assert result.exit_code == 0, result.output
+        assert kw["http"] is True
+        assert kw["port"] == 9999
 
     def test_mcp_filter_admin(self):
-        parser = build_parser()
-        args = parser.parse_args(["mcp", "--filter", "admin"])
-        assert args.filter_kind == "admin"
+        result, kw = self._invoke(["mcp", "--filter", "admin"])
+        assert result.exit_code == 0, result.output
+        assert kw["filter_kind"] == "admin"
 
     def test_mcp_filter_inference(self):
-        parser = build_parser()
-        args = parser.parse_args(["mcp", "--filter", "inference"])
-        assert args.filter_kind == "inference"
+        result, kw = self._invoke(["mcp", "--filter", "inference"])
+        assert result.exit_code == 0, result.output
+        assert kw["filter_kind"] == "inference"
 
     def test_mcp_server_and_token_args(self):
-        parser = build_parser()
-        args = parser.parse_args([
+        result, kw = self._invoke([
             "mcp",
             "--server", "http://other:8000",
             "--admin-token", "abc",
         ])
-        assert args.server == "http://other:8000"
-        assert args.admin_token == "abc"
+        assert result.exit_code == 0, result.output
+        assert kw["server_url"] == "http://other:8000"
+        assert kw["admin_token"] == "abc"
 
 
 class TestRunMcpServer:

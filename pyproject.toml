@@ -20,6 +20,12 @@ dependencies = [
   "numpy",
   "pyyaml",
   "requests",
+  # CLI: typer wraps click for argument parsing with type-annotated
+  # commands; rich for tables, status glyphs, and color in `muse
+  # models list` / `info` / `search` / `refresh`. Both are pure-Python,
+  # tiny, and import in <100ms total so `muse --help` stays fast.
+  "typer>=0.12.0",
+  "rich>=13.0.0",
 ]
 license = {file = "LICENSE"}
 
