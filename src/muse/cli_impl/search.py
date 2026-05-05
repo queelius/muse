@@ -83,10 +83,61 @@ def run_search(
         print("no results")
         return 0
 
+    if sys.stdout.isatty():
+        _render_rich_search(results)
+    else:
+        _render_plain_search(results)
+    return 0
+
+
+def _render_rich_search(results: list) -> None:
+    """Pretty interactive table for search results."""
+    from rich import box
+    from rich.table import Table
+
+    from muse.cli_impl.console import get_console
+
+    console = get_console()
+    table = Table(
+        box=box.SIMPLE,
+        show_header=True,
+        header_style="bold",
+        pad_edge=False,
+        expand=True,
+    )
+    table.add_column("uri", no_wrap=True, style="cyan")
+    table.add_column("size", justify="right", no_wrap=True)
+    table.add_column("downloads", justify="right", no_wrap=True)
+    table.add_column("license", no_wrap=True)
+    table.add_column("description", overflow="ellipsis", no_wrap=True, ratio=1)
     for r in results:
         size = f"{r.size_gb:.1f} GB" if r.size_gb else "?"
         downloads = f"{r.downloads:,}" if r.downloads else "?"
-        lic = r.license or ""
-        desc = r.description or ""
-        print(f"  {r.uri:55s}  {size:>9s}  dl={downloads:>12s}  {lic:15s}  {desc}")
-    return 0
+        table.add_row(
+            r.uri, size, downloads, r.license or "", r.description or "",
+        )
+    console.print(table)
+
+
+def _render_plain_search(results: list) -> None:
+    """Plain aligned text for piped / non-TTY output."""
+    uri_w = max((len(r.uri) for r in results), default=0)
+    size_w = max(
+        (len(f"{r.size_gb:.1f} GB" if r.size_gb else "?") for r in results),
+        default=0,
+    )
+    dl_w = max(
+        (len(f"{r.downloads:,}" if r.downloads else "?") for r in results),
+        default=0,
+    )
+    lic_w = max((len(r.license or "") for r in results), default=0)
+    for r in results:
+        size = f"{r.size_gb:.1f} GB" if r.size_gb else "?"
+        downloads = f"{r.downloads:,}" if r.downloads else "?"
+        print(
+            f"  {r.uri:<{uri_w}s}  "
+            f"{size:>{size_w}s}  "
+            f"dl={downloads:>{dl_w}s}  "
+            f"{(r.license or ''):<{lic_w}s}  "
+            f"{r.description or ''}"
+        )

@@ -410,7 +410,7 @@ class TestRunRefresh:
             run_refresh(model_id="x")
         captured = capsys.readouterr()
         assert "x" in captured.out
-        assert "OK" in captured.out
+        assert "ok" in captured.out
         assert "1 ok" in captured.out
 
     def test_failed_result_includes_pip_tail_in_human_output(self, tmp_catalog, tmp_path, capsys):
@@ -420,7 +420,7 @@ class TestRunRefresh:
         with patch("muse.cli_impl.refresh.refresh_one", return_value=bad):
             run_refresh(model_id="x")
         captured = capsys.readouterr()
-        assert "FAIL" in captured.out
+        assert "failed" in captured.out
         assert "line6" in captured.out
         # First line was clipped (only last 5 shown)
         assert "line1" not in captured.out

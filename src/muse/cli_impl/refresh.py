@@ -243,20 +243,81 @@ def run_refresh(
     if as_json:
         print(json.dumps([asdict(r) for r in results], indent=2))
     else:
-        marks = {"ok": "OK", "failed": "FAIL", "skipped": "skip"}
-        for r in results:
-            mark = marks.get(r.state, r.state)
-            line = f"  {r.model_id:24s} [{mark:5s}] {r.message}"
-            print(line)
-            if r.state == "failed" and r.pip_output:
-                # Show last few lines of pip output so the user can
-                # diagnose without re-running with --json.
-                tail = "\n".join(r.pip_output.strip().splitlines()[-5:])
-                print(f"    pip output (last 5 lines):\n    {tail}")
+        _render_refresh_summary(results)
+
+    n_failed = sum(1 for r in results if r.state == "failed")
+    return 0 if n_failed == 0 else 1
+
+
+# Status glyphs for the refresh summary. Mirrors the encoding used in
+# `muse models list` (●/○/★/·) but maps to refresh outcomes
+# specifically. Single-cell narrow chars only.
+_REFRESH_GLYPHS = {
+    "ok": ("✓", "bold green"),
+    "failed": ("✗", "bold red"),
+    "skipped": ("·", "dim"),
+}
+
+
+def _render_refresh_summary(results: list) -> None:
+    """Render results: rich.Table on TTY, plain aligned text otherwise."""
+    if sys.stdout.isatty():
+        _render_rich_refresh(results)
+    else:
+        _render_plain_refresh(results)
 
     n_ok = sum(1 for r in results if r.state == "ok")
     n_failed = sum(1 for r in results if r.state == "failed")
     n_skipped = sum(1 for r in results if r.state == "skipped")
-    if not as_json:
-        print(f"\n{n_ok} ok, {n_failed} failed, {n_skipped} skipped")
-    return 0 if n_failed == 0 else 1
+    print()
+    print(f"{n_ok} ok, {n_failed} failed, {n_skipped} skipped")
+
+
+def _render_rich_refresh(results: list) -> None:
+    from rich import box
+    from rich.table import Table
+    from rich.text import Text
+
+    from muse.cli_impl.console import get_console
+
+    console = get_console()
+    table = Table(box=box.SIMPLE, show_header=True, header_style="bold",
+                  pad_edge=False, expand=True)
+    table.add_column("", width=1, no_wrap=True)
+    table.add_column("model_id", no_wrap=True, style="cyan")
+    table.add_column("state", no_wrap=True)
+    table.add_column("message", overflow="fold", ratio=1)
+    for r in results:
+        glyph, style = _REFRESH_GLYPHS.get(r.state, ("?", "dim"))
+        table.add_row(
+            Text(glyph, style=style),
+            r.model_id,
+            r.state,
+            r.message,
+        )
+    console.print(table)
+    # Pip-output tails for failures (rich Panel-free since the content
+    # is shell output, not pretty-printable).
+    for r in results:
+        if r.state == "failed" and r.pip_output:
+            tail = "\n".join(r.pip_output.strip().splitlines()[-5:])
+            console.print(
+                Text(f"\n  {r.model_id} pip output (last 5 lines):", style="dim red")
+            )
+            console.print(Text(f"    {tail}", style="dim"))
+
+
+def _render_plain_refresh(results: list) -> None:
+    id_w = max((len(r.model_id) for r in results), default=0)
+    state_w = max((len(r.state) for r in results), default=0)
+    for r in results:
+        glyph, _ = _REFRESH_GLYPHS.get(r.state, ("?", ""))
+        print(
+            f"  {glyph} "
+            f"{r.model_id:<{id_w}s}  "
+            f"{r.state:<{state_w}s}  "
+            f"{r.message}"
+        )
+        if r.state == "failed" and r.pip_output:
+            tail = "\n".join(r.pip_output.strip().splitlines()[-5:])
+            print(f"    pip output (last 5 lines):\n    {tail}")
