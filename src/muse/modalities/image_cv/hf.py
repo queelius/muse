@@ -108,9 +108,11 @@ def _sniff(info) -> bool:
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
-    # Per-primitive dispatch. Tag check wins over name-fallback (we
-    # call _is_depth which ANDs both, but tags should always be
-    # reliable signals when present).
+    # Per-primitive dispatch. _is_depth / _is_keypoint /
+    # _is_object_detection each OR a canonical tag check with a
+    # repo-name-hint fallback: a matching tag short-circuits to True;
+    # if there's no tag, the name hints catch checkpoints whose
+    # uploaders forgot the canonical tag.
     if _is_depth(info):
         runtime_path = _DEPTH_RUNTIME
         pip_extras = list(_PIP_EXTRAS_BASE)
