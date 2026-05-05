@@ -115,50 +115,43 @@ def _director_loaded_ids() -> set[str]:
     CLI's vantage point: the CLI cannot observe runtime state without
     the admin API.
 
-    Implementation: best-effort GET /v1/admin/memory via AdminClient,
-    then read the `loaded` shape if present. Falls back to inspecting
-    /v1/admin/workers (for the case where the memory route doesn't
-    surface director state). On any failure -> empty set.
+    Implementation: a single GET /v1/admin/memory call to AdminClient.
+    The aggregated memory endpoint already surfaces every model the
+    director considers loaded, grouped by device, under
+    `gpu.models[].model_id` and `cpu.models[].model_id`. We union the
+    two lists. On any failure (no token, server unreachable, malformed
+    response) -> empty set; the CLI defaults every enabled row to
+    `enabled_unloaded`. We deliberately do NOT fall back to N per-id
+    `client.status(mid)` calls: with 10+ enabled models on a slow link
+    that pattern hangs the CLI for tens of seconds.
     """
     if not os.environ.get("MUSE_ADMIN_TOKEN"):
         return set()
     try:
-        from muse.admin.client import AdminClient, AdminClientError
+        from muse.admin.client import AdminClient
     except Exception:  # noqa: BLE001
         return set()
     client = AdminClient(timeout=2.0)
-    # The admin API does not currently expose a single endpoint that
-    # lists every model the director considers loaded. We probe each
-    # candidate id via /v1/admin/models/{id}/status. To keep the CLI
-    # latency bounded, we only consult the catalog-enabled subset and
-    # cap the per-call timeout.
     try:
-        from muse.core.catalog import _read_catalog
-        catalog = _read_catalog()
+        resp = client.memory()
     except Exception:  # noqa: BLE001
         return set()
-
+    if not isinstance(resp, dict):
+        return set()
     loaded: set[str] = set()
-    candidate_ids = [
-        mid for mid, e in catalog.items()
-        if isinstance(e, dict) and e.get("enabled", True)
-    ]
-    for mid in candidate_ids:
-        try:
-            info = client.status(mid)
-        except AdminClientError:
+    for side in ("gpu", "cpu"):
+        section = resp.get(side)
+        if not isinstance(section, dict):
             continue
-        except Exception:  # noqa: BLE001
-            return loaded
-        # The status endpoint returns {"loaded": bool, "worker_port", ...}
-        # under "runtime" or top-level depending on the route impl. We
-        # read both for safety.
-        if info.get("loaded") is True:
-            loaded.add(mid)
+        models = section.get("models")
+        if not isinstance(models, list):
             continue
-        runtime = info.get("runtime") or {}
-        if runtime.get("loaded") is True:
-            loaded.add(mid)
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("model_id")
+            if isinstance(mid, str) and mid:
+                loaded.add(mid)
     return loaded
 
 

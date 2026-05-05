@@ -166,9 +166,23 @@ def _supervisor_view() -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
         reasons = dict(getattr(state, "unservable_reasons", {}) or {})
         return _NO_DIRECTOR, reasons
     try:
-        director_status = director.status() or {}
+        raw_status = director.status() or {}
     except Exception:  # noqa: BLE001
-        director_status = {}
+        # A transient director.status() failure must not flip every
+        # registered model to loaded=False -- that would mislead clients
+        # into thinking the worker has unloaded everything when in
+        # reality the director just had a hiccup. Fall back to the
+        # no-director sentinel so the handler's "registered = loaded"
+        # branch fires for each model.
+        reasons = dict(getattr(state, "unservable_reasons", {}) or {})
+        return _NO_DIRECTOR, reasons
+    # Defensive copy: status() may return a cached/internal dict in some
+    # implementations. We mutate per-entry below to insert loaded_at, so
+    # take ownership of the outer dict + each inner dict before writing.
+    director_status: dict[str, dict[str, Any]] = {
+        mid: dict(meta) if isinstance(meta, dict) else meta
+        for mid, meta in raw_status.items()
+    }
     # Enrich with loaded_at from the underlying LoadEntry. Reading
     # `director.loaded` under the director lock keeps the snapshot
     # consistent with the status() return; status() releases its lock
@@ -178,6 +192,8 @@ def _supervisor_view() -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     try:
         with director.lock:
             for mid, meta in director_status.items():
+                if not isinstance(meta, dict):
+                    continue
                 entry = director.loaded.get(mid)
                 if entry is not None:
                     meta["loaded_at"] = getattr(entry, "loaded_at", None)

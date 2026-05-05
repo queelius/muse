@@ -297,6 +297,107 @@ def test_v1_models_real_director_populates_last_loaded_at(monkeypatch):
         clear_supervisor_state()
 
 
+def test_v1_models_loaded_fallback_when_director_status_raises(monkeypatch):
+    """If `director.status()` raises (transient hiccup, partial state, etc.),
+    /v1/models must NOT silently flip every registered model to
+    loaded=False. The handler should fall back to the no-director branch
+    where each registered model is reported as loaded=True with no
+    last_loaded_at -- matching the worker's local view."""
+    from muse.cli_impl.supervisor import (
+        SupervisorState,
+        clear_supervisor_state,
+        set_supervisor_state,
+    )
+
+    clear_supervisor_state()
+
+    class BrokenDirector:
+        def status(self):
+            raise RuntimeError("transient director failure")
+
+    state = SupervisorState()
+    state.director = BrokenDirector()
+    set_supervisor_state(state)
+    try:
+        reg = ModalityRegistry()
+
+        class Fake1:
+            model_id = "model-a"
+
+        class Fake2:
+            model_id = "model-b"
+
+        reg.register("audio/speech", Fake1(), manifest={"model_id": "model-a"})
+        reg.register("audio/speech", Fake2(), manifest={"model_id": "model-b"})
+
+        app = create_app(registry=reg, routers={})
+        client = TestClient(app)
+        r = client.get("/v1/models")
+        assert r.status_code == 200
+        data = r.json()["data"]
+        # Every registered model must still be reported as loaded=True
+        # with last_loaded_at=None: the worker's registry is the source
+        # of truth when the director is unreachable.
+        for entry in data:
+            assert entry["loaded"] is True, (
+                f"transient director error must not flip {entry['id']} to loaded=False"
+            )
+            assert entry["last_loaded_at"] is None
+    finally:
+        clear_supervisor_state()
+
+
+def test_v1_models_does_not_mutate_director_status_dict(monkeypatch):
+    """`_supervisor_view` must defensively copy the dict from status()
+    before inserting loaded_at, in case status() ever returns a cached
+    or shared structure. Mutating a director-internal dict could race
+    with concurrent admin reads."""
+    import time as _time
+
+    from muse.cli_impl.supervisor import (
+        SupervisorState,
+        clear_supervisor_state,
+        set_supervisor_state,
+    )
+
+    clear_supervisor_state()
+
+    # The cached dict that status() returns. /v1/models must not insert
+    # loaded_at into THIS dict; it must work on a copy.
+    cached_inner = {"loaded": True, "worker_port": 9001, "refcount": 0}
+    cached = {"shared-id": cached_inner}
+
+    class Director:
+        lock = __import__("threading").RLock()
+        loaded: dict = {}
+
+        def status(self):
+            return cached
+
+    state = SupervisorState()
+    state.director = Director()
+    set_supervisor_state(state)
+    try:
+        reg = ModalityRegistry()
+
+        class Fake:
+            model_id = "shared-id"
+
+        reg.register("audio/speech", Fake(), manifest={"model_id": "shared-id"})
+        app = create_app(registry=reg, routers={})
+        client = TestClient(app)
+        r = client.get("/v1/models")
+        assert r.status_code == 200
+        # Even if the loaded mapping is empty (no LoadEntry exists),
+        # _supervisor_view tries to enrich with loaded_at; the cached
+        # dict that the director returned must be untouched.
+        assert "loaded_at" not in cached_inner, (
+            "status() return value was mutated in place; defensive .copy() missing"
+        )
+    finally:
+        clear_supervisor_state()
+
+
 def test_v1_models_unservable_reason_surfaces_from_state(monkeypatch):
     """`unservable_reason` for a model is sourced from
     `state.unservable_reasons.get(model_id)` and exposed on the response."""
