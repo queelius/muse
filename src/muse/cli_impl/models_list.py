@@ -8,13 +8,44 @@ The row-building logic is its own function so it can be unit-tested
 without subprocess overhead. The table-rendering happens via
 rich.Table for color + glyph + truncation handling; --json bypasses
 rich and dumps the same row data as a JSON list.
+
+v0.40.0 introduced a five-state status enum: `enabled_loaded` (running
+on a worker), `enabled_unloaded` (catalog-enabled but not currently in
+the director's loaded set), `disabled`, `recommended`, `available`. The
+loaded-vs-unloaded split is computed by consulting the running
+supervisor's LoadDirector via the admin API. When the supervisor is
+unreachable from the CLI (admin token unset, or no `muse serve`
+running), every catalog-enabled row falls back to `enabled_unloaded`
+because the CLI cannot observe runtime state.
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sys
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+# Status enum values (kept here as constants so a typo in any one place
+# fails type-check / lint rather than silently routing to "available").
+STATUS_ENABLED_LOADED = "enabled_loaded"
+STATUS_ENABLED_UNLOADED = "enabled_unloaded"
+STATUS_DISABLED = "disabled"
+STATUS_RECOMMENDED = "recommended"
+STATUS_AVAILABLE = "available"
+
+# Statuses that count as "in the catalog" for --installed filtering.
+_INSTALLED_STATUSES = (
+    STATUS_ENABLED_LOADED,
+    STATUS_ENABLED_UNLOADED,
+    STATUS_DISABLED,
+)
+# Statuses that count as "could install" for --available filtering.
+_AVAILABLE_STATUSES = (STATUS_RECOMMENDED, STATUS_AVAILABLE)
 
 
 @dataclass
@@ -22,7 +53,8 @@ class _ListRow:
     """One row for `muse models list`. Ordered so JSON output is stable."""
     id: str
     modality: str
-    status: str  # one of: enabled, disabled, recommended, available
+    # one of: enabled_loaded, enabled_unloaded, disabled, recommended, available
+    status: str
     description: str
     mem_str: str
     mem_gb: Optional[float]
@@ -41,24 +73,124 @@ class _ListRow:
         }
 
 
+# Indirection seams: tests monkeypatch these symbols on the module to
+# stub catalog / curated / director access without forcing each test
+# to construct a full registry.
+
+def _load_known_models():
+    """Return {model_id: CatalogEntry} from bundled + resolver-pulled scripts."""
+    from muse.core.catalog import list_known
+    return {e.model_id: e for e in list_known(None)}
+
+
+def _load_curated_entries():
+    """Return {curated_id: CuratedEntry}."""
+    from muse.core.curated import load_curated
+    return {c.id: c for c in load_curated()}
+
+
+def _read_catalog_data():
+    """Return the raw catalog dict (for measurements lookup)."""
+    from muse.core.catalog import _read_catalog
+    return _read_catalog()
+
+
+def _is_pulled_for_row(model_id: str) -> bool:
+    from muse.core.catalog import is_pulled
+    return is_pulled(model_id)
+
+
+def _is_enabled_for_row(model_id: str) -> bool:
+    from muse.core.catalog import is_enabled
+    return is_enabled(model_id)
+
+
+def _director_loaded_ids() -> set[str]:
+    """Set of model ids the running supervisor's director reports as loaded.
+
+    The CLI may be invoked anywhere (no running `muse serve`, no admin
+    token, behind a firewall, etc.). When the director cannot be
+    reached, return an empty set so callers default-classify every
+    catalog-enabled row as `enabled_unloaded`. This is correct from the
+    CLI's vantage point: the CLI cannot observe runtime state without
+    the admin API.
+
+    Implementation: best-effort GET /v1/admin/memory via AdminClient,
+    then read the `loaded` shape if present. Falls back to inspecting
+    /v1/admin/workers (for the case where the memory route doesn't
+    surface director state). On any failure -> empty set.
+    """
+    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+        return set()
+    try:
+        from muse.admin.client import AdminClient, AdminClientError
+    except Exception:  # noqa: BLE001
+        return set()
+    client = AdminClient(timeout=2.0)
+    # The admin API does not currently expose a single endpoint that
+    # lists every model the director considers loaded. We probe each
+    # candidate id via /v1/admin/models/{id}/status. To keep the CLI
+    # latency bounded, we only consult the catalog-enabled subset and
+    # cap the per-call timeout.
+    try:
+        from muse.core.catalog import _read_catalog
+        catalog = _read_catalog()
+    except Exception:  # noqa: BLE001
+        return set()
+
+    loaded: set[str] = set()
+    candidate_ids = [
+        mid for mid, e in catalog.items()
+        if isinstance(e, dict) and e.get("enabled", True)
+    ]
+    for mid in candidate_ids:
+        try:
+            info = client.status(mid)
+        except AdminClientError:
+            continue
+        except Exception:  # noqa: BLE001
+            return loaded
+        # The status endpoint returns {"loaded": bool, "worker_port", ...}
+        # under "runtime" or top-level depending on the route impl. We
+        # read both for safety.
+        if info.get("loaded") is True:
+            loaded.add(mid)
+            continue
+        runtime = info.get("runtime") or {}
+        if runtime.get("loaded") is True:
+            loaded.add(mid)
+    return loaded
+
+
+def _classify_pulled(
+    model_id: str,
+    *,
+    director_loaded_ids: set[str],
+) -> str:
+    """Return the status enum for a pulled catalog row.
+
+    enabled + in director's loaded set -> enabled_loaded
+    enabled + not in director's loaded set -> enabled_unloaded
+    not enabled -> disabled
+    """
+    if not _is_enabled_for_row(model_id):
+        return STATUS_DISABLED
+    if model_id in director_loaded_ids:
+        return STATUS_ENABLED_LOADED
+    return STATUS_ENABLED_UNLOADED
+
+
 def build_rows() -> list[_ListRow]:
     """Build the unified row set for `muse models list`.
 
-    Status precedence: pulled (catalog wins enabled/disabled) >
-    curated-but-not-pulled (recommended) > bundled-but-not-pulled
-    (available).
+    Status precedence: pulled (catalog wins enabled_loaded/enabled_unloaded
+    /disabled) > curated-but-not-pulled (recommended) > bundled-but-not-
+    pulled (available).
     """
-    from muse.core.catalog import (
-        _read_catalog,
-        is_enabled,
-        is_pulled,
-        list_known,
-    )
-    from muse.core.curated import load_curated
-
-    bundled_entries = {e.model_id: e for e in list_known(None)}
-    curated_entries = {c.id: c for c in load_curated()}
-    catalog_data = _read_catalog()
+    bundled_entries = _load_known_models()
+    curated_entries = _load_curated_entries()
+    catalog_data = _read_catalog_data()
+    director_loaded = _director_loaded_ids()
 
     rows: list[_ListRow] = []
     seen: set[str] = set()
@@ -66,12 +198,14 @@ def build_rows() -> list[_ListRow]:
     # 1. Bundled scripts and resolver-pulled entries.
     for model_id, e in bundled_entries.items():
         seen.add(model_id)
-        if is_pulled(model_id):
-            status = "enabled" if is_enabled(model_id) else "disabled"
+        if _is_pulled_for_row(model_id):
+            status = _classify_pulled(
+                model_id, director_loaded_ids=director_loaded,
+            )
         elif model_id in curated_entries:
-            status = "recommended"
+            status = STATUS_RECOMMENDED
         else:
-            status = "available"
+            status = STATUS_AVAILABLE
         mem_str, mem_gb, mem_device = _model_memory_display(
             e.extra, catalog_data.get(model_id),
         )
@@ -90,10 +224,12 @@ def build_rows() -> list[_ListRow]:
     for cid, c in curated_entries.items():
         if cid in seen:
             continue
-        if is_pulled(cid):
-            status = "enabled" if is_enabled(cid) else "disabled"
+        if _is_pulled_for_row(cid):
+            status = _classify_pulled(
+                cid, director_loaded_ids=director_loaded,
+            )
         else:
-            status = "recommended"
+            status = STATUS_RECOMMENDED
         mem_str, mem_gb, mem_device = _model_memory_display(
             c.capabilities or {}, catalog_data.get(cid),
         )
@@ -122,9 +258,9 @@ def filter_rows(
     if modality:
         out = [r for r in out if r.modality == modality]
     if installed:
-        out = [r for r in out if r.status in ("enabled", "disabled")]
+        out = [r for r in out if r.status in _INSTALLED_STATUSES]
     if available:
-        out = [r for r in out if r.status in ("recommended", "available")]
+        out = [r for r in out if r.status in _AVAILABLE_STATUSES]
     return out
 
 
@@ -223,15 +359,18 @@ def _render_plain_table(rows: list[_ListRow]) -> None:
     from muse.cli_impl.console import STATUS_STYLE
 
     # Compute column widths from the longest content so columns line
-    # up without truncation.
+    # up without truncation. The status width pads to whichever known
+    # status name is longest (currently `enabled_unloaded` at 16 chars)
+    # so future renamings don't silently overflow the column.
     id_w = max((len(r.id) for r in rows), default=0)
     mod_w = max((len(r.modality) for r in rows), default=0)
     mem_w = max((len(r.mem_str) for r in rows), default=0)
+    status_w = max(len(s) for s in STATUS_STYLE) if STATUS_STYLE else 11
 
     for r in rows:
         glyph, _ = STATUS_STYLE.get(r.status, ("?", ""))
         line = (
-            f"  {glyph} {r.status:11s}  "
+            f"  {glyph} {r.status:<{status_w}s}  "
             f"{r.id:<{id_w}s}  "
             f"{r.modality:<{mod_w}s}  "
             f"{r.mem_str:>{mem_w}s}  "
@@ -242,28 +381,37 @@ def _render_plain_table(rows: list[_ListRow]) -> None:
 
 def _render_footer(rows: list[_ListRow], *, no_color: bool) -> None:
     """Memory totals + legend. Same in both TTY and plain modes; rich
-    gracefully degrades to plain text when stdout isn't a TTY."""
+    gracefully degrades to plain text when stdout isn't a TTY.
+
+    The "Enabled" tally counts every catalog-enabled row regardless of
+    whether the director currently has it loaded. Under lazy load the
+    enabled set is the operator's declared intent; runtime presence
+    fluctuates with traffic, so the static-state tally is the more
+    actionable footer for capacity planning.
+    """
     from rich.text import Text
 
     from muse.cli_impl.console import get_console, status_legend
 
     console = get_console(force_no_color=no_color)
+    enabled_statuses = (STATUS_ENABLED_LOADED, STATUS_ENABLED_UNLOADED)
     gpu_total = sum(
         r.mem_gb for r in rows
-        if r.status == "enabled" and r.mem_gb is not None
+        if r.status in enabled_statuses and r.mem_gb is not None
         and r.mem_device == "GPU"
     )
     cpu_total = sum(
         r.mem_gb for r in rows
-        if r.status == "enabled" and r.mem_gb is not None
+        if r.status in enabled_statuses and r.mem_gb is not None
         and r.mem_device == "CPU"
     )
-    n_enabled = sum(1 for r in rows if r.status == "enabled")
+    n_enabled = sum(1 for r in rows if r.status in enabled_statuses)
+    n_loaded = sum(1 for r in rows if r.status == STATUS_ENABLED_LOADED)
 
     summary = Text()
     summary.append("\nEnabled: ", style="bold")
     summary.append(f"{gpu_total:.1f} GB GPU + {cpu_total:.1f} GB CPU ")
-    summary.append(f"({n_enabled} models)", style="dim")
+    summary.append(f"({n_enabled} models, {n_loaded} loaded)", style="dim")
     console.print(summary)
     console.print(status_legend())
     console.print(

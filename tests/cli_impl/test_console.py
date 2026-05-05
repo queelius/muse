@@ -7,8 +7,34 @@ from muse.cli_impl.console import (
 )
 
 
-def test_status_style_covers_four_states():
-    assert set(STATUS_STYLE) == {"enabled", "disabled", "recommended", "available"}
+def test_status_style_covers_five_states():
+    """v0.40.0 lazy load split `enabled` into loaded / unloaded variants.
+
+    The five states cover the full lifecycle a catalog row can be in
+    visible to the operator: loaded (running on a worker), unloaded
+    (catalog-enabled but not currently in the director's loaded set),
+    disabled, recommended (curated; not pulled), available (bundled;
+    not pulled).
+    """
+    assert set(STATUS_STYLE) == {
+        "enabled_loaded",
+        "enabled_unloaded",
+        "disabled",
+        "recommended",
+        "available",
+    }
+
+
+def test_status_style_enabled_loaded_uses_filled_circle():
+    """The fully-active state remains the bright filled circle."""
+    glyph, _ = STATUS_STYLE["enabled_loaded"]
+    assert glyph == "●"  # filled circle
+
+
+def test_status_style_enabled_unloaded_uses_half_circle():
+    """The catalog-enabled-but-not-loaded state is a dim half circle."""
+    glyph, _ = STATUS_STYLE["enabled_unloaded"]
+    assert glyph == "◐"  # half-filled circle
 
 
 def test_status_glyph_returns_one_char():

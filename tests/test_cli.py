@@ -99,6 +99,14 @@ def test_pull_unknown_model_nonzero_exit():
     assert "unknown" in combined.lower() or "not found" in combined.lower()
 
 
+def test_pull_help_documents_no_probe_flag():
+    """muse pull --help must list the new --no-probe opt-out flag."""
+    r = _run("pull", "--help")
+    assert r.returncode == 0
+    combined = r.stdout + r.stderr
+    assert "--no-probe" in combined
+
+
 def test_pull_curated_alias_registers_hf_resolver():
     """Regression (v0.11.1): pulling a curated id that expands to an hf://
     URI must register the HF resolver before pull() dispatches. v0.11.0
@@ -162,6 +170,43 @@ def test_models_disable_subcommand_parses():
     assert r.returncode == 0
     combined = r.stdout + r.stderr
     assert "disable" in combined.lower()
+
+
+def test_models_warmup_subcommand_parses():
+    """`muse models warmup --help` must parse and document its argument."""
+    r = _run("models", "warmup", "soprano-80m", "--help")
+    assert r.returncode == 0
+    combined = r.stdout + r.stderr
+    assert "warmup" in combined.lower() or "pre-load" in combined.lower()
+
+
+def test_models_help_lists_warmup_subcommand():
+    """models --help must include the new warmup verb."""
+    r = _run("models", "--help")
+    assert r.returncode == 0
+    combined = r.stdout + r.stderr
+    assert "warmup" in combined.lower()
+
+
+def test_models_warmup_without_admin_token_emits_clear_error(tmp_path):
+    """Warmup is a runtime operation and has no offline equivalent.
+
+    When `MUSE_ADMIN_TOKEN` is unset, the CLI must emit a clear
+    "warmup requires a running `muse serve`" error rather than silently
+    falling through to a catalog mutation.
+    """
+    import os
+    env = os.environ.copy()
+    # Strip the admin token to exercise the error path.
+    env.pop("MUSE_ADMIN_TOKEN", None)
+    env["MUSE_CATALOG_DIR"] = str(tmp_path)
+    r = subprocess.run(
+        [sys.executable, "-m", "muse.cli", "models", "warmup", "kokoro-82m"],
+        capture_output=True, text=True, timeout=15, env=env,
+    )
+    assert r.returncode != 0
+    combined = (r.stdout + r.stderr).lower()
+    assert "muse serve" in combined or "admin_token" in combined or "admin token" in combined
 
 
 def test_models_enable_unknown_model_nonzero_exit():

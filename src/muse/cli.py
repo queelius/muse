@@ -121,9 +121,27 @@ def pull(
             ),
         ),
     ],
+    no_probe: Annotated[
+        bool,
+        typer.Option(
+            "--no-probe",
+            help=(
+                "skip the post-pull memory probe (use for cross-device pulls, "
+                "e.g. pulling on a CPU box for later GPU deployment)"
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """Download weights + install deps for a model."""
-    from muse.core.catalog import pull as _pull
+    """Download weights + install deps for a model.
+
+    By default the pull runs `muse models probe <id>` as a final step
+    to populate the new entry's `measurements.<device>.peak_bytes`.
+    Without that data the v0.40.0 supervisor flags the model as
+    `unservable: "no memory estimate; run muse models probe"` at boot
+    validation. `--no-probe` opts out for cross-device scenarios.
+    Probe failures are warned but do not undo the pull.
+    """
+    from muse.core.catalog import _read_catalog, pull as _pull
     # Always register the HF resolver before dispatching. The arg may
     # be a URI directly, OR a curated alias that expands to a URI
     # inside pull(); the old conditional "only import when :// is in
@@ -131,12 +149,36 @@ def pull(
     # for scheme 'hf'". Importing is near-free (heavy huggingface_hub
     # imports happen on actual resolve(), not on module import).
     import muse.core.resolvers_hf  # noqa: F401  (registers HFResolver on import)
+
+    # Capture the catalog state pre-pull so the post-pull probe can
+    # identify which entry is new. URIs and curated aliases that synth
+    # an override don't reveal the resolved model_id from the pull call
+    # itself; the diff is the cheapest, most reliable way to find it.
+    try:
+        before_keys = set(_read_catalog().keys())
+    except Exception:  # noqa: BLE001
+        before_keys = set()
+
     try:
         _pull(identifier)
     except KeyError as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(2)
     typer.echo(f"pulled {identifier}")
+
+    if no_probe:
+        return
+
+    # Probe-on-pull. Failures are logged to stderr by run_probe_for_pull
+    # but do not raise; we keep the exit code as the pull's success.
+    try:
+        from muse.cli_impl.probe import run_probe_for_pull
+        run_probe_for_pull(identifier, before_keys=before_keys)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(
+            f"warning: probe-on-pull skipped due to internal error: {e}",
+            err=True,
+        )
 
 
 @app.command("search")
@@ -393,6 +435,77 @@ def models_disable(
     typer.echo(
         f"disabled {model_id} (catalog only; supervisor will pick this up on restart)"
     )
+
+
+@models_app.command("warmup")
+def models_warmup(
+    model_id: Annotated[str, typer.Argument()],
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help=(
+                "max seconds to wait for the cold load to complete "
+                "(default: 300; bump for very large models)"
+            ),
+        ),
+    ] = 300.0,
+) -> None:
+    """Pre-load a model via the running supervisor.
+
+    Routes through the admin API's `POST /v1/admin/models/{id}/warmup`,
+    which calls `LoadDirector.warmup` to bring the model into the loaded
+    set without consuming a request slot. Subsequent inference requests
+    skip the cold-load latency.
+
+    Warmup is purely a runtime operation: there is no offline equivalent
+    (catalog state alone cannot pre-load anything). When
+    `MUSE_ADMIN_TOKEN` is unset OR the supervisor isn't reachable, this
+    command exits non-zero with a clear error rather than silently
+    succeeding.
+    """
+    import os
+    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+        typer.echo(
+            "error: warmup requires a running `muse serve` with MUSE_ADMIN_TOKEN set",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    try:
+        from muse.admin.client import AdminClient, AdminClientError
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"error: admin client unavailable: {e}", err=True)
+        raise typer.Exit(2)
+
+    client = AdminClient(timeout=timeout)
+    try:
+        # Pass the per-call timeout explicitly: cold loads take 10-60s
+        # for typical models and longer (5+ min) for large diffusion or
+        # video models. The constructor default (30s) would routinely
+        # truncate; the CLI knob lets operators tune up.
+        out = client.warmup(model_id, timeout=timeout)
+    except AdminClientError as e:
+        if e.status == 503 and e.code == "admin_disabled":
+            typer.echo(
+                "error: warmup requires a running `muse serve` with MUSE_ADMIN_TOKEN set",
+                err=True,
+            )
+            raise typer.Exit(2)
+        typer.echo(f"error: {e.message}", err=True)
+        raise typer.Exit(1)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(
+            f"error: warmup requires a running `muse serve`; could not reach supervisor ({e})",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    port = out.get("worker_port") if isinstance(out, dict) else None
+    if port:
+        typer.echo(f"warmed up {model_id} (worker port {port})")
+    else:
+        typer.echo(f"warmed up {model_id}")
 
 
 @models_app.command("probe")

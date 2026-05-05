@@ -337,3 +337,116 @@ def test_run_probe_all_continues_past_individual_failures(tmp_path, monkeypatch,
     assert rc == 1
     captured = capsys.readouterr()
     assert "1 failed" in captured.out.lower() or "failed: beta" in captured.out.lower()
+
+
+# v0.40.0 probe-on-pull --------------------------------------------------
+
+
+def test_run_probe_for_pull_dispatches_for_curated_alias(tmp_path, monkeypatch):
+    """run_probe_for_pull resolves a curated alias to its model_id and
+    dispatches run_probe with that id."""
+    from muse.cli_impl.probe import run_probe_for_pull
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+
+    # Stub the catalog so the resolved id ends up in known_models +
+    # catalog reads. The curated alias "qwen3-8b-q4" must resolve to
+    # itself when present in the catalog.
+    fake_catalog = {"qwen3-8b-q4": {"enabled": True}}
+    monkeypatch.setattr(
+        "muse.cli_impl.probe._read_catalog", lambda: fake_catalog,
+    )
+
+    call_log: list[str] = []
+    def fake_run_probe(*, model_id, **kwargs):
+        call_log.append(model_id)
+        return 0
+
+    with patch("muse.cli_impl.probe.run_probe", side_effect=fake_run_probe):
+        rc = run_probe_for_pull("qwen3-8b-q4", before_keys=set())
+
+    assert rc == 0
+    assert call_log == ["qwen3-8b-q4"]
+
+
+def test_run_probe_for_pull_resolves_uri_via_diff(tmp_path, monkeypatch):
+    """When the identifier is a URI, run_probe_for_pull diffs the catalog
+    against `before_keys` to find the new entry's model_id."""
+    from muse.cli_impl.probe import run_probe_for_pull
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+
+    fake_catalog = {
+        "existing-pre-pull": {"enabled": True},
+        "freshly-pulled-id": {"enabled": True},
+    }
+    monkeypatch.setattr(
+        "muse.cli_impl.probe._read_catalog", lambda: fake_catalog,
+    )
+
+    call_log: list[str] = []
+    def fake_run_probe(*, model_id, **kwargs):
+        call_log.append(model_id)
+        return 0
+
+    before = {"existing-pre-pull"}
+    with patch("muse.cli_impl.probe.run_probe", side_effect=fake_run_probe):
+        rc = run_probe_for_pull(
+            "hf://some/repo@v",
+            before_keys=before,
+        )
+
+    assert rc == 0
+    assert call_log == ["freshly-pulled-id"]
+
+
+def test_run_probe_for_pull_swallows_subprocess_failure(tmp_path, monkeypatch, capsys):
+    """A probe that fails post-pull must NOT propagate. The pull already
+    succeeded; probe is a best-effort polish step. Caller should warn
+    but exit zero."""
+    from muse.cli_impl.probe import run_probe_for_pull
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+
+    fake_catalog = {"x": {"enabled": True}}
+    monkeypatch.setattr(
+        "muse.cli_impl.probe._read_catalog", lambda: fake_catalog,
+    )
+
+    def fake_run_probe(*, model_id, **kwargs):
+        raise RuntimeError("simulated probe failure")
+
+    with patch("muse.cli_impl.probe.run_probe", side_effect=fake_run_probe):
+        # No exception escapes.
+        rc = run_probe_for_pull("x", before_keys=set())
+
+    # Non-zero is fine -- the caller propagates with a warning -- but the
+    # function MUST NOT raise.
+    assert isinstance(rc, int)
+    err = capsys.readouterr().err
+    assert "warning" in err.lower() or "probe" in err.lower()
+
+
+def test_run_probe_for_pull_returns_nonzero_on_unidentified_pull(tmp_path, monkeypatch, capsys):
+    """When the diff finds zero new entries (URI pull added nothing
+    visible to us) we cannot identify the model. Return non-zero +
+    warning so the caller knows."""
+    from muse.cli_impl.probe import run_probe_for_pull
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+
+    # Catalog hasn't grown.
+    fake_catalog = {"existing": {"enabled": True}}
+    monkeypatch.setattr(
+        "muse.cli_impl.probe._read_catalog", lambda: fake_catalog,
+    )
+
+    with patch("muse.cli_impl.probe.run_probe") as mock_run_probe:
+        rc = run_probe_for_pull(
+            "hf://opaque/repo", before_keys={"existing"},
+        )
+
+    assert rc != 0
+    mock_run_probe.assert_not_called()
+    err = capsys.readouterr().err
+    assert "could not identify" in err.lower() or "skipping probe" in err.lower()

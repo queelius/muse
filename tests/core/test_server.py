@@ -136,6 +136,200 @@ def test_v1_models_exposes_capabilities_and_metadata_from_manifest():
     assert entry["voices"] == ["af_heart", "am_adam"]
 
 
+# v0.40.0 lazy-load fields on /v1/models -----------------------------------
+
+
+def test_v1_models_includes_lazy_load_fields_no_supervisor():
+    """Without a SupervisorState wired, /v1/models still emits the v0.40.0
+    fields with safe defaults: every registered model is treated as
+    loaded (the worker has it in its registry), with no last_loaded_at
+    or unservable_reason. This keeps the worker's local view consistent
+    when running in isolation (tests, debugging, single-worker mode).
+    """
+    reg = ModalityRegistry()
+
+    class Fake:
+        model_id = "test-model"
+
+    reg.register("audio/speech", Fake(), manifest={"model_id": "test-model"})
+    app = create_app(registry=reg, routers={})
+    client = TestClient(app)
+    r = client.get("/v1/models")
+    assert r.status_code == 200
+    entry = r.json()["data"][0]
+    assert "loaded" in entry
+    assert "last_loaded_at" in entry
+    assert "unservable_reason" in entry
+    # Defaults: registered = loaded; no director timestamp on a worker
+    # without supervisor state; no unservable_reason on a successfully
+    # registered model.
+    assert entry["loaded"] is True
+    assert entry["last_loaded_at"] is None
+    assert entry["unservable_reason"] is None
+
+
+def test_v1_models_loaded_field_reflects_director_state(monkeypatch):
+    """When SupervisorState carries a director with `loaded`, `/v1/models`
+    sources `loaded` from `state.director.status()` so the CLI / SDK
+    can see runtime state without extra round-trips."""
+    import time as _time
+
+    from muse.cli_impl.supervisor import (
+        SupervisorState,
+        clear_supervisor_state,
+        set_supervisor_state,
+    )
+
+    clear_supervisor_state()
+    state = SupervisorState()
+
+    # Stub a director-like object exposing the `status()` and `loaded`
+    # surface that core/server.py consults. Two models: one currently
+    # loaded, the other absent (returns "loaded": False).
+    monotonic_loaded_at = _time.monotonic() - 12.0  # 12s ago
+    fake_loaded = {
+        "loaded-id": {
+            "loaded": True,
+            "worker_port": 9001,
+            "last_touched_at": _time.monotonic(),
+            "loaded_at": monotonic_loaded_at,
+            "refcount": 0,
+        },
+    }
+
+    class FakeDirector:
+        def status(self):
+            return dict(fake_loaded)
+    state.director = FakeDirector()
+    set_supervisor_state(state)
+    try:
+        reg = ModalityRegistry()
+
+        class Fake:
+            model_id = "loaded-id"
+
+        class Fake2:
+            model_id = "unloaded-id"
+
+        reg.register("audio/speech", Fake(), manifest={"model_id": "loaded-id"})
+        reg.register("audio/speech", Fake2(), manifest={"model_id": "unloaded-id"})
+
+        app = create_app(registry=reg, routers={})
+        client = TestClient(app)
+        r = client.get("/v1/models")
+        data = r.json()["data"]
+        by_id = {e["id"]: e for e in data}
+        assert by_id["loaded-id"]["loaded"] is True
+        # last_loaded_at is ISO-8601 UTC -- must be a non-empty string.
+        last = by_id["loaded-id"]["last_loaded_at"]
+        assert isinstance(last, str)
+        assert "T" in last  # ISO-8601 has the date/time separator
+        # The unloaded model is registered (worker hosts it) but absent
+        # from director.loaded. The director is the source of truth: it
+        # says not loaded, so the response says not loaded.
+        assert by_id["unloaded-id"]["loaded"] is False
+        assert by_id["unloaded-id"]["last_loaded_at"] is None
+    finally:
+        clear_supervisor_state()
+
+
+def test_v1_models_real_director_populates_last_loaded_at(monkeypatch):
+    """Smoke test against an actual LoadDirector instance: when the
+    director has a real LoadEntry with `loaded_at`, /v1/models renders
+    last_loaded_at as an ISO-8601 string rather than null. Guards
+    against accidental regressions where status() shape drifts but the
+    dataclass is still populated."""
+    import time as _time
+
+    from muse.cli_impl.load_director import LoadDirector, LoadEntry
+    from muse.cli_impl.supervisor import (
+        SupervisorState,
+        clear_supervisor_state,
+        set_supervisor_state,
+    )
+
+    clear_supervisor_state()
+
+    class FakeProbe:
+        def gpu_free_gb(self): return 10.0
+        def cpu_free_gb(self): return 16.0
+
+    director = LoadDirector(
+        enable_fn=lambda mid: 9001,
+        disable_fn=lambda mid: None,
+        memory_probe=FakeProbe(),
+    )
+    # Inject a LoadEntry directly so we don't need to call the full
+    # acquire path (which would hit memory accounting and other code
+    # outside this test's scope).
+    now = _time.monotonic()
+    director.loaded["real-id"] = LoadEntry(
+        model_id="real-id",
+        worker_port=9001,
+        memory_gb=0.5,
+        refcount=0,
+        last_touched_at=now,
+        loaded_at=now - 5.0,  # 5s ago
+    )
+
+    state = SupervisorState()
+    state.director = director
+    set_supervisor_state(state)
+    try:
+        reg = ModalityRegistry()
+
+        class Fake:
+            model_id = "real-id"
+
+        reg.register("audio/speech", Fake(), manifest={"model_id": "real-id"})
+        app = create_app(registry=reg, routers={})
+        client = TestClient(app)
+        r = client.get("/v1/models")
+        entry = r.json()["data"][0]
+        assert entry["loaded"] is True
+        assert isinstance(entry["last_loaded_at"], str)
+        # ISO 8601 includes "T" between date and time.
+        assert "T" in entry["last_loaded_at"]
+        # The time should be approximately 5 seconds ago, but we don't
+        # assert exact value: the monotonic-to-wall-clock conversion is
+        # subject to scheduling jitter. A non-empty string is enough.
+    finally:
+        clear_supervisor_state()
+
+
+def test_v1_models_unservable_reason_surfaces_from_state(monkeypatch):
+    """`unservable_reason` for a model is sourced from
+    `state.unservable_reasons.get(model_id)` and exposed on the response."""
+    from muse.cli_impl.supervisor import (
+        SupervisorState,
+        clear_supervisor_state,
+        set_supervisor_state,
+    )
+
+    clear_supervisor_state()
+    state = SupervisorState()
+    state.unservable_reasons["broken-id"] = "no memory estimate; run muse models probe"
+    set_supervisor_state(state)
+    try:
+        reg = ModalityRegistry()
+
+        class Fake:
+            model_id = "broken-id"
+
+        reg.register(
+            "audio/speech", Fake(), manifest={"model_id": "broken-id"},
+        )
+        app = create_app(registry=reg, routers={})
+        client = TestClient(app)
+        r = client.get("/v1/models")
+        entry = r.json()["data"][0]
+        assert entry["unservable_reason"] == (
+            "no memory estimate; run muse models probe"
+        )
+    finally:
+        clear_supervisor_state()
+
+
 def test_model_not_found_error_serializes_openai_shape():
     """ModelNotFoundError must produce {error: {...}} not {detail: {error: {...}}}."""
     from muse.core.errors import ModelNotFoundError

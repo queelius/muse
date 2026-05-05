@@ -184,6 +184,89 @@ def run_probe_all(
     return 0 if not failures else 1
 
 
+def run_probe_for_pull(
+    identifier: str,
+    *,
+    before_keys: set[str],
+    no_inference: bool = False,
+    device: str | None = None,
+) -> int:
+    """Probe the model that `pull(identifier)` just installed.
+
+    Resolves the post-pull model_id and dispatches run_probe in
+    fail-soft mode: subprocess failures, missing identifiers, or
+    catalog-state surprises do NOT raise. The intent is to populate the
+    new entry's `measurements.<device>.peak_bytes` so the supervisor's
+    boot validation does not flag it as unservable for "no memory
+    estimate."
+
+    Identifier resolution order (mirrors `catalog.pull` dispatch):
+      1. If `identifier` is a curated id present in the post-pull
+         catalog, use it directly.
+      2. If `identifier` is a bare model_id present in the catalog, use
+         it directly.
+      3. Otherwise (URI, or curated alias with override), diff the
+         post-pull catalog keys against `before_keys` to find the
+         freshly-added entry. When exactly one new entry exists, use
+         it; when zero or multiple, give up and warn.
+
+    `before_keys` is the set of catalog keys captured BEFORE the pull
+    by the caller. The CLI's pull command snapshots this immediately
+    before calling catalog.pull(); the probe-on-pull happens after.
+
+    Returns 0 on probe success; non-zero on any failure mode (the
+    caller may surface this as a warning but should not propagate
+    because the pull itself already succeeded).
+    """
+    catalog = _read_catalog()
+
+    # 1) Direct match on the identifier.
+    resolved_id: str | None = None
+    if identifier in catalog:
+        resolved_id = identifier
+
+    # 2) Otherwise, find a single new entry.
+    if resolved_id is None:
+        new_keys = set(catalog.keys()) - set(before_keys)
+        if len(new_keys) == 1:
+            resolved_id = next(iter(new_keys))
+        elif len(new_keys) == 0:
+            print(
+                f"warning: could not identify which model {identifier!r} just "
+                f"pulled; skipping probe (run `muse models probe <id>` manually)",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            # Multiple new entries -- ambiguous; pick the lexicographically
+            # last one as a best-effort default, but warn so the operator
+            # can rerun probe explicitly.
+            resolved_id = sorted(new_keys)[-1]
+            print(
+                f"warning: pull added {len(new_keys)} entries; probing "
+                f"{resolved_id!r} (rerun `muse models probe <id>` for the rest)",
+                file=sys.stderr,
+            )
+
+    # Dispatch run_probe in fail-soft mode. Any unexpected exception is
+    # caught + logged so the pull's success remains the user's signal.
+    try:
+        return run_probe(
+            model_id=resolved_id,
+            no_inference=no_inference,
+            device=device,
+            as_json=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"warning: probe-on-pull failed for {resolved_id!r}: {e}; "
+            f"the pull itself succeeded. Run `muse models probe {resolved_id}` "
+            f"manually when convenient.",
+            file=sys.stderr,
+        )
+        return 5
+
+
 def _print_human(r: dict) -> None:
     """Format a measurement record for terminal display."""
     if "error" in r and not r.get("ran_inference"):

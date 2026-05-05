@@ -6,11 +6,15 @@ consistent. Rich already respects the NO_COLOR env automatically; the
 explicit `--no-color` flag on user-facing commands overrides via
 `force_terminal=False`.
 
-Status encoding is symbolic: each of the four model statuses gets
+Status encoding is symbolic: each of the five model statuses gets
 exactly one glyph + color pair. Glyphs are single East-Asian-Width
 narrow characters so they monospace cleanly in tables. Color carries
 the redundant signal for color-friendly terminals; the glyph alone
 suffices in piped/no-color output.
+
+The v0.40.0 lazy-load model splits "enabled" into a four-state lifecycle
+(loaded vs unloaded) plus the original disabled / recommended / available
+that catalog metadata can describe without consulting runtime state.
 """
 from __future__ import annotations
 
@@ -24,9 +28,17 @@ from rich.text import Text
 # Status encoding: glyph + color. The same dict is used for the table
 # rendering and for the legend, so the encoding and its documentation
 # can never drift out of sync.
+#
+# v0.40.0 split "enabled" into "enabled_loaded" (bright green filled
+# circle: catalog-enabled AND currently in the director's loaded set)
+# and "enabled_unloaded" (dim yellow half circle: catalog-enabled but
+# not currently held by a worker, will cold-load on next request). The
+# old "enabled" key is gone; callers should use "enabled_loaded" for
+# the active state.
 STATUS_STYLE: dict[str, tuple[str, str]] = {
     # status_name: (glyph, rich-style-name)
-    "enabled": ("●", "bold green"),
+    "enabled_loaded": ("●", "bold green"),
+    "enabled_unloaded": ("◐", "yellow"),
     "disabled": ("○", "red"),
     "recommended": ("★", "yellow"),
     "available": ("·", "dim cyan"),

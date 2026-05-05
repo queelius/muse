@@ -25,7 +25,7 @@ from muse.cli_impl.models_list import (
 def sample_rows():
     return [
         _ListRow(
-            id="kokoro-82m", modality="audio/speech", status="enabled",
+            id="kokoro-82m", modality="audio/speech", status="enabled_loaded",
             description="TTS", mem_str="~0.5 GB CPU", mem_gb=0.5,
             mem_device="CPU",
         ),
@@ -65,11 +65,35 @@ def test_filter_rows_modality(sample_rows):
 
 
 def test_filter_rows_installed_only(sample_rows):
-    """--installed includes both enabled and disabled."""
+    """--installed includes every catalog-enabled state plus disabled."""
     out = filter_rows(
         sample_rows, modality=None, installed=True, available=False,
     )
     assert {r.id for r in out} == {"kokoro-82m", "sd-turbo"}
+
+
+def test_filter_rows_installed_includes_enabled_unloaded():
+    """--installed must catch enabled_unloaded too: it's still a catalog row."""
+    rows = [
+        _ListRow(
+            id="loaded", modality="x", status="enabled_loaded",
+            description="d", mem_str="-", mem_gb=None, mem_device="GPU",
+        ),
+        _ListRow(
+            id="unloaded", modality="x", status="enabled_unloaded",
+            description="d", mem_str="-", mem_gb=None, mem_device="GPU",
+        ),
+        _ListRow(
+            id="off", modality="x", status="disabled",
+            description="d", mem_str="-", mem_gb=None, mem_device="GPU",
+        ),
+        _ListRow(
+            id="rec", modality="x", status="recommended",
+            description="d", mem_str="-", mem_gb=None, mem_device="GPU",
+        ),
+    ]
+    out = filter_rows(rows, modality=None, installed=True, available=False)
+    assert {r.id for r in out} == {"loaded", "unloaded", "off"}
 
 
 def test_filter_rows_available_only(sample_rows):
@@ -148,8 +172,79 @@ def test_json_output_filter_excludes_correct_rows(sample_rows):
     parsed = json.loads(captured.getvalue())
     statuses = {r["status"] for r in parsed}
     assert statuses == {"recommended", "available"}
-    assert "enabled" not in statuses
+    assert "enabled_loaded" not in statuses
+    assert "enabled_unloaded" not in statuses
     assert "disabled" not in statuses
+
+
+# v0.40.0 lazy-load: enabled_unloaded state ---------------------------------
+
+
+def test_build_rows_classifies_loaded_vs_unloaded(monkeypatch, tmp_path):
+    """When the director reports a model as currently loaded, it
+    classifies as enabled_loaded. Catalog-enabled but not in director
+    state -> enabled_unloaded."""
+    from muse.cli_impl import models_list as ml
+
+    # Two pulled+enabled models: one is in director.loaded, the other isn't.
+    # Stub catalog/curated/known so build_rows returns deterministic shape.
+    fake_known = {
+        "loaded-id": _FakeKnown("loaded-id", "audio/speech", "loaded model"),
+        "unloaded-id": _FakeKnown("unloaded-id", "audio/speech", "unloaded model"),
+    }
+    fake_catalog = {
+        "loaded-id": {"enabled": True},
+        "unloaded-id": {"enabled": True},
+    }
+    fake_loaded = {"loaded-id"}  # what the director thinks is loaded
+
+    monkeypatch.setattr(ml, "_load_known_models", lambda: fake_known)
+    monkeypatch.setattr(ml, "_load_curated_entries", lambda: {})
+    monkeypatch.setattr(ml, "_read_catalog_data", lambda: fake_catalog)
+    monkeypatch.setattr(ml, "_is_pulled_for_row", lambda mid: True)
+    monkeypatch.setattr(ml, "_is_enabled_for_row", lambda mid: True)
+    monkeypatch.setattr(ml, "_director_loaded_ids", lambda: fake_loaded)
+
+    rows = ml.build_rows()
+    by_id = {r.id: r for r in rows}
+    assert by_id["loaded-id"].status == "enabled_loaded"
+    assert by_id["unloaded-id"].status == "enabled_unloaded"
+
+
+def test_build_rows_director_unreachable_treats_all_as_unloaded(monkeypatch):
+    """When the director isn't reachable (CLI used outside a running
+    supervisor), every catalog-enabled row falls back to enabled_unloaded."""
+    from muse.cli_impl import models_list as ml
+
+    fake_known = {
+        "a": _FakeKnown("a", "audio/speech", "a"),
+        "b": _FakeKnown("b", "audio/speech", "b"),
+    }
+    fake_catalog = {
+        "a": {"enabled": True},
+        "b": {"enabled": True},
+    }
+
+    monkeypatch.setattr(ml, "_load_known_models", lambda: fake_known)
+    monkeypatch.setattr(ml, "_load_curated_entries", lambda: {})
+    monkeypatch.setattr(ml, "_read_catalog_data", lambda: fake_catalog)
+    monkeypatch.setattr(ml, "_is_pulled_for_row", lambda mid: True)
+    monkeypatch.setattr(ml, "_is_enabled_for_row", lambda mid: True)
+    # Empty set -> nothing is loaded; CLI doesn't know runtime state
+    monkeypatch.setattr(ml, "_director_loaded_ids", lambda: set())
+
+    rows = ml.build_rows()
+    statuses = {r.id: r.status for r in rows}
+    assert statuses == {"a": "enabled_unloaded", "b": "enabled_unloaded"}
+
+
+class _FakeKnown:
+    """Minimal stand-in for muse.core.catalog.CatalogEntry used in tests."""
+    def __init__(self, model_id, modality, description):
+        self.model_id = model_id
+        self.modality = modality
+        self.description = description
+        self.extra = {}
 
 
 def test_json_output_no_memory_for_unprobed_unannotated():
