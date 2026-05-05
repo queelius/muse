@@ -1,11 +1,14 @@
 """Tests for LoadDirector: hot/cold acquire, refcount, singleton-load coordination,
-on-demand LRU eviction.
+on-demand LRU eviction, and observed-peak writeback.
 
 Task B and Task C of the v0.40.0 lazy-load plan. Task B covers the three-phase
 acquire (decide / load / commit). Task C adds the on-demand LRU eviction loop:
 when a cold acquire does not fit, the director picks the least-recently-used
 loaded model with refcount == 0, calls the injected disable_fn, polls the
-memory probe for release, and retries the fit check.
+memory probe for release, and retries the fit check. Task D adds observed-peak
+writeback: every cold load measures `free_before - free_after` and writes the
+delta back to `measurements.<device>.peak_bytes` if it exceeds the recorded
+value; estimates self-heal upward toward reality.
 
 Concurrency tests use threading.Barrier to make two sync threads enter the
 decision phase as close to simultaneously as the GIL allows. Both threads
@@ -26,6 +29,7 @@ from muse.cli_impl.load_director import (
     LoadDirector,
     LoadEntry,
 )
+from muse.core.catalog import _read_catalog, _write_catalog
 
 
 def _make_probe(gpu_free: float = 32.0, cpu_free: float = 64.0) -> MagicMock:
@@ -1061,3 +1065,339 @@ class TestDecisionLogEntryShape:
         assert d.model_id == "x"
         assert d.action == "load"
         assert d.evicted == []
+
+
+# ----------------------------------------------------------------------
+# Task D: observed-peak writeback
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def catalog_dir(tmp_path, monkeypatch):
+    """Scope the muse catalog file to a temp dir for the test.
+
+    `_read_catalog` / `_write_catalog` consult the `MUSE_CATALOG_DIR`
+    env var (falling back to `~/.muse`); we redirect to tmp_path so each
+    test gets a clean catalog.json without touching the user's real one.
+    """
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    return tmp_path
+
+
+def _seed_catalog(model_id: str, *, device: str, peak_bytes: int | None) -> None:
+    """Write a minimal catalog.json with the given measurement seed.
+
+    `peak_bytes=None` writes the catalog entry but no `measurements.<device>`
+    record at all (simulates first cold load before any probe ran).
+    """
+    catalog = _read_catalog()
+    entry = catalog.setdefault(model_id, {})
+    entry["enabled"] = True
+    if peak_bytes is not None:
+        entry.setdefault("measurements", {})
+        entry["measurements"][device] = {
+            "peak_bytes": peak_bytes,
+            "weights_bytes": peak_bytes,
+            "device": device,
+        }
+    _write_catalog(catalog)
+
+
+class TestObservedPeakWriteback:
+    """observed_peak fires a fire-and-forget thread that monotonically
+    raises `measurements.<device>.peak_bytes` toward reality.
+
+    The director swallows IO errors so a corrupted catalog or transient
+    filesystem failure does not surface as a 500 to the user; this test
+    suite verifies the full happy-path + the swallow-and-log paths.
+    """
+
+    def test_writes_back_when_observed_exceeds_recorded(self, catalog_dir):
+        # Recorded peak: 1 GB. Observed: 2 GB. Writeback must replace it.
+        _seed_catalog("fake-model", device="cuda", peak_bytes=1 * 1024**3)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        thread = director.observed_peak(
+            "fake-model",
+            observed_peak_bytes=2 * 1024**3,
+            device="cuda",
+        )
+        assert thread is not None
+        thread.join(timeout=2.0)
+        assert not thread.is_alive(), "writeback thread did not complete in 2s"
+
+        catalog = _read_catalog()
+        m = catalog["fake-model"]["measurements"]["cuda"]
+        assert m["peak_bytes"] == 2 * 1024**3
+        # observed_at + source must be set on this writeback path.
+        assert m["source"] == "lazy_load_observation"
+        assert "observed_at" in m
+        # ISO 8601 UTC sanity (e.g. "2026-05-05T..."): contains "T" + ends "+00:00" or "Z".
+        assert "T" in m["observed_at"]
+
+    def test_does_not_write_back_when_observed_lte_recorded(self, catalog_dir):
+        # Estimate is monotonically upward only; a smaller observed value
+        # must NOT erase a larger recorded one.
+        _seed_catalog("fake-model", device="cuda", peak_bytes=5 * 1024**3)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        thread = director.observed_peak(
+            "fake-model",
+            observed_peak_bytes=2 * 1024**3,
+            device="cuda",
+        )
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        m = catalog["fake-model"]["measurements"]["cuda"]
+        assert m["peak_bytes"] == 5 * 1024**3
+        # No writeback happened: source field stays absent (the seed didn't set one).
+        assert "source" not in m
+        assert "observed_at" not in m
+
+    def test_writes_back_when_no_recorded_value_exists(self, catalog_dir):
+        # First cold load: catalog entry exists but has no `measurements`
+        # block at all. Writeback must create the bucket and populate it.
+        _seed_catalog("fake-model", device="cuda", peak_bytes=None)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        thread = director.observed_peak(
+            "fake-model",
+            observed_peak_bytes=3 * 1024**3,
+            device="cuda",
+        )
+        assert thread is not None
+        thread.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        m = catalog["fake-model"]["measurements"]["cuda"]
+        assert m["peak_bytes"] == 3 * 1024**3
+        assert m["source"] == "lazy_load_observation"
+        assert "observed_at" in m
+
+    def test_swallows_ioerror_during_write(self, catalog_dir, monkeypatch, caplog):
+        # If the catalog write fails (disk full, permissions, etc.), the
+        # writeback path must log a warning and swallow the error so the
+        # request hot path is unaffected. The caller has no observable
+        # failure: thread completes cleanly.
+        _seed_catalog("fake-model", device="cuda", peak_bytes=1 * 1024**3)
+
+        # Patch the writeback's _write_catalog reference (LoadDirector
+        # imports it locally inside the thread so we patch by module path).
+        import muse.cli_impl.load_director as ld_mod
+
+        def boom(_data: dict) -> None:
+            raise IOError("disk full")
+
+        monkeypatch.setattr(ld_mod, "_write_catalog", boom)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        with caplog.at_level("WARNING", logger="muse.cli_impl.load_director"):
+            thread = director.observed_peak(
+                "fake-model",
+                observed_peak_bytes=10 * 1024**3,
+                device="cuda",
+            )
+            assert thread is not None
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+
+        # The seed value must remain because the write was rejected.
+        catalog = _read_catalog()
+        assert catalog["fake-model"]["measurements"]["cuda"]["peak_bytes"] == 1 * 1024**3
+        # And the logger captured the failure (admin can debug it later).
+        warned = any(
+            "observed_peak" in rec.getMessage().lower()
+            or "writeback" in rec.getMessage().lower()
+            or "disk full" in rec.getMessage().lower()
+            for rec in caplog.records
+            if rec.levelname == "WARNING"
+        )
+        assert warned, "expected a WARNING log when writeback fails"
+
+    def test_swallows_oserror_during_read(self, catalog_dir, monkeypatch, caplog):
+        # If the catalog read fails, the writeback path must also swallow
+        # the error gracefully. Same contract as IO during write.
+        _seed_catalog("fake-model", device="cuda", peak_bytes=1 * 1024**3)
+
+        import muse.cli_impl.load_director as ld_mod
+
+        def boom() -> dict:
+            raise OSError("filesystem error")
+
+        monkeypatch.setattr(ld_mod, "_read_catalog", boom)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        with caplog.at_level("WARNING", logger="muse.cli_impl.load_director"):
+            thread = director.observed_peak(
+                "fake-model",
+                observed_peak_bytes=10 * 1024**3,
+                device="cuda",
+            )
+            assert thread is not None
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+
+    def test_unknown_model_in_catalog_is_swallowed(self, catalog_dir):
+        # If the model is missing from the catalog entirely (race with
+        # `muse models remove`), writeback must not crash. No catalog
+        # mutation should result.
+        # No seed: catalog stays empty.
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        thread = director.observed_peak(
+            "ghost-model",
+            observed_peak_bytes=2 * 1024**3,
+            device="cuda",
+        )
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        # Either: catalog stayed empty, OR the writeback decided not to
+        # auto-create entries for unknown models. Both are acceptable;
+        # the contract is "don't crash". Verify no crash.
+        assert "ghost-model" not in catalog or catalog["ghost-model"].get(
+            "measurements"
+        ) is None
+
+    def test_zero_or_negative_observed_is_no_writeback(self, catalog_dir):
+        # A negative or zero observed peak indicates the load actually
+        # FREED memory (other process released VRAM during our load
+        # window), or the measurement was meaningless. Either way, do
+        # not corrupt the recorded peak with a 0 value.
+        _seed_catalog("fake-model", device="cuda", peak_bytes=2 * 1024**3)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+
+        thread = director.observed_peak(
+            "fake-model",
+            observed_peak_bytes=0,
+            device="cuda",
+        )
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        m = catalog["fake-model"]["measurements"]["cuda"]
+        assert m["peak_bytes"] == 2 * 1024**3
+        assert "source" not in m
+
+
+class TestColdLoadCommitFiresWriteback:
+    """The wired callsite: a successful cold load fires the writeback
+    thread automatically, with the observed delta computed from the
+    free_before / free_after captured in `_load_and_commit`.
+    """
+
+    def test_cold_load_fires_writeback_after_commit(self, catalog_dir):
+        # Probe simulates 4 GB consumed: pre=10 GB free, post=6 GB free.
+        # Observed peak bytes = 4 GB. Recorded = 1 GB. Writeback raises.
+        _seed_catalog("fake-model", device="cpu", peak_bytes=1 * 1024**3)
+
+        # cpu_free_gb is called twice during _load_and_commit (free_before
+        # and free_after) plus possibly once or twice for decision/eviction.
+        # Use side_effect with a long tail so all calls succeed.
+        free_seq = iter([10.0, 10.0, 6.0] + [6.0] * 50)
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: next(free_seq)
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+
+        # Capture the writeback thread by patching threading.Thread on
+        # the module so we can join it deterministically.
+        spawned: list[threading.Thread] = []
+        import muse.cli_impl.load_director as ld_mod
+        orig_thread = ld_mod.threading.Thread
+
+        def capture_thread(*args, **kwargs):
+            t = orig_thread(*args, **kwargs)
+            spawned.append(t)
+            return t
+
+        # Patch the load_director's threading.Thread so we capture only
+        # our writeback thread, not arbitrary ones from other code paths.
+        import unittest.mock as um
+        with um.patch.object(ld_mod.threading, "Thread", side_effect=capture_thread):
+            director.acquire(
+                "fake-model",
+                manifest=_manifest(memory_gb=1.0, device="cpu"),
+            )
+
+        # One writeback thread must have been started; join + verify catalog.
+        assert len(spawned) >= 1, "no writeback thread was spawned during cold load"
+        for t in spawned:
+            t.join(timeout=2.0)
+
+        catalog = _read_catalog()
+        m = catalog["fake-model"]["measurements"]["cpu"]
+        # 10.0 - 6.0 = 4.0 GB observed, > 1 GB recorded; writeback wins.
+        assert m["peak_bytes"] == int(4.0 * 1024**3)
+        assert m["source"] == "lazy_load_observation"
+
+    def test_cold_load_with_no_observed_consumption_does_not_overwrite(self, catalog_dir):
+        # Probe shows free_before = free_after (no consumption observed,
+        # e.g. enable_fn was a no-op or memory was already accounted for).
+        # Writeback must not reduce the recorded peak.
+        _seed_catalog("fake-model", device="cpu", peak_bytes=2 * 1024**3)
+
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.return_value = 8.0
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+
+        # Run a cold acquire; the writeback should fire but observe a 0-byte
+        # delta and skip the catalog mutation.
+        director.acquire(
+            "fake-model",
+            manifest=_manifest(memory_gb=0.5, device="cpu"),
+        )
+        # Give any writeback thread time to complete (worst case).
+        time.sleep(0.1)
+
+        catalog = _read_catalog()
+        m = catalog["fake-model"]["measurements"]["cpu"]
+        assert m["peak_bytes"] == 2 * 1024**3

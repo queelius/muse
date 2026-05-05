@@ -34,6 +34,11 @@ Three-phase acquire (decide / load / commit):
   Commit (under self.lock)
     - Insert LoadEntry, pop the in_flight_loads Event, append a
       DecisionLogEntry, set() the Event so any concurrent waiters wake.
+    - Schedule the observed-peak writeback (Task D): a fire-and-forget
+      daemon thread compares observed delta vs the recorded
+      `measurements.<device>.peak_bytes` and raises it if observation
+      exceeds the seed. Errors are logged + swallowed so the request
+      hot path is unaffected.
 
 This module does NOT import enable_model / disable_model from
 muse.admin.operations at import time (it does lazy-import OperationError
@@ -49,9 +54,29 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
+# Task D writeback uses the existing catalog read / atomic-write helpers.
+# These are imported at module scope so tests can monkeypatch them on the
+# load_director module's namespace (see tests/cli_impl/test_load_director.py
+# `test_swallows_ioerror_during_write` etc.).
+from muse.core.catalog import _read_catalog, _write_catalog
+
 logger = logging.getLogger(__name__)
+
+
+# Task D: serialize observed-peak writebacks across models so concurrent
+# cold loads of DIFFERENT models cannot lose updates via interleaved
+# read-modify-write. The atomic write-then-rename in `_write_catalog`
+# ensures one writer's tmp -> final rename does not corrupt another's
+# pending tmp file, but it does NOT prevent thread A from reading the
+# catalog, thread B reading + rewriting it, and thread A then writing
+# its (now stale) version back -- losing B's update. A single global
+# Lock on the writeback path eliminates the read-modify-write race
+# without coupling to LoadDirector.lock (which is reserved for in-memory
+# state mutations on the request hot path).
+_WRITEBACK_LOCK = threading.Lock()
 
 
 # Default headroom margins in GB. Subtracted from live free before the
@@ -267,6 +292,124 @@ class LoadDirector:
                 for mid, e in self.loaded.items()
             }
 
+    def observed_peak(
+        self,
+        model_id: str,
+        *,
+        observed_peak_bytes: int,
+        device: str,
+    ) -> threading.Thread | None:
+        """Schedule a passive writeback of the observed peak.
+
+        Spec section "Lazy-load passive observation": every cold load
+        compares the observed `free_before - free_after` delta against
+        the recorded `catalog[model_id].measurements.<device>.peak_bytes`.
+        If observed > recorded (or recorded is missing), the catalog gets
+        the new larger value via the existing atomic write-then-rename
+        in `muse.core.catalog._write_catalog`.
+
+        This is fire-and-forget: a daemon thread does the
+        read-modify-write so the request hot path is unaffected.
+        Failures are logged at WARNING level and swallowed because a
+        corrupted catalog file or transient filesystem error must NOT
+        surface as a 500 to the user. Returns the Thread reference (so
+        tests can deterministically join it via .join()); production
+        callers can ignore the return value.
+
+        `observed_peak_bytes <= 0` is treated as a no-op (negative deltas
+        mean another process freed memory during our load window, or the
+        measurement was meaningless; we do not corrupt a recorded peak
+        with a zero or negative observation).
+
+        `device` is the catalog measurements bucket key. Existing probe
+        records use "cuda" / "cpu" / "mps"; the alias "gpu" normalizes
+        to "cuda" so callers don't need to know the convention.
+        """
+        if observed_peak_bytes <= 0:
+            return None
+
+        # Normalize gpu -> cuda for catalog consistency. The probe writes
+        # "cuda" via _resolve_device; the supervisor will pass through
+        # whatever capabilities.device declares. Folding here avoids a
+        # split-brain measurements bucket where both keys exist for the
+        # same physical device.
+        device_key = "cuda" if device == "gpu" else device
+
+        thread = threading.Thread(
+            target=self._observed_peak_writeback,
+            args=(model_id, observed_peak_bytes, device_key),
+            daemon=True,
+            name=f"observed-peak-writeback-{model_id}",
+        )
+        thread.start()
+        return thread
+
+    @staticmethod
+    def _observed_peak_writeback(
+        model_id: str,
+        observed_peak_bytes: int,
+        device_key: str,
+    ) -> None:
+        """Body of the writeback thread; runs OFF the request hot path.
+
+        Held under the module-level _WRITEBACK_LOCK so concurrent cold
+        loads of different models do not lose updates via interleaved
+        read-modify-write.
+
+        Errors are logged at WARNING and swallowed: the catalog write
+        is best-effort, not an invariant.
+        """
+        try:
+            with _WRITEBACK_LOCK:
+                catalog = _read_catalog()
+                entry = catalog.get(model_id)
+                if entry is None:
+                    # Model removed (e.g. `muse models remove`) since the
+                    # load completed. Nothing to write back; not an error.
+                    logger.debug(
+                        "observed_peak: %r not in catalog; skipping writeback",
+                        model_id,
+                    )
+                    return
+
+                measurements = entry.setdefault("measurements", {})
+                bucket = measurements.get(device_key) or {}
+                recorded = int(bucket.get("peak_bytes") or 0)
+                if observed_peak_bytes <= recorded:
+                    # Estimate is monotonically upward only.
+                    return
+
+                bucket["peak_bytes"] = int(observed_peak_bytes)
+                bucket["device"] = device_key
+                bucket["source"] = "lazy_load_observation"
+                bucket["observed_at"] = datetime.now(timezone.utc).isoformat()
+                # If `weights_bytes` is absent (no probe ever ran), seed
+                # it with the observed peak as a conservative lower bound.
+                # This keeps existing /v1/models renderers working even
+                # when only lazy-load measurements exist.
+                bucket.setdefault("weights_bytes", int(observed_peak_bytes))
+                measurements[device_key] = bucket
+
+                _write_catalog(catalog)
+
+                logger.info(
+                    "observed_peak writeback: %s (%s): %d bytes (was %d)",
+                    model_id,
+                    device_key,
+                    observed_peak_bytes,
+                    recorded,
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Any IO / OS / JSON failure is logged + swallowed. The
+            # writeback is best-effort; the next cold load will retry.
+            logger.warning(
+                "observed_peak writeback failed for %s (%s): %s",
+                model_id,
+                device_key,
+                exc,
+                exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # Internals: decision / load / commit
     # ------------------------------------------------------------------
@@ -344,6 +487,13 @@ class LoadDirector:
 
         On exception, performs cleanup so concurrent waiters wake up,
         no stale LoadEntry exists, and the exception propagates.
+
+        After a successful commit, schedules the observed-peak writeback
+        (Task D): a daemon thread compares the observed `free_before -
+        free_after` delta against the catalog's recorded peak and raises
+        the recorded value if observation exceeds it. The thread starts
+        OFF the request hot path so the caller is unaffected by catalog
+        IO latency or filesystem failures.
         """
         memory_gb = float(manifest.get("capabilities", {}).get("memory_gb", 0.0) or 0.0)
         device = str(manifest.get("capabilities", {}).get("device", "cpu")).lower()
@@ -389,6 +539,17 @@ class LoadDirector:
         # awakened waiter on its first re-entry into _decide.
         if event is not None:
             event.set()
+
+        # Task D: schedule the observed-peak writeback. Compute the delta
+        # in bytes; observed_peak swallows non-positive values internally.
+        # Spawn happens AFTER waiters wake up so the writeback IO can't
+        # delay them.
+        observed_bytes = int((free_before_gb - free_after_gb) * 1024**3)
+        self.observed_peak(
+            model_id,
+            observed_peak_bytes=observed_bytes,
+            device=device,
+        )
 
         return worker_port
 
