@@ -32,17 +32,28 @@ MODALITY = "audio/classification"
 
 def _probe_call(model):
     """Probe-default body: 1 second of silence at 16kHz, written to
-    a temp WAV, then classified."""
+    a temp WAV, then classified.
+
+    The temp file is unlinked unconditionally so a failed classify
+    (transient OOM, model error) doesn't leak a WAV under /tmp.
+    """
+    import os
     import tempfile
     import wave
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         path = f.name
-    with wave.open(path, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(b"\x00\x00" * 16000)  # 1 second silence
-    return model.classify(path)
+    try:
+        with wave.open(path, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00\x00" * 16000)  # 1 second silence
+        return model.classify(path)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 PROBE_DEFAULTS = {
