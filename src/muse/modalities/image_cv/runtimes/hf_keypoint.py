@@ -29,6 +29,7 @@ Deferred imports follow the muse pattern.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -144,14 +145,15 @@ class HFKeypointRuntime:
             self._processor, "post_process_keypoint_detection", None,
         )
         if callable(post):
-            try:
-                processed = post(
-                    outputs, target_sizes=[(H, W)],
-                    boxes=boxes, threshold=threshold,
-                )
-            except TypeError:
-                # Some signatures don't take `boxes` and/or `threshold`.
-                processed = post(outputs, target_sizes=[(H, W)])
+            # Different transformers versions and processor classes accept
+            # different optional kwargs. Inspect the signature once and
+            # build a kwargs dict containing only what's supported, so a
+            # genuine TypeError raised inside the function (a bug) isn't
+            # silently swallowed and retried with stale args.
+            kwargs = self._adaptive_kwargs(
+                post, target_sizes=[(H, W)], boxes=boxes, threshold=threshold,
+            )
+            processed = post(outputs, **kwargs)
             # processed is a list (per image) of lists (per box) of
             # dicts {keypoints, scores, labels}. Pull the first image's
             # first box's results.
@@ -184,6 +186,25 @@ class HFKeypointRuntime:
             image_size=(W, H),
         )
 
+    @staticmethod
+    def _adaptive_kwargs(fn: Any, /, **candidate_kwargs: Any) -> dict[str, Any]:
+        """Filter candidate_kwargs to those `fn` actually accepts.
+
+        Returns the subset of candidate_kwargs whose names appear in
+        fn's signature parameters or whose presence is implied by a
+        **kwargs catch-all (VAR_KEYWORD). When the signature is
+        unintrospectable (some C-implemented callables), pass everything
+        through.
+        """
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return dict(candidate_kwargs)
+        params = sig.parameters
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(candidate_kwargs)
+        return {k: v for k, v in candidate_kwargs.items() if k in params}
+
     def _build_detection_from_processed(
         self,
         processed: dict,
@@ -197,7 +218,11 @@ class HFKeypointRuntime:
         labels_tensor = processed.get("labels")
 
         if kps_tensor is None or scores_tensor is None:
-            return KeypointDetection(bbox=bbox, score=1.0, keypoints=[])
+            # Defensive default: an empty detection has no confidence,
+            # not perfect confidence. The path is unreachable from the
+            # current callers but should be sane if a future processor
+            # returns malformed dicts.
+            return KeypointDetection(bbox=bbox, score=0.0, keypoints=[])
 
         kps = kps_tensor.detach().cpu().tolist() if hasattr(kps_tensor, "detach") else list(kps_tensor)
         scores = scores_tensor.detach().cpu().tolist() if hasattr(scores_tensor, "detach") else list(scores_tensor)

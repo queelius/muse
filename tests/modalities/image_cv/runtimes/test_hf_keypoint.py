@@ -156,22 +156,23 @@ def test_detect_keypoints_falls_back_to_index_when_no_id2label():
     assert result.detections[0].keypoints[0].name == "0"
 
 
-def test_detect_keypoints_typeerror_fallback_no_boxes():
+def test_detect_keypoints_signature_introspection_drops_unsupported_kwargs():
     """Some processor.post_process_keypoint_detection signatures don't
-    take `boxes=` and `threshold=`. The runtime catches TypeError and
-    retries with the simpler signature."""
+    accept `boxes=` and/or `threshold=`. The runtime introspects the
+    signature once and only passes kwargs the function actually accepts,
+    so we don't conflate missing-kwarg TypeErrors with bugs in the
+    function body."""
     import muse.modalities.image_cv.runtimes.hf_keypoint as mod
-    processed = [[_kp_dict(kps=[[1.0, 1.0]], scores=[0.99])]]
-    call_count = {"n": 0}
+    processed_result = [[_kp_dict(kps=[[1.0, 1.0]], scores=[0.99])]]
+    received_kwargs: list[set[str]] = []
 
-    def _post(outputs, **kwargs):
-        call_count["n"] += 1
-        if "boxes" in kwargs or "threshold" in kwargs:
-            raise TypeError("unexpected keyword")
-        return processed
+    def _post(outputs, target_sizes):
+        # Only target_sizes is in the signature; boxes/threshold must
+        # be filtered out by the runtime before the call.
+        received_kwargs.append({"target_sizes"})
+        return processed_result
 
     _wire_runtime(mod, processed=[[]])
-    # Override post_process_keypoint_detection with our function.
     proc_factory = mod.AutoImageProcessor
     proc_obj = proc_factory.from_pretrained.return_value
     proc_obj.post_process_keypoint_detection = _post
@@ -182,8 +183,63 @@ def test_detect_keypoints_typeerror_fallback_no_boxes():
     image = MagicMock()
     image.size = (10, 10)
     result = runtime.detect_keypoints(image)
-    assert call_count["n"] == 2  # first with boxes/threshold, then without
+    # Exactly one call: signature was introspected, unsupported kwargs
+    # filtered, no retry needed.
+    assert len(received_kwargs) == 1
     assert len(result.detections) == 1
+
+
+def test_detect_keypoints_signature_introspection_passes_supported_kwargs():
+    """When the processor accepts boxes and threshold, the runtime
+    forwards them on the single call."""
+    import muse.modalities.image_cv.runtimes.hf_keypoint as mod
+    processed_result = [[_kp_dict(kps=[[1.0, 1.0]], scores=[0.99])]]
+    received: dict = {}
+
+    def _post(outputs, target_sizes, boxes, threshold):
+        received.update(
+            target_sizes=target_sizes, boxes=boxes, threshold=threshold,
+        )
+        return processed_result
+
+    _wire_runtime(mod, processed=[[]])
+    proc_factory = mod.AutoImageProcessor
+    proc_obj = proc_factory.from_pretrained.return_value
+    proc_obj.post_process_keypoint_detection = _post
+
+    runtime = mod.HFKeypointRuntime(
+        model_id="m", hf_repo="x", device="cpu",
+    )
+    image = MagicMock()
+    image.size = (10, 10)
+    runtime.detect_keypoints(image, threshold=0.42)
+    assert received["threshold"] == 0.42
+    assert received["target_sizes"] == [(10, 10)]
+    assert received["boxes"] == [[[0.0, 0.0, 10.0, 10.0]]]
+
+
+def test_detect_keypoints_internal_typeerror_propagates():
+    """A TypeError raised from inside post_process_keypoint_detection
+    (i.e., a bug in the function body, not a signature mismatch) must
+    NOT be silently swallowed. Regression: the old try/except fallback
+    would retry with simpler args, masking real bugs."""
+    import muse.modalities.image_cv.runtimes.hf_keypoint as mod
+
+    def _post(outputs, target_sizes, boxes, threshold):
+        raise TypeError("genuine bug inside post-processing")
+
+    _wire_runtime(mod, processed=[[]])
+    proc_factory = mod.AutoImageProcessor
+    proc_obj = proc_factory.from_pretrained.return_value
+    proc_obj.post_process_keypoint_detection = _post
+
+    runtime = mod.HFKeypointRuntime(
+        model_id="m", hf_repo="x", device="cpu",
+    )
+    image = MagicMock()
+    image.size = (10, 10)
+    with pytest.raises(TypeError, match="genuine bug"):
+        runtime.detect_keypoints(image)
 
 
 def test_detect_keypoints_empty_when_no_detections():
