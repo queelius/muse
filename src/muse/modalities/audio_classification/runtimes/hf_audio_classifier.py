@@ -82,6 +82,7 @@ class HFAudioClassifier:
         local_dir: str | None = None,
         device: str = "auto",
         dtype: str = "fp32",
+        multi_label: bool | None = None,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -119,9 +120,17 @@ class HFAudioClassifier:
                 self._id2label[int(k)] = str(v)
             except (TypeError, ValueError):
                 continue
-        self._multi_label = (
+        config_multi_label = (
             getattr(cfg, "problem_type", None) == "multi_label_classification"
         )
+        # OR the manifest hint with the config check: hints can flip
+        # False -> True (e.g., AST/AudioSet checkpoints whose config
+        # lacks problem_type) but never override a config-declared
+        # True. Hints are additive metadata, not a clobber.
+        if multi_label is None:
+            self._multi_label = config_multi_label
+        else:
+            self._multi_label = bool(multi_label) or config_multi_label
         self._sampling_rate = int(
             getattr(self._extractor, "sampling_rate", 16000)
         )
