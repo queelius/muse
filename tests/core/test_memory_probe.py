@@ -47,7 +47,10 @@ def test_cpu_free_gb_uses_psutil_virtual_memory():
     import muse.core.memory_probe as mod
     fake_vm = MagicMock()
     fake_vm.available = 8 * (1024 ** 3)  # 8 GiB exact
-    with patch.object(mod.psutil, "virtual_memory", return_value=fake_vm):
+    # Patch via the deferred-import path: cpu_free_gb does its own
+    # `import psutil` inside the function, so we patch the package
+    # module directly.
+    with patch("psutil.virtual_memory", return_value=fake_vm):
         assert mod.cpu_free_gb() == pytest.approx(8.0)
 
 

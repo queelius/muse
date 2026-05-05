@@ -26,8 +26,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import psutil
-
 logger = logging.getLogger(__name__)
 
 
@@ -106,4 +104,5 @@ def cpu_free_gb() -> float:
     from /proc/meminfo; macOS / Windows: the equivalent platform-specific
     counter). psutil is a hard ``muse[server]`` dep so this never fails.
     """
+    import psutil
     return float(psutil.virtual_memory().available) / _BYTES_PER_GB
