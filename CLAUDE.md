@@ -280,39 +280,46 @@ would be a leaky abstraction. Instead, `ModalityRegistry` treats models as
 
 ## Process model
 
-`muse serve` is a **supervisor**, not a single process:
+`muse serve` is a **supervisor**, not a single process. As of v0.40.0 it
+is **lazy by default**: the gateway is healthy as soon as the supervisor
+boots, and per-model workers spawn on the first request that names them
+(see "Lazy load + LRU eviction" below for the full state machine):
 
 ```
 User request
     |
     v
-muse serve (supervisor, port 8000)
+muse serve (supervisor, port 8000)              [healthy instantly; zero workers]
   ├── gateway FastAPI app (in-process)
   │    routes by request body `model` field
+  │    on cold model: director.acquire() spawns the worker
   │
-  └── subprocess per venv group:
-       ├── worker (port 9001, venv-A) hosts soprano-80m, kokoro-82m
-       ├── worker (port 9002, venv-B) hosts bark-small
-       └── worker (port 9003, venv-C) hosts sd-turbo
+  └── subprocess per loaded model (spawned lazily):
+       ├── worker (port 9001, venv-kokoro)   spawned on first /v1/audio/speech
+       ├── worker (port 9002, venv-sd-turbo) spawned on first /v1/images/generations
+       └── (other catalog-enabled models stay unloaded until requested)
 ```
 
 Each pulled model gets its own venv at `~/.muse/venvs/<model-id>/`
 with exactly the pip_extras it declares. Workers run the existing
 `muse.cli_impl.worker.run_worker` logic via `muse _worker`
-(hidden subcommand). The supervisor spawns them with each venv's
-Python interpreter, polls `/health` until the FIRST one is ready, then
-runs the gateway. Remaining workers promote on a daemon thread
-(`_promote_workers`) that flips `WorkerSpec.status` from `pending` to
-`running` under `state.lock` once each one passes `/health`. Models on
-pending workers are filtered out of `/v1/models` and the proxy's
-routing table until they promote, so clients don't hit a partially
-loaded worker. With six-plus enabled models, this turns the historical
-30-60s of dead-air startup into useful warm-up time (v0.30.0).
+(hidden subcommand). The supervisor brings the gateway up immediately,
+runs catalog boot validation (flags models with no memory estimate or
+estimates exceeding device capacity as `unservable_reason`), then waits.
+Workers spawn on demand through `LoadDirector.acquire`; the historical
+"poll FIRST worker then promote others" boot dance is gone. Operators
+who want eager loading run `muse models warmup <id>` for each model in
+their startup script (see "Lazy load + LRU eviction" below).
 
 The gateway extracts `model` from the request body (POST) or query
-(GET), looks up which worker hosts it, and forwards the request,
-streaming SSE through without buffering. `/v1/models` and `/health`
-are aggregated across all workers via parallel httpx calls.
+(GET), calls `director.acquire(model_id)` to ensure the worker is
+loaded (cold loads pay one-shot latency; hot loads return in
+sub-millisecond), forwards the request, and calls
+`director.release(model_id)` on stream-close. `/v1/models` and
+`/health` are aggregated across the live (loaded) workers via parallel
+httpx calls; entries for catalog-enabled-but-unloaded models still
+appear in `/v1/models` with `loaded: false` and the SDK can decide
+whether to warm them.
 
 This gives you dep isolation (transformers 4.46 for parler-tts
 coexists with transformers 5.x for newer models), crash isolation
@@ -320,23 +327,128 @@ coexists with transformers 5.x for newer models), crash isolation
 HTTP surface (clients hit one port, do not care about internal venvs).
 
 The supervisor also runs an auto-restart monitor thread. Every 5
-seconds it polls each worker's /health and checks for process death
-via Popen.poll. After 3 consecutive failures (or immediate process
-exit), the monitor terminates the existing process and respawns it
-with exponential backoff (1s, 2s, 4s, ..., capped at 30s). After 10
-unsuccessful restart attempts the worker is marked dead; /health
-reports "degraded" and /v1/models skips its entries.
+seconds it polls each currently loaded worker's /health and checks for
+process death via Popen.poll. After 3 consecutive failures (or
+immediate process exit), the monitor terminates the existing process
+and respawns it with exponential backoff (1s, 2s, 4s, ..., capped at
+30s). After 10 unsuccessful restart attempts the worker is marked
+dead; /health reports "degraded" and /v1/models skips its entries.
+The monitor reads the dynamic loaded set from `state.director.loaded`
+on each tick, so admin-driven loads and evictions show up immediately.
 
-Use `muse models disable <id>` to mark a pulled model as inactive
-(supervisor skips it at plan_workers time, freeing its venv's memory
-budget). `muse models enable <id>` re-enables it. Neither command
-restarts the server; the change takes effect next `muse serve`.
+Use `muse models disable <id>` to mark a pulled model as inactive in
+the catalog (the supervisor refuses to lazy-load it on request).
+`muse models enable <id>` re-enables it. These flip the catalog
+`enabled` bit; whether a model is *actually* in memory is a separate
+runtime question handled by the LoadDirector (see "Lazy load + LRU
+eviction" below). When the supervisor is running and `MUSE_ADMIN_TOKEN`
+is set, the same CLI commands route through the admin API; otherwise
+they edit the catalog only and take effect on the next request.
 
-When the supervisor is running and `MUSE_ADMIN_TOKEN` is set, the same
-`muse models enable/disable` commands route through the admin API
-instead, so the running gateway picks up the change live (worker spawn
-or unload). The catalog flip + worker mutation are part of the same
-operation.
+## Lazy load + LRU eviction (v0.40.0+)
+
+`muse serve` no longer eager-loads enabled models at boot. The gateway
+comes up instantly with zero workers; per-model workers spawn on first
+request and are evicted under memory pressure via on-demand LRU. Behind
+this is a runtime decoupling: catalog `enabled: true` declares "in
+service, may serve requests" but does NOT imply "in memory right now."
+A 12GB GPU can have 30 models enabled and serve them all, just not
+simultaneously; the live working set is sized to fit current free VRAM
+minus a headroom margin.
+
+The orchestrator is `muse.cli_impl.load_director.LoadDirector`,
+attached to `SupervisorState`. The gateway wraps every forwarded
+request in `director.acquire(model_id)` / `director.release(model_id)`.
+`acquire` is a three-phase critical section: under-lock decision (read
+loaded set, query live free memory, pick eviction victims if needed) ->
+outside-lock load (worker spawn + `/health` poll, possibly with
+preceding evictions) -> under-lock commit (insert `LoadEntry`,
+increment refcount, update `last_touched_at`). Concurrent acquires for
+the *same* cold model collapse to one load via an `asyncio.Future` /
+`threading.Event` registered in `in_flight_loads`; concurrent acquires
+for *different* cold models proceed in parallel because the load phase
+runs outside the lock.
+
+Memory accounting is live, not declared. `muse.core.memory_probe`
+wraps `pynvml.nvmlDeviceGetMemoryInfo` (GPU) and
+`psutil.virtual_memory().available` (CPU). `nvidia-ml-py` is a soft
+dep under `[server]`: when missing (CPU-only host, AMD GPU, driver
+mismatch) `gpu_free_gb()` returns None and GPU loads either fall back
+to a declared `MUSE_GPU_BUDGET_GB` cap or 503 with `unservable_reason`.
+Every cold load also captures `free_before - free_after`; if the
+observed delta exceeds `measurements.<device>.peak_bytes` it gets
+written back via atomic write-then-rename. Estimates self-heal upward
+toward reality on every load.
+
+Configuration env vars (all optional):
+
+- `MUSE_GPU_BUDGET_GB`: declared cap on GPU memory; muse uses
+  `min(declared, live)` when both are available.
+- `MUSE_CPU_BUDGET_GB`: declared cap on host RAM.
+- `MUSE_GPU_HEADROOM_GB` (default `1.0`): subtracted from live free
+  VRAM before deciding fit; protects against driver allocations and
+  fragmentation.
+- `MUSE_CPU_HEADROOM_GB` (default `2.0`): subtracted from live free
+  RAM before deciding fit.
+
+`muse models list` shows a five-state status enum:
+
+- `enabled_loaded` (filled circle): catalog-enabled and currently
+  resident on a worker.
+- `enabled_unloaded` (half circle): catalog-enabled but not resident;
+  next request triggers a cold load.
+- `disabled` (open circle): catalog-disabled; requests 503 without
+  attempting a load.
+- `recommended` (star): curated entry not yet pulled.
+- `available` (mid-dot): pullable from a resolver but not curated.
+
+The breaking behavior change is cold-start latency on first request
+to each model. A 9B GGUF can take 10-30s to load; a 3B diffusion
+model 5-15s. `muse models warmup <id>` is the manual pre-load: the
+admin endpoint `POST /v1/admin/models/{id}/warmup` runs the load
+without bumping refcount, so subsequent requests are hot. Operators
+who really want the v0.39 eager-boot semantics put a warmup loop in
+their startup script.
+
+`muse pull` runs probe at the end (`--no-probe` opts out for
+cross-device pulls, e.g., pulling on a CPU host for later GPU
+deployment). This means freshly-pulled models always have a memory
+estimate, so the supervisor doesn't reject them at first request with
+"no memory estimate" 503s. Pulled models still need an explicit
+`muse models enable <id>` to start serving traffic, since enabling is
+a separate operator decision from "have weights on disk."
+
+Decoupling principle: `enabled` is catalog state; `loaded` is runtime
+state. Two new admin operations, `load_model_into_worker` and
+`unload_model_from_worker` (in `muse.admin.operations`), perform the
+runtime mutation *without* flipping the catalog `enabled` bit. The
+LoadDirector calls these on lazy-load and eviction paths so LRU
+eviction of model X doesn't accidentally disable X for the next
+request. The legacy `enable_model` / `disable_model` ops keep
+catalog-flip semantics for explicit operator intent and back the
+`muse models enable/disable` CLI verbs.
+
+Catalog format stays backward-compatible. `measurements.<device>.peak_bytes`
+gains self-healing semantics (passively updated on every cold load),
+and older muse readers ignore unknown fields. `/v1/models` gains
+`loaded: bool`, `last_loaded_at: iso8601 | null`, and `unservable_reason:
+str | null` per entry; the OpenAI-shape envelope is otherwise unchanged.
+
+Lock discipline:
+
+- `state.director.lock` (RLock) guards in-memory mutations of the
+  loaded set, in_flight_loads, and the recent_decisions deque. Held
+  during decision and commit phases of `acquire`; released around the
+  long-running worker spawn / wait.
+- Admin operations (`load_model_into_worker`, `disable_model`,
+  `unload_model_from_worker`) plan their mutations under `state.lock`,
+  release the lock before slow worker spawn or shutdown, then reacquire
+  to commit. Same plan-then-execute pattern as the existing admin
+  endpoints; lets `acquire` and admin endpoints share the runtime
+  without serializing on slow I/O.
+- Module-level `_WRITEBACK_LOCK` (in `load_director.py`) serializes
+  the read-modify-write on `measurements` across observed-peak writebacks
+  for *different* models so catalog.json round-trips stay atomic.
 
 ## Admin REST API
 
@@ -580,7 +692,7 @@ PY
   and data URLs; default 10485760 / 10MB; read per-call so changes
   take effect without a server restart).
 - **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.
-- **Enable/disable is catalog state**, not runtime state. `muse serve` reads the catalog at startup. Changing a model's enabled bit while the server is running has no effect until the next restart.
+- **Enable/disable is catalog state; loaded/unloaded is runtime state (v0.40.0+).** The two are decoupled. `enabled: true` means "in service; allowed to lazy-load." `loaded` (visible via `/v1/models` and `muse models list`'s `enabled_loaded` glyph) means "currently resident on a worker." LRU eviction unloads without disabling; `muse models warmup` loads without bumping refcount. Operator-driven `muse models enable/disable` flips the catalog bit and (when the supervisor is running with `MUSE_ADMIN_TOKEN`) syncs runtime state via `enable_model` / `disable_model`; lazy-load and eviction paths use `load_model_into_worker` / `unload_model_from_worker` which skip the catalog flip.
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 - **CLI is typer + rich (v0.39.0+).** Per-subcommand parameter binding lives in `src/muse/cli.py` as typer command functions; the heavy logic lives in `src/muse/cli_impl/<command>.py`. New subcommands add a `@app.command(...)` plus a sibling `cli_impl/*.py` module; do not put logic in `cli.py`. Long-form output that goes to a TTY is rendered via `rich.Table` from `cli_impl/console.py`'s shared `Console`; non-TTY output (subprocess, pipe, redirect) is plain text with no ANSI and no truncation, so `muse models list | grep` always sees full content. Status encoding for `models list` and `refresh --all` uses single colored glyphs (`STATUS_STYLE` in `cli_impl/console.py`): `●` enabled, `○` disabled, `★` recommended, `·` available; `✓` ok, `✗` failed for refresh outcomes. `--json` is the canonical machine-readable output across `list` / `probe` / `refresh`.

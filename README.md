@@ -67,8 +67,13 @@ muse pull hf://sentence-transformers/all-MiniLM-L6-v2
 # Admin: list what's in the catalog
 muse models list
 
-# Start the server (loads pulled models; serves OpenAI-compatible endpoints)
+# Start the server (instant boot; serves OpenAI-compatible endpoints).
+# As of v0.40.0 muse is lazy-load: enabled models stay on disk until
+# the first request that names them, then spawn a worker on demand.
 muse serve --host 0.0.0.0 --port 8000
+
+# Optional: pre-warm a model so the first real request is hot
+muse models warmup soprano-80m
 ```
 
 From any client, generation is an HTTP call:
@@ -287,25 +292,47 @@ client.chat.completions.create(model="qwen3-8b-gguf-q4-k-m", messages=[...])
 `muse serve` auto-restarts crashed worker processes with exponential backoff.
 Individual model failures don't take down the server or other modalities.
 
-As of v0.30.0 the gateway boots as soon as the FIRST worker passes
-`/health`; remaining workers promote on a daemon thread and join
-`/v1/models` progressively. With six-plus enabled models, this turns
-30-60s of dead-air startup into useful warm-up time: clients can hit
-the fast workers immediately while slow ones (large GGUFs, big
-diffusion models) finish loading.
+As of v0.40.0 muse is **lazy-load by default**. `muse serve` brings
+the gateway up instantly with zero workers running. The first request
+to each model triggers a cold load (worker spawn + weights), so
+expect 5-30s of latency on that first hit; subsequent requests are
+hot. Memory pressure is handled by on-demand LRU eviction backed by
+live `pynvml` + `psutil` measurements: a 12GB GPU can have 30 models
+catalog-enabled and serve them all, just not simultaneously. Operators
+who want eager-boot semantics put a warmup loop in their startup
+script:
+
+```bash
+muse serve &
+sleep 1
+for m in $(muse models list --json | jq -r '.[].id'); do
+    muse models warmup "$m"
+done
+```
+
+`muse models list` shows a five-state status indicator: `enabled_loaded`
+(filled circle) for resident workers, `enabled_unloaded` (half circle)
+for catalog-enabled-but-unloaded, plus the existing `disabled`,
+`recommended`, and `available` states. `/v1/models` gains `loaded`,
+`last_loaded_at`, and `unservable_reason` per entry. Headroom margins
+are tunable via `MUSE_GPU_HEADROOM_GB` (default 1.0) and
+`MUSE_CPU_HEADROOM_GB` (default 2.0); declared caps via
+`MUSE_GPU_BUDGET_GB` and `MUSE_CPU_BUDGET_GB` are optional and
+combined with live measurements as `min(declared, live)`.
 
 ## CLI (admin-only)
 
 | Command | Description |
 |---|---|
-| `muse serve` | start the HTTP server |
-| `muse pull <model-id-or-uri>` | download weights + install deps (accepts bundled id OR resolver URI like `hf://org/repo@variant`) |
+| `muse serve` | start the HTTP server (instant boot; lazy-load on first request) |
+| `muse pull <model-id-or-uri>` | download weights + install deps + run probe (accepts bundled id OR resolver URI like `hf://org/repo@variant`; `--no-probe` opts out) |
 | `muse search <query> [--modality M]` | search HuggingFace for pullable GGUF / sentence-transformers models |
-| `muse models list [--modality X]` | list known/pulled models |
+| `muse models list [--modality X]` | list known/pulled models with five-state status (enabled_loaded / enabled_unloaded / disabled / recommended / available) |
 | `muse models info <model-id>` | show catalog entry |
 | `muse models remove <model-id>` | unregister from catalog |
-| `muse models enable <model-id>` | mark a pulled model active (load on next serve) |
-| `muse models disable <model-id>` | mark a pulled model inactive (skip on next serve) |
+| `muse models enable <model-id>` | mark a pulled model active in the catalog (allowed to lazy-load) |
+| `muse models disable <model-id>` | mark a pulled model inactive in the catalog (refuses to lazy-load) |
+| `muse models warmup <model-id>` | pre-load a model into a worker without serving traffic; first real request is hot |
 | `muse models refresh <id> \| --all \| --enabled` | re-install muse[server,extras] into per-model venv(s) (after `pip install -U muse`) |
 | `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (29 tools) |
 
