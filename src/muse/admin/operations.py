@@ -286,6 +286,13 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
          the existing `_restart_worker_inplace` path joins it.
       3. spawn_new: brand-new worker for this model's python_path.
 
+    Concurrency contract (mirrors `enable_model`): the in-flight
+    pending spec is stamped with `spec.job_id = "director-load-<id>"`
+    before the slow spawn / restart phase, and cleared on success.
+    The auto-restart monitor skips specs whose `job_id` is non-None,
+    so it cannot race the director-driven cold load (which can take
+    10-60s for real models, far longer than the monitor's 5s tick).
+
     Raises OperationError on user-facing failures (model not found,
     not pulled, no venv on record). Other exceptions propagate to the
     director, which cleans up its in-flight Event and re-raises.
@@ -310,6 +317,11 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
             f"model {model_id!r} has no per-model venv on record",
             status=409,
         )
+
+    # Sentinel that marks the spec as "owned by a director-driven load
+    # in flight." The monitor skips specs with non-None job_id, so this
+    # protects the slow spawn window from a duplicate restart attempt.
+    job_sentinel = f"director-load-{model_id}"
 
     # Phase 1: plan + claim under a brief lock.
     plan: str | None = None
@@ -336,6 +348,7 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
                 # Join the sibling's venv group via restart-in-place.
                 sibling.models = sorted(set(sibling.models) | {model_id})
                 sibling.status = "restarting"
+                sibling.job_id = job_sentinel
                 plan = "restart_sibling"
                 spec_ref = sibling
             else:
@@ -347,6 +360,7 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
                     device=state.device,
                 )
                 new_spec.status = "pending"
+                new_spec.job_id = job_sentinel
                 state.workers.append(new_spec)
                 plan = "spawn_new"
                 spec_ref = new_spec
@@ -363,7 +377,10 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
         except Exception:
             with state.lock:
                 spec_ref.status = "dead"
+                spec_ref.job_id = None
             raise
+        with state.lock:
+            spec_ref.job_id = None
         return spec_ref.port
 
     if plan == "spawn_new":
@@ -373,9 +390,11 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
         except Exception:
             with state.lock:
                 spec_ref.status = "dead"
+                spec_ref.job_id = None
             raise
         with state.lock:
             spec_ref.status = "running"
+            spec_ref.job_id = None
         return spec_ref.port
 
     # Unreachable; the assert above guarantees plan is set.
@@ -390,12 +409,30 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
     service"; this just frees the memory slot so the director can
     load another model.
 
+    Plan-then-execute (mirrors `enable_model`): under state.lock we
+    pop the spec / mutate the model list and stamp `job_id` so the
+    monitor leaves the spec alone during the slow phase. The slow
+    steps (`_shutdown_workers` or `_restart_worker_inplace`, each a
+    multi-second subprocess wait or spawn cycle) run OUTSIDE the lock
+    so concurrent admin reads / hot-acquires never block on us.
+
     Three paths:
       1. model_id not loaded in any worker: no-op.
-      2. model_id is the only model in a worker: terminate the worker.
+      2. model_id is the only model in a worker: pop the spec, then
+         terminate the worker (lock released for SIGTERM + grace).
       3. model_id is one of several in a worker (venv-group sibling):
-         restart-in-place with the reduced model list.
+         claim the spec via job_id, then restart-in-place with the
+         reduced model list (lock released for spawn + readiness wait).
+
+    On path (2), state.workers is mutated in place via
+    `state.workers.remove(spec)`. Rebinding the attribute would
+    desynchronize the auto-restart monitor thread, which captured the
+    original list reference at supervisor boot.
     """
+    spec_to_shutdown: WorkerSpec | None = None
+    spec_to_restart: WorkerSpec | None = None
+
+    # Phase 1: plan + claim under a brief lock.
     with state.lock:
         spec = find_worker_for_model(state, model_id)
         if spec is None:
@@ -403,24 +440,56 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
 
         spec.models = [m for m in spec.models if m != model_id]
         if not spec.models:
-            _shutdown_workers([spec])
-            state.workers = [w for w in state.workers if w.port != spec.port]
-            return
-        # Sibling models still live in this venv group; restart-in-place
-        # so the running worker drops the unloaded model from its
-        # in-memory state.
-        _restart_worker_inplace(spec, device=state.device)
+            # Pop the spec NOW so concurrent admin reads see the
+            # eviction commitment immediately. In-place mutation
+            # keeps the monitor's captured list reference live.
+            state.workers.remove(spec)
+            spec_to_shutdown = spec
+        else:
+            # Sibling models still live; claim the spec for restart-in-place
+            # via job_id so the monitor doesn't race us during the
+            # _restart_worker_inplace window.
+            spec.job_id = f"director-unload-{model_id}"
+            spec_to_restart = spec
+
+    # Phase 2: slow steps run OUTSIDE the lock.
+    if spec_to_shutdown is not None:
+        _shutdown_workers([spec_to_shutdown])
+        return
+
+    assert spec_to_restart is not None
+    try:
+        _restart_worker_inplace(spec_to_restart, device=state.device)
+    except Exception:
+        with state.lock:
+            spec_to_restart.status = "dead"
+            spec_to_restart.job_id = None
+        raise
+    with state.lock:
+        spec_to_restart.job_id = None
 
 
 def disable_model(model_id: str, *, state: SupervisorState) -> dict:
     """Sync operation: catalog flip + worker unload.
 
+    Plan-then-execute (mirrors `enable_model` and
+    `unload_model_from_worker`): the catalog flip + state.workers
+    mutation happen under state.lock; the slow shutdown / restart-
+    in-place phase runs OUTSIDE the lock. The auto-restart monitor
+    skips the spec while we own it via `job_id`.
+
     Three paths:
       1. model unknown -> OperationError(404).
       2. model not loaded in any worker -> catalog flip only.
       3. model is loaded -> drop it from the worker; if it was the only
-         model in that worker, terminate the worker; else restart-in-place
-         with the reduced load list.
+         model in that worker, pop the spec then terminate it (slow
+         step outside the lock); else restart-in-place with the reduced
+         load list (slow step outside the lock).
+
+    On the sole-tenant path, state.workers is mutated in place via
+    `state.workers.remove(spec)`. Rebinding the attribute would
+    desynchronize the auto-restart monitor thread, which captured the
+    original list reference at supervisor boot.
     """
     catalog_known = known_models()
     if model_id not in catalog_known:
@@ -428,6 +497,11 @@ def disable_model(model_id: str, *, state: SupervisorState) -> dict:
             "model_not_found", f"unknown model {model_id!r}", status=404,
         )
 
+    spec_to_shutdown: WorkerSpec | None = None
+    spec_to_restart: WorkerSpec | None = None
+    result_unloaded: dict | None = None
+
+    # Phase 1: plan + claim under a brief lock.
     with state.lock:
         spec = find_worker_for_model(state, model_id)
         try:
@@ -438,32 +512,57 @@ def disable_model(model_id: str, *, state: SupervisorState) -> dict:
             pass
 
         if spec is None:
-            return {
+            result_unloaded = {
                 "model_id": model_id,
                 "loaded": False,
                 "worker_terminated": False,
                 "remaining_models_in_worker": [],
             }
+        else:
+            spec.models = [m for m in spec.models if m != model_id]
+            if not spec.models:
+                # Pop the spec NOW. In-place mutation keeps the monitor's
+                # captured list reference live.
+                state.workers.remove(spec)
+                spec_to_shutdown = spec
+            else:
+                # Claim the spec for restart-in-place via job_id so the
+                # monitor doesn't race us during _restart_worker_inplace.
+                spec.job_id = f"admin-disable-{model_id}"
+                spec_to_restart = spec
 
-        spec.models = [m for m in spec.models if m != model_id]
-        if not spec.models:
-            _shutdown_workers([spec])
-            state.workers = [w for w in state.workers if w.port != spec.port]
-            return {
-                "model_id": model_id,
-                "loaded": False,
-                "worker_terminated": True,
-                "worker_port": spec.port,
-                "remaining_models_in_worker": [],
-            }
-        _restart_worker_inplace(spec, device=state.device)
+    # Early-out path: no worker to touch.
+    if result_unloaded is not None:
+        return result_unloaded
+
+    # Phase 2: slow steps run OUTSIDE the lock.
+    if spec_to_shutdown is not None:
+        _shutdown_workers([spec_to_shutdown])
         return {
             "model_id": model_id,
             "loaded": False,
-            "worker_terminated": False,
-            "worker_port": spec.port,
-            "remaining_models_in_worker": list(spec.models),
+            "worker_terminated": True,
+            "worker_port": spec_to_shutdown.port,
+            "remaining_models_in_worker": [],
         }
+
+    assert spec_to_restart is not None
+    try:
+        _restart_worker_inplace(spec_to_restart, device=state.device)
+    except Exception:
+        with state.lock:
+            spec_to_restart.status = "dead"
+            spec_to_restart.job_id = None
+        raise
+    with state.lock:
+        spec_to_restart.job_id = None
+    return {
+        "model_id": model_id,
+        "loaded": False,
+        "worker_terminated": False,
+        "worker_port": spec_to_restart.port,
+        "remaining_models_in_worker": list(spec_to_restart.models),
+    }
 
 
 def remove_model(model_id: str, *, state: SupervisorState, purge: bool) -> dict:

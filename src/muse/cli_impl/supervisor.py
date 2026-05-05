@@ -398,6 +398,17 @@ def _monitor_workers(
             if spec.status == "dead":
                 continue
 
+            # Skip specs in the middle of an admin- or director-driven
+            # transition. job_id is set when an in-flight operation has
+            # claimed the spec (enable_model, load_model_into_worker,
+            # restart-in-place). The owning operation is responsible for
+            # the spawn / readiness wait; the monitor must not race it
+            # by polling /health (which fails until the worker binds the
+            # port) and triggering a duplicate restart. The owning op
+            # clears job_id on success or marks the spec dead on failure.
+            if spec.job_id is not None:
+                continue
+
             # Process-death detection is unambiguous; short-circuit
             if spec.process is not None and spec.process.poll() is not None:
                 logger.warning(
