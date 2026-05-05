@@ -22,6 +22,20 @@ def _reset_supervisor_state():
     clear_supervisor_state()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_pynvml_sentinels():
+    """Prevent supervisor tests from polluting memory_probe module-level
+    pynvml sentinels via run_supervisor's lazy-load validate_catalog_at_boot
+    path. On exit, reset to fresh-untried state so subsequent test files
+    (notably tests/core/test_memory_probe.py) see a clean module.
+    """
+    import muse.core.memory_probe as mod
+    try:
+        yield
+    finally:
+        mod.pynvml, mod._init_attempted, mod._init_ok = None, False, False
+
+
 @pytest.fixture
 def tmp_catalog(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
@@ -221,11 +235,9 @@ class TestWaitForReady:
 
 
 class TestRunSupervisor:
-    def test_supervisor_spawns_all_workers_and_waits_for_first(self, tmp_catalog):
-        """All workers spawn, but only the FIRST is waited on synchronously.
-
-        Remaining workers promote on the boot thread (mocked out here so
-        the test doesn't actually poll httpx).
+    def test_supervisor_does_not_spawn_workers_at_boot(self, tmp_catalog):
+        """v0.40.0 lazy-load: no eager worker spawn. Models load on
+        first request via the LoadDirector.
         """
         _seed_catalog({
             "model-a": {
@@ -247,20 +259,25 @@ class TestRunSupervisor:
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
-            # _wait_for_first_ready returns the first spec passed in.
-            mock_first.side_effect = lambda specs, **kw: specs[0]
-            # Simulate graceful shutdown by raising KeyboardInterrupt from uvicorn.run
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-            # Two workers planned: both spawned, but only ONE _wait call.
-            assert mock_spawn.call_count == 2
-            mock_first.assert_called_once()
+            # No eager spawn under lazy load.
+            mock_spawn.assert_not_called()
+            mock_first.assert_not_called()
+            mock_promote.assert_not_called()
+            # Gateway still starts; shutdown still runs.
             mock_uvicorn.run.assert_called_once()
             mock_shutdown.assert_called_once()
 
     def test_supervisor_tears_down_workers_if_gateway_fails(self, tmp_catalog):
+        """Crash path: shutdown_workers runs even when uvicorn raises.
+
+        Under lazy load, state.workers is empty at this point unless the
+        director already loaded something. Either way, the teardown call
+        must happen so the exit path is consistent.
+        """
         _seed_catalog({
             "model-a": {
                 "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
@@ -271,10 +288,8 @@ class TestRunSupervisor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
-            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = RuntimeError("uvicorn died")
 
             with pytest.raises(RuntimeError, match="uvicorn died"):
@@ -524,6 +539,9 @@ class TestCheckWorkerHealth:
 
 class TestRunSupervisorMonitor:
     def test_run_supervisor_starts_monitor_thread(self, tmp_catalog):
+        """Even at empty-catalog boot, the monitor thread is started so
+        director-spawned workers are watched as soon as they appear.
+        """
         _seed_catalog({
             "model-a": {
                 "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
@@ -535,20 +553,18 @@ class TestRunSupervisorMonitor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread") as mock_thread_cls:
-            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
             mock_thread = MagicMock()
             mock_thread_cls.return_value = mock_thread
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-            # At least one daemon thread (the monitor) was created and started.
-            # When there are remaining workers, a second daemon thread (the
-            # boot promoter) is also created; with one model only the monitor.
+            # The monitor daemon thread is unconditionally started at
+            # boot under lazy load (it watches state.workers, which can
+            # grow at any time).
             assert mock_thread_cls.call_count >= 1
             for call in mock_thread_cls.call_args_list:
                 assert call.kwargs.get("daemon") is True
@@ -576,12 +592,10 @@ class TestRunSupervisorMonitor:
             return e
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"), \
              patch("muse.cli_impl.supervisor.threading.Event", side_effect=capture_event), \
              patch("muse.cli_impl.supervisor.threading.Thread"):
-            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -627,7 +641,11 @@ class TestSupervisorState:
 
 class TestRunSupervisorRegistersState:
     def test_run_supervisor_registers_state_during_run(self, tmp_catalog):
-        """run_supervisor should set the singleton before uvicorn.run."""
+        """run_supervisor should set the singleton before uvicorn.run.
+
+        Under lazy load, workers list is empty at boot; the director is
+        non-None on the registered state.
+        """
         _seed_catalog({
             "model-a": {
                 "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
@@ -645,20 +663,22 @@ class TestRunSupervisorRegistersState:
             raise KeyboardInterrupt()
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = capture_state
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         # State was non-None during the run
         assert seen_state["value"] is not None
         assert seen_state["value"].device == "cpu"
-        assert len(seen_state["value"].workers) == 1
+        # Lazy load: zero workers at boot.
+        assert seen_state["value"].workers == []
+        # The director is wired up.
+        assert seen_state["value"].director is not None
         # And it's been cleared on exit
         cleared = get_supervisor_state()
         assert cleared.workers == []
+        assert cleared.director is None
 
     def test_run_supervisor_clears_state_on_exception(self, tmp_catalog):
         """Crash path: state must still get cleared in the finally block."""
@@ -673,10 +693,8 @@ class TestRunSupervisorRegistersState:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = RuntimeError("uvicorn boom")
             with pytest.raises(RuntimeError):
                 run_supervisor(host="0.0.0.0", port=8000, device="cpu")
@@ -789,10 +807,17 @@ class TestPromoteWorkers:
         assert 9001 in call_log and 9002 in call_log
 
 
-class TestRunSupervisorFirstReadyOrdering:
-    def test_gateway_starts_after_first_ready_and_before_remaining(self, tmp_catalog):
-        """The gateway must boot once the first spec is healthy; remaining
-        specs promote in the background after that."""
+class TestRunSupervisorLazyBootOrdering:
+    """Tests for the lazy-boot ordering. Replaced the v0.39.x
+    eager-boot ordering tests when v0.40.0 lazy load made first-ready
+    waits irrelevant.
+    """
+
+    def test_gateway_starts_immediately_without_worker_wait(self, tmp_catalog):
+        """The gateway must boot immediately on lazy load; no
+        _wait_for_first_ready call. With one or N enabled models in the
+        catalog, the supervisor should still proceed to uvicorn.run.
+        """
         _seed_catalog({
             "fast": {
                 "pulled_at": "...", "hf_repo": "f", "local_dir": "/f",
@@ -821,8 +846,7 @@ class TestRunSupervisorFirstReadyOrdering:
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
              patch("muse.cli_impl.supervisor._wait_for_first_ready",
-                   side_effect=first_ready_side), \
-             patch("muse.cli_impl.supervisor._promote_workers"), \
+                   side_effect=first_ready_side) as mock_first, \
              patch("muse.cli_impl.supervisor._monitor_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
@@ -831,13 +855,15 @@ class TestRunSupervisorFirstReadyOrdering:
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-        assert "first_ready_returned" in events
+        # No first-ready wait under lazy load.
+        mock_first.assert_not_called()
+        assert "first_ready_returned" not in events
         assert "gateway_started" in events
-        # First-ready must precede gateway-start
-        assert events.index("first_ready_returned") < events.index("gateway_started")
 
-    def test_first_ready_failure_propagates(self, tmp_catalog):
-        """If no worker comes up, run_supervisor raises and gateway is never started."""
+    def test_lazy_boot_does_not_invoke_eager_helpers(self, tmp_catalog):
+        """plan_workers, _wait_for_first_ready, _promote_workers,
+        spawn_worker are all silent at boot under lazy load.
+        """
         _seed_catalog({
             "x": {
                 "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
@@ -848,35 +874,30 @@ class TestRunSupervisorFirstReadyOrdering:
         })
         from muse.cli_impl.supervisor import run_supervisor
 
-        with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready",
-                   side_effect=TimeoutError("nobody ready")), \
+        with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
+             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
+             patch("muse.cli_impl.supervisor._promote_workers") as mock_promote, \
+             patch("muse.cli_impl.supervisor.plan_workers") as mock_plan, \
              patch("muse.cli_impl.supervisor._monitor_workers"), \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            with pytest.raises(TimeoutError, match="nobody ready"):
-                run_supervisor(host="0.0.0.0", port=8000, device="cpu")
-            mock_uvicorn.run.assert_not_called()
+            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-    def test_late_workers_promote_in_background_thread(self, tmp_catalog):
-        """The remaining-specs list is handed to _promote_workers."""
+        mock_plan.assert_not_called()
+        mock_spawn.assert_not_called()
+        mock_first.assert_not_called()
+        mock_promote.assert_not_called()
+
+    def test_monitor_thread_started_at_boot(self, tmp_catalog):
+        """The monitor thread is unconditionally started at boot since it
+        watches state.workers, which can grow at any time after startup.
+        """
         _seed_catalog({
             "fast": {
                 "pulled_at": "...", "hf_repo": "f", "local_dir": "/f",
                 "venv_path": "/venvs/fast",
                 "python_path": "/venvs/fast/bin/python",
-                "enabled": True,
-            },
-            "slow1": {
-                "pulled_at": "...", "hf_repo": "s1", "local_dir": "/s1",
-                "venv_path": "/venvs/slow1",
-                "python_path": "/venvs/slow1/bin/python",
-                "enabled": True,
-            },
-            "slow2": {
-                "pulled_at": "...", "hf_repo": "s2", "local_dir": "/s2",
-                "venv_path": "/venvs/slow2",
-                "python_path": "/venvs/slow2/bin/python",
                 "enabled": True,
             },
         })
@@ -893,20 +914,18 @@ class TestRunSupervisorFirstReadyOrdering:
             return t
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor.threading.Thread",
                    side_effect=fake_thread_init), \
              patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_first.side_effect = lambda specs, **kw: specs[0]
             mock_uvicorn.run.side_effect = KeyboardInterrupt()
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-        # _promote_workers AND _monitor_workers were both wired as thread
-        # targets when remaining specs exist.
-        assert "_promote_workers" in seen_thread_targets
+        # _monitor_workers is wired in regardless of catalog size.
         assert "_monitor_workers" in seen_thread_targets
+        # _promote_workers is gone under lazy load (no eager workers to promote).
+        assert "_promote_workers" not in seen_thread_targets
 
 
 class TestGatewayStateRoutes:

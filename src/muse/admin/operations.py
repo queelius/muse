@@ -262,6 +262,156 @@ def enable_model(
         store.update(job.job_id, state="failed", error=str(e))
 
 
+def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
+    """Sync operation: spawn a worker for `model_id` and return its port.
+
+    Lazy-load companion to `enable_model`. The crucial difference: this
+    does NOT call `set_enabled(model_id, True)`. Lazy load is
+    "give me a worker for this model right now"; the catalog's
+    `enabled` flag is the persistent "this model is in service" state,
+    which is orthogonal. v0.40.0 decouples those two concepts so a
+    user can have 20 enabled models in their catalog and only the few
+    actually under traffic occupy worker memory.
+
+    The LoadDirector's `enable_fn` callable is bound to this operation.
+    It serves as the "load this model now" hook the director invokes
+    during the load phase of `acquire`.
+
+    Three terminal paths:
+      1. already_running: model already hosted by a running worker;
+         return that worker's port (the director's hot-acquire path
+         normally short-circuits this, but races during boot or after
+         admin-triggered enable can land here).
+      2. restart_sibling: a venv-group sibling exists and is running;
+         the existing `_restart_worker_inplace` path joins it.
+      3. spawn_new: brand-new worker for this model's python_path.
+
+    Raises OperationError on user-facing failures (model not found,
+    not pulled, no venv on record). Other exceptions propagate to the
+    director, which cleans up its in-flight Event and re-raises.
+    """
+    catalog_known = known_models()
+    if model_id not in catalog_known:
+        raise OperationError(
+            "model_not_found", f"unknown model {model_id!r}", status=404,
+        )
+    if not is_pulled(model_id):
+        raise OperationError(
+            "model_not_pulled",
+            f"model {model_id!r} not pulled; run pull first",
+            status=409,
+        )
+
+    catalog = _read_catalog()
+    python_path = catalog[model_id].get("python_path")
+    if not python_path:
+        raise OperationError(
+            "missing_venv",
+            f"model {model_id!r} has no per-model venv on record",
+            status=409,
+        )
+
+    # Phase 1: plan + claim under a brief lock.
+    plan: str | None = None
+    spec_ref: WorkerSpec | None = None
+
+    with state.lock:
+        existing = next(
+            (s for s in state.workers if model_id in s.models),
+            None,
+        )
+        if existing is not None and (
+            existing.status == "running" or existing.job_id is None
+        ):
+            # Already loaded; return the existing port.
+            plan = "already_running"
+            spec_ref = existing
+        else:
+            sibling = next(
+                (s for s in state.workers
+                 if s.python_path == python_path and s.status == "running"),
+                None,
+            )
+            if sibling is not None:
+                # Join the sibling's venv group via restart-in-place.
+                sibling.models = sorted(set(sibling.models) | {model_id})
+                sibling.status = "restarting"
+                plan = "restart_sibling"
+                spec_ref = sibling
+            else:
+                new_port = find_free_port(start=9001, end=9999)
+                new_spec = WorkerSpec(
+                    models=[model_id],
+                    python_path=python_path,
+                    port=new_port,
+                    device=state.device,
+                )
+                new_spec.status = "pending"
+                state.workers.append(new_spec)
+                plan = "spawn_new"
+                spec_ref = new_spec
+
+    # Phase 2: execute outside the lock (the slow path).
+    assert spec_ref is not None and plan is not None  # type checker
+
+    if plan == "already_running":
+        return spec_ref.port
+
+    if plan == "restart_sibling":
+        try:
+            _restart_worker_inplace(spec_ref, device=state.device)
+        except Exception:
+            with state.lock:
+                spec_ref.status = "dead"
+            raise
+        return spec_ref.port
+
+    if plan == "spawn_new":
+        try:
+            spawn_worker(spec_ref, device=state.device)
+            wait_for_ready(port=spec_ref.port, timeout=120.0)
+        except Exception:
+            with state.lock:
+                spec_ref.status = "dead"
+            raise
+        with state.lock:
+            spec_ref.status = "running"
+        return spec_ref.port
+
+    # Unreachable; the assert above guarantees plan is set.
+    raise OperationError("unreachable", "load_model_into_worker fell through")
+
+
+def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
+    """Sync operation: drop `model_id` from its worker without disabling.
+
+    Lazy-load companion to `disable_model`. Crucial difference: does
+    NOT call `set_enabled(model_id, False)`. The catalog stays "in
+    service"; this just frees the memory slot so the director can
+    load another model.
+
+    Three paths:
+      1. model_id not loaded in any worker: no-op.
+      2. model_id is the only model in a worker: terminate the worker.
+      3. model_id is one of several in a worker (venv-group sibling):
+         restart-in-place with the reduced model list.
+    """
+    with state.lock:
+        spec = find_worker_for_model(state, model_id)
+        if spec is None:
+            return
+
+        spec.models = [m for m in spec.models if m != model_id]
+        if not spec.models:
+            _shutdown_workers([spec])
+            state.workers = [w for w in state.workers if w.port != spec.port]
+            return
+        # Sibling models still live in this venv group; restart-in-place
+        # so the running worker drops the unloaded model from its
+        # in-memory state.
+        _restart_worker_inplace(spec, device=state.device)
+
+
 def disable_model(model_id: str, *, state: SupervisorState) -> dict:
     """Sync operation: catalog flip + worker unload.
 

@@ -1,13 +1,15 @@
 """`muse serve` supervisor: orchestrate workers + run gateway.
 
-Responsibilities (across E1-E4):
-  1. Read catalog (E1)
-  2. Group models by venv (same python_path = same worker) (E1)
-  3. Allocate a local port per worker (E1)
-  4. Spawn worker subprocesses (E2)
-  5. Wait for each worker's /health to become responsive (E2)
-  6. Build gateway routes + run gateway uvicorn (E3)
-  7. On shutdown: SIGTERM workers, wait for exit (E3)
+Responsibilities (v0.40.0+, lazy load):
+  1. Read catalog at boot (only for validation, not for eager spawning).
+  2. Construct a LoadDirector and hang it off SupervisorState.
+  3. Stamp `unservable_reasons` for enabled catalog rows that lack memory
+     data or whose declared memory_gb exceeds device capacity at boot.
+  4. Start gateway immediately (zero workers initially). First request
+     to a model triggers `LoadDirector.acquire`, which calls back into
+     this module's `load_model_into_worker` to spawn the worker.
+  5. On shutdown: SIGTERM workers (whatever was loaded by then), wait for
+     exit.
 
 A module-level SupervisorState singleton holds the worker list and shared
 metadata. Admin endpoints (muse.admin.*) read and mutate the state under
@@ -21,6 +23,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 import uvicorn
@@ -65,6 +68,9 @@ class SupervisorState:
 
     `workers` is the live list of spawned WorkerSpec records. Admin
     operations (enable/disable) mutate it; the monitor thread reads it.
+    Under lazy load, the LoadDirector also adds and removes WorkerSpec
+    records via `load_model_into_worker` and `unload_model_from_worker`
+    in `muse.admin.operations`.
 
     `device` is the supervisor-wide device flag (cuda/cpu/auto/mps).
     Admin-spawned workers inherit it unless their MANIFEST capability
@@ -73,13 +79,27 @@ class SupervisorState:
     `started_at` is monotonic seconds at supervisor boot; admin uptime
     queries can subtract this to report worker uptimes.
 
-    `lock` is a reentrant lock guarding all mutations of `workers`. v1
-    uses one global lock; per-model locks are deferred until contention
-    becomes measurable.
+    `director` is the LoadDirector singleton. Populated by
+    `run_supervisor` after construction; admin endpoints reach the
+    director through `state.director`. None outside of a running
+    supervisor (tests building bare states get a coherent default).
+
+    `unservable_reasons` is a per-model-id map populated at boot by
+    `validate_catalog_at_boot`. Maps model_id to a string explaining
+    why the model cannot be served (no memory data, exceeds device
+    capacity, etc). The gateway short-circuits 503 for these models
+    before calling `director.acquire`; `/v1/models` surfaces the
+    reason to clients.
+
+    `lock` is a reentrant lock guarding all mutations of `workers` +
+    `unservable_reasons`. v1 uses one global lock; per-model locks
+    are deferred until contention becomes measurable.
     """
     workers: list[WorkerSpec] = field(default_factory=list)
     device: str = "auto"
     started_at: float = field(default_factory=time.monotonic)
+    director: "Any | None" = None
+    unservable_reasons: dict[str, str] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -429,86 +449,246 @@ def _shutdown_workers(specs: list[WorkerSpec], grace: float = 5.0) -> None:
             logger.warning("error waiting for worker on port %d: %s", spec.port, e)
 
 
-def run_supervisor(*, host: str, port: int, device: str) -> int:
-    """Entry point for `muse serve`.
+class _MemoryProbeAdapter:
+    """Thin adapter wrapping `muse.core.memory_probe` module functions
+    as bound methods on an object.
 
-    Plans workers from catalog, spawns them, waits for the FIRST one to
-    pass /health, then starts the gateway. Remaining workers promote on
-    a background daemon thread; their models join /v1/models when ready.
-    This means the gateway is reachable in seconds even when a slow
-    worker (large GGUF, big diffusion model) is still loading.
+    LoadDirector accepts any object with `.gpu_free_gb()` and
+    `.cpu_free_gb()`. The memory_probe module exposes those as
+    free functions; this adapter satisfies the duck-typed contract
+    without forcing a class definition into memory_probe.py
+    (deferred to a future refactor; for now an adapter at the
+    composition seam is the smaller change).
+    """
+
+    def gpu_free_gb(self, device_id: int = 0) -> float | None:
+        from muse.core import memory_probe
+        return memory_probe.gpu_free_gb(device_id)
+
+    def cpu_free_gb(self) -> float:
+        from muse.core import memory_probe
+        return memory_probe.cpu_free_gb()
+
+
+def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
+    """Return (has_data, declared_memory_gb, device).
+
+    Two sources of memory data, in order of preference:
+      1. `manifest.capabilities.memory_gb` annotation (hand-set or
+         from a script's MANIFEST).
+      2. `measurements.<device>.peak_bytes` from a probe run.
+
+    `device` is read from `manifest.capabilities.device` and lowercased.
+    Falls back to "cpu" when absent (the catalog default).
+
+    `has_data` is True when either source is present; False when both
+    are absent. The boot validation flags False entries as unservable
+    with the probe-prompt reason.
+    """
+    manifest = catalog_entry.get("manifest", {}) or {}
+    capabilities = manifest.get("capabilities", {}) or {}
+    device = str(capabilities.get("device", "cpu")).lower() or "cpu"
+    declared = capabilities.get("memory_gb")
+
+    measurements = catalog_entry.get("measurements", {}) or {}
+    # Probe records key by the resolved device (e.g. "cpu" / "cuda")
+    # so we look up by the same key. "gpu" alias normalizes to "cuda"
+    # to match what the probe writes.
+    measurement_key = "cuda" if device == "gpu" else device
+    measured = (measurements.get(measurement_key) or {}).get("peak_bytes")
+
+    if declared is not None:
+        try:
+            declared_gb = float(declared)
+        except (TypeError, ValueError):
+            declared_gb = 0.0
+        return True, declared_gb, device
+    if measured is not None and measured > 0:
+        try:
+            measured_gb = float(measured) / (1024 ** 3)
+        except (TypeError, ValueError):
+            measured_gb = 0.0
+        return True, measured_gb, device
+
+    return False, 0.0, device
+
+
+def validate_catalog_at_boot(
+    state: SupervisorState,
+    *,
+    memory_probe: "Any | None" = None,
+    gpu_headroom_gb: float = 1.0,
+    cpu_headroom_gb: float = 2.0,
+) -> None:
+    """Walk the enabled catalog and stamp unservable_reasons.
+
+    For each `enabled: true` row in the catalog:
+      - If the row has neither `manifest.capabilities.memory_gb` nor
+        `measurements.<device>.peak_bytes`, mark it
+        "no memory estimate; run muse models probe".
+      - If the row's declared memory_gb exceeds free at boot
+        (live free minus headroom), mark it "exceeds device capacity".
+      - GPU rows with no live VRAM info (pynvml unavailable) are
+        treated as exceeding capacity until probe data lands.
+
+    The result is stored in `state.unservable_reasons`; the gateway and
+    `/v1/models` consult this dict to short-circuit 503 before calling
+    the director.
+
+    `memory_probe` defaults to the production adapter; tests inject a
+    MagicMock with the desired return values.
+    """
+    if memory_probe is None:
+        memory_probe = _MemoryProbeAdapter()
+
+    catalog = _read_catalog()
+    cpu_free_gb = float(memory_probe.cpu_free_gb())
+    cpu_available_gb = max(0.0, cpu_free_gb - cpu_headroom_gb)
+
+    gpu_free = memory_probe.gpu_free_gb()
+    if gpu_free is None:
+        gpu_available_gb = None
+    else:
+        gpu_available_gb = max(0.0, float(gpu_free) - gpu_headroom_gb)
+
+    for model_id, entry in catalog.items():
+        if not entry.get("enabled", True):
+            continue
+        # Skip pre-worker entries; they cannot load anyway.
+        if not entry.get("python_path"):
+            continue
+
+        has_data, declared_gb, device = _has_memory_data(entry)
+        if not has_data:
+            state.unservable_reasons[model_id] = (
+                "no memory estimate; run `muse models probe` to populate"
+            )
+            continue
+
+        # Pick the relevant device's available pool.
+        if device in ("cuda", "gpu"):
+            available_gb = gpu_available_gb
+            if available_gb is None:
+                # pynvml unavailable; we cannot say it fits. Until probe
+                # data lands or pynvml installs, mark unservable so
+                # callers get a 503 instead of a load attempt that ends
+                # in a crashed worker.
+                state.unservable_reasons[model_id] = (
+                    "exceeds device capacity (no GPU info available; "
+                    "install nvidia-ml-py / pynvml or set memory budget)"
+                )
+                continue
+        else:
+            available_gb = cpu_available_gb
+
+        if declared_gb > available_gb:
+            state.unservable_reasons[model_id] = (
+                f"exceeds device capacity ({declared_gb:.1f} GB > "
+                f"{available_gb:.1f} GB available on {device})"
+            )
+
+
+def _build_load_director(state: SupervisorState) -> "Any":
+    """Construct a LoadDirector wired to the supervisor's enable/disable.
+
+    `enable_fn` and `disable_fn` are thin wrappers around the new
+    `load_model_into_worker` and `unload_model_from_worker` operations
+    in `muse.admin.operations`. Those operations spawn / terminate
+    workers WITHOUT touching the catalog's `enabled` flag - lazy load
+    is "is there a worker for this model right now?", orthogonal to
+    the catalog's "is this model in service?" flag. Reusing the
+    existing `enable_model` / `disable_model` ops would re-couple the
+    two states, defeating the v0.40.0 design.
+
+    Imported lazily to break the cycle: supervisor.py is imported by
+    admin.operations on its way up, so an unconditional top-level
+    import would loop.
+    """
+    from muse.admin.operations import (
+        load_model_into_worker,
+        unload_model_from_worker,
+    )
+    from muse.cli_impl.load_director import LoadDirector
+
+    def enable_fn(model_id: str) -> int:
+        return load_model_into_worker(model_id, state=state)
+
+    def disable_fn(model_id: str) -> None:
+        unload_model_from_worker(model_id, state=state)
+
+    return LoadDirector(
+        enable_fn=enable_fn,
+        disable_fn=disable_fn,
+        memory_probe=_MemoryProbeAdapter(),
+    )
+
+
+def run_supervisor(*, host: str, port: int, device: str) -> int:
+    """Entry point for `muse serve` (v0.40.0+: lazy load).
+
+    Boot sequence:
+      1. Construct a SupervisorState with an empty worker list.
+      2. Construct a LoadDirector and hang it off state.director.
+      3. Run validate_catalog_at_boot to stamp unservable_reasons.
+      4. Start the auto-restart monitor (it watches state.workers, which
+         is empty at boot but will fill via director.acquire).
+      5. Start the gateway. First request per model triggers the
+         director's enable_fn, which spawns the worker.
+      6. On shutdown: SIGTERM whatever workers are loaded (could be 0).
+
+    No worker spawn at boot. No first-ready wait. The gateway is
+    reachable instantly. Cold-start latency moves from boot to first
+    request per model.
 
     Registers a SupervisorState singleton so admin endpoints under
     `/v1/admin/*` can inspect and mutate the worker list. The monitor
-    thread reads `state.workers` directly so admin-triggered worker
-    additions/removals are picked up on the next polling tick without
-    extra synchronization.
+    thread reads `state.workers` directly, so director-triggered worker
+    spawns + admin-triggered enable/disable + auto-restart all show up
+    in one consistent live list.
     """
     from muse.cli_impl.gateway import build_gateway
 
-    specs = plan_workers()
-    if not specs:
-        logger.warning(
-            "no pulled models with a venv - server will start empty. "
-            "Pull a model first: `muse pull <model-id>`"
-        )
-
-    state = SupervisorState(workers=specs, device=device)
+    state = SupervisorState(workers=[], device=device)
+    state.director = _build_load_director(state)
     set_supervisor_state(state)
 
+    # Validate the catalog. Models with no memory data or memory > free
+    # at boot get a 503 reason stamped on state.unservable_reasons.
+    validate_catalog_at_boot(state)
+    if state.unservable_reasons:
+        for mid, reason in sorted(state.unservable_reasons.items()):
+            logger.warning("unservable model %r: %s", mid, reason)
+
     stop_event = threading.Event()
-    monitor_thread: threading.Thread | None = None
+
+    # The monitor thread reads `state.workers` (a live reference), so
+    # workers spawned later via the director's enable_fn show up on the
+    # next polling tick without extra coordination. Started always (not
+    # gated on a non-empty worker list, since lazy load means workers
+    # arrive later).
+    monitor_thread = threading.Thread(
+        target=_monitor_workers,
+        args=(state.workers, stop_event),
+        daemon=True,
+        name="muse-monitor",
+    )
+    monitor_thread.start()
+    logger.info(
+        "auto-restart monitor running (interval=%.1fs, threshold=%d, budget=%d)",
+        _MONITOR_INTERVAL, _FAILURE_THRESHOLD, _MAX_RESTARTS,
+    )
 
     try:
-        for spec in specs:
-            spawn_worker(spec, device=device)
-
-        if specs:
-            # Wait for the FIRST worker only. With one spec the loop
-            # terminates immediately; with N it returns the moment any
-            # single worker passes /health. The remaining workers
-            # promote on the boot thread (below) so the gateway can
-            # serve fast workers while slow ones load.
-            first_ready = _wait_for_first_ready(specs)
-            with state.lock:
-                first_ready.status = "running"
-            logger.info(
-                "first worker ready on port %d (%s); gateway will start now; "
-                "remaining %d worker(s) will promote in the background",
-                first_ready.port, first_ready.models, len(specs) - 1,
-            )
-
-            remaining = [s for s in specs if s is not first_ready]
-            if remaining:
-                threading.Thread(
-                    target=_promote_workers,
-                    args=(remaining, state),
-                    daemon=True,
-                    name="muse-late-boot",
-                ).start()
-
-            # Auto-restart monitor reads state.workers (a live
-            # reference) so admin-triggered enable/disable plus the
-            # late-boot thread's promotions all show up here.
-            monitor_thread = threading.Thread(
-                target=_monitor_workers,
-                args=(state.workers, stop_event),
-                daemon=True,
-                name="muse-monitor",
-            )
-            monitor_thread.start()
-            logger.info(
-                "auto-restart monitor running (interval=%.1fs, threshold=%d, budget=%d)",
-                _MONITOR_INTERVAL, _FAILURE_THRESHOLD, _MAX_RESTARTS,
-            )
-
         # Build gateway with a live SupervisorState reference. Routes
         # are derived per-request from state.workers (running-only) so
-        # late-promoting workers join the routing table without an
+        # director-spawned workers join the routing table without an
         # app rebuild.
         app = build_gateway(state=state)
 
-        logger.info("starting gateway on %s:%d", host, port)
+        logger.info(
+            "starting gateway on %s:%d (lazy load: %d unservable model(s))",
+            host, port, len(state.unservable_reasons),
+        )
         uvicorn.run(app, host=host, port=port, log_config=None)
     except KeyboardInterrupt:
         logger.info("shutting down (SIGINT)")
@@ -518,8 +698,8 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         stop_event.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=5.0)
-        # boot_thread is daemon=True so it dies with the process; it
-        # uses short httpx timeouts so it exits naturally on its own.
+        # Whatever workers were loaded by the director get torn down here.
+        # Empty list is a no-op.
         _shutdown_workers(state.workers)
         clear_supervisor_state()
         # Best-effort: join admin job threads so a Ctrl+C during a pull
