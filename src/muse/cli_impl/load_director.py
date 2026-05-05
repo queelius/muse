@@ -173,12 +173,14 @@ class LoadDirector:
         # (no LoadEntry was inserted). On wake, we re-enter the decision
         # phase rather than blindly trusting the winner.
         while True:
-            phase_decision = self._decide(model_id, manifest=manifest)
+            phase_decision, port = self._decide(model_id, manifest=manifest)
 
             if phase_decision == "hot":
-                # Hot path returns under the lock with the entry already
-                # touched. _decide handed us back the port via state.
-                return self.loaded[model_id].worker_port
+                # _decide returns the port read under the same lock that
+                # classified the entry as loaded. No TOCTOU window: an
+                # eviction (Task C) cannot race between classification
+                # and read because both happen inside the lock.
+                return port
 
             if phase_decision == "wait":
                 # We did not own the load; another thread did. Wait for
@@ -235,15 +237,19 @@ class LoadDirector:
     # Internals: decision / load / commit
     # ------------------------------------------------------------------
 
-    def _decide(self, model_id: str, *, manifest: dict) -> str:
+    def _decide(
+        self, model_id: str, *, manifest: dict,
+    ) -> tuple[str, int | None]:
         """First phase, under the lock.
 
-        Returns one of:
-          "hot": entry already loaded; refcount + last_touched bumped here.
-          "wait": another thread owns the load; caller awaits the Event.
-          "load": we just claimed ownership; run load phase + commit.
+        Returns a (phase, port_or_none) tuple:
+          ("hot", port): entry already loaded; refcount + last_touched
+            bumped under the lock; port is the worker_port read under
+            the same lock (no TOCTOU window for an evictor to race in).
+          ("wait", None): another thread owns the load; caller awaits the Event.
+          ("load", None): we just claimed ownership; run load phase + commit.
 
-        On the "load" return path, an Event has been stashed in
+        On the ("load", None) return path, an Event has been stashed in
         self.in_flight_loads[model_id]. The caller is responsible for
         either committing (success) or popping + setting the Event
         (failure). _commit and _abort cover both cases.
@@ -253,10 +259,13 @@ class LoadDirector:
             if entry is not None:
                 entry.refcount += 1
                 entry.last_touched_at = time.monotonic()
-                return "hot"
+                # Read port under the same lock that classified the
+                # entry; an evictor (Task C) cannot race between the
+                # classification and this read.
+                return ("hot", entry.worker_port)
 
             if model_id in self.in_flight_loads:
-                return "wait"
+                return ("wait", None)
 
             # We're going to do this load. Decide whether it fits before
             # we claim the in-flight slot, so that if the answer is "no"
@@ -290,7 +299,7 @@ class LoadDirector:
             # Claim ownership of the load.
             event = threading.Event()
             self.in_flight_loads[model_id] = event
-            return "load"
+            return ("load", None)
 
     def _get_in_flight_event(self, model_id: str) -> threading.Event | None:
         """Read the current in-flight Event under the lock.
