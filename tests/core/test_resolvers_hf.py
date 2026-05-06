@@ -310,3 +310,53 @@ def test_resolve_unknown_error_message_includes_repo_diagnostics():
             assert "random.bin" in msg
         else:
             raise AssertionError("expected ResolverError")
+
+
+def test_resolve_via_modality_picks_named_plugin_not_priority_winner():
+    """Regression for v0.41.1: a curated alias declaring `modality:
+    text/rerank` for a sentence-transformers reranker repo
+    (BAAI/bge-reranker-base) must route through the text/rerank plugin,
+    not the embedding/text plugin (which would otherwise win on sniff).
+    """
+    from muse.core.resolvers_hf import HFResolver
+
+    rerank_plugin_resolved = MagicMock(name="rerank-resolved")
+    embedding_plugin = {
+        "modality": "embedding/text",
+        "sniff": MagicMock(return_value=True),  # would win on sniff
+        "resolve": MagicMock(name="embedding-resolve"),
+    }
+    rerank_plugin = {
+        "modality": "text/rerank",
+        "sniff": MagicMock(return_value=False),  # wouldn't win on sniff
+        "resolve": MagicMock(return_value=rerank_plugin_resolved),
+    }
+    resolver = HFResolver(plugins=[embedding_plugin, rerank_plugin])
+
+    info = SimpleNamespace(siblings=[], tags=[], id="BAAI/bge-reranker-base")
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        out = resolver.resolve_via_modality(
+            "hf://BAAI/bge-reranker-base", "text/rerank",
+        )
+
+    assert out is rerank_plugin_resolved
+    rerank_plugin["resolve"].assert_called_once()
+    # The embedding plugin must NOT have been consulted, even though
+    # its sniff would have returned True under priority dispatch.
+    embedding_plugin["sniff"].assert_not_called()
+    embedding_plugin["resolve"].assert_not_called()
+
+
+def test_resolve_via_modality_raises_when_no_plugin_for_modality():
+    from muse.core.resolvers_hf import HFResolver
+
+    plugin = {"modality": "audio/speech", "sniff": MagicMock(), "resolve": MagicMock()}
+    resolver = HFResolver(plugins=[plugin])
+    try:
+        resolver.resolve_via_modality("hf://x/y", "image/segmentation")
+    except ResolverError as e:
+        msg = str(e)
+        assert "no HF plugin for modality" in msg
+        assert "image/segmentation" in msg
+    else:
+        raise AssertionError("expected ResolverError")

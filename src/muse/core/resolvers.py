@@ -128,9 +128,37 @@ def get_resolver(uri: str) -> Resolver:
         )
 
 
-def resolve(uri: str) -> ResolvedModel:
-    """Resolve a URI through the matching resolver."""
-    return get_resolver(uri).resolve(uri)
+def resolve(uri: str, *, modality: str | None = None) -> ResolvedModel:
+    """Resolve a URI through the matching resolver.
+
+    When `modality` is None (default), uses priority-based sniff
+    dispatch: each plugin's sniff is consulted in order and the first
+    True wins.
+
+    When `modality` is set, bypasses sniff and routes directly to the
+    plugin claiming that modality. Used for curated aliases that
+    declare an explicit `modality:` field, so the operator's intent
+    beats the resolver's heuristic (e.g. reranker repos register as
+    sentence-transformers but should resolve via text/rerank, not
+    embedding/text).
+
+    Raises ResolverError if no resolver matches the scheme, or if
+    `modality` is set and no plugin claims that modality.
+    """
+    resolver = get_resolver(uri)
+    if modality is None:
+        return resolver.resolve(uri)
+    method = getattr(resolver, "resolve_via_modality", None)
+    if not callable(method):
+        # Resolver doesn't support modality override; warn and fall
+        # back to standard sniff dispatch. Future resolvers should
+        # implement resolve_via_modality.
+        logger.warning(
+            "resolver for %r does not support modality override; "
+            "falling back to sniff dispatch", uri,
+        )
+        return resolver.resolve(uri)
+    return method(uri, modality)
 
 
 def search(query: str, *, backend: str | None = None, **filters: Any) -> Iterable[SearchResult]:

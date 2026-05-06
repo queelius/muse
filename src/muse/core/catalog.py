@@ -422,6 +422,7 @@ def pull(identifier: str) -> None:
                 curated.uri,
                 model_id_override=curated.id,
                 capabilities_overlay=curated.capabilities or None,
+                modality_override=curated.modality,
             )
             return
         # Bundled curated entry: id equals an existing bundled script's
@@ -443,6 +444,7 @@ def pull(identifier: str) -> None:
                 identifier,
                 model_id_override=uri_curated.id,
                 capabilities_overlay=uri_curated.capabilities or None,
+                modality_override=uri_curated.modality,
             )
         else:
             _pull_via_resolver(identifier)
@@ -542,6 +544,7 @@ def _pull_via_resolver(
     *,
     model_id_override: str | None = None,
     capabilities_overlay: dict | None = None,
+    modality_override: str | None = None,
 ) -> None:
     """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
 
@@ -558,6 +561,14 @@ def _pull_via_resolver(
     the resolver's synthesized model_id so the catalog stores the
     friendly curated id.
 
+    `modality_override` is set when the curated alias declared an
+    explicit `modality:` field. The priority-based resolver dispatch
+    sometimes misclassifies multi-flavor repos (rerankers ship as
+    sentence-transformers, so the embedding/text plugin claims them
+    even though they're cross-encoders). When the operator declared
+    a modality in curated.yaml, we honor it: look up the plugin for
+    that modality and resolve via it directly. Bypasses sniff-priority.
+
     `capabilities_overlay` is set when the URI was reached via a curated
     alias that declared its own `capabilities:` block. It merges into
     the resolver-synthesized manifest's `capabilities` (shallow merge;
@@ -567,7 +578,11 @@ def _pull_via_resolver(
     """
     from muse.core.resolvers import resolve
 
-    resolved = resolve(uri)
+    # `modality_override` is forwarded to resolve() when set; the
+    # resolver dispatches via resolve_via_modality (bypassing sniff)
+    # so curated yaml's modality declaration beats the priority-based
+    # plugin pick. See resolvers.resolve docstring.
+    resolved = resolve(uri, modality=modality_override)
     manifest = dict(resolved.manifest)
     # Resolver may put backend_path in the manifest itself, or only on
     # the ResolvedModel. Persist it consistently so load_backend can

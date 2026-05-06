@@ -62,6 +62,34 @@ class HFResolver(Resolver):
             f"siblings={siblings}..."
         )
 
+    def resolve_via_modality(self, uri: str, modality: str) -> ResolvedModel:
+        """Resolve a URI through the plugin for the named modality,
+        bypassing priority-based sniff dispatch.
+
+        Used when curated.yaml declares a `modality:` field for a URI
+        that the priority-based resolve would otherwise misclassify.
+        Reranker repos (BAAI/bge-reranker-base) are sentence-transformers
+        models so the embedding/text plugin's sniff returns True; the
+        text/rerank plugin needs to win when the curated entry says so.
+
+        Returns the chosen plugin's resolved model. Raises ResolverError
+        when no plugin claims the named modality.
+        """
+        scheme, repo_id, variant = parse_uri(uri)
+        if scheme != "hf":
+            raise ResolverError(f"HFResolver cannot resolve scheme {scheme!r}")
+
+        for plugin in self._plugins:
+            if plugin["modality"] == modality:
+                info = self._api.repo_info(repo_id)
+                return plugin["resolve"](repo_id, variant, info)
+
+        supported = sorted({p["modality"] for p in self._plugins})
+        raise ResolverError(
+            f"no HF plugin for modality {modality!r}; "
+            f"registered: {supported}"
+        )
+
     def search(self, query: str, **filters) -> Iterable[SearchResult]:
         modality = filters.get("modality")
         sort = filters.get("sort", "downloads")
