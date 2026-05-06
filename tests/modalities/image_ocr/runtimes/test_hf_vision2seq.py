@@ -18,11 +18,13 @@ def _reset_module_sentinels():
     import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
     orig = (
         mod.torch, mod.AutoModelForVision2Seq, mod.AutoProcessor,
+        mod.AutoImageProcessor, mod.AutoTokenizer,
         mod._LAST_IMPORT_ERROR,
     )
     yield
     (
         mod.torch, mod.AutoModelForVision2Seq, mod.AutoProcessor,
+        mod.AutoImageProcessor, mod.AutoTokenizer,
         mod._LAST_IMPORT_ERROR,
     ) = orig
 
@@ -55,6 +57,13 @@ def _wire_basic_runtime(mod, *, decoded_text="hello world", token_count=10):
     # return_tensors=...), it returns `encoded`.
     processor.return_value = encoded
     processor.batch_decode = MagicMock(return_value=[decoded_text])
+    # The runtime detects "unified vs split" by checking for
+    # `image_processor` (or legacy `feature_extractor`) on the
+    # AutoProcessor return. The default fixture is the unified path
+    # (TrOCR/Nougat shape); attach a placeholder image_processor so
+    # the constructor takes the existing branch without needing
+    # AutoImageProcessor mocked.
+    processor.image_processor = MagicMock()
     # tokenizer().input_ids.to(device) chain for prompt encoding.
     # The .to() return value needs a .shape so the runtime can
     # compute prompt_len for completion_tokens accounting.
@@ -328,6 +337,73 @@ def test_ensure_deps_prefers_transformers5_class_when_available():
             sys.modules["transformers"] = real_transformers
         else:
             sys.modules.pop("transformers", None)
+
+
+def test_split_component_path_when_processor_lacks_image_processor():
+    """Regression for v0.40.5: when AutoProcessor returns a tokenizer
+    (because the repo lacks `preprocessor_config.json`), the runtime
+    must fall back to AutoImageProcessor + AutoTokenizer.
+
+    Repos that hit this path: TexTeller and other older
+    vision-encoder-decoder OCR repos.
+    """
+    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+
+    # Set up: AutoProcessor returns a tokenizer-only (no image_processor,
+    # no feature_extractor). The runtime should detect this and load
+    # AutoImageProcessor separately.
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    fake_torch.backends = MagicMock(mps=None)
+    mod.torch = fake_torch
+
+    # Tokenizer-shaped object: callable for text, batch_decode method,
+    # input_ids chain. NO image_processor / feature_extractor attribute.
+    tokenizer = MagicMock(spec=["__call__", "batch_decode"])
+    tok_moved = MagicMock()
+    tok_moved.shape = (1, 5)
+    tok_out = MagicMock()
+    tok_out.input_ids = MagicMock()
+    tok_out.input_ids.to = MagicMock(return_value=tok_moved)
+    tokenizer.return_value = tok_out
+    tokenizer.batch_decode = MagicMock(return_value=["formula"])
+
+    proc_factory = MagicMock()
+    proc_factory.from_pretrained = MagicMock(return_value=tokenizer)
+    mod.AutoProcessor = proc_factory
+
+    # AutoImageProcessor: returns a processor that takes an image
+    # positionally and returns a movable encoding.
+    image_processor = MagicMock()
+    encoded = MagicMock()
+    encoded.to = MagicMock(return_value=encoded)
+    image_processor.return_value = encoded
+    ip_factory = MagicMock()
+    ip_factory.from_pretrained = MagicMock(return_value=image_processor)
+    mod.AutoImageProcessor = ip_factory
+
+    # Model: standard.
+    model_obj = MagicMock()
+    model_obj.to = MagicMock(return_value=model_obj)
+    model_obj.generate = MagicMock(return_value=_make_outputs(token_count=12))
+    model_factory = MagicMock()
+    model_factory.from_pretrained = MagicMock(return_value=model_obj)
+    mod.AutoModelForVision2Seq = model_factory
+
+    runtime = mod.HFVision2SeqRuntime(
+        model_id="texteller", hf_repo="OleehyO/TexTeller", device="cpu",
+    )
+    # The constructor should have detected the split case.
+    assert runtime._processor is None
+    assert runtime._tokenizer is tokenizer
+    assert runtime._image_processor is image_processor
+
+    # Inference should use the image_processor for the image side and
+    # the tokenizer for batch_decode.
+    result = runtime.ocr(MagicMock(name="pil_image"))
+    assert result.text == "formula"
+    image_processor.assert_called_once()
+    tokenizer.batch_decode.assert_called_once()
 
 
 def test_ensure_deps_falls_back_to_legacy_class_on_transformers4():

@@ -29,7 +29,20 @@ from muse.core.resolvers import ResolvedModel, SearchResult
 _RUNTIME_PATH = (
     "muse.modalities.image_ocr.runtimes.hf_vision2seq:HFVision2SeqRuntime"
 )
-_PIP_EXTRAS = ("torch>=2.1.0", "transformers>=4.40.0", "Pillow")
+# torchvision is required by transformers.AutoImageProcessor on the
+# split-component path (repos that lack preprocessor_config.json, like
+# TexTeller and other older vision-encoder-decoder OCR repos). Without
+# it, AutoImageProcessor.from_pretrained raises ImportError. The
+# transformers 4.x AutoProcessor unified path (TrOCR, Nougat) doesn't
+# need torchvision, but listing it unconditionally matches the
+# pip_extras audit philosophy (declare every direct + transitive
+# import the runtime can hit at load time).
+_PIP_EXTRAS = (
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "transformers>=4.40.0",
+    "Pillow",
+)
 
 
 def _model_id(repo_id: str) -> str:

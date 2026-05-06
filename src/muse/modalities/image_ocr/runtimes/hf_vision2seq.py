@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 torch: Any = None
 AutoModelForVision2Seq: Any = None
 AutoProcessor: Any = None
+AutoImageProcessor: Any = None
+AutoTokenizer: Any = None
 _LAST_IMPORT_ERROR: Exception | None = None
 
 
@@ -48,7 +50,8 @@ def _ensure_deps() -> None:
     is not installed" line, which lies when transformers IS installed
     but the specific class isn't.
     """
-    global torch, AutoModelForVision2Seq, AutoProcessor, _LAST_IMPORT_ERROR
+    global torch, AutoModelForVision2Seq, AutoProcessor
+    global AutoImageProcessor, AutoTokenizer, _LAST_IMPORT_ERROR
     if torch is None:
         try:
             import torch as _t
@@ -83,6 +86,22 @@ def _ensure_deps() -> None:
         except Exception as e:  # noqa: BLE001
             logger.debug("HFVision2SeqRuntime AutoProcessor unavailable: %s", e)
             _LAST_IMPORT_ERROR = e
+    if AutoImageProcessor is None:
+        try:
+            from transformers import AutoImageProcessor as _ip
+            AutoImageProcessor = _ip
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "HFVision2SeqRuntime AutoImageProcessor unavailable: %s", e,
+            )
+    if AutoTokenizer is None:
+        try:
+            from transformers import AutoTokenizer as _tk
+            AutoTokenizer = _tk
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "HFVision2SeqRuntime AutoTokenizer unavailable: %s", e,
+            )
 
 
 class HFVision2SeqRuntime:
@@ -138,7 +157,76 @@ class HFVision2SeqRuntime:
         self._default_max_new_tokens = max_new_tokens
         src = local_dir or hf_repo
         with LoadTimer(f"loading vision2seq from {src}", logger):
-            self._processor = AutoProcessor.from_pretrained(src)
+            # Modern multimodal repos (TrOCR, Nougat) ship a
+            # `preprocessor_config.json` so AutoProcessor returns a
+            # unified processor that handles both image preprocessing
+            # AND tokenization. Older repos (TexTeller) have only
+            # `tokenizer_config.json`, so AutoProcessor falls back to
+            # AutoTokenizer; calling `tokenizer(image)` would then fail
+            # at inference with a confusing "text input must be of type
+            # str" error.
+            #
+            # Detect the split case by looking for the standard image-side
+            # attributes (`image_processor` or legacy `feature_extractor`)
+            # on the loaded processor. If absent, load
+            # `AutoImageProcessor` + `AutoTokenizer` separately and
+            # leave `_processor=None` so the inference path uses the
+            # split components.
+            unified = AutoProcessor.from_pretrained(src)
+            has_image_side = (
+                hasattr(unified, "image_processor")
+                or hasattr(unified, "feature_extractor")
+            )
+            if has_image_side:
+                self._processor = unified
+                self._image_processor = None
+                self._tokenizer = None
+            else:
+                # Split path: `unified` is actually a tokenizer.
+                self._processor = None
+                self._tokenizer = unified
+                if AutoImageProcessor is None:
+                    raise RuntimeError(
+                        "AutoImageProcessor not available; cannot load "
+                        f"{src!r} (the repo lacks preprocessor_config.json "
+                        "so the split-component path is required, but "
+                        "AutoImageProcessor failed to import). Run "
+                        f"`muse models refresh {model_id}`."
+                    )
+                # Three-tier image-processor fallback:
+                #   1. AutoImageProcessor.from_pretrained(src): works
+                #      when the repo ships preprocessor_config.json
+                #      (most modern repos).
+                #   2. AutoImageProcessor with the model_type from
+                #      config.json (some repos rely on the type alone).
+                #   3. ViTImageProcessor with default config: the
+                #      universal fallback for vision-encoder-decoder
+                #      OCR repos that ship neither of the above
+                #      (TexTeller is the canonical example). ViT-style
+                #      preprocessing (224x224 + ImageNet normalization)
+                #      is what these encoders trained on.
+                try:
+                    self._image_processor = AutoImageProcessor.from_pretrained(src)
+                except Exception as e1:  # noqa: BLE001
+                    logger.debug(
+                        "AutoImageProcessor.from_pretrained(%s) failed: %s; "
+                        "falling back to ViTImageProcessor",
+                        src, e1,
+                    )
+                    try:
+                        from transformers import ViTImageProcessor
+                        self._image_processor = ViTImageProcessor()
+                        logger.info(
+                            "Loaded %s with ViTImageProcessor fallback "
+                            "(repo lacks preprocessor_config.json)", model_id,
+                        )
+                    except Exception as e2:  # noqa: BLE001
+                        raise RuntimeError(
+                            f"Cannot load image processor for {src!r}: "
+                            f"AutoImageProcessor failed ({e1}) and "
+                            f"ViTImageProcessor fallback also failed "
+                            f"({e2}). The repo may need a custom runtime."
+                        ) from e2
             self._model = AutoModelForVision2Seq.from_pretrained(
                 src, torch_dtype=self._dtype,
             )
@@ -161,7 +249,23 @@ class HFVision2SeqRuntime:
         Nougat can receive the task hint.
         """
         max_new = max_new_tokens or self._default_max_new_tokens
-        inputs = self._processor(image, return_tensors="pt").to(self._device)
+        # Two paths depending on whether the repo shipped a unified
+        # multimodal processor (TrOCR, Nougat) or only a tokenizer
+        # (TexTeller and other older repos that lack
+        # preprocessor_config.json). The constructor decided which
+        # branch we're in by inspecting the AutoProcessor return.
+        if self._processor is not None:
+            inputs = self._processor(
+                image, return_tensors="pt",
+            ).to(self._device)
+            tokenizer = self._processor.tokenizer
+            decoder = self._processor
+        else:
+            inputs = self._image_processor(
+                image, return_tensors="pt",
+            ).to(self._device)
+            tokenizer = self._tokenizer
+            decoder = self._tokenizer
         gen_kwargs: dict[str, Any] = {
             "max_new_tokens": max_new,
             "num_beams": num_beams,
@@ -172,7 +276,7 @@ class HFVision2SeqRuntime:
         # tokenized prompt prepends.
         prompt_len = 1
         if prompt is not None:
-            tok_ids = self._processor.tokenizer(
+            tok_ids = tokenizer(
                 prompt, return_tensors="pt",
             ).input_ids.to(self._device)
             gen_kwargs["decoder_input_ids"] = tok_ids
@@ -184,13 +288,18 @@ class HFVision2SeqRuntime:
         # OpenAI usage.completion_tokens semantics).
         completion_tokens = max(0, int(outputs.shape[-1]) - prompt_len)
 
-        decoded = self._processor.batch_decode(
+        decoded = decoder.batch_decode(
             outputs, skip_special_tokens=True,
         )[0]
         # post_process_generation is a Nougat-specific helper that strips
-        # control tokens and normalizes whitespace. Older transformers
-        # versions don't have it; absent processor handles fall through.
-        post = getattr(self._processor, "post_process_generation", None)
+        # control tokens and normalizes whitespace. Lives on the unified
+        # multimodal processor; in the split-component path it never
+        # exists (TexTeller and similar legacy repos don't ship it).
+        post = (
+            getattr(self._processor, "post_process_generation", None)
+            if self._processor is not None
+            else None
+        )
         if callable(post):
             try:
                 # Some processors take fix_markdown=True; pass it when
