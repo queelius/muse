@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-eighteen modalities:
+nineteen modalities:
 
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
@@ -25,6 +25,7 @@ eighteen modalities:
 - **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
 - **text/summarization**: BART/PEGASUS seq2seq summarization via `/v1/summarize` (bart-large-cnn bundled; any summarization-tagged HF repo via the resolver; Cohere-compat wire shape)
 - **video/generation**: text-to-video via `/v1/video/generations` (wan2-1-t2v-1-3b bundled; Wan / CogVideoX / LTX-Video families via the resolver; narrative clips up to 30s; mp4/webm/frames_b64 output; GPU-required, 8GB+ VRAM tight, 12GB+ recommended)
+- **3d/generation**: image-to-3d via `/v1/3d/from-image` and text-to-3d via `/v1/3d/generations` (triposr bundled; TRELLIS, Wonder3D, Hunyuan3D-2, Shap-E via the resolver; GLB output as `data:model/gltf-binary;base64,...` URL or b64_json; capability flags `supports_text_to_3d` / `supports_image_to_3d` gate per route; sync/blocking pattern mirroring video/generation)
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
 path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,
