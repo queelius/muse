@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from muse.cli_impl.idle_sweeper import IdleSweeper
 from muse.cli_impl.load_director import LoadDirector
 from muse.cli_impl.supervisor import (
     SupervisorState,
@@ -1056,3 +1057,98 @@ class TestStateWorkersMutatedInPlace:
             "monitor failed to see the surviving worker via the live "
             "reference (state.workers was rebound)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Task B (v0.40.1): IdleSweeper wired at boot.
+#
+# The sweeper is created, started, exposed on state.idle_sweeper +
+# state.idle_sweeper_thread, and joined on graceful shutdown via the
+# shared state.stop_event.
+# ---------------------------------------------------------------------------
+
+
+class TestIdleSweeperWiredAtBoot:
+    def test_run_supervisor_starts_idle_sweeper(self, tmp_catalog):
+        """state.idle_sweeper is an IdleSweeper, and its thread is alive
+        at the moment the gateway runs.
+        """
+        _seed_catalog({})
+        from muse.cli_impl.supervisor import run_supervisor
+
+        seen: dict = {"state": None, "thread_alive": None, "sweeper": None}
+
+        def capture_state(*args, **kwargs):
+            s = get_supervisor_state()
+            seen["state"] = s
+            seen["sweeper"] = s.idle_sweeper
+            seen["thread_alive"] = (
+                s.idle_sweeper_thread is not None
+                and s.idle_sweeper_thread.is_alive()
+            )
+            raise KeyboardInterrupt()
+
+        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_uvicorn.run.side_effect = capture_state
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        assert seen["sweeper"] is not None, (
+            "expected state.idle_sweeper to be populated by run_supervisor"
+        )
+        assert isinstance(seen["sweeper"], IdleSweeper)
+        assert seen["thread_alive"] is True, (
+            "expected state.idle_sweeper_thread to be alive while uvicorn runs"
+        )
+
+    def test_run_supervisor_stops_idle_sweeper_on_shutdown(self, tmp_catalog):
+        """After run_supervisor exits, the sweeper thread is no longer
+        alive: stop_event was set in cleanup and the thread joined.
+        """
+        _seed_catalog({})
+        from muse.cli_impl.supervisor import run_supervisor
+
+        captured: dict = {"thread": None}
+
+        def capture_thread(*args, **kwargs):
+            s = get_supervisor_state()
+            captured["thread"] = s.idle_sweeper_thread
+            raise KeyboardInterrupt()
+
+        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_uvicorn.run.side_effect = capture_thread
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        thread = captured["thread"]
+        assert thread is not None
+        # The cleanup path joins with timeout=5.0; the thread should have
+        # exited already because stop_event was set. Allow a small grace
+        # window in case scheduling delay leaves it briefly alive.
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), (
+            "idle sweeper thread is still alive after run_supervisor "
+            "returned; stop_event/join did not propagate"
+        )
+
+    def test_idle_sweep_interval_env_var_respected(
+        self, tmp_catalog, monkeypatch,
+    ):
+        """MUSE_IDLE_SWEEP_INTERVAL_SECONDS=0.1 reaches IdleSweeper.interval_seconds."""
+        _seed_catalog({})
+        monkeypatch.setenv("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", "0.1")
+        from muse.cli_impl.supervisor import run_supervisor
+
+        seen: dict = {"interval": None}
+
+        def capture_interval(*args, **kwargs):
+            s = get_supervisor_state()
+            seen["interval"] = s.idle_sweeper.interval_seconds
+            raise KeyboardInterrupt()
+
+        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor._shutdown_workers"):
+            mock_uvicorn.run.side_effect = capture_interval
+            run_supervisor(host="0.0.0.0", port=8000, device="cpu")
+
+        assert seen["interval"] == 0.1

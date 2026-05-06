@@ -19,6 +19,7 @@ state is registered by `run_supervisor` and cleared on its way out.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -28,7 +29,8 @@ from typing import Any
 import httpx
 import uvicorn
 
-from muse.core.catalog import _read_catalog
+from muse.cli_impl.idle_sweeper import IdleSweeper
+from muse.core.catalog import _read_catalog, get_manifest
 from muse.core.venv import find_free_port
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,20 @@ class SupervisorState:
     `lock` is a reentrant lock guarding all mutations of `workers` +
     `unservable_reasons`. v1 uses one global lock; per-model locks
     are deferred until contention becomes measurable.
+
+    `stop_event` is the supervisor-wide shutdown signal. Set on
+    KeyboardInterrupt / SIGTERM in `run_supervisor`'s cleanup; consumed
+    by the auto-restart monitor and the idle sweeper so a single
+    Ctrl+C unblocks every supervisor-owned daemon thread at once.
+    A bare default state (e.g. one returned by `get_supervisor_state`
+    when nothing is registered) gets a fresh Event so admin or test
+    code that touches `state.stop_event` doesn't crash on None.
+
+    `idle_sweeper` and `idle_sweeper_thread` hold the v0.40.1 idle-
+    timeout sweeper after `run_supervisor` boots it. Exposed on the
+    state so tests can introspect the sweeper and so future admin
+    endpoints can read its tick metadata without a module-level
+    singleton lookup.
     """
     workers: list[WorkerSpec] = field(default_factory=list)
     device: str = "auto"
@@ -101,6 +117,9 @@ class SupervisorState:
     director: "Any | None" = None
     unservable_reasons: dict[str, str] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    idle_sweeper: "IdleSweeper | None" = None
+    idle_sweeper_thread: "threading.Thread | None" = None
 
 
 # Module-level singleton; admin routes reach this through
@@ -670,7 +689,13 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         for mid, reason in sorted(state.unservable_reasons.items()):
             logger.warning("unservable model %r: %s", mid, reason)
 
+    # The auto-restart monitor and the idle sweeper share state.stop_event
+    # so a single Ctrl+C / SIGTERM unblocks both at once. Allocate a
+    # fresh Event for this supervisor lifecycle (replacing the dataclass
+    # default) so a re-entered run_supervisor in the same process always
+    # gets a clean unset-state event.
     stop_event = threading.Event()
+    state.stop_event = stop_event
 
     # The monitor thread reads `state.workers` (a live reference), so
     # workers spawned later via the director's enable_fn show up on the
@@ -689,6 +714,27 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         _MONITOR_INTERVAL, _FAILURE_THRESHOLD, _MAX_RESTARTS,
     )
 
+    # Idle-timeout sweeper (v0.40.1). Per-model idle eviction runs on a
+    # background thread that shares stop_event with the monitor; the
+    # sweeper reads loaded-set entries via the director's public surface
+    # and unloads anything past its `capabilities.idle_timeout_seconds`.
+    sweep_interval = float(
+        os.environ.get("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", "30")
+    )
+    sweeper = IdleSweeper(
+        director=state.director,
+        catalog_lookup=get_manifest,
+        interval_seconds=sweep_interval,
+        stop_event=stop_event,
+    )
+    sweeper_thread = sweeper.start()
+    state.idle_sweeper = sweeper
+    state.idle_sweeper_thread = sweeper_thread
+    logger.info(
+        "idle sweeper running (interval=%.1fs)",
+        sweep_interval,
+    )
+
     try:
         # Build gateway with a live SupervisorState reference. Routes
         # are derived per-request from state.workers (running-only) so
@@ -704,11 +750,15 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     except KeyboardInterrupt:
         logger.info("shutting down (SIGINT)")
     finally:
-        # Tell the monitor to stop BEFORE killing workers. Otherwise the
-        # monitor could spawn a restart while we're terminating processes.
+        # Tell the monitor + idle sweeper to stop BEFORE killing workers.
+        # Otherwise the monitor could spawn a restart while we're
+        # terminating processes, and the sweeper could try to evict a
+        # model whose worker is mid-shutdown.
         stop_event.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=5.0)
+        if sweeper_thread is not None:
+            sweeper_thread.join(timeout=5.0)
         # Whatever workers were loaded by the director get torn down here.
         # Empty list is a no-op.
         _shutdown_workers(state.workers)
