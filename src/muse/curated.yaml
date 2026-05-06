@@ -507,3 +507,74 @@
     default_steps: 20
     default_guidance: 3.0
     device: cuda
+
+
+# ===== 3D generation =====
+#
+# v0.41.0 ships TripoSR as the bundled image-to-3d default. Curated
+# entries below cover larger / dual-direction models. Note: the v0.41.0
+# HF resolver routes ALL 3D-tagged repos through TripoSRRuntime; the
+# entries below carry hf_repo + capability flags but their dedicated
+# runtime classes (TRELLIS, Hunyuan3D-2, etc.) ship in v0.41.x. Pulling
+# any of these today downloads the weights and registers a placeholder
+# runtime; calling /v1/3d/* against them will route through TripoSRRuntime
+# which may or may not work depending on the repo's safetensors layout.
+# This is a deliberate trade-off: ship the protocol + a working bundled
+# default in v0.41.0, fill in dedicated runtimes incrementally.
+
+# TRELLIS large: vision + text, ~1.5GB at fp16, requires trust_remote_code.
+# Microsoft Research's 2024 release. JeffreyXiang's mirror is the
+# community-maintained drop-in.
+- id: trellis-text-image
+  uri: hf://JeffreyXiang/TRELLIS-image-large
+  modality: 3d/generation
+  size_gb: 1.5
+  description: "TRELLIS image+text to 3D: ~1.5GB at fp16, dual-direction (image and text), requires trust_remote_code, MIT"
+  capabilities:
+    memory_gb: 6.0
+    device: cuda
+    supports_image_to_3d: true
+    supports_text_to_3d: true
+    output_format: glb
+    trust_remote_code: true
+
+# Wonder3D: multi-view diffusion. Image-only.
+- id: wonder3d-base
+  uri: hf://flamehaze1115/wonder3d-v1.0
+  modality: 3d/generation
+  size_gb: 3.0
+  description: "Wonder3D: multi-view diffusion-based image-to-3D, ~3GB, CC-BY-NC-4.0 (non-commercial)"
+  capabilities:
+    memory_gb: 8.0
+    device: cuda
+    supports_image_to_3d: true
+    supports_text_to_3d: false
+    output_format: glb
+
+# Hunyuan3D-2: Tencent's 2024 release, dual-direction.
+- id: hunyuan3d-2
+  uri: hf://tencent/Hunyuan3D-2
+  modality: 3d/generation
+  size_gb: 5.0
+  description: "Hunyuan3D-2 by Tencent: dual-direction (image and text), ~5GB at fp16, requires trust_remote_code"
+  capabilities:
+    memory_gb: 10.0
+    device: cuda
+    supports_image_to_3d: true
+    supports_text_to_3d: true
+    output_format: glb
+    trust_remote_code: true
+
+# Shap-E: OpenAI's classic text-to-3d. Quality has been surpassed but
+# the official released model is useful for rapid prototyping.
+- id: shap-e
+  uri: hf://openai/shap-e
+  modality: 3d/generation
+  size_gb: 0.6
+  description: "Shap-E: OpenAI's text-to-3D (mesh + radiance field), ~600MB, MIT"
+  capabilities:
+    memory_gb: 2.0
+    device: cuda
+    supports_image_to_3d: false
+    supports_text_to_3d: true
+    output_format: glb
