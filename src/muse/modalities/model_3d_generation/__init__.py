@@ -24,6 +24,8 @@ from muse.modalities.model_3d_generation.client import Generation3DClient
 from muse.modalities.model_3d_generation.protocol import (
     Generation3DBackend,
     Generation3DResult,
+    ImageTo3DBackend,
+    TextTo3DBackend,
 )
 from muse.modalities.model_3d_generation.routes import build_router
 
@@ -72,4 +74,6 @@ __all__ = [
     "Generation3DBackend",
     "Generation3DClient",
     "Generation3DResult",
+    "ImageTo3DBackend",
+    "TextTo3DBackend",
 ]

@@ -1,6 +1,5 @@
 """Codec tests for 3d/generation."""
 import base64
-import os
 
 import pytest
 
@@ -31,7 +30,12 @@ def test_b64_json_round_trip():
     assert decoded == payload
 
 
-def test_url_mode_writes_tempfile():
+def test_url_mode_returns_data_url():
+    """url mode emits a data URL with model/gltf-binary MIME (per glTF spec).
+
+    Avoids unreachable file:// URLs from a remote muse server and an
+    unbounded server-side tempfile leak.
+    """
     payload = b"GLB-bytes-for-url-mode"
     results = [Generation3DResult(glb_bytes=payload, model_id="m")]
     body = encode_3d_response(
@@ -41,18 +45,30 @@ def test_url_mode_writes_tempfile():
     assert entry["format"] == "glb"
     assert "url" in entry
     assert "b64_json" not in entry
-    assert entry["url"].startswith("file://")
-    path = entry["url"][len("file://"):]
-    try:
-        assert os.path.exists(path), "url-mode tempfile must exist"
-        with open(path, "rb") as f:
-            assert f.read() == payload
-        assert path.endswith(".glb")
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    prefix = "data:model/gltf-binary;base64,"
+    assert entry["url"].startswith(prefix)
+    encoded = entry["url"][len(prefix):]
+    assert base64.b64decode(encoded) == payload
+
+
+def test_url_mode_does_not_write_tempfile(tmp_path, monkeypatch):
+    """Regression: url mode must not leak server-side files."""
+    import tempfile as _tempfile
+
+    calls = []
+    real_named = _tempfile.NamedTemporaryFile
+
+    def _track(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_named(*args, **kwargs)
+
+    monkeypatch.setattr(_tempfile, "NamedTemporaryFile", _track)
+    results = [Generation3DResult(glb_bytes=b"GLB", model_id="m")]
+    encode_3d_response(results, model_id="m", response_format="url")
+    assert calls == [], (
+        "url mode must not allocate a server-side tempfile; "
+        f"saw {len(calls)} NamedTemporaryFile call(s)"
+    )
 
 
 def test_default_response_format_is_b64_json():
