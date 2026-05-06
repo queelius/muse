@@ -210,42 +210,57 @@ class IdleSweeper:
             free_before_gb = self._free_for_device(device)
 
             # Pop now so other threads see the eviction commitment
-            # immediately. If disable_fn raises we'll re-insert.
-            self.director.loaded.pop(candidate.model_id, None)
+            # immediately. If disable_fn raises we'll re-insert THIS
+            # popped value (not the stale snapshot reference) so the
+            # restored entry matches the live worker that disable_fn
+            # tried to terminate. Concretely: the model could have been
+            # evicted and re-loaded by another path between snapshot
+            # and re-check, in which case `current` has a fresh
+            # worker_port + loaded_at + memory_gb and `candidate`
+            # (the snapshot ref) is stale.
+            popped = self.director.loaded.pop(candidate.model_id, None)
+            if popped is None:
+                # Should not happen given the re-check above, but be
+                # defensive: if some race squeezed a pop in between
+                # the re-check and pop, treat as "already evicted".
+                return None
 
         # ---- lock released: slow disable_fn step ----
         try:
-            self.director.disable_fn(candidate.model_id)
+            self.director.disable_fn(popped.model_id)
         except Exception as exc:  # noqa: BLE001
             # Same remediation as on-demand LRU eviction's failed-victim
             # path: re-insert the popped LoadEntry so accounting matches
-            # the still-alive worker. Preserve last_touched_at +
-            # refcount verbatim so LRU ordering and idle-timeout
-            # arithmetic remain coherent next tick.
+            # the still-alive worker. Use the popped (live) reference so
+            # we restore the right worker_port; preserve its
+            # last_touched_at + refcount verbatim so LRU ordering and
+            # idle-timeout arithmetic remain coherent next tick.
             logger.warning(
                 "idle sweeper: disable_fn(%r) raised: %s; re-inserted into loaded set",
-                candidate.model_id, exc,
+                popped.model_id, exc,
                 exc_info=True,
             )
             with self.director.lock:
-                self.director.loaded[candidate.model_id] = candidate
+                self.director.loaded[popped.model_id] = popped
             return None
 
-        # 5. Append DecisionLogEntry under lock.
+        # 5. Append DecisionLogEntry under lock. Use the popped (live)
+        # reference for memory_gb so the log records what was actually
+        # evicted, not the snapshot's stale value.
         free_after_gb = self._free_for_device(device)
         with self.director.lock:
             self.director.recent_decisions.append(DecisionLogEntry(
                 timestamp=time.time(),
-                model_id=candidate.model_id,
+                model_id=popped.model_id,
                 action="evict",
-                memory_gb=candidate.memory_gb,
+                memory_gb=popped.memory_gb,
                 free_before_gb=free_before_gb,
                 free_after_gb=free_after_gb,
                 reason=f"idle_timeout:{int(idle_timeout_f)}s",
-                evicted=[candidate.model_id],
+                evicted=[popped.model_id],
             ))
 
-        return candidate.model_id
+        return popped.model_id
 
     def _free_for_device(self, device: str) -> float:
         """Live free memory in GB for the relevant device.
