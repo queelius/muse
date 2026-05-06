@@ -24,6 +24,23 @@ def test_no_args_prints_help():
     assert "muse" in combined.lower()
 
 
+def test_no_args_does_not_print_traceback():
+    """`muse` with no args should print help and exit cleanly.
+
+    Regression watchdog for the typer + standalone_mode=False bug
+    where click's NoArgsIsHelpError leaked through main()'s try/except,
+    leaving a Python traceback chasing the rendered help.
+    """
+    r = _run()
+    combined = r.stdout + r.stderr
+    assert "Traceback" not in combined, (
+        f"Python traceback should not be printed for `muse` no-args:\n{combined}"
+    )
+    assert "NoArgsIsHelpError" not in combined, (
+        f"click internal exception leaked through main():\n{combined}"
+    )
+
+
 def test_top_level_help_lists_only_admin_subcommands():
     """serve, pull, models — and nothing modality-specific."""
     r = _run("--help")
@@ -90,6 +107,19 @@ def test_models_info_unknown_nonzero():
     assert r.returncode != 0
     combined = (r.stdout + r.stderr).lower()
     assert "unknown" in combined
+
+
+def test_models_info_curated_only_renders_card():
+    """Regression for v0.40.2: a curated-only id (in curated.yaml but
+    not bundled and not pulled) must render an info card with the
+    description / uri / install hint, not 'unknown model'.
+    """
+    r = _run("models", "info", "bge-reranker-base")
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = r.stdout
+    assert "recommended, not pulled" in out
+    assert "text/rerank" in out
+    assert "muse pull bge-reranker-base" in out
 
 
 def test_pull_unknown_model_nonzero_exit():

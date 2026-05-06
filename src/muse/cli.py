@@ -350,22 +350,73 @@ def models_list(
 def models_info(
     model_id: Annotated[str, typer.Argument()],
 ) -> None:
-    """Show catalog entry for a model."""
+    """Show catalog entry for a model.
+
+    Recognizes three sources, in priority order:
+      1. Bundled scripts and resolver-pulled entries (`known_models()`)
+      2. Curated recommendations not yet pulled (`curated.yaml`)
+      3. Unknown -> 2 with a clear error.
+
+    For curated-only rows the output shows description / hf_repo /
+    license / suggested memory plus a `muse pull <id>` hint, so
+    `muse models info <id>` matches the rows surfaced by
+    `muse models list` symmetrically.
+    """
     from muse.core.catalog import _read_catalog, known_models
     from muse.cli_impl.models_info_display import format_info
+    from muse.core.curated import load_curated
 
     catalog_known = known_models()
-    if model_id not in catalog_known:
-        typer.echo(f"error: unknown model {model_id!r}", err=True)
-        raise typer.Exit(2)
-    catalog_data = _read_catalog().get(model_id, {}) or {}
-    online_status = _probe_online_worker_status(model_id)
-    typer.echo(format_info(
-        model_id,
-        catalog_known=catalog_known,
-        catalog_data=catalog_data,
-        online_status=online_status,
-    ))
+    if model_id in catalog_known:
+        catalog_data = _read_catalog().get(model_id, {}) or {}
+        online_status = _probe_online_worker_status(model_id)
+        typer.echo(format_info(
+            model_id,
+            catalog_known=catalog_known,
+            catalog_data=catalog_data,
+            online_status=online_status,
+        ))
+        return
+
+    # Fall through: maybe it's a curated-only recommendation that
+    # hasn't been pulled. Render a minimal info card from the YAML.
+    curated_match = next(
+        (c for c in load_curated() if c.id == model_id), None,
+    )
+    if curated_match is not None:
+        typer.echo(_format_curated_info(curated_match))
+        return
+
+    typer.echo(f"error: unknown model {model_id!r}", err=True)
+    raise typer.Exit(2)
+
+
+def _format_curated_info(c) -> str:
+    """Render a `CuratedEntry` as the same shape as `format_info` for
+    curated-only (not-yet-pulled) entries.
+    """
+    lines: list[str] = []
+    lines.append(f"{c.id}".ljust(36) + "  [recommended, not pulled]")
+    lines.append("")
+    lines.append("Basics:")
+    if c.modality:
+        lines.append(f"  modality:        {c.modality}")
+    if c.uri:
+        lines.append(f"  uri:             {c.uri}")
+    if c.description:
+        lines.append(f"  description:     {c.description}")
+    if c.size_gb is not None:
+        lines.append(f"  size on HF:      ~{c.size_gb:.1f} GB")
+    if c.tags:
+        lines.append(f"  tags:            {', '.join(c.tags)}")
+    if c.capabilities:
+        lines.append("")
+        lines.append("Capabilities (would be applied at pull):")
+        for k, v in c.capabilities.items():
+            lines.append(f"  {k + ':':17s}{v}")
+    lines.append("")
+    lines.append(f"To install: muse pull {c.id}")
+    return "\n".join(lines)
 
 
 @models_app.command("remove")
@@ -674,7 +725,18 @@ def _try_admin_action(action: str, model_id: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Programmatic entry point. Accepts argv override for tests."""
+    """Programmatic entry point. Accepts argv override for tests.
+
+    `standalone_mode=False` lets us translate `typer.Exit` into a
+    return code instead of letting click call `sys.exit`. The price
+    is that any other click exception (`NoArgsIsHelpError` when the
+    user runs `muse` with no subcommand; `UsageError` for bad flags;
+    `Abort` for SIGINT) also propagates here. We catch the click
+    base class `ClickException` and use its `exit_code` so the user
+    sees the help that click already rendered, without a Python
+    traceback chasing it.
+    """
+    import click
     try:
         app(args=argv, standalone_mode=False)
         return 0
@@ -682,6 +744,12 @@ def main(argv: list[str] | None = None) -> int:
         return e.exit_code
     except SystemExit as e:
         return int(e.code) if e.code is not None else 0
+    except click.exceptions.ClickException as e:
+        # NoArgsIsHelpError already rendered the help (its message
+        # IS the help text); other ClickExceptions print their own
+        # message via show() in standalone mode but we suppress
+        # double-print here. Just return the exit code click set.
+        return e.exit_code
 
 
 if __name__ == "__main__":
