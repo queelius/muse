@@ -19,6 +19,7 @@ Structure:
 from __future__ import annotations
 
 import importlib
+import contextlib
 import json
 import logging
 import os
@@ -32,7 +33,41 @@ from huggingface_hub import snapshot_download
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.install import check_system_packages, install_pip_extras
-from muse.core.venv import create_venv, install_into_venv, venv_python
+from muse.core.venv import (
+    _is_verbose,
+    create_venv,
+    install_into_venv,
+    venv_python,
+)
+
+
+@contextlib.contextmanager
+def _hf_quiet_if_needed():
+    """Suppress huggingface_hub tqdm progress bars when in quiet mode.
+
+    The bars are useful when a 1GB+ download is in progress and the
+    user is staring at the terminal, but during `muse pull <id>` they
+    interleave with subsequent stages and add noise. Honor the
+    `install_output_mode(verbose=...)` flag set by the CLI: quiet =
+    bars off; verbose = bars stay on.
+
+    Implemented via the existing `HF_HUB_DISABLE_PROGRESS_BARS` env
+    var so we don't depend on huggingface_hub internals; restore the
+    prior value on exit so concurrent downloads in other paths aren't
+    affected.
+    """
+    if _is_verbose():
+        yield
+        return
+    prev = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
+        else:
+            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = prev
 
 logger = logging.getLogger(__name__)
 
@@ -458,13 +493,14 @@ def _pull_bundled(model_id: str) -> None:
     # checkpoints when the diffusers/transformers runtime only needs the
     # subfolder weights.
     allow_patterns = entry.extra.get("allow_patterns")
-    if allow_patterns:
-        local_dir = snapshot_download(
-            repo_id=entry.hf_repo,
-            allow_patterns=list(allow_patterns),
-        )
-    else:
-        local_dir = snapshot_download(repo_id=entry.hf_repo)
+    with _hf_quiet_if_needed():
+        if allow_patterns:
+            local_dir = snapshot_download(
+                repo_id=entry.hf_repo,
+                allow_patterns=list(allow_patterns),
+            )
+        else:
+            local_dir = snapshot_download(repo_id=entry.hf_repo)
 
     catalog = _read_catalog()
     catalog[model_id] = {
@@ -549,7 +585,8 @@ def _pull_via_resolver(
 
     weights_cache = _catalog_dir() / "weights"
     weights_cache.mkdir(parents=True, exist_ok=True)
-    local_dir = resolved.download(weights_cache)
+    with _hf_quiet_if_needed():
+        local_dir = resolved.download(weights_cache)
 
     catalog = _read_catalog()
     catalog[model_id] = {

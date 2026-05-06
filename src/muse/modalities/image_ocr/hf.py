@@ -45,15 +45,29 @@ def _repo_license(info) -> str | None:
 
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
-    # Explicit VLM exclusion: image-text-to-text repos belong to a
-    # future image/description modality (#97) even if they also carry
-    # the older image-to-text tag.
-    if "image-text-to-text" in tags:
-        return False
-    if "image-to-text" in tags:
-        return True
     repo_id = (getattr(info, "id", "") or "").lower()
-    return any(s in repo_id for s in ("trocr", "nougat", "texteller"))
+    # Repo-name allowlist: well-known OCR repos always claim, even
+    # when their HF tags are sloppy. Explicit list dominates the
+    # tag-based fallback below; this is what makes `muse pull texteller`
+    # work even if the upstream re-tags later.
+    if any(s in repo_id for s in ("trocr", "nougat", "texteller")):
+        return True
+    # Tag-based dispatch:
+    # - `image-to-text` alone -> OCR shape (vision-encoder-decoder).
+    # - `image-text-to-text` alone -> VLM shape (Llava / Qwen-VL
+    #   style; takes image + text input). Defer to the future
+    #   image/description modality (#97).
+    # - BOTH tags -> the model accepts both paths but the
+    #   image-to-text presence proves it has an OCR-compatible mode.
+    #   Claim it for image/ocr; the user can disambiguate via the
+    #   curated YAML if a real VLM ends up here.
+    has_i2t = "image-to-text" in tags
+    has_it2t = "image-text-to-text" in tags
+    if has_i2t:
+        return True
+    if has_it2t:
+        return False
+    return False
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

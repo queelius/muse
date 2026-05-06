@@ -131,17 +131,35 @@ def pull(
             ),
         ),
     ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v",
+            help=(
+                "stream pip's full dep-resolution output and HF tqdm "
+                "progress bars (default: quiet, only stage markers + "
+                "errors)"
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Download weights + install deps for a model.
 
-    By default the pull runs `muse models probe <id>` as a final step
-    to populate the new entry's `measurements.<device>.peak_bytes`.
-    Without that data the v0.40.0 supervisor flags the model as
-    `unservable: "no memory estimate; run muse models probe"` at boot
-    validation. `--no-probe` opts out for cross-device scenarios.
-    Probe failures are warned but do not undo the pull.
+    By default the pull is quiet: pip runs with `-q`, HF download
+    progress bars are suppressed, and the user sees only the stage
+    markers (creating venv, installing muse[server], installing
+    pip_extras, downloaded weights, probed). On non-zero pip exit
+    the captured output is printed to stderr so dep failures are
+    diagnosable. Use `-v` / `--verbose` to stream the full pip +
+    HF firehose (the v0.40.2 default).
+
+    The post-pull probe runs by default to populate the new entry's
+    `measurements.<device>.peak_bytes`; without that data the v0.40.0
+    supervisor flags the model as unservable. `--no-probe` opts out
+    for cross-device scenarios.
     """
     from muse.core.catalog import _read_catalog, pull as _pull
+    from muse.core.venv import install_output_mode
     # Always register the HF resolver before dispatching. The arg may
     # be a URI directly, OR a curated alias that expands to a URI
     # inside pull(); the old conditional "only import when :// is in
@@ -159,26 +177,27 @@ def pull(
     except Exception:  # noqa: BLE001
         before_keys = set()
 
-    try:
-        _pull(identifier)
-    except KeyError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-    typer.echo(f"pulled {identifier}")
+    with install_output_mode(verbose=verbose):
+        try:
+            _pull(identifier)
+        except KeyError as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(2)
+        typer.echo(f"pulled {identifier}")
 
-    if no_probe:
-        return
+        if no_probe:
+            return
 
-    # Probe-on-pull. Failures are logged to stderr by run_probe_for_pull
-    # but do not raise; we keep the exit code as the pull's success.
-    try:
-        from muse.cli_impl.probe import run_probe_for_pull
-        run_probe_for_pull(identifier, before_keys=before_keys)
-    except Exception as e:  # noqa: BLE001
-        typer.echo(
-            f"warning: probe-on-pull skipped due to internal error: {e}",
-            err=True,
-        )
+        # Probe-on-pull. Failures are logged to stderr by run_probe_for_pull
+        # but do not raise; we keep the exit code as the pull's success.
+        try:
+            from muse.cli_impl.probe import run_probe_for_pull
+            run_probe_for_pull(identifier, before_keys=before_keys)
+        except Exception as e:  # noqa: BLE001
+            typer.echo(
+                f"warning: probe-on-pull skipped due to internal error: {e}",
+                err=True,
+            )
 
 
 @app.command("search")

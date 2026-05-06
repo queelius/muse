@@ -109,17 +109,28 @@ def test_models_info_unknown_nonzero():
     assert "unknown" in combined
 
 
-def test_models_info_curated_only_renders_card():
+def test_models_info_curated_only_renders_card(tmp_path):
     """Regression for v0.40.2: a curated-only id (in curated.yaml but
     not bundled and not pulled) must render an info card with the
     description / uri / install hint, not 'unknown model'.
+
+    Scope to a fresh empty catalog via MUSE_CATALOG_DIR so the test
+    is hermetic regardless of what the dev box has pulled.
     """
-    r = _run("models", "info", "bge-reranker-base")
+    import os
+    import subprocess
+    import sys
+    env = os.environ.copy()
+    env["MUSE_CATALOG_DIR"] = str(tmp_path)
+    r = subprocess.run(
+        [sys.executable, "-m", "muse.cli", "models", "info", "flux-schnell"],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
     assert r.returncode == 0, r.stdout + r.stderr
     out = r.stdout
     assert "recommended, not pulled" in out
-    assert "text/rerank" in out
-    assert "muse pull bge-reranker-base" in out
+    assert "image/generation" in out
+    assert "muse pull flux-schnell" in out
 
 
 def test_pull_unknown_model_nonzero_exit():

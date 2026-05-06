@@ -31,12 +31,33 @@ def test_sniff_true_on_image_to_text_tag():
     assert HF_PLUGIN["sniff"](info) is True
 
 
-def test_sniff_false_on_image_text_to_text_tag():
-    """VLMs (image-text-to-text) belong to the future #97 modality.
-    Even if they also carry the older image-to-text tag, we exclude
-    them here so the VLM modality can claim them when it lands."""
-    info = _fake_info(tags=["image-to-text", "image-text-to-text"])
+def test_sniff_false_on_image_text_to_text_only():
+    """VLMs that ONLY carry image-text-to-text (no image-to-text)
+    belong to the future #97 modality. Defer them."""
+    info = _fake_info(tags=["image-text-to-text"])
     assert HF_PLUGIN["sniff"](info) is False
+
+
+def test_sniff_true_when_both_image_tags_present():
+    """Vision-encoder-decoder OCR repos (TexTeller, some Nougat
+    variants) carry BOTH image-to-text AND image-text-to-text tags.
+    The image-to-text presence proves an OCR-shape mode; claim it
+    here. Pure VLMs (Llava, Qwen-VL) only have image-text-to-text.
+    """
+    info = _fake_info(tags=["image-to-text", "image-text-to-text"])
+    assert HF_PLUGIN["sniff"](info) is True
+
+
+def test_sniff_true_on_texteller_name_with_vlm_tag():
+    """Regression watchdog: TexTeller's HF repo carries the
+    image-text-to-text tag for SDK-routing reasons, but it's an
+    OCR model. Repo-name allowlist beats the tag check.
+    """
+    info = _fake_info(
+        tags=["image-text-to-text", "vision-encoder-decoder"],
+        repo_id="OleehyO/TexTeller",
+    )
+    assert HF_PLUGIN["sniff"](info) is True
 
 
 def test_sniff_false_on_random_tag():
