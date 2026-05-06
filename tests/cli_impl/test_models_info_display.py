@@ -195,3 +195,83 @@ class TestFormatInfo:
         )
         assert out.startswith("error:")
         assert "ghost" in out
+
+
+class TestIdleTimeoutCapability:
+    """idle_timeout_seconds is a cross-modality (lazy-load related)
+    capability and should render uniformly across every modality's
+    KNOWN_CAPABILITIES entry, matching how `device` and `memory_gb`
+    are handled.
+    """
+
+    def test_idle_timeout_present_in_every_modality_table(self):
+        for modality, table in KNOWN_CAPABILITIES.items():
+            assert "idle_timeout_seconds" in table, (
+                f"idle_timeout_seconds missing from {modality} table"
+            )
+            label, _ = table["idle_timeout_seconds"]
+            assert label == "idle timeout"
+
+    def test_idle_timeout_renders_with_seconds_suffix(self):
+        out = _render_capability_value(
+            "audio/speech", "idle_timeout_seconds", 1800,
+        )
+        assert out == ("idle timeout", "1800s")
+
+    def test_idle_timeout_renders_in_chat_completion(self):
+        out = _render_capability_value(
+            "chat/completion", "idle_timeout_seconds", 900,
+        )
+        assert out == ("idle timeout", "900s")
+
+    def test_idle_timeout_visible_in_format_info_when_set(self):
+        catalog_known = {"kokoro-82m": _entry(
+            extra={"idle_timeout_seconds": 1800},
+        )}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True},
+            online_status=None,
+        )
+        assert "idle timeout:" in out
+        assert "1800s" in out
+
+    def test_idle_timeout_absent_from_format_info_when_unset(self):
+        catalog_known = {"kokoro-82m": _entry(
+            extra={"sample_rate": 24000},  # has caps, but no idle_timeout
+        )}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True},
+            online_status=None,
+        )
+        assert "idle timeout" not in out
+
+    def test_idle_timeout_absent_from_format_info_when_null(self):
+        catalog_known = {"kokoro-82m": _entry(
+            extra={"sample_rate": 24000, "idle_timeout_seconds": None},
+        )}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True},
+            online_status=None,
+        )
+        assert "idle timeout" not in out
+        # Also: the null value should NOT leak into the (other capabilities) tail.
+        assert "idle_timeout_seconds=None" not in out
+
+    def test_idle_timeout_absent_from_format_info_when_zero(self):
+        catalog_known = {"kokoro-82m": _entry(
+            extra={"sample_rate": 24000, "idle_timeout_seconds": 0},
+        )}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True},
+            online_status=None,
+        )
+        assert "idle timeout" not in out
+        assert "idle_timeout_seconds=0" not in out

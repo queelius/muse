@@ -450,6 +450,28 @@ Lock discipline:
   the read-modify-write on `measurements` across observed-peak writebacks
   for *different* models so catalog.json round-trips stay atomic.
 
+### Idle eviction (v0.40.1+)
+
+In addition to memory-pressure LRU eviction, models can declare a
+per-model `capabilities.idle_timeout_seconds` in their manifest. A
+background sweeper thread runs every `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`
+(default 30) and evicts loaded models whose `last_touched_at` exceeds
+the timeout AND whose refcount is 0. This frees memory without
+waiting for traffic-driven LRU.
+
+Default behavior preserved: models without `idle_timeout_seconds`
+(or with the field set to null/0) are NEVER idle-evicted; only
+memory pressure can release them.
+
+The sweeper reuses the on-demand eviction's disable_fn primitive,
+so the orphan-worker-on-disable-failure remediation (re-insert
+LoadEntry) applies uniformly. Idle eviction is logged in
+`recent_decisions` with reason="idle_timeout:Ns".
+
+Configuration:
+- Per-model: `capabilities.idle_timeout_seconds: <number>` in manifest. Null/absent = never idle-evict.
+- Sweep interval: `MUSE_IDLE_SWEEP_INTERVAL_SECONDS` env (default 30).
+
 ## Admin REST API
 
 `muse.admin/` provides eleven endpoints under `/v1/admin/*` for runtime

@@ -51,29 +51,34 @@ KNOWN_CAPABILITIES: dict[str, dict[str, tuple[str, Callable[[Any], str]]]] = {
         "default_steps": ("default steps", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "audio/speech": {
         "voices": ("voices", _join_list),
         "sample_rate": ("sample rate", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "audio/transcription": {
         "compute_type": ("compute type", _str),
         "default_language": ("default language", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "audio/embedding": {
         "embedding_dim": ("embedding dim", _str),
         "sample_rate": ("sample rate", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "audio/generation": {
         "sample_rate": ("sample rate", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "chat/completion": {
         "context_length": ("context length", _str),
@@ -82,6 +87,7 @@ KNOWN_CAPABILITIES: dict[str, dict[str, tuple[str, Callable[[Any], str]]]] = {
         "gguf_file": ("gguf file", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "embedding/text": {
         "embedding_dim": ("embedding dim", _str),
@@ -89,27 +95,32 @@ KNOWN_CAPABILITIES: dict[str, dict[str, tuple[str, Callable[[Any], str]]]] = {
         "trust_remote_code": ("trust remote code", _yes_no),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "image/embedding": {
         "embedding_dim": ("embedding dim", _str),
         "image_size": ("image size", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "image/segmentation": {
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "image/upscale": {
         "scale_factor": ("scale factor", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "image/animation": {
         "default_size": ("default size", _str),
         "default_frames": ("default frames", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "video/generation": {
         "default_size": ("default size", _str),
@@ -117,6 +128,7 @@ KNOWN_CAPABILITIES: dict[str, dict[str, tuple[str, Callable[[Any], str]]]] = {
         "default_fps": ("default fps", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "text/classification": {
         "labels": ("labels", _join_list),
@@ -124,17 +136,20 @@ KNOWN_CAPABILITIES: dict[str, dict[str, tuple[str, Callable[[Any], str]]]] = {
         "default_threshold": ("default threshold", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "text/rerank": {
         "max_seq_length": ("max seq length", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
     "text/summarization": {
         "max_input_tokens": ("max input tokens", _str),
         "max_output_tokens": ("max output tokens", _str),
         "device": ("device pref", _str),
         "memory_gb": ("annotated memory", lambda v: f"{v} GB"),
+        "idle_timeout_seconds": ("idle timeout", lambda v: f"{v}s"),
     },
 }
 
@@ -279,6 +294,13 @@ def format_info(
         unknown: list[tuple[str, Any]] = []
         for k, v in extra.items():
             if k in skip:
+                continue
+            # idle_timeout_seconds is cross-modality (lazy-load related).
+            # Null / 0 means "never idle-evict" per v0.40.1 contract; render
+            # nothing in either case so a missing value doesn't surface as
+            # "idle timeout: 0s" (misleading) or get dumped into the
+            # "(other capabilities: ...)" tail.
+            if k == "idle_timeout_seconds" and (v is None or v == 0):
                 continue
             rendered = _render_capability_value(entry.modality, k, v)
             if rendered is not None:
