@@ -27,10 +27,28 @@ logger = logging.getLogger(__name__)
 torch: Any = None
 AutoModelForVision2Seq: Any = None
 AutoProcessor: Any = None
+_LAST_IMPORT_ERROR: Exception | None = None
 
 
 def _ensure_deps() -> None:
-    global torch, AutoModelForVision2Seq, AutoProcessor
+    """Lazy-import torch + transformers Auto* classes.
+
+    Vision2Seq family naming history:
+      - transformers <= 4.x: `AutoModelForVision2Seq` is the canonical
+        class for vision-encoder + text-decoder models (TrOCR, Nougat,
+        TexTeller).
+      - transformers 5.0 renamed it to `AutoModelForImageTextToText`
+        to match HF's tag taxonomy. The old name is gone in 5.x.
+
+    Try the new name first (forward-looking), fall back to the old
+    name (covers 4.x venvs). Either one populates the module sentinel.
+
+    The last-import-error is recorded on the module so the constructor
+    can surface a useful message instead of the generic "transformers
+    is not installed" line, which lies when transformers IS installed
+    but the specific class isn't.
+    """
+    global torch, AutoModelForVision2Seq, AutoProcessor, _LAST_IMPORT_ERROR
     if torch is None:
         try:
             import torch as _t
@@ -38,19 +56,33 @@ def _ensure_deps() -> None:
         except Exception as e:  # noqa: BLE001
             logger.debug("HFVision2SeqRuntime torch unavailable: %s", e)
     if AutoModelForVision2Seq is None:
+        last_err: Exception | None = None
         try:
-            from transformers import AutoModelForVision2Seq as _m
+            from transformers import AutoModelForImageTextToText as _m
             AutoModelForVision2Seq = _m
         except Exception as e:  # noqa: BLE001
+            last_err = e
             logger.debug(
-                "HFVision2SeqRuntime AutoModelForVision2Seq unavailable: %s", e,
+                "HFVision2SeqRuntime AutoModelForImageTextToText unavailable: %s", e,
             )
+            try:
+                from transformers import AutoModelForVision2Seq as _m
+                AutoModelForVision2Seq = _m
+            except Exception as e2:  # noqa: BLE001
+                last_err = e2
+                logger.debug(
+                    "HFVision2SeqRuntime AutoModelForVision2Seq unavailable: %s",
+                    e2,
+                )
+        if AutoModelForVision2Seq is None:
+            _LAST_IMPORT_ERROR = last_err
     if AutoProcessor is None:
         try:
             from transformers import AutoProcessor as _p
             AutoProcessor = _p
         except Exception as e:  # noqa: BLE001
             logger.debug("HFVision2SeqRuntime AutoProcessor unavailable: %s", e)
+            _LAST_IMPORT_ERROR = e
 
 
 class HFVision2SeqRuntime:
@@ -76,9 +108,29 @@ class HFVision2SeqRuntime:
                 "`torch` into this venv"
             )
         if AutoModelForVision2Seq is None or AutoProcessor is None:
+            # Don't lie: transformers might be installed but missing the
+            # specific class. Surface the underlying ImportError so the
+            # operator can diagnose (e.g. "transformers 5.x dropped
+            # AutoModelForVision2Seq; pin transformers<5.0 OR upgrade
+            # muse to a version that imports AutoModelForImageTextToText").
+            try:
+                import transformers as _t
+                version = getattr(_t, "__version__", "unknown")
+                detail = (
+                    f"transformers {version} is installed but neither "
+                    f"`AutoModelForImageTextToText` (transformers 5.x) "
+                    f"nor `AutoModelForVision2Seq` (transformers 4.x) "
+                    f"could be imported"
+                )
+            except Exception:  # noqa: BLE001
+                detail = (
+                    "transformers package is not importable in this venv"
+                )
+            if _LAST_IMPORT_ERROR is not None:
+                detail += f" (last error: {_LAST_IMPORT_ERROR})"
             raise RuntimeError(
-                "transformers is not installed; run `muse pull` or "
-                "install `transformers` into this venv"
+                f"{detail}; run `muse models refresh {model_id}` or "
+                f"install transformers into this venv"
             )
         self.model_id = model_id
         self._device = _select_device(device)

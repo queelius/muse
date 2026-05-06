@@ -16,9 +16,15 @@ import pytest
 def _reset_module_sentinels():
     """Reset module-top sentinels between tests (deferred-imports pattern)."""
     import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    orig = (mod.torch, mod.AutoModelForVision2Seq, mod.AutoProcessor)
+    orig = (
+        mod.torch, mod.AutoModelForVision2Seq, mod.AutoProcessor,
+        mod._LAST_IMPORT_ERROR,
+    )
     yield
-    mod.torch, mod.AutoModelForVision2Seq, mod.AutoProcessor = orig
+    (
+        mod.torch, mod.AutoModelForVision2Seq, mod.AutoProcessor,
+        mod._LAST_IMPORT_ERROR,
+    ) = orig
 
 
 def _make_outputs(token_count=10):
@@ -256,12 +262,17 @@ def test_raises_when_torch_not_installed(monkeypatch):
 
 
 def test_raises_when_transformers_not_installed(monkeypatch):
+    """The error must surface the version + class context so the user
+    isn't told 'transformers is not installed' when transformers IS
+    installed but the specific Auto* class isn't (e.g. transformers 5.x
+    dropped AutoModelForVision2Seq).
+    """
     import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
     monkeypatch.setattr(mod, "_ensure_deps", lambda: None)
     mod.torch = MagicMock()
     mod.AutoModelForVision2Seq = None
     mod.AutoProcessor = None
-    with pytest.raises(RuntimeError, match="transformers is not installed"):
+    with pytest.raises(RuntimeError, match="AutoModelForImageTextToText"):
         mod.HFVision2SeqRuntime(model_id="m", hf_repo="x", device="cpu")
 
 
@@ -273,5 +284,90 @@ def test_partial_transformers_install_also_raises(monkeypatch):
     mod.torch = MagicMock()
     mod.AutoModelForVision2Seq = MagicMock()
     mod.AutoProcessor = None
-    with pytest.raises(RuntimeError, match="transformers is not installed"):
+    with pytest.raises(RuntimeError, match="AutoModelForImageTextToText"):
         mod.HFVision2SeqRuntime(model_id="m", hf_repo="x", device="cpu")
+
+
+def test_ensure_deps_prefers_transformers5_class_when_available():
+    """Regression watchdog: transformers 5.x renamed
+    AutoModelForVision2Seq -> AutoModelForImageTextToText. The runtime
+    must try the new name first and fall back to the old name on
+    older transformers versions.
+
+    Simulates the transformers 5.x case: the new class imports cleanly,
+    the old name raises ImportError. Expect the sentinel populated
+    from the new class.
+    """
+    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+    fake_transformers = MagicMock()
+    fake_new_class = MagicMock()
+    fake_new_class.__name__ = "AutoModelForImageTextToText"
+    fake_transformers.AutoModelForImageTextToText = fake_new_class
+    # Don't expose AutoModelForVision2Seq on the fake module (it's gone
+    # in transformers 5.x).
+    delattr_target = "AutoModelForVision2Seq"
+    if hasattr(fake_transformers, delattr_target):
+        delattr(fake_transformers, delattr_target)
+    fake_transformers.AutoProcessor = MagicMock()
+
+    import sys
+    real_transformers = sys.modules.get("transformers")
+    sys.modules["transformers"] = fake_transformers
+    try:
+        mod.torch = None
+        mod.AutoModelForVision2Seq = None
+        mod.AutoProcessor = None
+        mod._LAST_IMPORT_ERROR = None
+        mod._ensure_deps()
+        assert mod.AutoModelForVision2Seq is fake_new_class, (
+            "Expected AutoModelForVision2Seq sentinel to hold the "
+            "new transformers 5.x class"
+        )
+    finally:
+        if real_transformers is not None:
+            sys.modules["transformers"] = real_transformers
+        else:
+            sys.modules.pop("transformers", None)
+
+
+def test_ensure_deps_falls_back_to_legacy_class_on_transformers4():
+    """Symmetric regression: when only the legacy class is available
+    (transformers 4.x), the sentinel should hold it."""
+    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+
+    # Build a fake module where the new class import RAISES but the
+    # old class succeeds. We can't easily delattr the new class to
+    # cause an ImportError, so use a dynamic __getattr__ on a custom
+    # module-shaped class.
+    class _FakeT4:
+        AutoProcessor = MagicMock()
+        # Old class exists.
+        AutoModelForVision2Seq = MagicMock(name="LegacyVision2Seq")
+
+        def __getattr__(self, name):
+            # New class doesn't exist in transformers 4.x.
+            if name == "AutoModelForImageTextToText":
+                raise ImportError(
+                    "cannot import AutoModelForImageTextToText (transformers 4.x)"
+                )
+            raise AttributeError(name)
+
+    fake = _FakeT4()
+    import sys
+    real_transformers = sys.modules.get("transformers")
+    sys.modules["transformers"] = fake
+    try:
+        mod.torch = None
+        mod.AutoModelForVision2Seq = None
+        mod.AutoProcessor = None
+        mod._LAST_IMPORT_ERROR = None
+        mod._ensure_deps()
+        assert mod.AutoModelForVision2Seq is fake.AutoModelForVision2Seq, (
+            "Expected fallback to legacy AutoModelForVision2Seq in "
+            "transformers 4.x"
+        )
+    finally:
+        if real_transformers is not None:
+            sys.modules["transformers"] = real_transformers
+        else:
+            sys.modules.pop("transformers", None)

@@ -51,23 +51,45 @@ def _hf_quiet_if_needed():
     `install_output_mode(verbose=...)` flag set by the CLI: quiet =
     bars off; verbose = bars stay on.
 
-    Implemented via the existing `HF_HUB_DISABLE_PROGRESS_BARS` env
-    var so we don't depend on huggingface_hub internals; restore the
-    prior value on exit so concurrent downloads in other paths aren't
-    affected.
+    The `HF_HUB_DISABLE_PROGRESS_BARS` env var is read by
+    huggingface_hub at module import time, NOT per call, so setting
+    it inside this context manager has no effect after huggingface_hub
+    is already loaded. Use the runtime API
+    `huggingface_hub.utils.disable_progress_bars()` /
+    `enable_progress_bars()` instead; both are idempotent and cheap.
+    Fall back to the env var only if the runtime API isn't available
+    (very old huggingface_hub versions, very rare in practice).
     """
     if _is_verbose():
         yield
         return
-    prev = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
-    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
-        else:
-            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = prev
+        from huggingface_hub.utils import (
+            disable_progress_bars,
+            enable_progress_bars,
+        )
+        disable_progress_bars()
+        try:
+            yield
+        finally:
+            # Restore default. Note: this re-enables globally; if a
+            # caller above us had already disabled bars for their own
+            # reasons, they get re-enabled. Acceptable since the only
+            # in-tree disabler is this context manager itself.
+            enable_progress_bars()
+    except ImportError:
+        # Old huggingface_hub: fall back to the env var. It only
+        # works if the import happens after we set it; not great,
+        # but better than nothing.
+        prev = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        try:
+            yield
+        finally:
+            if prev is None:
+                os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
+            else:
+                os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = prev
 
 logger = logging.getLogger(__name__)
 
