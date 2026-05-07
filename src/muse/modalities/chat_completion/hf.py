@@ -1,10 +1,11 @@
-"""HF resolver plugin for GGUF chat/completion models.
+"""HF resolver plugin for GGUF and VLM chat/completion models.
 
-Sniffs HuggingFace repos for `.gguf` siblings and synthesizes a manifest
-that targets the LlamaCppModel generic runtime. Variant (quant tag) is
-required: a single GGUF repo often publishes 5+ quants and there is no
-defensible default. `muse search foo --modality chat/completion`
-enumerates each variant as a separate row.
+Sniffs HuggingFace repos for `.gguf` siblings (-> LlamaCppModel) or for
+the `image-text-to-text` tag / VLM model_type (-> HFVisionLanguageModel).
+Variant (quant tag) is required for GGUFs: a single GGUF repo often
+publishes 5+ quants and there is no defensible default.
+`muse search foo --modality chat/completion` enumerates each variant as a
+separate row.
 
 This plugin is loaded by `discover_hf_plugins` via single-file import,
 so it must NOT use relative imports or import from sibling modality
@@ -29,6 +30,16 @@ _VARIANT_RE = re.compile(
 
 _RUNTIME_PATH = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
 _PIP_EXTRAS = ("llama-cpp-python>=0.2.90",)
+
+# VLM detection constants
+_VLM_MULTI_IMAGE_MODEL_TYPES = frozenset({
+    "idefics3", "smolvlm", "qwen2_vl", "pixtral", "llava_next", "minicpmv",
+})
+_VLM_SINGLE_IMAGE_MODEL_TYPES = frozenset({"llava"})
+_VLM_RUNTIME_PATH = (
+    "muse.modalities.chat_completion.runtimes.transformers_vlm:HFVisionLanguageModel"
+)
+_VLM_PIP_EXTRAS = ("torch>=2.1.0", "transformers>=4.46.0", "accelerate", "Pillow")
 
 
 def _extract_variant(gguf_filename: str) -> str:
@@ -86,12 +97,61 @@ def _try_sniff_context_length_from_repo(repo_id: str) -> int | None:
         return None
 
 
+def _is_vlm(info) -> tuple[bool, bool]:
+    """Detect VLM repos. Returns (is_vlm, supports_multi_image)."""
+    tags = set(getattr(info, "tags", []) or [])
+    cfg = getattr(info, "config", None) or {}
+    model_type = (cfg.get("model_type") or "").lower()
+    if "image-text-to-text" in tags:
+        # Tag-only signal: assume multi-image (most VLMs of this generation
+        # support it). model_type can refine.
+        if model_type in _VLM_SINGLE_IMAGE_MODEL_TYPES:
+            return True, False
+        return True, True
+    if model_type in _VLM_MULTI_IMAGE_MODEL_TYPES:
+        return True, True
+    if model_type in _VLM_SINGLE_IMAGE_MODEL_TYPES:
+        return True, False
+    return False, False
+
+
 def _sniff(info) -> bool:
+    if _is_vlm(info)[0]:
+        return True
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     return any(f.endswith(".gguf") for f in siblings)
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
+    is_vlm, multi_image = _is_vlm(info)
+    if is_vlm:
+        license_str = _repo_license(info)
+        manifest = {
+            "model_id": repo_id.split("/", 1)[-1].lower(),
+            "modality": "chat/completion",
+            "hf_repo": repo_id,
+            "description": f"VLM via HF resolver: {repo_id}",
+            "license": license_str,
+            "pip_extras": list(_VLM_PIP_EXTRAS),
+            "capabilities": {
+                "supports_vision": True,
+                "supports_multi_image": multi_image,
+                "supports_tools": False,
+            },
+        }
+
+        def _download(cache_dir: Path) -> Path:
+            return Path(snapshot_download(
+                repo_id=repo_id,
+                cache_dir=str(cache_dir) if cache_dir else None,
+            ))
+
+        return ResolvedModel(
+            manifest=manifest,
+            backend_path=_VLM_RUNTIME_PATH,
+            download=_download,
+        )
+
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     gguf_files = [f for f in siblings if f.endswith(".gguf")]
     if not gguf_files:
