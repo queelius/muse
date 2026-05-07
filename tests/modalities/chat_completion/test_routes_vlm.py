@@ -52,7 +52,16 @@ class _FakeChatModel:
 
 def _client_with_model(model):
     registry = ModalityRegistry()
-    registry.register("chat/completion", model)
+    # Build a manifest from the model's capability attrs so the route's
+    # manifest-based capability gating (fix #4) sees the right flags.
+    manifest = {
+        "model_id": model.model_id,
+        "capabilities": {
+            "supports_vision": getattr(model, "supports_vision", False),
+            "supports_multi_image": getattr(model, "supports_multi_image", False),
+        },
+    }
+    registry.register("chat/completion", model, manifest=manifest)
     app = FastAPI()
     app.include_router(build_router(registry))
     return TestClient(app)
@@ -214,6 +223,64 @@ def test_legacy_string_content_unaffected():
     })
     assert r.status_code == 200
     assert model.received_messages == [{"role": "user", "content": "plain text"}]
+
+
+def test_resolver_pulled_vlm_capability_via_manifest():
+    """Regression for the IMPORTANT #4 fix: when a model is registered
+    WITHOUT supports_vision as an instance attr (as resolver-pulled
+    VLMs are), the route still allows vision requests because the
+    manifest declares the capability."""
+
+    class _BareModel:
+        # No class-level supports_vision attribute. Mirrors a resolver-
+        # pulled model whose capabilities come from the synthesized
+        # manifest, not the class.
+        model_id = "resolver-pulled-vlm"
+
+        def chat(self, messages, **_):
+            from muse.modalities.chat_completion.protocol import (
+                ChatChoice, ChatResult,
+            )
+            return ChatResult(
+                id="x", model_id=self.model_id, created=0,
+                choices=[ChatChoice(
+                    index=0,
+                    message={"role": "assistant", "content": "ok"},
+                    finish_reason="stop",
+                )],
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+    registry = ModalityRegistry()
+    registry.register(
+        "chat/completion",
+        _BareModel(),
+        manifest={
+            "model_id": "resolver-pulled-vlm",
+            "capabilities": {
+                "supports_vision": True,
+                "supports_multi_image": True,
+            },
+        },
+    )
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from muse.modalities.chat_completion.routes import build_router
+    app = FastAPI()
+    app.include_router(build_router(registry))
+    client = TestClient(app)
+    data_url = _make_data_url()
+    r = client.post("/v1/chat/completions", json={
+        "model": "resolver-pulled-vlm",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "?"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+    })
+    assert r.status_code == 200, r.text
 
 
 def test_capability_error_fires_before_sse_stream_opens():

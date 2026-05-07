@@ -20,11 +20,10 @@ import threading
 from typing import Any
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
-from muse.core.errors import ModelNotFoundError
+from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.chat_completion.codec import (
     DONE_SENTINEL,
@@ -83,7 +82,24 @@ class ChatCompletionRequest(BaseModel):
         return out
 
 
-async def _decode_image_parts(messages: list[dict], model: Any) -> list[dict]:
+class _ImageDecodeError(Exception):
+    """Raised by _decode_image_parts with a structured error code + message.
+
+    The route handler catches this and translates to a 400 with the
+    OpenAI-shape error envelope.
+    """
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+async def _decode_image_parts(
+    messages: list[dict],
+    supports_vision: bool,
+    supports_multi_image: bool,
+    model_id: str,
+) -> list[dict]:
     """Walk messages; validate + decode any image_url parts; return rewritten list.
 
     Pre-dispatch step that runs before ChatModel.chat()/chat_stream() to:
@@ -94,8 +110,20 @@ async def _decode_image_parts(messages: list[dict], model: Any) -> list[dict]:
       - Rewrite the part as {type: image, image: <PIL.Image>} so the
         backend consumes a uniform muse-internal shape
 
-    Raises ValueError with structured codes (code: human-readable) that
-    the route translates to 400 responses with OpenAI-shape error envelopes.
+    Capability flags come from the registry manifest (not instance attrs)
+    so resolver-pulled VLMs whose capabilities live in the synthesized
+    manifest are correctly gated.
+
+    Check order per spec:
+      1. unsupported_content_type  (early reject, no further work)
+      2. supports_vision            (early reject before any fetch)
+      3. invalid_content_part       (url field present)
+      4. decode                     (only after all gates pass)
+
+    The too_many_images count check runs in a first pass before the decode
+    loop so we don't waste fetches on messages that are about to 400.
+
+    Raises _ImageDecodeError with a structured error code + message.
 
     Returns the original `messages` list unchanged when no image_url parts
     are found, preserving byte-identical behaviour for text-only requests.
@@ -107,7 +135,20 @@ async def _decode_image_parts(messages: list[dict], model: Any) -> list[dict]:
         if not isinstance(content, list):
             new_messages.append(msg)
             continue
-        image_count = 0
+
+        # First pass: count image_url parts to gate too_many_images BEFORE
+        # any decoding (avoids wasting HTTP fetches).
+        image_count = sum(
+            1 for part in content
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        )
+        if image_count > 1 and not supports_multi_image:
+            raise _ImageDecodeError(
+                "too_many_images",
+                f"model {model_id!r} accepts only 1 image per message; "
+                f"got {image_count}",
+            )
+
         new_content: list[Any] = []
         for part in content:
             if not isinstance(part, dict):
@@ -118,60 +159,42 @@ async def _decode_image_parts(messages: list[dict], model: Any) -> list[dict]:
                 new_content.append(part)
             elif ptype == "image_url":
                 has_any_image = True
-                image_count += 1
+                # 1. Unsupported content-type check is for non-image_url
+                #    types (handled in the else branch below).
+                # 2. supports_vision check before url validation or decode.
+                if not supports_vision:
+                    raise _ImageDecodeError(
+                        "vision_not_supported",
+                        f"model {model_id!r} does not support vision input; "
+                        f"pick a model with supports_vision=true",
+                    )
+                # 3. url field present.
                 url = (part.get("image_url") or {}).get("url")
                 if not url:
-                    raise ValueError(
-                        "invalid_content_part: image_url part missing required url field"
+                    raise _ImageDecodeError(
+                        "invalid_content_part",
+                        "image_url part missing required url field",
                     )
-                # Capability check before decode so we don't waste a
-                # fetch on a request that's about to 400.
-                if not getattr(model, "supports_vision", False):
-                    raise ValueError(
-                        f"vision_not_supported: model "
-                        f"{getattr(model, 'model_id', '?')} does not "
-                        f"support vision input; pick a model with "
-                        f"supports_vision=true"
-                    )
+                # 4. decode.
                 try:
                     img = await decode_image_input(url)
                 except ValueError as ve:
-                    raise ValueError(
-                        f"invalid_image: could not decode image: {ve}"
+                    raise _ImageDecodeError(
+                        "invalid_image",
+                        f"could not decode image: {ve}",
                     ) from ve
                 new_content.append({"type": "image", "image": img})
             elif ptype is None:
                 new_content.append(part)
             else:
-                raise ValueError(
-                    f"unsupported_content_type: content type {ptype!r} "
-                    f"not supported; allowed: text, image_url"
+                # 1. unsupported content type — always reject first.
+                raise _ImageDecodeError(
+                    "unsupported_content_type",
+                    f"content type {ptype!r} not supported; "
+                    f"allowed: text, image_url",
                 )
-        if image_count > 1 and not getattr(model, "supports_multi_image", False):
-            raise ValueError(
-                f"too_many_images: model "
-                f"{getattr(model, 'model_id', '?')} accepts only 1 "
-                f"image per message; got {image_count}"
-            )
         new_messages.append({**msg, "content": new_content})
     return new_messages if has_any_image else messages
-
-
-def _image_decode_error_response(ve: ValueError) -> JSONResponse:
-    """Translate a ValueError from _decode_image_parts into an OpenAI-shape
-    400 JSONResponse.  ValueError messages are formatted as "code: text"."""
-    msg = str(ve)
-    code, _, detail = msg.partition(": ")
-    return JSONResponse(
-        status_code=400,
-        content={
-            "error": {
-                "code": code,
-                "message": detail or msg,
-                "type": "invalid_request_error",
-            },
-        },
-    )
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -190,13 +213,31 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def chat_completions(req: ChatCompletionRequest):
         model = _get_model(req.model)
 
+        # Derive effective_id the same way image_generation does: prefer
+        # the model's own model_id attr; fall back to the request field or
+        # the literal default marker.
+        effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+
+        # Read capability flags from the registry manifest (NOT instance
+        # attrs) so resolver-pulled VLMs whose capabilities live in the
+        # synthesized manifest are correctly gated.
+        manifest = registry.manifest(MODALITY, effective_id) or {}
+        caps = manifest.get("capabilities", {})
+        supports_vision = caps.get("supports_vision", False)
+        supports_multi_image = caps.get("supports_multi_image", False)
+
         # Pre-dispatch: decode image_url content parts and validate
         # capability flags BEFORE branching on stream/non-stream so that
         # errors always surface as 400 (never as mid-stream SSE errors).
         try:
-            messages = await _decode_image_parts(req.messages, model)
-        except ValueError as ve:
-            return _image_decode_error_response(ve)
+            messages = await _decode_image_parts(
+                req.messages,
+                supports_vision=supports_vision,
+                supports_multi_image=supports_multi_image,
+                model_id=effective_id,
+            )
+        except _ImageDecodeError as e:
+            return error_response(400, e.code, e.message)
 
         kwargs = req.backend_kwargs()
 
