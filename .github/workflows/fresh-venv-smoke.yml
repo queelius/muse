@@ -36,6 +36,7 @@ jobs:
           - vitpose-base-simple
           - detr-resnet-50
           - ast-audioset
+          - smolvlm-256m-instruct
 
     steps:
       - name: checkout
