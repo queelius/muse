@@ -43,6 +43,55 @@
   capabilities:
     memory_gb: 2.5
 
+# ---------- chat/completion: vision-language models (v0.42.0+) ----------
+# All transformers-runtime VLMs. Bundled smolvlm-256m-instruct is the
+# CPU-friendly default; the entries below are quality steps that need
+# more memory or a GPU.
+
+- id: smolvlm-instruct
+  description: SmolVLM-Instruct (2.2B). Strong VLM at small size, matches LLaVA-1.5-7B quality.
+  uri: hf://HuggingFaceTB/SmolVLM-Instruct
+  modality: chat/completion
+  capabilities:
+    memory_gb: 5.0
+    device: cpu
+    supports_vision: true
+    supports_multi_image: true
+    supports_tools: false
+
+- id: qwen2-vl-2b-instruct
+  description: Qwen2-VL-2B-Instruct. SOTA quality at 2B params; multi-image, dynamic resolution.
+  uri: hf://Qwen/Qwen2-VL-2B-Instruct
+  modality: chat/completion
+  capabilities:
+    memory_gb: 5.0
+    device: cpu
+    supports_vision: true
+    supports_multi_image: true
+    supports_tools: false
+
+- id: llava-1.5-7b
+  description: LLaVA-1.5-7B (proven, well-known). Single-image only.
+  uri: hf://llava-hf/llava-1.5-7b-hf
+  modality: chat/completion
+  capabilities:
+    memory_gb: 14.0
+    device: cuda
+    supports_vision: true
+    supports_multi_image: false
+    supports_tools: false
+
+- id: qwen2-vl-7b-instruct
+  description: Qwen2-VL-7B-Instruct (flagship). Strong multi-image and OCR; needs 16GB+ VRAM.
+  uri: hf://Qwen/Qwen2-VL-7B-Instruct
+  modality: chat/completion
+  capabilities:
+    memory_gb: 16.0
+    device: cuda
+    supports_vision: true
+    supports_multi_image: true
+    supports_tools: false
+
 # ---------- embedding/text ----------
 
 - id: all-minilm-l6-v2
