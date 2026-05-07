@@ -289,6 +289,30 @@ client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-used")
 client.chat.completions.create(model="qwen3-8b-gguf-q4-k-m", messages=[...])
 ```
 
+**Vision (v0.42.0+):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-used")
+
+with open("photo.png", "rb") as f:
+    import base64
+    data_url = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+r = client.chat.completions.create(
+    model="smolvlm-256m-instruct",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "What's in this image?"},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    }],
+)
+print(r.choices[0].message.content)
+```
+
 `muse serve` auto-restarts crashed worker processes with exponential backoff.
 Individual model failures don't take down the server or other modalities.
 

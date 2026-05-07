@@ -12,7 +12,7 @@ nineteen modalities:
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
-- **chat/completion**: text-to-text LLMs via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming; powered by llama-cpp-python; any GGUF on HF via the resolver)
+- **chat/completion**: text-to-text LLMs AND vision-language models via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming + multimodal `messages` content; powered by llama-cpp-python for GGUF chat; `transformers.AutoModelForImageTextToText` for VLMs; SmolVLM, Qwen2-VL, LLaVA via the resolver)
 - **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
 - **image/animation**: text-to-animation via `/v1/images/animations` (AnimateDiff: 16-frame loops, animated WebP/GIF/MP4 output)
 - **image/embedding**: image-to-vector via `/v1/images/embeddings` (dinov2-small bundled; CLIP, SigLIP, DINOv2 family via the resolver; OpenAI-shape wire envelope mirroring `/v1/embeddings`)
@@ -149,6 +149,8 @@ The package is organized around three plugin surfaces:
   (`LlamaCppModel` for GGUF, `SentenceTransformerModel` for ST embedders).
   Best for uniform model classes where one runtime serves many models.
   See `docs/RESOLVERS.md` and `docs/CHAT_COMPLETION.md`.
+
+`chat/completion` (v0.42.0+) accepts vision-language models via the OpenAI multimodal `messages` shape: `content: [{type: text}, {type: image_url, image_url: {url: ...}}]`. The route's pre-dispatch step (`_decode_image_parts` in `routes.py`) walks `messages`, validates capability flags (`supports_vision`, `supports_multi_image`) on the loaded model, decodes each `image_url` via the existing `decode_image_input` helper (data URLs + `http(s)://` with SSRF guard), and rewrites the part to a muse-internal `{type: image, image: <PIL.Image>}` shape before calling the backend's `chat()` / `chat_stream()`. Capability mismatches return 400 `vision_not_supported` or `too_many_images`; bad images return 400 `invalid_image`. The runtime is `HFVisionLanguageModel` (`muse.modalities.chat_completion.runtimes.transformers_vlm`); bundled default is `smolvlm-256m-instruct` (~500MB, CPU-runnable). Curated extends with SmolVLM-Instruct, Qwen2-VL-2B/7B, and LLaVA-1.5-7B.
 
 A modality-agnostic core (`muse.core`) holds the registry, discovery,
 resolver dispatch, HF downloader, per-venv pip install, and FastAPI
