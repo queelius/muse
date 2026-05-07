@@ -20,6 +20,7 @@ import threading
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
@@ -30,6 +31,7 @@ from muse.modalities.chat_completion.codec import (
     chunk_to_sse_data,
     result_to_openai_dict,
 )
+from muse.modalities.image_generation.image_input import decode_image_input
 
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,97 @@ class ChatCompletionRequest(BaseModel):
         return out
 
 
+async def _decode_image_parts(messages: list[dict], model: Any) -> list[dict]:
+    """Walk messages; validate + decode any image_url parts; return rewritten list.
+
+    Pre-dispatch step that runs before ChatModel.chat()/chat_stream() to:
+      - Detect image_url parts in any message.content list
+      - Reject capability mismatches (vision_not_supported, too_many_images)
+      - Validate part shape (invalid_content_part, unsupported_content_type)
+      - Decode each url via decode_image_input (data: or http(s)://)
+      - Rewrite the part as {type: image, image: <PIL.Image>} so the
+        backend consumes a uniform muse-internal shape
+
+    Raises ValueError with structured codes (code: human-readable) that
+    the route translates to 400 responses with OpenAI-shape error envelopes.
+
+    Returns the original `messages` list unchanged when no image_url parts
+    are found, preserving byte-identical behaviour for text-only requests.
+    """
+    has_any_image = False
+    new_messages: list[dict] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            new_messages.append(msg)
+            continue
+        image_count = 0
+        new_content: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict):
+                new_content.append(part)
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                new_content.append(part)
+            elif ptype == "image_url":
+                has_any_image = True
+                image_count += 1
+                url = (part.get("image_url") or {}).get("url")
+                if not url:
+                    raise ValueError(
+                        "invalid_content_part: image_url part missing required url field"
+                    )
+                # Capability check before decode so we don't waste a
+                # fetch on a request that's about to 400.
+                if not getattr(model, "supports_vision", False):
+                    raise ValueError(
+                        f"vision_not_supported: model "
+                        f"{getattr(model, 'model_id', '?')} does not "
+                        f"support vision input; pick a model with "
+                        f"supports_vision=true"
+                    )
+                try:
+                    img = await decode_image_input(url)
+                except ValueError as ve:
+                    raise ValueError(
+                        f"invalid_image: could not decode image: {ve}"
+                    ) from ve
+                new_content.append({"type": "image", "image": img})
+            elif ptype is None:
+                new_content.append(part)
+            else:
+                raise ValueError(
+                    f"unsupported_content_type: content type {ptype!r} "
+                    f"not supported; allowed: text, image_url"
+                )
+        if image_count > 1 and not getattr(model, "supports_multi_image", False):
+            raise ValueError(
+                f"too_many_images: model "
+                f"{getattr(model, 'model_id', '?')} accepts only 1 "
+                f"image per message; got {image_count}"
+            )
+        new_messages.append({**msg, "content": new_content})
+    return new_messages if has_any_image else messages
+
+
+def _image_decode_error_response(ve: ValueError) -> JSONResponse:
+    """Translate a ValueError from _decode_image_parts into an OpenAI-shape
+    400 JSONResponse.  ValueError messages are formatted as "code: text"."""
+    msg = str(ve)
+    code, _, detail = msg.partition(": ")
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "code": code,
+                "message": detail or msg,
+                "type": "invalid_request_error",
+            },
+        },
+    )
+
+
 def build_router(registry: ModalityRegistry) -> APIRouter:
     router = APIRouter(prefix="/v1", tags=["chat/completion"])
 
@@ -96,6 +189,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.post("/chat/completions")
     async def chat_completions(req: ChatCompletionRequest):
         model = _get_model(req.model)
+
+        # Pre-dispatch: decode image_url content parts and validate
+        # capability flags BEFORE branching on stream/non-stream so that
+        # errors always surface as 400 (never as mid-stream SSE errors).
+        try:
+            messages = await _decode_image_parts(req.messages, model)
+        except ValueError as ve:
+            return _image_decode_error_response(ve)
+
         kwargs = req.backend_kwargs()
 
         # If the request asks for tool calling, warn when the loaded
@@ -123,7 +225,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
 
         if not req.stream:
-            result = await asyncio.to_thread(model.chat, req.messages, **kwargs)
+            result = await asyncio.to_thread(model.chat, messages, **kwargs)
             return result_to_openai_dict(result)
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -135,7 +237,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             # run_coroutine_threadsafe(...).result() pattern would
             # deadlock if the loop was busy. Mirrors audio_speech.
             try:
-                for chunk in model.chat_stream(req.messages, **kwargs):
+                for chunk in model.chat_stream(messages, **kwargs):
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
             except Exception as e:
                 loop.call_soon_threadsafe(queue.put_nowait, e)
