@@ -256,3 +256,62 @@ def test_chat_stream_yields_chunks_then_final_finish_reason():
     assert chunks[2].delta == {"content": " world"}
     assert chunks[3].finish_reason == "stop"
     assert chunks[3].delta == {}
+
+
+def test_chat_stream_calls_streamer_end_when_generate_raises():
+    """Regression: if generate() raises, streamer.end() must still be called
+    (in the finally block) so the consumer iterator doesn't deadlock."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+
+    fake_streamer = MagicMock()
+    fake_streamer.__iter__ = MagicMock(return_value=iter([]))
+    fake_streamer.end = MagicMock()
+    streamer_factory = MagicMock(return_value=fake_streamer)
+    mod.TextIteratorStreamer = streamer_factory
+
+    runtime = mod.HFVisionLanguageModel(
+        model_id="m", hf_repo="x", device="cpu",
+    )
+    # Make generate raise inside the daemon thread.
+    runtime._model.generate = MagicMock(side_effect=RuntimeError("CUDA OOM"))
+
+    chunks = list(runtime.chat_stream([{"role": "user", "content": "x"}]))
+    # The exception fires in the daemon thread; the consumer drains the
+    # empty streamer (end() was called in finally) and finishes cleanly.
+    fake_streamer.end.assert_called()
+    # The final finish_reason chunk must still be emitted.
+    assert chunks[-1].finish_reason == "stop"
+
+
+def test_chat_stream_thread_is_daemon():
+    """Regression: the generate thread must be daemon=True so it doesn't
+    prevent interpreter shutdown on consumer abandonment."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+
+    captured_threads: list = []
+    original_thread_class = mod.threading.Thread
+
+    class CapturingThread(original_thread_class):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            captured_threads.append(self)
+
+    fake_streamer = MagicMock()
+    fake_streamer.__iter__ = MagicMock(return_value=iter(["hi"]))
+    mod.TextIteratorStreamer = MagicMock(return_value=fake_streamer)
+
+    mod.threading.Thread = CapturingThread
+    try:
+        runtime = mod.HFVisionLanguageModel(
+            model_id="m", hf_repo="x", device="cpu",
+        )
+        list(runtime.chat_stream([{"role": "user", "content": "x"}]))
+    finally:
+        mod.threading.Thread = original_thread_class
+
+    assert captured_threads, "expected at least one Thread to be created"
+    assert all(t.daemon for t in captured_threads), (
+        "chat_stream's generate thread must be daemon=True"
+    )

@@ -142,8 +142,12 @@ class HFVisionLanguageModel:
 
         prompt_len = int(inputs["input_ids"].shape[-1])
 
+        seed = kwargs.get("seed")
+        if seed is not None and torch is not None:
+            torch.manual_seed(int(seed))
+
         gen_kwargs: dict[str, Any] = {"max_new_tokens": max_new}
-        for key in ("temperature", "top_p", "seed"):
+        for key in ("temperature", "top_p"):
             if kwargs.get(key) is not None:
                 gen_kwargs[key] = kwargs[key]
 
@@ -191,16 +195,27 @@ class HFVisionLanguageModel:
             skip_prompt=True,
             skip_special_tokens=True,
         )
+
+        seed = kwargs.get("seed")
+        if seed is not None and torch is not None:
+            torch.manual_seed(int(seed))
+
         gen_kwargs: dict[str, Any] = {
             "max_new_tokens": max_new, "streamer": streamer,
         }
-        for key in ("temperature", "top_p", "seed"):
+        for key in ("temperature", "top_p"):
             if kwargs.get(key) is not None:
                 gen_kwargs[key] = kwargs[key]
-        thread = threading.Thread(
-            target=self._model.generate,
-            kwargs={**inputs, **gen_kwargs},
-        )
+
+        generate_inputs = {**inputs, **gen_kwargs}
+
+        def _generate_with_cleanup() -> None:
+            try:
+                self._model.generate(**generate_inputs)
+            finally:
+                streamer.end()
+
+        thread = threading.Thread(target=_generate_with_cleanup, daemon=True)
         thread.start()
 
         chunk_id = f"chatcmpl-{int(time.time() * 1000)}"
