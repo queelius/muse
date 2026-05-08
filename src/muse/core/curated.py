@@ -135,6 +135,16 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
     )
 
 
+def all_curated() -> list[CuratedEntry]:
+    """Return every curated entry. Thin alias for load_curated().
+
+    Prefer this over load_curated() in code that reads entries for
+    iteration: the name makes intent explicit and lets callers avoid
+    importing load_curated directly.
+    """
+    return load_curated()
+
+
 def find_curated(model_id: str) -> CuratedEntry | None:
     """Return the curated entry with this id, or None."""
     for e in load_curated():

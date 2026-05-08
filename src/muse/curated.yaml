@@ -336,6 +336,9 @@
     memory_gb: 1.4
     max_new_tokens: 1024
     supports_math: true
+    image_processor_overrides:
+      num_channels: 1
+      image_size: 448
 
 # Handwriting recognition. ~558M; bigger than the bundled printed model.
 - id: trocr-large-handwritten
