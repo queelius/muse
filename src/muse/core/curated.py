@@ -160,7 +160,7 @@ def find_curated_by_uri(uri: str) -> CuratedEntry | None:
     curated `capabilities` overlay (e.g. `safe_labels`, `chat_format`)
     that was set for the same upstream repo. Without this, pulling by
     curated id and pulling by raw URI produce subtly different catalog
-    manifests for the same model — a footgun where curated metadata
+    manifests for the same model, a footgun where curated metadata
     silently disappears the moment a user copies the URI from `muse
     search` output.
     """
