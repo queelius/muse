@@ -339,7 +339,7 @@ def test_ensure_deps_prefers_transformers5_class_when_available():
             sys.modules.pop("transformers", None)
 
 
-def test_split_component_path_when_processor_lacks_image_processor():
+def test_split_component_path_when_processor_lacks_image_processor(monkeypatch):
     """Regression for v0.40.5: when AutoProcessor returns a tokenizer
     (because the repo lacks `preprocessor_config.json`), the runtime
     must fall back to AutoImageProcessor + AutoTokenizer.
@@ -348,10 +348,11 @@ def test_split_component_path_when_processor_lacks_image_processor():
     vision-encoder-decoder OCR repos.
     """
     import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+    import muse.core.image_preprocessing as ip_mod
 
     # Set up: AutoProcessor returns a tokenizer-only (no image_processor,
     # no feature_extractor). The runtime should detect this and load
-    # AutoImageProcessor separately.
+    # AutoImageProcessor separately via build_image_processor tier 2.
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = False
     fake_torch.backends = MagicMock(mps=None)
@@ -372,15 +373,14 @@ def test_split_component_path_when_processor_lacks_image_processor():
     proc_factory.from_pretrained = MagicMock(return_value=tokenizer)
     mod.AutoProcessor = proc_factory
 
-    # AutoImageProcessor: returns a processor that takes an image
-    # positionally and returns a movable encoding.
+    # Patch the core module's _load_auto_image_processor to return our
+    # sentinel image_processor (build_image_processor tier 2: auto succeeds).
     image_processor = MagicMock()
     encoded = MagicMock()
     encoded.to = MagicMock(return_value=encoded)
     image_processor.return_value = encoded
-    ip_factory = MagicMock()
-    ip_factory.from_pretrained = MagicMock(return_value=image_processor)
-    mod.AutoImageProcessor = ip_factory
+    monkeypatch.setattr(ip_mod, "_load_auto_image_processor",
+                        lambda src: image_processor)
 
     # Model: standard.
     model_obj = MagicMock()
@@ -406,207 +406,18 @@ def test_split_component_path_when_processor_lacks_image_processor():
     tokenizer.batch_decode.assert_called_once()
 
 
-# ----------------------------------------------------------------------
-# v0.41.2 fix: encoder-config-derived image processor for repos that
-# ship neither preprocessor_config.json nor feature_extractor_config.json
-# (TexTeller is the canonical example: 1-channel grayscale at 448x448).
-# ----------------------------------------------------------------------
-
-
-def test_read_encoder_preprocess_hints_finds_grayscale(tmp_path):
-    """A vision-encoder-decoder config nested under `encoder` is the
-    canonical layout. Hints should surface num_channels, image_size,
-    image_mean, image_std when present."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    import json
-    cfg = {
-        "model_type": "vision-encoder-decoder",
-        "encoder": {
-            "model_type": "vit",
-            "num_channels": 1,
-            "image_size": 448,
-            "patch_size": 16,
-        },
-        "decoder": {"model_type": "roberta"},
-    }
-    (tmp_path / "config.json").write_text(json.dumps(cfg))
-    out = mod._read_encoder_preprocess_hints(str(tmp_path))
-    assert out["num_channels"] == 1
-    assert out["image_size"] == 448
-
-
-def test_read_encoder_preprocess_hints_falls_back_to_top_level(tmp_path):
-    """Older repos sometimes put encoder hyperparams at the top level
-    instead of nested under `encoder`. The hint reader covers both."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    import json
-    cfg = {
-        "model_type": "vit",
-        "num_channels": 3,
-        "image_size": 224,
-    }
-    (tmp_path / "config.json").write_text(json.dumps(cfg))
-    out = mod._read_encoder_preprocess_hints(str(tmp_path))
-    assert out["num_channels"] == 3
-    assert out["image_size"] == 224
-
-
-def test_read_encoder_preprocess_hints_returns_empty_when_missing(tmp_path):
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    out = mod._read_encoder_preprocess_hints(str(tmp_path))
-    assert out == {}
-
-
-def test_read_encoder_preprocess_hints_returns_empty_on_malformed_json(tmp_path):
-    """Don't crash on a bad config.json; return {} so the fallback
-    chain proceeds to the next tier."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    (tmp_path / "config.json").write_text("{broken json")
-    out = mod._read_encoder_preprocess_hints(str(tmp_path))
-    assert out == {}
-
-
-@pytest.mark.parametrize(
-    "num_channels,size,fill,expected_shape,expected_min,expected_max",
-    [
-        # Grayscale: white -> (1.0 - 0.5) / 0.5 = +1.0 normalized.
-        (1, 64, "white", (1, 1, 64, 64), 0.99, 1.01),
-        # RGB: black -> (0.0 - 0.5) / 0.5 = -1.0 normalized.
-        (3, 32, "black", (1, 3, 32, 32), -1.01, -0.99),
-    ],
-)
-def test_derived_image_processor_shape_and_normalization(
-    num_channels, size, fill, expected_shape, expected_min, expected_max,
-):
-    """Output tensors have the right shape and symmetric [-1, 1] normalization."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    import torch as real_torch
-    mod.torch = real_torch
-
-    proc = mod._DerivedImageProcessor(num_channels=num_channels, image_size=size)
-    from PIL import Image
-    img = Image.new("RGB", (128, 128), fill)
-    pv = proc(img, return_tensors="pt")["pixel_values"]
-    assert pv.shape == expected_shape
-    assert expected_min <= pv.min().item() <= expected_max
-    assert expected_min <= pv.max().item() <= expected_max
-
-
-def test_derived_image_processor_accepts_image_size_tuple():
-    """image_size can be a (height, width) pair for non-square inputs."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    import torch as real_torch
-    mod.torch = real_torch
-
-    proc = mod._DerivedImageProcessor(num_channels=1, image_size=(48, 96))
-    from PIL import Image
-    img = Image.new("RGB", (100, 100), "white")
-    out = proc(img, return_tensors="pt")
-    assert out["pixel_values"].shape == (1, 1, 48, 96)
-
-
-def test_derived_image_processor_to_device_chain():
-    """The returned BatchFeature must support `.to(device)` for the
-    runtime's `inputs.to(self._device)` chain."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    import torch as real_torch
-    mod.torch = real_torch
-
-    proc = mod._DerivedImageProcessor(num_channels=1, image_size=32)
-    from PIL import Image
-    out = proc(Image.new("RGB", (64, 64), "gray"), return_tensors="pt")
-    moved = out.to("cpu")
-    assert hasattr(moved, "__getitem__")
-    assert moved["pixel_values"].device.type == "cpu"
-
-
-def test_build_image_processor_fallback_tier1_succeeds(tmp_path, monkeypatch):
-    """Tier 1: AutoImageProcessor.from_pretrained returns a processor;
-    no fallback fires."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    sentinel = MagicMock(name="auto-image-processor")
-    fake_factory = MagicMock()
-    fake_factory.from_pretrained = MagicMock(return_value=sentinel)
-    mod.AutoImageProcessor = fake_factory
-
-    out = mod._build_image_processor_fallback(
-        src=str(tmp_path), model_id="m",
-    )
-    assert out is sentinel
-
-
-def test_build_image_processor_fallback_tier2_uses_derived(tmp_path):
-    """Tier 2: AutoImageProcessor raises; encoder hints in config.json
-    drive _DerivedImageProcessor."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    import json
-    (tmp_path / "config.json").write_text(json.dumps({
-        "encoder": {"num_channels": 1, "image_size": 448},
-    }))
-
-    failing = MagicMock()
-    failing.from_pretrained = MagicMock(side_effect=RuntimeError("no pp config"))
-    mod.AutoImageProcessor = failing
-
-    out = mod._build_image_processor_fallback(
-        src=str(tmp_path), model_id="texteller-test",
-    )
-    assert isinstance(out, mod._DerivedImageProcessor)
-    assert out.num_channels == 1
-    assert out.height == 448
-    assert out.width == 448
-
-
-def test_build_image_processor_fallback_tier3_uses_vit_default(tmp_path):
-    """Tier 3: AutoImageProcessor raises AND no usable hints. Falls
-    back to ViTImageProcessor() defaults."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    failing = MagicMock()
-    failing.from_pretrained = MagicMock(side_effect=RuntimeError("no pp config"))
-    mod.AutoImageProcessor = failing
-
-    # No config.json in tmp_path -> tier 2 returns no hints -> tier 3 fires.
-    out = mod._build_image_processor_fallback(
-        src=str(tmp_path), model_id="m",
-    )
-    assert "ViTImageProcessor" in type(out).__name__
-
-
-def test_build_image_processor_fallback_all_tiers_exhausted(tmp_path, monkeypatch):
-    """When tier 1 fails, no usable hints exist, AND ViTImageProcessor
-    can't be imported, the fallback raises RuntimeError citing all
-    three attempts so the operator can diagnose."""
-    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
-    failing = MagicMock()
-    failing.from_pretrained = MagicMock(side_effect=RuntimeError("no pp config"))
-    mod.AutoImageProcessor = failing
-
-    # Force tier 3 import failure by injecting a fake transformers module
-    # without ViTImageProcessor.
-    import sys
-    fake_transformers = MagicMock(spec=[])  # explicit empty spec -> no attributes
-    real_transformers = sys.modules.get("transformers")
-    sys.modules["transformers"] = fake_transformers
-    try:
-        with pytest.raises(RuntimeError, match="Cannot load image processor"):
-            mod._build_image_processor_fallback(
-                src=str(tmp_path), model_id="m",
-            )
-    finally:
-        if real_transformers is not None:
-            sys.modules["transformers"] = real_transformers
-        else:
-            sys.modules.pop("transformers", None)
-
-
-def test_constructor_split_path_uses_derived_when_auto_image_processor_fails(tmp_path):
+def test_constructor_split_path_uses_derived_when_auto_image_processor_fails(tmp_path, monkeypatch):
     """End-to-end: when AutoProcessor returns a tokenizer-only AND
     AutoImageProcessor.from_pretrained raises (the TexTeller case),
-    the constructor must wire the _DerivedImageProcessor into
-    self._image_processor via the fallback ladder."""
+    the constructor must wire DerivedImageProcessor into
+    self._image_processor via build_image_processor's fallback ladder.
+
+    Regression watchdog: the fallback path from the core module
+    (build_image_processor tier 3) must still fire through the runtime."""
     import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
     import json
     import torch as real_torch
+    import muse.core.image_preprocessing as ip_mod
 
     # Drop a config.json with grayscale encoder hints into the snapshot dir.
     (tmp_path / "config.json").write_text(json.dumps({
@@ -620,10 +431,9 @@ def test_constructor_split_path_uses_derived_when_auto_image_processor_fails(tmp
     proc_factory = MagicMock()
     proc_factory.from_pretrained = MagicMock(return_value=tokenizer)
     mod.AutoProcessor = proc_factory
-    # AutoImageProcessor raises -> tier 2 fires.
-    ip_factory = MagicMock()
-    ip_factory.from_pretrained = MagicMock(side_effect=RuntimeError("no pp"))
-    mod.AutoImageProcessor = ip_factory
+    # Patch core module's _load_auto_image_processor to raise so tier 3 fires.
+    monkeypatch.setattr(ip_mod, "_load_auto_image_processor",
+                        lambda src: (_ for _ in ()).throw(RuntimeError("no pp")))
 
     model_obj = MagicMock()
     model_obj.to = MagicMock(return_value=model_obj)
@@ -639,7 +449,8 @@ def test_constructor_split_path_uses_derived_when_auto_image_processor_fails(tmp
     )
     assert runtime._processor is None
     assert runtime._tokenizer is tokenizer
-    assert isinstance(runtime._image_processor, mod._DerivedImageProcessor)
+    from muse.core.image_preprocessing import DerivedImageProcessor
+    assert isinstance(runtime._image_processor, DerivedImageProcessor)
     assert runtime._image_processor.num_channels == 1
     assert runtime._image_processor.height == 448
 
@@ -685,3 +496,51 @@ def test_ensure_deps_falls_back_to_legacy_class_on_transformers4():
             sys.modules["transformers"] = real_transformers
         else:
             sys.modules.pop("transformers", None)
+
+
+def test_constructor_accepts_image_processor_overrides_kwarg(tmp_path, monkeypatch):
+    """When a manifest declares capabilities.image_processor_overrides,
+    the runtime forwards them to build_image_processor.
+
+    Regression for v0.42.1: the override hatch must reach the core
+    helper through the runtime's constructor, bypassing AutoImageProcessor."""
+    import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
+    import torch as real_torch
+    import muse.core.image_preprocessing as ip_mod
+    mod.torch = real_torch
+
+    # AutoProcessor returns a tokenizer-only object (TexTeller shape).
+    tokenizer = MagicMock(spec=["__call__", "batch_decode"])
+    tokenizer.batch_decode = MagicMock(return_value=["x"])
+    proc_factory = MagicMock()
+    proc_factory.from_pretrained = MagicMock(return_value=tokenizer)
+    mod.AutoProcessor = proc_factory
+
+    # _load_auto_image_processor: should NOT be called because overrides is set.
+    auto_ip_called = []
+    def _must_not_call(src):
+        auto_ip_called.append(src)
+        raise AssertionError(
+            "AutoImageProcessor must not be called when overrides is set"
+        )
+    monkeypatch.setattr(ip_mod, "_load_auto_image_processor", _must_not_call)
+
+    model_obj = MagicMock()
+    model_obj.to = MagicMock(return_value=model_obj)
+    model_factory = MagicMock()
+    model_factory.from_pretrained = MagicMock(return_value=model_obj)
+    mod.AutoModelForVision2Seq = model_factory
+
+    runtime = mod.HFVision2SeqRuntime(
+        model_id="texteller",
+        hf_repo="OleehyO/TexTeller",
+        local_dir=str(tmp_path),
+        device="cpu",
+        image_processor_overrides={"num_channels": 1, "image_size": 448},
+    )
+    # The core DerivedImageProcessor was used via build_image_processor.
+    from muse.core.image_preprocessing import DerivedImageProcessor
+    assert isinstance(runtime._image_processor, DerivedImageProcessor)
+    assert runtime._image_processor.num_channels == 1
+    assert runtime._image_processor.height == 448
+    assert not auto_ip_called, "AutoImageProcessor must not be called"

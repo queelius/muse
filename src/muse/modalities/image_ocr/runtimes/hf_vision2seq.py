@@ -10,24 +10,22 @@ AutoProcessor as module-top sentinels populated by _ensure_deps().
 Tests patch the sentinels directly; _ensure_deps short-circuits on
 non-None.
 
-Image preprocessor fallback chain (v0.41.2+):
+Image preprocessor fallback chain (v0.42.1+):
   1. AutoProcessor (unified): TrOCR, Nougat, repos with
      preprocessor_config.json. Returns multimodal processor.
-  2. AutoImageProcessor (split): repos that ship preprocessor_config.json
-     but no unified config. Pairs with AutoTokenizer.
-  3. _DerivedImageProcessor (split, v0.41.2+): repos with neither
-     preprocessor file. Reads encoder hints (num_channels, image_size)
-     from config.json and builds preprocessing accordingly. Handles
-     TexTeller (1-channel grayscale at 448x448) without hardcoding.
-  4. ViTImageProcessor with defaults: last-resort, ImageNet RGB 224x224.
+  2. Split components: AutoImageProcessor + AutoTokenizer. The
+     AutoImageProcessor side delegates to muse.core.image_preprocessing
+     .build_image_processor for the four-tier dispatch (override-first,
+     auto, encoder-hints-derived, fail-loud).
 """
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any
 
+from muse.core.image_preprocessing import (
+    ImageProcessorError, build_image_processor,
+)
 from muse.core.runtime_helpers import (
     LoadTimer, dtype_for_name, select_device, set_inference_mode,
 )
@@ -117,179 +115,6 @@ def _ensure_deps() -> None:
             )
 
 
-def _read_encoder_preprocess_hints(src: str) -> dict:
-    """Read encoder preprocessing hints from a model's `config.json`.
-
-    Returns a dict with any of `num_channels`, `image_size` (int or
-    list), `image_mean`, `image_std` that the encoder config exposes.
-    Empty dict when config.json is missing or unreadable.
-
-    Vision-encoder-decoder configs nest the encoder's hyperparams
-    under either `encoder` (the canonical layout) or directly at the
-    top level (some older repos). We check both.
-
-    Used as the fallback when neither AutoProcessor nor
-    AutoImageProcessor can synthesize a preprocessor from the repo
-    files: derive enough preprocessing parameters from the model's
-    own config to build a `_DerivedImageProcessor`. Handles repos
-    like TexTeller (1-channel grayscale at 448x448) without
-    hardcoding model-specific paths.
-    """
-    config_path = Path(src) / "config.json"
-    if not config_path.is_file():
-        return {}
-    try:
-        with open(config_path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.debug("could not read %s: %s", config_path, e)
-        return {}
-    enc = cfg.get("encoder") or cfg
-    out: dict = {}
-    for key in ("num_channels", "image_size", "image_mean", "image_std"):
-        if key in enc:
-            out[key] = enc[key]
-    return out
-
-
-class _DerivedImageProcessor:
-    """Minimal image preprocessor derived from a model's config.json.
-
-    Produces a `BatchFeature`-compatible object with `pixel_values`
-    tensor of shape `(1, num_channels, H, W)`. Mimics the
-    `AutoImageProcessor` interface that the runtime's inference path
-    expects: callable with `image` + `return_tensors="pt"`, returning
-    an object that supports `.to(device)` (returns a BatchFeature
-    with all tensors moved) and unpacks via `**inputs` for the
-    model's `generate(...)`.
-
-    Used when the repo lacks both `preprocessor_config.json` and
-    `feature_extractor_config.json`, so AutoImageProcessor and
-    AutoFeatureExtractor both raise. We synthesize preprocessing
-    from `config.json`'s encoder hyperparams.
-
-    Conventions:
-      - `num_channels=1`: convert PIL to grayscale ("L" mode);
-        output tensor shape (1, 1, H, W).
-      - `num_channels=3` (default): convert to RGB; (1, 3, H, W).
-      - `image_size` is the side length (int) or a (h, w) pair.
-      - Pixel range normalized to [-1, 1] via mean=0.5, std=0.5
-        per-channel (the canonical ViT default for grayscale and
-        the most common for RGB OCR encoders). Override via
-        `image_mean` / `image_std` from config.json when the encoder
-        declares them.
-    """
-
-    def __init__(
-        self,
-        *,
-        num_channels: int = 3,
-        image_size: int | tuple[int, int] = 224,
-        image_mean: list[float] | None = None,
-        image_std: list[float] | None = None,
-    ) -> None:
-        self.num_channels = int(num_channels)
-        if isinstance(image_size, (list, tuple)):
-            self.height, self.width = int(image_size[0]), int(image_size[1])
-        else:
-            self.height = self.width = int(image_size)
-        # Default to ViT canonical symmetric [-1, 1] scaling; matches
-        # what most encoders without a shipped preprocessor were trained on.
-        self.image_mean = image_mean or [0.5] * self.num_channels
-        self.image_std = image_std or [0.5] * self.num_channels
-
-    def __call__(self, image: Any, *, return_tensors: str = "pt") -> Any:
-        """Preprocess a PIL image into a model-ready BatchFeature.
-
-        Output has shape `(1, num_channels, H, W)` and supports
-        `.to(device)` for the runtime's `inputs.to(self._device)` chain.
-        """
-        target_mode = "L" if self.num_channels == 1 else "RGB"
-        if not hasattr(image, "convert"):
-            raise TypeError(
-                f"_DerivedImageProcessor expected a PIL Image; got {type(image)!r}"
-            )
-        from PIL import Image as _PILImage
-        image = image.convert(target_mode).resize(
-            (self.width, self.height), _PILImage.Resampling.BICUBIC,
-        )
-
-        import numpy as np
-        arr = np.asarray(image, dtype=np.float32) / 255.0
-        if self.num_channels == 1:
-            arr = arr[..., None]  # PIL "L" gives (H, W); add channel axis.
-        mean = np.array(self.image_mean, dtype=np.float32)
-        std = np.array(self.image_std, dtype=np.float32)
-        arr = ((arr - mean) / std).transpose(2, 0, 1)[None, :, :, :]
-
-        if return_tensors != "pt":
-            return {"pixel_values": arr}
-        if torch is None:
-            raise RuntimeError(
-                "torch is not available; "
-                "_DerivedImageProcessor requires torch for tensor output"
-            )
-        from transformers.feature_extraction_utils import BatchFeature
-        return BatchFeature({"pixel_values": torch.from_numpy(arr)})
-
-
-def _build_image_processor_fallback(*, src: str, model_id: str) -> Any:
-    """Three-tier image-processor fallback for the split-component path.
-
-    See module docstring for the full ladder. Raises RuntimeError if
-    none of the tiers can produce a usable processor.
-    """
-    # Tier 1: AutoImageProcessor.from_pretrained
-    try:
-        return AutoImageProcessor.from_pretrained(src)
-    except Exception as e_auto:  # noqa: BLE001
-        logger.debug(
-            "AutoImageProcessor.from_pretrained(%s) failed: %s",
-            src, e_auto,
-        )
-
-    # Tier 2: _DerivedImageProcessor from config.json hints
-    hints = _read_encoder_preprocess_hints(src)
-    if hints:
-        try:
-            proc = _DerivedImageProcessor(
-                num_channels=int(hints.get("num_channels", 3)),
-                image_size=hints.get("image_size", 224),
-                image_mean=hints.get("image_mean"),
-                image_std=hints.get("image_std"),
-            )
-            logger.info(
-                "Loaded %s with _DerivedImageProcessor "
-                "(num_channels=%s image_size=%s; repo lacks "
-                "preprocessor_config.json, derived from config.json)",
-                model_id, hints.get("num_channels"), hints.get("image_size"),
-            )
-            return proc
-        except Exception as e_derived:  # noqa: BLE001
-            logger.debug(
-                "_DerivedImageProcessor failed for %s: %s",
-                src, e_derived,
-            )
-
-    # Tier 3: ViTImageProcessor defaults
-    try:
-        from transformers import ViTImageProcessor
-        proc = ViTImageProcessor()
-        logger.warning(
-            "Loaded %s with ViTImageProcessor defaults "
-            "(no preprocessor_config.json AND no usable encoder hints "
-            "in config.json; output may be wrong for non-RGB-224 models)",
-            model_id,
-        )
-        return proc
-    except Exception as e_vit:  # noqa: BLE001
-        raise RuntimeError(
-            f"Cannot load image processor for {src!r}: tried "
-            f"AutoImageProcessor, _DerivedImageProcessor (config.json "
-            f"hints: {hints!r}), and ViTImageProcessor defaults; all "
-            f"failed. Last error: {e_vit}"
-        ) from e_vit
-
 
 class HFVision2SeqRuntime:
     """Generic vision-encoder + text-decoder OCR runtime."""
@@ -305,6 +130,7 @@ class HFVision2SeqRuntime:
         device: str = "auto",
         dtype: str = "fp32",
         max_new_tokens: int = 512,
+        image_processor_overrides: dict | None = None,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -380,8 +206,8 @@ class HFVision2SeqRuntime:
                         "AutoImageProcessor failed to import). Run "
                         f"`muse models refresh {model_id}`."
                     )
-                self._image_processor = _build_image_processor_fallback(
-                    src=src, model_id=model_id,
+                self._image_processor = build_image_processor(
+                    src, overrides=image_processor_overrides, model_id=model_id,
                 )
             self._model = AutoModelForVision2Seq.from_pretrained(
                 src, torch_dtype=self._dtype,
