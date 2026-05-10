@@ -78,8 +78,6 @@ class ShapERuntime:
         strength; Shap-E's official default. Higher values push the
         output closer to the text prompt at the cost of diversity.
       - ``num_inference_steps`` (default 64): denoising steps.
-      - ``frame_size`` (default 256): resolution of the ShapE rendering
-        grid; higher values produce finer meshes.
     """
 
     model_id: str
@@ -96,7 +94,6 @@ class ShapERuntime:
         dtype: str = "fp16",
         guidance_scale: float = 15.0,
         num_inference_steps: int = 64,
-        frame_size: int = 256,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -124,7 +121,6 @@ class ShapERuntime:
         self._dtype = dtype_for_name(dtype, torch_module=torch)
         self._default_guidance_scale = float(guidance_scale)
         self._default_num_inference_steps = int(num_inference_steps)
-        self._default_frame_size = int(frame_size)
         src = local_dir or hf_repo
         with LoadTimer(f"loading Shap-E from {src}", logger):
             self._pipeline = ShapEPipeline.from_pretrained(
@@ -149,9 +145,6 @@ class ShapERuntime:
         num_inference_steps = int(
             kwargs.get("num_inference_steps", self._default_num_inference_steps)
         )
-        frame_size = int(
-            kwargs.get("frame_size", self._default_frame_size)
-        )
 
         results: list[Generation3DResult] = []
         for _ in range(max(1, n)):
@@ -159,14 +152,15 @@ class ShapERuntime:
                 prompt,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps,
-                frame_size=frame_size,
+                output_type="mesh",
             )
 
-            # ShapEPipeline returns .meshes as a list of mesh-like objects
-            # with .vertices and .faces tensors. Adapt to trimesh.Trimesh,
-            # then export to GLB bytes through the existing codec contract.
-            mesh_data = result.meshes[0]
-            vertices = mesh_data.vertices.cpu().numpy()
+            # ShapEPipelineOutput always uses .images regardless of output_type.
+            # With output_type="mesh", .images[0] is a MeshDecoderOutput whose
+            # vertex attribute is .verts (not .vertices) and face attribute is
+            # .faces. Adapt to trimesh.Trimesh, then export to GLB bytes.
+            mesh_data = result.images[0]
+            vertices = mesh_data.verts.cpu().numpy()
             faces = mesh_data.faces.cpu().numpy()
             mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
             glb_bytes = mesh.export(file_type="glb")
@@ -188,5 +182,5 @@ class ShapERuntime:
         raise NotImplementedError(
             "Shap-E base is text-to-3D only; image-to-3D would require "
             "the separate openai/shap-e-img2img variant which is not "
-            "supported in v0.43.0."
+            "supported by this runtime; use TripoSR or Wonder3D for image-to-3D."
         )
