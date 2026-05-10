@@ -47,3 +47,20 @@ def test_pip_extras_for_triposr_default():
         "muse.modalities.model_3d_generation.runtimes.triposr:TripoSRRuntime"
     )
     assert any("tsr" in e for e in extras)
+
+
+def test_family_for_shap_e_returns_shape_e_family():
+    from muse.modalities.model_3d_generation.hf import _family_for, _SHAPE_E_RUNTIME_PATH
+    family = _family_for("openai/shap-e")
+    assert family.runtime_path == _SHAPE_E_RUNTIME_PATH
+    assert family.capability_overrides.get("supports_text_to_3d") is True
+    assert family.capability_overrides.get("supports_image_to_3d") is False
+    assert family.trust_remote_code is False
+
+
+def test_family_for_unknown_returns_default_triposr_family():
+    from muse.modalities.model_3d_generation.hf import _family_for, _TRIPOSR_RUNTIME_PATH
+    family = _family_for("some/unknown-repo")
+    assert family.runtime_path == _TRIPOSR_RUNTIME_PATH
+    assert family.capability_overrides == {}
+    assert family.trust_remote_code is False

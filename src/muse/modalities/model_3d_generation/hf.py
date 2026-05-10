@@ -11,10 +11,17 @@ _runtime_path_for(): Shap-E repos route to ShapERuntime; all other
 repos fall through to TripoSRRuntime until their dedicated runtimes
 ship in v0.44.0+ (Wonder3D), v0.45.0+ (TRELLIS), v0.46.0+ (Hunyuan3D-2).
 
+v0.43.2 replaces the parallel _runtime_path_for / _pip_extras_for
+dispatchers with a _Family dataclass registry. Adding a new family now
+means appending one _Family entry to _FAMILIES plus shipping a runtime
+file; no new dispatch functions and no new conditional branches in
+_resolve.
+
 Loaded via single-file import; no relative imports.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -54,24 +61,75 @@ _SHAPE_E_PIP_EXTRAS: tuple[str, ...] = (
 )
 
 
-def _runtime_path_for(repo_id: str) -> str:
-    """Pick the right runtime backend for an HF repo by family.
+@dataclass(frozen=True)
+class _Family:
+    """One 3D-generation model family: how to detect it and how to load it.
 
-    Extension point: when v0.44.0 adds Wonder3D, add one branch here
-    plus one runtime file. Curated entries get their runtime via this
-    dispatch; ad-hoc HF URI pulls without a curated entry fall through
-    to TripoSR.
+    Adding a new family in v0.44.0+ means appending one _Family entry to
+    _FAMILIES below, plus shipping the named runtime file. No new
+    dispatch functions, no new conditional branches in _resolve.
+
+    Fields:
+      name_hints: repo-name substrings (lowercased) that identify this family.
+      runtime_path: backend_path written into the catalog manifest.
+      pip_extras: per-model pip dependencies installed into the model venv.
+      capability_overrides: dict merged over the default capabilities block;
+        values here win. Shap-E uses this to flip image/text support flags.
+      trust_remote_code: when True, forwarded into capabilities so the
+        runtime can pass trust_remote_code=True to from_pretrained. Used
+        by TRELLIS (v0.45.0) and Hunyuan3D-2 (v0.46.0).
     """
+
+    name_hints: tuple[str, ...]
+    runtime_path: str
+    pip_extras: tuple[str, ...]
+    capability_overrides: dict = field(default_factory=dict)
+    trust_remote_code: bool = False
+
+
+_FAMILIES: tuple[_Family, ...] = (
+    _Family(
+        name_hints=("shap-e", "shape-e"),
+        runtime_path=_SHAPE_E_RUNTIME_PATH,
+        pip_extras=_SHAPE_E_PIP_EXTRAS,
+        capability_overrides={
+            "supports_image_to_3d": False,
+            "supports_text_to_3d": True,
+        },
+    ),
+    # Future entries added here (one _Family per release):
+    #   _Family(name_hints=("wonder3d",), runtime_path=_WONDER3D_RUNTIME_PATH, ...),
+    #   _Family(name_hints=("trellis",), trust_remote_code=True, ...),
+    #   _Family(name_hints=("hunyuan3d",), trust_remote_code=True, ...),
+)
+
+_DEFAULT_FAMILY = _Family(
+    name_hints=(),
+    runtime_path=_TRIPOSR_RUNTIME_PATH,
+    pip_extras=_TRIPOSR_PIP_EXTRAS,
+)
+
+
+def _family_for(repo_id: str) -> _Family:
+    """Pick the family by repo-name substring; fall back to TripoSR."""
     name = repo_id.lower()
-    if "shap-e" in name or "shape-e" in name:
-        return _SHAPE_E_RUNTIME_PATH
-    return _TRIPOSR_RUNTIME_PATH
+    return next(
+        (f for f in _FAMILIES if any(h in name for h in f.name_hints)),
+        _DEFAULT_FAMILY,
+    )
+
+
+def _runtime_path_for(repo_id: str) -> str:
+    """Thin alias preserved for test stability. Real dispatch via _family_for."""
+    return _family_for(repo_id).runtime_path
 
 
 def _pip_extras_for(runtime_path: str) -> tuple[str, ...]:
-    if runtime_path == _SHAPE_E_RUNTIME_PATH:
-        return _SHAPE_E_PIP_EXTRAS
-    return _TRIPOSR_PIP_EXTRAS
+    """Thin alias preserved for test stability. Real dispatch via _family_for."""
+    for family in _FAMILIES + (_DEFAULT_FAMILY,):
+        if family.runtime_path == runtime_path:
+            return family.pip_extras
+    return _DEFAULT_FAMILY.pip_extras
 
 
 # Repo-name allowlist: the canonical 3D generation repos. These match
@@ -91,6 +149,10 @@ _TAG_HINTS = ("image-to-3d", "text-to-3d")
 # Repo-name substrings whose model declares supports_text_to_3d=True.
 # These are the families that natively accept text prompts in 2026;
 # TripoSR / Wonder3D / InstantMesh are image-only.
+# NOTE: "shap-e" is intentionally absent here because Shap-E gets its
+# supports_text_to_3d=True via capability_overrides in _FAMILIES, not
+# via this hint list. The guard in _resolve skips this check when
+# capability_overrides has already set the flag.
 _TEXT_CAPABLE_NAME_HINTS = ("trellis", "hunyuan3d", "shap-e")
 
 
@@ -117,16 +179,14 @@ def _sniff(info) -> bool:
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
-    """Per-family dispatch: Shap-E -> ShapERuntime; all others -> TripoSRRuntime.
+    """Single-dispatch via _family_for: routes each repo to the right runtime.
 
     Ad-hoc HF URI pulls that don't have a curated entry fall through to
-    TripoSR. Curated entries for TRELLIS, Wonder3D, and Hunyuan3D-2
-    also land here on pull; they route to TripoSRRuntime until v0.44.0+
-    ships their dedicated runtimes.
+    TripoSR via _DEFAULT_FAMILY. Curated entries for TRELLIS, Wonder3D,
+    and Hunyuan3D-2 also land here on pull; they route to TripoSRRuntime
+    until v0.44.0+ ships their dedicated runtimes.
     """
-    name = repo_id.lower()
-    runtime_path = _runtime_path_for(repo_id)
-    pip_extras = _pip_extras_for(runtime_path)
+    family = _family_for(repo_id)
 
     capabilities: dict = {
         "device": "cuda",
@@ -134,15 +194,17 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "supports_text_to_3d": False,
         "output_format": "glb",
     }
+    capabilities.update(family.capability_overrides)
 
-    # Shap-E is text-only (no image-to-3D in the base model).
-    if runtime_path == _SHAPE_E_RUNTIME_PATH:
-        capabilities["supports_image_to_3d"] = False
-        capabilities["supports_text_to_3d"] = True
-    elif any(s in name for s in _TEXT_CAPABLE_NAME_HINTS):
-        # Repo-name hints for other text-capable families (TRELLIS,
-        # Hunyuan3D-2). Image direction stays True for dual-direction repos.
-        capabilities["supports_text_to_3d"] = True
+    # Apply text-capable hints ONLY when capability_overrides has not
+    # already set the flag (avoids double-application for Shap-E).
+    if "supports_text_to_3d" not in family.capability_overrides:
+        name = repo_id.lower()
+        if any(s in name for s in _TEXT_CAPABLE_NAME_HINTS):
+            capabilities["supports_text_to_3d"] = True
+
+    if family.trust_remote_code:
+        capabilities["trust_remote_code"] = True
 
     manifest = {
         "model_id": _model_id(repo_id),
@@ -150,7 +212,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "hf_repo": repo_id,
         "description": f"3D generation: {repo_id}",
         "license": _repo_license(info),
-        "pip_extras": list(pip_extras),
+        "pip_extras": list(family.pip_extras),
         "system_packages": [],
         "capabilities": capabilities,
     }
@@ -168,7 +230,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
     return ResolvedModel(
         manifest=manifest,
-        backend_path=runtime_path,
+        backend_path=family.runtime_path,
         download=_download,
     )
 
