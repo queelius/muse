@@ -581,7 +581,7 @@
   uri: hf://JeffreyXiang/TRELLIS-image-large
   modality: 3d/generation
   size_gb: 1.5
-  description: "TRELLIS image+text to 3D: ~1.5GB at fp16, dual-direction (image and text), requires trust_remote_code, MIT"
+  description: "TRELLIS image+text to 3D: ~1.5GB at fp16, dual-direction (image and text), requires trust_remote_code, MIT (runtime arrives in v0.45.0)"
   capabilities:
     memory_gb: 6.0
     device: cuda
@@ -595,7 +595,7 @@
   uri: hf://flamehaze1115/wonder3d-v1.0
   modality: 3d/generation
   size_gb: 3.0
-  description: "Wonder3D: multi-view diffusion-based image-to-3D, ~3GB, CC-BY-NC-4.0 (non-commercial)"
+  description: "Wonder3D: multi-view diffusion-based image-to-3D, ~3GB, CC-BY-NC-4.0 (non-commercial) (runtime arrives in v0.44.0)"
   capabilities:
     memory_gb: 8.0
     device: cuda
@@ -608,7 +608,7 @@
   uri: hf://tencent/Hunyuan3D-2
   modality: 3d/generation
   size_gb: 5.0
-  description: "Hunyuan3D-2 by Tencent: dual-direction (image and text), ~5GB at fp16, requires trust_remote_code"
+  description: "Hunyuan3D-2 by Tencent: dual-direction (image and text), ~5GB at fp16, requires trust_remote_code (runtime arrives in v0.46.0)"
   capabilities:
     memory_gb: 10.0
     device: cuda

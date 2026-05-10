@@ -6,9 +6,10 @@ other modality-specific plugins (audio_classification, audio_embedding,
 image_segmentation, image_ocr, image_cv).
 
 v0.41.0 routes ALL matched repos through TripoSRRuntime (the only
-runtime currently implemented). Curated entries for TRELLIS, Wonder3D,
-Hunyuan3D-2, and Shap-E declare these via curated.yaml and will get
-dedicated runtime classes in v0.41.x.
+runtime currently implemented). v0.43.0 adds per-family dispatch via
+_runtime_path_for(): Shap-E repos route to ShapERuntime; all other
+repos fall through to TripoSRRuntime until their dedicated runtimes
+ship in v0.44.0+ (Wonder3D), v0.45.0+ (TRELLIS), v0.46.0+ (Hunyuan3D-2).
 
 Loaded via single-file import; no relative imports.
 """
@@ -22,14 +23,18 @@ from huggingface_hub import HfApi, snapshot_download
 from muse.core.resolvers import ResolvedModel, SearchResult
 
 
-_RUNTIME_PATH = (
+_TRIPOSR_RUNTIME_PATH = (
     "muse.modalities.model_3d_generation.runtimes.triposr:TripoSRRuntime"
 )
+_SHAPE_E_RUNTIME_PATH = (
+    "muse.modalities.model_3d_generation.runtimes.shape_e:ShapERuntime"
+)
+
 # pip_extras audit philosophy: declare every direct + transitive import
 # the runtime can hit at load time. tsr is the canonical TripoSR pip
 # package; trimesh handles GLB serialization; omegaconf + einops are
 # tsr's transitive deps that AutoModel.from_pretrained triggers.
-_PIP_EXTRAS = (
+_TRIPOSR_PIP_EXTRAS: tuple[str, ...] = (
     "torch>=2.1.0",
     "torchvision>=0.16.0",
     "transformers>=4.40.0",
@@ -41,6 +46,32 @@ _PIP_EXTRAS = (
     "einops",
     "huggingface_hub",
 )
+_SHAPE_E_PIP_EXTRAS: tuple[str, ...] = (
+    "torch>=2.1.0",
+    "diffusers>=0.27.0",
+    "transformers",
+    "trimesh",
+)
+
+
+def _runtime_path_for(repo_id: str) -> str:
+    """Pick the right runtime backend for an HF repo by family.
+
+    Extension point: when v0.44.0 adds Wonder3D, add one branch here
+    plus one runtime file. Curated entries get their runtime via this
+    dispatch; ad-hoc HF URI pulls without a curated entry fall through
+    to TripoSR.
+    """
+    name = repo_id.lower()
+    if "shap-e" in name or "shape-e" in name:
+        return _SHAPE_E_RUNTIME_PATH
+    return _TRIPOSR_RUNTIME_PATH
+
+
+def _pip_extras_for(runtime_path: str) -> tuple[str, ...]:
+    if runtime_path == _SHAPE_E_RUNTIME_PATH:
+        return _SHAPE_E_PIP_EXTRAS
+    return _TRIPOSR_PIP_EXTRAS
 
 
 # Repo-name allowlist: the canonical 3D generation repos. These match
@@ -86,27 +117,31 @@ def _sniff(info) -> bool:
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
-    """All v0.41.0 matches route through TripoSRRuntime.
+    """Per-family dispatch: Shap-E -> ShapERuntime; all others -> TripoSRRuntime.
 
-    Future curated entries (TRELLIS, Wonder3D, etc.) get dedicated
-    runtime_path overrides via curated.yaml capabilities; this resolver
-    is the fallback for ad-hoc HF URIs.
+    Ad-hoc HF URI pulls that don't have a curated entry fall through to
+    TripoSR. Curated entries for TRELLIS, Wonder3D, and Hunyuan3D-2
+    also land here on pull; they route to TripoSRRuntime until v0.44.0+
+    ships their dedicated runtimes.
     """
     name = repo_id.lower()
+    runtime_path = _runtime_path_for(repo_id)
+    pip_extras = _pip_extras_for(runtime_path)
+
     capabilities: dict = {
         "device": "cuda",
         "supports_image_to_3d": True,
-        # TripoSR-only default; flipped below for text-capable families.
-        # Curated overrides take precedence at catalog-merge time.
         "supports_text_to_3d": False,
         "output_format": "glb",
     }
-    # Repo-name based hints. Some repos (TRELLIS, Hunyuan3D-2, Shap-E)
-    # support both directions; flip the text capability when their name
-    # matches even though the runtime is still TripoSR. Curated yaml
-    # will pick the right runtime per family; this is for ad-hoc bare
-    # URI pulls that don't have a curated entry.
-    if any(s in name for s in _TEXT_CAPABLE_NAME_HINTS):
+
+    # Shap-E is text-only (no image-to-3D in the base model).
+    if runtime_path == _SHAPE_E_RUNTIME_PATH:
+        capabilities["supports_image_to_3d"] = False
+        capabilities["supports_text_to_3d"] = True
+    elif any(s in name for s in _TEXT_CAPABLE_NAME_HINTS):
+        # Repo-name hints for other text-capable families (TRELLIS,
+        # Hunyuan3D-2). Image direction stays True for dual-direction repos.
         capabilities["supports_text_to_3d"] = True
 
     manifest = {
@@ -115,7 +150,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "hf_repo": repo_id,
         "description": f"3D generation: {repo_id}",
         "license": _repo_license(info),
-        "pip_extras": list(_PIP_EXTRAS),
+        "pip_extras": list(pip_extras),
         "system_packages": [],
         "capabilities": capabilities,
     }
@@ -133,7 +168,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
     return ResolvedModel(
         manifest=manifest,
-        backend_path=_RUNTIME_PATH,
+        backend_path=runtime_path,
         download=_download,
     )
 
@@ -169,8 +204,8 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
 
 HF_PLUGIN = {
     "modality": "3d/generation",
-    "runtime_path": _RUNTIME_PATH,
-    "pip_extras": _PIP_EXTRAS,
+    "runtime_path": _TRIPOSR_RUNTIME_PATH,
+    "pip_extras": _TRIPOSR_PIP_EXTRAS,
     "system_packages": (),
     # 110: tag-based, more specific than text-classification (200) but
     # loses to file-pattern plugins (100). Same slot as

@@ -100,20 +100,29 @@ def test_resolve_kebab_case_model_id():
     assert result.manifest["model_id"] == "triposr"
 
 
-def test_resolve_supports_image_to_3d_always_true():
-    """Every 3d/generation manifest declares supports_image_to_3d=True
-    because that's the dominant direction in 2026."""
+def test_resolve_supports_image_to_3d_for_non_shape_e():
+    """Non-Shap-E repos declare supports_image_to_3d=True (the dominant
+    direction). Shap-E base is text-only and is tested separately."""
     for repo_id in (
         "stabilityai/TripoSR",
         "JeffreyXiang/TRELLIS-image-large",
         "tencent/Hunyuan3D-2",
         "flamehaze1115/Wonder3D-v1.0",
-        "openai/shap-e",
     ):
         info = _fake_info(tags=["image-to-3d"], repo_id=repo_id)
         result = HF_PLUGIN["resolve"](repo_id, None, info)
         caps = result.manifest["capabilities"]
         assert caps["supports_image_to_3d"] is True, repo_id
+
+
+def test_resolve_shap_e_is_text_only():
+    """Shap-E base is text-to-3D only: supports_image_to_3d=False,
+    supports_text_to_3d=True."""
+    info = _fake_info(tags=["text-to-3d"], repo_id="openai/shap-e")
+    result = HF_PLUGIN["resolve"]("openai/shap-e", None, info)
+    caps = result.manifest["capabilities"]
+    assert caps["supports_image_to_3d"] is False
+    assert caps["supports_text_to_3d"] is True
 
 
 def test_resolve_supports_text_to_3d_for_trellis():
