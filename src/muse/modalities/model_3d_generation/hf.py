@@ -5,22 +5,18 @@ manifest pointing at the right runtime. Priority 110, same slot as the
 other modality-specific plugins (audio_classification, audio_embedding,
 image_segmentation, image_ocr, image_cv).
 
-v0.41.0 routes ALL matched repos through TripoSRRuntime (the only
-runtime currently implemented). v0.43.0 adds per-family dispatch via
-_runtime_path_for(): Shap-E repos route to ShapERuntime; all other
-repos fall through to TripoSRRuntime until their dedicated runtimes
-ship in v0.44.0+ (Wonder3D), v0.45.0+ (TRELLIS), v0.46.0+ (Hunyuan3D-2).
-
-v0.43.2 replaces the parallel _runtime_path_for / _pip_extras_for
-dispatchers with a _Family dataclass registry. Adding a new family now
-means appending one _Family entry to _FAMILIES plus shipping a runtime
-file; no new dispatch functions and no new conditional branches in
-_resolve.
+Per-family dispatch via _family_for(): Shap-E repos route to
+ShapERuntime; all other repos fall through to TripoSRRuntime until
+their dedicated runtimes ship in v0.44.0+ (Wonder3D), v0.45.0+
+(TRELLIS), v0.46.0+ (Hunyuan3D-2). Adding a new family means appending
+one _Family entry to _FAMILIES plus shipping a runtime file; no new
+dispatch functions and no new conditional branches in _resolve.
 
 Loaded via single-file import; no relative imports.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -78,6 +74,8 @@ class _Family:
       trust_remote_code: when True, forwarded into capabilities so the
         runtime can pass trust_remote_code=True to from_pretrained. Used
         by TRELLIS (v0.45.0) and Hunyuan3D-2 (v0.46.0).
+      system_packages: OS-level packages (e.g. libGL) needed by the runtime.
+        Empty for most families; Wonder3D / TRELLIS may declare libGL.
     """
 
     name_hints: tuple[str, ...]
@@ -85,6 +83,7 @@ class _Family:
     pip_extras: tuple[str, ...]
     capability_overrides: dict = field(default_factory=dict)
     trust_remote_code: bool = False
+    system_packages: tuple[str, ...] = ()
 
 
 _FAMILIES: tuple[_Family, ...] = (
@@ -109,12 +108,29 @@ _DEFAULT_FAMILY = _Family(
     pip_extras=_TRIPOSR_PIP_EXTRAS,
 )
 
+# Precomputed tuple used by _pip_extras_for to avoid recomputation per call.
+_ALL_FAMILIES: tuple[_Family, ...] = _FAMILIES + (_DEFAULT_FAMILY,)
+
+
+def _matches_hint(name: str, hint: str) -> bool:
+    """Word-boundary substring match.
+
+    The hint matches `name` only when it appears with non-alphanumeric
+    chars on both sides (or at string boundaries). Prevents false positives
+    like `my-reshape-enhancer` matching `shape-e`.
+    """
+    pattern = re.compile(
+        rf"(?<![a-z0-9]){re.escape(hint)}(?![a-z0-9])",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(name))
+
 
 def _family_for(repo_id: str) -> _Family:
-    """Pick the family by repo-name substring; fall back to TripoSR."""
+    """Pick the family by name-hint match; fall back to TripoSR."""
     name = repo_id.lower()
     return next(
-        (f for f in _FAMILIES if any(h in name for h in f.name_hints)),
+        (f for f in _FAMILIES if any(_matches_hint(name, h) for h in f.name_hints)),
         _DEFAULT_FAMILY,
     )
 
@@ -126,10 +142,10 @@ def _runtime_path_for(repo_id: str) -> str:
 
 def _pip_extras_for(runtime_path: str) -> tuple[str, ...]:
     """Thin alias preserved for test stability. Real dispatch via _family_for."""
-    for family in _FAMILIES + (_DEFAULT_FAMILY,):
+    for family in _ALL_FAMILIES:
         if family.runtime_path == runtime_path:
             return family.pip_extras
-    return _DEFAULT_FAMILY.pip_extras
+    return _DEFAULT_FAMILY.pip_extras  # unreachable in practice but type-safe
 
 
 # Repo-name allowlist: the canonical 3D generation repos. These match
@@ -149,11 +165,11 @@ _TAG_HINTS = ("image-to-3d", "text-to-3d")
 # Repo-name substrings whose model declares supports_text_to_3d=True.
 # These are the families that natively accept text prompts in 2026;
 # TripoSR / Wonder3D / InstantMesh are image-only.
-# NOTE: "shap-e" is intentionally absent here because Shap-E gets its
+# NOTE: Shap-E is intentionally absent here. Shap-E gets its
 # supports_text_to_3d=True via capability_overrides in _FAMILIES, not
 # via this hint list. The guard in _resolve skips this check when
 # capability_overrides has already set the flag.
-_TEXT_CAPABLE_NAME_HINTS = ("trellis", "hunyuan3d", "shap-e")
+_TEXT_CAPABLE_NAME_HINTS = ("trellis", "hunyuan3d")
 
 
 def _model_id(repo_id: str) -> str:
@@ -213,7 +229,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "description": f"3D generation: {repo_id}",
         "license": _repo_license(info),
         "pip_extras": list(family.pip_extras),
-        "system_packages": [],
+        "system_packages": list(family.system_packages),
         "capabilities": capabilities,
     }
 
@@ -265,7 +281,12 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
 
 
 HF_PLUGIN = {
+    "scheme": "hf",
     "modality": "3d/generation",
+    # Framework-required top-level keys. The values here are TripoSR-specific
+    # placeholders that satisfy the plugin contract (REQUIRED_HF_PLUGIN_KEYS in
+    # core/discovery.py); the actual per-resolve runtime_path and pip_extras
+    # come from _family_for(repo_id) inside _resolve below.
     "runtime_path": _TRIPOSR_RUNTIME_PATH,
     "pip_extras": _TRIPOSR_PIP_EXTRAS,
     "system_packages": (),

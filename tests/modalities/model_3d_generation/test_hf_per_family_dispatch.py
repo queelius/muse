@@ -64,3 +64,50 @@ def test_family_for_unknown_returns_default_triposr_family():
     assert family.runtime_path == _TRIPOSR_RUNTIME_PATH
     assert family.capability_overrides == {}
     assert family.trust_remote_code is False
+
+
+def test_text_capable_hints_does_not_overlap_with_family_overrides():
+    """Regression: hints list and family capability_overrides should not
+    both claim the same family. The override path owns Shap-E's text-to-3d
+    capability."""
+    from muse.modalities.model_3d_generation.hf import (
+        _FAMILIES, _TEXT_CAPABLE_NAME_HINTS,
+    )
+    for family in _FAMILIES:
+        if "supports_text_to_3d" in family.capability_overrides:
+            for hint in family.name_hints:
+                assert hint not in _TEXT_CAPABLE_NAME_HINTS, (
+                    f"Family hint {hint!r} also in _TEXT_CAPABLE_NAME_HINTS; "
+                    f"this is double-dispatch (override AND hint list). "
+                    f"Remove from hint list since the override owns it."
+                )
+
+
+def test_family_for_rejects_false_positive_substring():
+    """Regression: _family_for must use word-boundary matching so that
+    e.g. `my-reshape-enhancer` does NOT match `shape-e`."""
+    from muse.modalities.model_3d_generation.hf import (
+        _family_for, _TRIPOSR_RUNTIME_PATH,
+    )
+    family = _family_for("user/my-reshape-enhancer")
+    assert family.runtime_path == _TRIPOSR_RUNTIME_PATH
+
+
+def test_family_for_accepts_word_boundary_match():
+    """Legitimate fork-style names (e.g. `my-shap-e-fork`) should still match."""
+    from muse.modalities.model_3d_generation.hf import (
+        _family_for, _SHAPE_E_RUNTIME_PATH,
+    )
+    family = _family_for("someuser/my-shap-e-fork")
+    assert family.runtime_path == _SHAPE_E_RUNTIME_PATH
+
+
+def test_family_default_has_empty_system_packages():
+    from muse.modalities.model_3d_generation.hf import _DEFAULT_FAMILY
+    assert _DEFAULT_FAMILY.system_packages == ()
+
+
+def test_shape_e_family_has_empty_system_packages():
+    from muse.modalities.model_3d_generation.hf import _family_for
+    family = _family_for("openai/shap-e")
+    assert family.system_packages == ()
