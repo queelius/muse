@@ -12,10 +12,12 @@ def test_runtime_path_for_shap_e():
     assert _runtime_path_for("openai/shap-e").endswith(":ShapERuntime")
 
 
-def test_runtime_path_for_trellis():
-    """Until v0.45.0, TRELLIS still falls back to TripoSR."""
+def test_runtime_path_for_trellis_now_dispatches_to_TRELLISRuntime():
+    """v0.44.0 promotes TRELLIS from TripoSR fallback to dedicated runtime."""
     from muse.modalities.model_3d_generation.hf import _runtime_path_for
-    assert _runtime_path_for("JeffreyXiang/TRELLIS-image-large").endswith(":TripoSRRuntime")
+    assert _runtime_path_for("JeffreyXiang/TRELLIS-image-large").endswith(
+        ":TRELLISRuntime"
+    )
 
 
 def test_runtime_path_for_wonder3d():
@@ -111,3 +113,42 @@ def test_shape_e_family_has_empty_system_packages():
     from muse.modalities.model_3d_generation.hf import _family_for
     family = _family_for("openai/shap-e")
     assert family.system_packages == ()
+
+
+def test_family_for_trellis_has_trust_remote_code_true():
+    from muse.modalities.model_3d_generation.hf import _family_for
+    family = _family_for("JeffreyXiang/TRELLIS-image-large")
+    assert family.trust_remote_code is True
+
+
+def test_family_for_trellis_has_correct_capability_overrides():
+    """TRELLIS-image-large is image-only. The override sets the flags
+    explicitly so the hint-list path is bypassed."""
+    from muse.modalities.model_3d_generation.hf import _family_for
+    family = _family_for("JeffreyXiang/TRELLIS-image-large")
+    assert family.capability_overrides.get("supports_image_to_3d") is True
+    assert family.capability_overrides.get("supports_text_to_3d") is False
+
+
+def test_resolve_trellis_manifest_includes_trust_remote_code_capability():
+    """Integration: the synthesized manifest carries trust_remote_code=True
+    in capabilities so the runtime constructor receives it via the kwargs splat."""
+    from unittest.mock import MagicMock
+    from muse.modalities.model_3d_generation.hf import _resolve
+    info = MagicMock()
+    info.card_data = None
+    resolved = _resolve("JeffreyXiang/TRELLIS-image-large", None, info)
+    caps = resolved.manifest["capabilities"]
+    assert caps.get("trust_remote_code") is True
+    assert caps.get("supports_image_to_3d") is True
+    assert caps.get("supports_text_to_3d") is False
+
+
+def test_pip_extras_for_trellis_includes_transformers_and_trimesh():
+    from muse.modalities.model_3d_generation.hf import (
+        _TRELLIS_RUNTIME_PATH, _pip_extras_for,
+    )
+    extras = _pip_extras_for(_TRELLIS_RUNTIME_PATH)
+    assert any("transformers" in e for e in extras)
+    assert any("trimesh" in e for e in extras)
+    assert any("torch" in e for e in extras)

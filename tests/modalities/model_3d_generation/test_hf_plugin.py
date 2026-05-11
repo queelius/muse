@@ -126,9 +126,13 @@ def test_resolve_shap_e_is_text_only():
 
 
 def test_resolve_supports_text_to_3d_for_trellis():
+    """TRELLIS-image-large is image-only: the v0.44.0 family registry entry
+    sets supports_text_to_3d=False via capability_overrides (fixing the
+    capability lie present in prior releases)."""
     info = _fake_info(tags=["image-to-3d"], repo_id="JeffreyXiang/TRELLIS-image-large")
     result = HF_PLUGIN["resolve"]("JeffreyXiang/TRELLIS-image-large", None, info)
-    assert result.manifest["capabilities"]["supports_text_to_3d"] is True
+    assert result.manifest["capabilities"]["supports_text_to_3d"] is False
+    assert result.manifest["capabilities"]["supports_image_to_3d"] is True
 
 
 def test_resolve_supports_text_to_3d_for_hunyuan3d():

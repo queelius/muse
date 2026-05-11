@@ -6,11 +6,12 @@ other modality-specific plugins (audio_classification, audio_embedding,
 image_segmentation, image_ocr, image_cv).
 
 Per-family dispatch via _family_for(): Shap-E repos route to
-ShapERuntime; all other repos fall through to TripoSRRuntime until
-their dedicated runtimes ship in v0.44.0+ (Wonder3D), v0.45.0+
-(TRELLIS), v0.46.0+ (Hunyuan3D-2). Adding a new family means appending
-one _Family entry to _FAMILIES plus shipping a runtime file; no new
-dispatch functions and no new conditional branches in _resolve.
+ShapERuntime; TRELLIS repos route to TRELLISRuntime (v0.44.0+); all
+other repos fall through to TripoSRRuntime until their dedicated
+runtimes ship in v0.45.0+ (Hunyuan3D-2); Wonder3D is deferred
+indefinitely. Adding a new family means appending one _Family entry
+to _FAMILIES plus shipping a runtime file; no new dispatch functions
+and no new conditional branches in _resolve.
 
 Loaded via single-file import; no relative imports.
 """
@@ -55,6 +56,16 @@ _SHAPE_E_PIP_EXTRAS: tuple[str, ...] = (
     "transformers",
     "trimesh",
 )
+_TRELLIS_RUNTIME_PATH = (
+    "muse.modalities.model_3d_generation.runtimes.trellis:TRELLISRuntime"
+)
+_TRELLIS_PIP_EXTRAS: tuple[str, ...] = (
+    "torch>=2.1.0",
+    "transformers>=4.46.0",
+    "diffusers>=0.27.0",
+    "trimesh",
+    "accelerate",
+)
 
 
 @dataclass(frozen=True)
@@ -96,9 +107,18 @@ _FAMILIES: tuple[_Family, ...] = (
             "supports_text_to_3d": True,
         },
     ),
+    _Family(
+        name_hints=("trellis",),
+        runtime_path=_TRELLIS_RUNTIME_PATH,
+        pip_extras=_TRELLIS_PIP_EXTRAS,
+        capability_overrides={
+            "supports_image_to_3d": True,
+            "supports_text_to_3d": False,
+        },
+        trust_remote_code=True,
+    ),
     # Future entries added here (one _Family per release):
     #   _Family(name_hints=("wonder3d",), runtime_path=_WONDER3D_RUNTIME_PATH, ...),
-    #   _Family(name_hints=("trellis",), trust_remote_code=True, ...),
     #   _Family(name_hints=("hunyuan3d",), trust_remote_code=True, ...),
 )
 
@@ -163,13 +183,18 @@ _NAME_HINTS = (
 # Tag-based fallback. The canonical 3D generation tags on HF.
 _TAG_HINTS = ("image-to-3d", "text-to-3d")
 # Repo-name substrings whose model declares supports_text_to_3d=True.
-# These are the families that natively accept text prompts in 2026;
-# TripoSR / Wonder3D / InstantMesh are image-only.
-# NOTE: Shap-E is intentionally absent here. Shap-E gets its
-# supports_text_to_3d=True via capability_overrides in _FAMILIES, not
-# via this hint list. The guard in _resolve skips this check when
-# capability_overrides has already set the flag.
-_TEXT_CAPABLE_NAME_HINTS = ("trellis", "hunyuan3d")
+# These are the fallback hint-list for families NOT yet registered in
+# _FAMILIES above. Once a family gets a _Family entry with explicit
+# capability_overrides for supports_text_to_3d, it must be REMOVED from
+# this list to prevent double-dispatch (the override path owns it).
+# NOTE: Shap-E and TRELLIS are intentionally absent here. Both get
+# their supports_text_to_3d value via capability_overrides in _FAMILIES;
+# the guard in _resolve skips this check when capability_overrides has
+# already set the flag. Removing from the hint list enforces the
+# invariant tested by test_text_capable_hints_does_not_overlap_with_family_overrides.
+_TEXT_CAPABLE_NAME_HINTS = (
+    "hunyuan3d",     # remains until v0.45.0 wires it into a _Family entry
+)
 
 
 def _model_id(repo_id: str) -> str:
