@@ -59,12 +59,28 @@ _SHAPE_E_PIP_EXTRAS: tuple[str, ...] = (
 _TRELLIS_RUNTIME_PATH = (
     "muse.modalities.model_3d_generation.runtimes.trellis:TRELLISRuntime"
 )
+# TRELLIS uses Microsoft's standalone SDK (NOT a transformers/diffusers
+# AutoPipeline). Verified at v0.44.0 implementation time against the
+# real downloaded SDK. The TRELLIS GitHub repo has native-build deps
+# (kaolin, xformers, flash-attn, nvdiffrast) that pip cannot install
+# cleanly on all systems; Microsoft's setup.sh script is the official
+# install path. Users may need to follow that script manually after
+# `muse pull trellis-image` if the git pip-install below fails. See:
+#   https://github.com/microsoft/TRELLIS/blob/main/setup.sh
 _TRELLIS_PIP_EXTRAS: tuple[str, ...] = (
     "torch>=2.1.0",
+    "torchvision>=0.16.0",
     "transformers>=4.46.0",
     "diffusers>=0.27.0",
     "trimesh",
     "accelerate",
+    "Pillow",
+    "numpy",
+    # TRELLIS standalone SDK from Microsoft. May fail to pip-install
+    # on hosts without CUDA toolchain or compatible NVIDIA driver. If
+    # so, fall back to following Microsoft's setup.sh inside the
+    # per-model venv at ~/.muse/venvs/trellis-image/.
+    "trellis @ git+https://github.com/microsoft/TRELLIS.git",
 )
 
 
