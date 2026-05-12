@@ -102,7 +102,7 @@ def cpu_free_gb() -> float:
     Backed by ``psutil.virtual_memory().available``: the kernel's view of
     how much memory can be allocated without swapping (Linux: MemAvailable
     from /proc/meminfo; macOS / Windows: the equivalent platform-specific
-    counter). psutil is a hard ``muse[server]`` dep so this never fails.
+    counter). psutil is a hard ``museq[server]`` dep so this never fails.
     """
     import psutil
     return float(psutil.virtual_memory().available) / _BYTES_PER_GB

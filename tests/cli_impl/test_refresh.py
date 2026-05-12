@@ -96,7 +96,7 @@ class TestRefreshOne:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = refresh_one("kokoro-82m")
         assert result.state == "ok"
-        # Two calls: muse[server,audio] then pip_extras
+        # Two calls: museq[server,audio] then pip_extras
         assert mock_run.call_count == 2
         first_cmd = mock_run.call_args_list[0].args[0]
         assert first_cmd[0] == py
@@ -149,7 +149,7 @@ class TestRefreshOne:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = refresh_one("x", no_extras=True)
         assert result.state == "ok"
-        # Only ONE call (the muse[server,audio] one); extras call skipped
+        # Only ONE call (the museq[server,audio] one); extras call skipped
         assert mock_run.call_count == 1
 
     def test_skips_missing_catalog_entry(self, tmp_catalog):
@@ -188,7 +188,7 @@ class TestRefreshOne:
             )
             result = refresh_one("x")
         assert result.state == "failed"
-        assert "muse[server] install failed" in result.message
+        assert "museq[server] install failed" in result.message
         assert "Could not find muse" in result.pip_output
 
     def test_failed_extras_install_returns_failed(self, tmp_catalog, tmp_path):
@@ -276,7 +276,7 @@ class TestRefreshOne:
              patch("muse.cli_impl.refresh.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             refresh_one("x")
-        # Only the muse[server,audio] call; no extras pass.
+        # Only the museq[server,audio] call; no extras pass.
         assert mock_run.call_count == 1
 
 

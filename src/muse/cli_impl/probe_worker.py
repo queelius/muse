@@ -8,7 +8,7 @@ on stdout for the parent process to parse and persist.
 Progress logs go to stderr so the final stdout line is unambiguous.
 
 psutil is imported defensively because older venvs (created before
-psutil was added to muse[server] in v0.18.2) won't have it. We fall
+psutil was added to museq[server] in v0.18.2) won't have it. We fall
 back to /proc/self/statm on Linux when needed.
 """
 from __future__ import annotations

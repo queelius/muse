@@ -147,7 +147,7 @@ def pull(
 
     By default the pull is quiet: pip runs with `-q`, HF download
     progress bars are suppressed, and the user sees only the stage
-    markers (creating venv, installing muse[server], installing
+    markers (creating venv, installing museq[server], installing
     pip_extras, downloaded weights, probed). On non-zero pip exit
     the captured output is printed to stderr so dep failures are
     diagnosable. Use `-v` / `--verbose` to stream the full pip +
@@ -636,7 +636,7 @@ def models_refresh(
         bool,
         typer.Option(
             "--no-extras",
-            help="only refresh muse[server]; skip the model's pip_extras",
+            help="only refresh museq[server]; skip the model's pip_extras",
         ),
     ] = False,
     as_json: Annotated[
@@ -647,7 +647,7 @@ def models_refresh(
         ),
     ] = False,
 ) -> None:
-    """Re-install muse[server] + the model's pip_extras into per-model venvs."""
+    """Re-install museq[server] + the model's pip_extras into per-model venvs."""
     from muse.cli_impl.refresh import run_refresh
     raise typer.Exit(run_refresh(
         model_id=model_id, all_=all_, enabled_only=enabled_only,

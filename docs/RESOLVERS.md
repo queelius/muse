@@ -115,7 +115,7 @@ Routes the URI through the matching resolver:
 
 1. `resolve(uri)` returns a `ResolvedModel` with the synthesized MANIFEST.
 2. Per-model venv created at `~/.muse/venvs/<model_id>/`.
-3. `pip install muse[server]` (editable) + `pip install <manifest.pip_extras>`.
+3. `pip install museq[server]` (editable) + `pip install <manifest.pip_extras>`.
 4. `resolved.download(weights_cache)` fetches the weights (snapshot_download
    with appropriate `allow_patterns` for GGUF; full repo for sentence-transformers).
 5. Synthesized MANIFEST + `source: <uri>` persisted in `~/.muse/catalog.json`.

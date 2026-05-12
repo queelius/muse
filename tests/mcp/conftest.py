@@ -15,7 +15,7 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     except ImportError:
         skip = pytest.mark.skip(
             reason="mcp Python package not installed; "
-                   "install via `pip install 'muse[server]'`",
+                   "install via `pip install 'museq[server]'`",
         )
         for item in items:
             if "/tests/mcp/" in str(item.fspath) or "\\tests\\mcp\\" in str(item.fspath):

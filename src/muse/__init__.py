@@ -54,8 +54,8 @@ v0.30.0 bundles three operational improvements:
     regression-guard test parametrized over every bundled script
     catches future gaps.
   - new `muse models refresh <id> | --all | --enabled` re-installs
-    `muse[server,<extras>]` plus the model's `pip_extras` into per-model
-    venvs; use after `pip install -U muse` to propagate new server-side
+    `museq[server,<extras>]` plus the model's `pip_extras` into per-model
+    venvs; use after `pip install -U museq` to propagate new server-side
     deps.
 
 v0.29.0 adds `muse mcp`: an MCP (Model Context Protocol) server that

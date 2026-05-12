@@ -92,7 +92,7 @@ class DiffusersText2ImageModel:
         _ensure_deps()
         if AutoPipelineForText2Image is None:
             raise RuntimeError(
-                "diffusers is not installed; ensure muse[images] extras are "
+                "diffusers is not installed; ensure museq[images] extras are "
                 "installed in the per-model venv"
             )
         self.model_id = model_id
@@ -207,7 +207,7 @@ class DiffusersText2ImageModel:
             if _i2i is None:
                 raise RuntimeError(
                     "diffusers AutoPipelineForImage2Image is not available; "
-                    "ensure muse[images] extras are installed in the per-model venv"
+                    "ensure museq[images] extras are installed in the per-model venv"
                 )
             logger.info(
                 "loading img2img pipeline from %s (model_id=%s, device=%s, dtype=%s)",
@@ -307,7 +307,7 @@ class DiffusersText2ImageModel:
             if _inp is None:
                 raise RuntimeError(
                     "diffusers AutoPipelineForInpainting is not available; "
-                    "ensure muse[images] extras are installed in the per-model venv"
+                    "ensure museq[images] extras are installed in the per-model venv"
                 )
             logger.info(
                 "loading inpaint pipeline from %s (model_id=%s, device=%s, dtype=%s)",

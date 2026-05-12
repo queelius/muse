@@ -90,7 +90,7 @@ class WanRuntime:
         pipeline_cls = WanPipeline or DiffusionPipeline
         if pipeline_cls is None:
             raise RuntimeError(
-                "diffusers is not installed; ensure muse[images] extras "
+                "diffusers is not installed; ensure museq[images] extras "
                 "are installed in the per-model venv via "
                 "`muse pull <model-id>`"
             )

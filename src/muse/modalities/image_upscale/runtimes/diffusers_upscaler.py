@@ -82,7 +82,7 @@ class DiffusersUpscaleRuntime:
         _ensure_deps()
         if StableDiffusionUpscalePipeline is None:
             raise RuntimeError(
-                "diffusers is not installed; ensure muse[images] extras are "
+                "diffusers is not installed; ensure museq[images] extras are "
                 "installed in the per-model venv"
             )
         self.model_id = model_id

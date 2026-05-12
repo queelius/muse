@@ -77,7 +77,7 @@ class CogVideoXRuntime:
         if CogVideoXPipeline is None:
             raise RuntimeError(
                 "diffusers CogVideoXPipeline is not installed; ensure "
-                "muse[images] extras are installed in the per-model venv"
+                "museq[images] extras are installed in the per-model venv"
             )
         self.model_id = model_id
         self._default_duration = default_duration_seconds

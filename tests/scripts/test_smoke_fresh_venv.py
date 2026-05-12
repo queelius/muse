@@ -76,7 +76,7 @@ def test_smoke_one_unknown_model(tmp_path, fake_known_models):
 
 
 def test_smoke_one_pip_install_muse_fails(tmp_path, fake_known_models):
-    """muse[server] install fails; result is FAIL with pip mention."""
+    """museq[server] install fails; result is FAIL with pip mention."""
     with patch.object(smoke, "_create_venv"), \
          patch.object(smoke, "_install_muse",
                       return_value=(1, "ERROR: no matching distribution\n")), \
@@ -86,7 +86,7 @@ def test_smoke_one_pip_install_muse_fails(tmp_path, fake_known_models):
         result = smoke.smoke_one("fake-model", tmp_path)
 
     assert result.ok is False
-    assert "muse[server]" in result.error
+    assert "museq[server]" in result.error
     assert "FAIL" in result.label
 
 

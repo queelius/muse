@@ -4,7 +4,7 @@ Importing this module lazily probes the ``mcp`` Python package. If it's
 not installed, the symbols still exist at module level (so the rest of
 muse can ``from muse.mcp import MCPServer`` without importing the SDK
 unless instantiated). Construction or ``build_tools`` calls then raise
-a clear RuntimeError pointing at ``pip install muse[server]``.
+a clear RuntimeError pointing at ``pip install museq[server]``.
 
 Stdio mode (default) is for desktop LLM apps that spawn the MCP server
 as a child process. HTTP+SSE mode is for remote / web embedders.
@@ -33,7 +33,7 @@ def _require_mcp() -> None:
     if not _MCP_AVAILABLE:
         raise RuntimeError(
             "the `mcp` Python package is required for muse mcp; "
-            "install via: pip install 'muse[server]'"
+            "install via: pip install 'museq[server]'"
         )
 
 

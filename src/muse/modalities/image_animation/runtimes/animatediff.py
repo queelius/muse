@@ -85,7 +85,7 @@ class AnimateDiffRuntime:
         _ensure_deps()
         if AnimateDiffPipeline is None or MotionAdapter is None:
             raise RuntimeError(
-                "diffusers AnimateDiff is not installed; ensure muse[images] "
+                "diffusers AnimateDiff is not installed; ensure museq[images] "
                 "extras are installed in the per-model venv"
             )
         self.model_id = model_id

@@ -187,7 +187,7 @@ def test_pull_installs_pip_downloads_and_writes_catalog(tmp_catalog):
         mock_download.return_value = "/fake/cache/soprano"
         pull("soprano-80m")
         mock_create.assert_called_once()
-        # install_into_venv called twice: once for muse[server], once for
+        # install_into_venv called twice: once for museq[server], once for
         # the model's pip_extras.
         assert mock_install.call_count == 2
         mock_download.assert_called_once()
@@ -450,7 +450,7 @@ def test_pull_installs_pip_extras_into_venv_not_system(tmp_catalog):
          patch("muse.core.catalog.check_system_packages", return_value=[]):
         pull("soprano-80m")
     # Find the call that installed soprano's actual pip_extras. There are
-    # two calls in total: muse[server] first, then the model's pip_extras.
+    # two calls in total: museq[server] first, then the model's pip_extras.
     model_call = next(
         c for c in mock_install.call_args_list
         if any("transformers" in p for p in c.args[1])

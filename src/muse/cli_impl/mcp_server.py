@@ -34,7 +34,7 @@ def run_mcp_server(
     except ImportError as e:
         print(
             f"error: muse mcp requires the mcp Python package "
-            f"(install via `pip install 'muse[server]'`). Original: {e}",
+            f"(install via `pip install 'museq[server]'`). Original: {e}",
             file=sys.stderr,
         )
         return 2

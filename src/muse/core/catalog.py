@@ -405,7 +405,7 @@ def pull(identifier: str) -> None:
          and pulled via the bundled-script path.
 
     All paths create a per-model venv at `<MUSE_CATALOG_DIR>/venvs/<id>/`,
-    install muse[server] (editable) + pip_extras, fetch weights, and
+    install museq[server] (editable) + pip_extras, fetch weights, and
     record the venv's Python path so `muse serve` can spawn workers
     with the right interpreter.
     """

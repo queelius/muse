@@ -27,7 +27,7 @@ def _server_extras(pyproject: dict) -> list[str]:
 
 
 def test_server_extras_include_python_multipart(pyproject):
-    """Every per-model venv installs muse[server]; multipart is required
+    """Every per-model venv installs museq[server]; multipart is required
     by FastAPI's Form/UploadFile decorators. The audio_transcription
     router uses both at import time, so a worker missing multipart
     crashes before the worker can serve anything.

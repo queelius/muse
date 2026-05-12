@@ -3,7 +3,7 @@
 Pure functions: numpy audio array + sample_rate + channels -> bytes.
 
 WAV uses stdlib `wave`; always available.
-FLAC uses `soundfile` (already in muse[audio] for Kokoro).
+FLAC uses `soundfile` (already in museq[audio] for Kokoro).
 MP3 / Opus go through `pydub` + `ffmpeg`. Lazy-imported and
 swappable; if either dep is missing, raises UnsupportedFormatError so
 the route layer can convert to a clean 400 envelope.

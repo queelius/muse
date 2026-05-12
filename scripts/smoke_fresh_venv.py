@@ -8,7 +8,7 @@ diffusers) pulls in at load time.
 The host muse install (with broad dev extras: server, audio, images,
 embeddings, dev) typically has those transitives already, so the test
 suite passes. A fresh per-model venv created via `muse pull` does NOT,
-because `pull` installs ONLY `muse[server]` plus the model's declared
+because `pull` installs ONLY `museq[server]` plus the model's declared
 `pip_extras`. Transitive holes show up there.
 
 This script reproduces the `muse pull` install path against a clean
@@ -86,12 +86,12 @@ def _create_venv(target: Path) -> None:
 
 
 def _install_muse(venv_python: Path, repo_root: Path) -> tuple[int, str]:
-    """Install muse[server] (editable) into the venv. Returns (rc, captured)."""
+    """Install museq[server] (editable) into the venv. Returns (rc, captured)."""
     cmd = [
         str(venv_python), "-m", "pip", "install",
         "-e", f"{repo_root}[server]",
     ]
-    logger.info("installing muse[server]: %s", " ".join(cmd))
+    logger.info("installing museq[server]: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -210,9 +210,9 @@ def smoke_one(
         return SmokeResult(
             model_id=model_id,
             ok=False,
-            error=f"pip install muse[server] failed: {reason}",
+            error=f"pip install museq[server] failed: {reason}",
             duration_s=duration,
-            label=f"{model_id}: FAIL (pip muse[server]: {reason})",
+            label=f"{model_id}: FAIL (pip museq[server]: {reason})",
         )
 
     rc, captured = _install_pip_extras(py, pip_extras)

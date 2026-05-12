@@ -1,6 +1,6 @@
-"""`muse models refresh`: re-install muse[server,<extras>] into per-model venvs.
+"""`muse models refresh`: re-install museq[server,<extras>] into per-model venvs.
 
-Use case: muse[server] gets a new dep (e.g. python-multipart in v0.13.1)
+Use case: museq[server] gets a new dep (e.g. python-multipart in v0.13.1)
 and existing per-model venvs created by older `muse pull` calls are
 stale. Without this command, hitting the new code path inside an old
 venv crashes the worker; the user has fixed this by hand multiple
@@ -73,7 +73,7 @@ class RefreshResult:
 
 
 def _infer_extras(modality: str) -> list[str]:
-    """Look up muse[server,<extras>] for a modality tag. Unknown -> []."""
+    """Look up museq[server,<extras>] for a modality tag. Unknown -> []."""
     return list(MODALITY_EXTRAS.get(modality, []))
 
 
@@ -151,14 +151,14 @@ def refresh_one(
         return RefreshResult(
             model_id,
             "failed",
-            f"muse[server] install timed out after {_PIP_TIMEOUT}s",
+            f"museq[server] install timed out after {_PIP_TIMEOUT}s",
             extras=muse_extras,
         )
     if proc.returncode != 0:
         return RefreshResult(
             model_id,
             "failed",
-            "muse[server] install failed",
+            "museq[server] install failed",
             proc.stdout + proc.stderr,
             extras=muse_extras,
         )

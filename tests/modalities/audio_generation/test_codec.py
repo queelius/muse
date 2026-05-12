@@ -1,7 +1,7 @@
 """Tests for audio_generation codec.
 
 WAV is stdlib, always available. FLAC uses soundfile (already in
-muse[audio]). MP3 + Opus go through pydub + ffmpeg; tests assert
+museq[audio]). MP3 + Opus go through pydub + ffmpeg; tests assert
 clean UnsupportedFormatError when either dep is missing.
 """
 import io
