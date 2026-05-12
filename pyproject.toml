@@ -3,17 +3,40 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "muse"
-version = "0.45.1"
+# PyPI distribution name. The short name `muse` is squatted by an
+# abandoned 2010s placeholder; `pymuse`/`musepy` are owned by the
+# astronomy community (ESO's MUSE instrument). The Python import path,
+# CLI binary, GitHub repo, and project identity stay `muse`; only the
+# PyPI label is `museq`. See docs/superpowers/specs/ for context.
+name = "museq"
+version = "0.45.2"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]
-description = "Muse: model-agnostic multi-modality generation server (audio, images)"
+description = "Self-hostable OpenAI-compatible multi-modality AI server: 20 modalities (chat, image, audio, video, 3D, embeddings, OCR, segmentation), plugin runtimes (PyTorch, diffusers, llama-cpp-python)."
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+    "ai", "machine-learning", "ml", "llm", "openai-compatible",
+    "multi-modality", "multimodal", "text-to-speech", "speech-to-text",
+    "text-to-image", "image-generation", "embeddings",
+    "vision-language-model", "vlm", "3d-generation", "server",
+    "self-hosted", "huggingface", "pytorch", "diffusers",
+]
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: FastAPI",
 ]
 dependencies = [
   "huggingface_hub",
@@ -31,6 +54,9 @@ license = {file = "LICENSE"}
 
 [project.urls]
 Homepage = "https://github.com/queelius/muse"
+Repository = "https://github.com/queelius/muse"
+Documentation = "https://github.com/queelius/muse/blob/main/CLAUDE.md"
+Changelog = "https://github.com/queelius/muse/releases"
 Issues = "https://github.com/queelius/muse/issues"
 
 [project.optional-dependencies]
