@@ -1,53 +1,59 @@
 """Per-family backend_path dispatch in the 3d/generation HF resolver.
 
 The dispatcher picks a runtime path based on repo name. Shap-E gets
-the new ShapERuntime path; TRELLIS / Wonder3D / Hunyuan3D-2 fall
-through to TripoSR until their dedicated runtimes ship in v0.44.0+.
-TripoSR repos remain on TripoSR (regression watchdog).
+ShapERuntime; TRELLIS gets TRELLISRuntime; Hunyuan3D-2 gets
+Hunyuan3DRuntime. Unknown repos (TripoSR, Wonder3D) fall through to
+TripoSRRuntime (regression watchdog).
 """
+import pytest
 
 
 def test_runtime_path_for_shap_e():
-    from muse.modalities.model_3d_generation.hf import _runtime_path_for
-    assert _runtime_path_for("openai/shap-e").endswith(":ShapERuntime")
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("openai/shap-e").runtime_path.endswith(":ShapERuntime")
 
 
 def test_runtime_path_for_trellis_now_dispatches_to_TRELLISRuntime():
     """v0.44.0 promotes TRELLIS from TripoSR fallback to dedicated runtime."""
-    from muse.modalities.model_3d_generation.hf import _runtime_path_for
-    assert _runtime_path_for("JeffreyXiang/TRELLIS-image-large").endswith(
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("JeffreyXiang/TRELLIS-image-large").runtime_path.endswith(
         ":TRELLISRuntime"
     )
 
 
 def test_runtime_path_for_wonder3d():
-    """Until v0.44.0, Wonder3D still falls back to TripoSR."""
-    from muse.modalities.model_3d_generation.hf import _runtime_path_for
-    assert _runtime_path_for("flamehaze1115/wonder3d-v1.0").endswith(":TripoSRRuntime")
+    """Wonder3D is deferred; falls back to TripoSR."""
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("flamehaze1115/wonder3d-v1.0").runtime_path.endswith(":TripoSRRuntime")
 
 
 def test_runtime_path_for_triposr():
     """Regression watchdog: TripoSR repos always route to TripoSRRuntime."""
-    from muse.modalities.model_3d_generation.hf import _runtime_path_for
-    assert _runtime_path_for("stabilityai/TripoSR").endswith(":TripoSRRuntime")
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("stabilityai/TripoSR").runtime_path.endswith(":TripoSRRuntime")
 
 
-def test_pip_extras_for_shap_e():
-    from muse.modalities.model_3d_generation.hf import (
-        _SHAPE_E_RUNTIME_PATH, _pip_extras_for,
-    )
-    extras = _pip_extras_for(_SHAPE_E_RUNTIME_PATH)
-    assert any("diffusers" in e for e in extras)
-    assert any("trimesh" in e for e in extras)
-    assert any("torch" in e for e in extras)
+@pytest.mark.parametrize(
+    "repo_id,required_substrings",
+    [
+        ("openai/shap-e", ("torch", "diffusers", "trimesh")),
+        ("JeffreyXiang/TRELLIS-image-large", ("torch", "transformers", "trimesh", "trellis")),
+        ("tencent/Hunyuan3D-2", ("torch", "trimesh", "hy3dgen")),
+    ],
+)
+def test_pip_extras_for_family_includes_required_substrings(repo_id, required_substrings):
+    from muse.modalities.model_3d_generation.hf import _family_for
+    extras = _family_for(repo_id).pip_extras
+    for sub in required_substrings:
+        assert any(sub in e for e in extras), (
+            f"pip_extras for {repo_id!r} must include {sub!r}; got {extras!r}"
+        )
 
 
 def test_pip_extras_for_triposr_default():
-    """Non-Shap-E paths get the original TripoSR pip_extras."""
-    from muse.modalities.model_3d_generation.hf import _pip_extras_for
-    extras = _pip_extras_for(
-        "muse.modalities.model_3d_generation.runtimes.triposr:TripoSRRuntime"
-    )
+    """Non-family repos get the original TripoSR pip_extras (fallback path)."""
+    from muse.modalities.model_3d_generation.hf import _family_for
+    extras = _family_for("some/unknown-3d-repo").pip_extras
     assert any("tsr" in e for e in extras)
 
 
@@ -66,23 +72,6 @@ def test_family_for_unknown_returns_default_triposr_family():
     assert family.runtime_path == _TRIPOSR_RUNTIME_PATH
     assert family.capability_overrides == {}
     assert family.trust_remote_code is False
-
-
-def test_text_capable_hints_does_not_overlap_with_family_overrides():
-    """Regression: hints list and family capability_overrides should not
-    both claim the same family. The override path owns Shap-E's text-to-3d
-    capability."""
-    from muse.modalities.model_3d_generation.hf import (
-        _FAMILIES, _TEXT_CAPABLE_NAME_HINTS,
-    )
-    for family in _FAMILIES:
-        if "supports_text_to_3d" in family.capability_overrides:
-            for hint in family.name_hints:
-                assert hint not in _TEXT_CAPABLE_NAME_HINTS, (
-                    f"Family hint {hint!r} also in _TEXT_CAPABLE_NAME_HINTS; "
-                    f"this is double-dispatch (override AND hint list). "
-                    f"Remove from hint list since the override owns it."
-                )
 
 
 def test_family_for_rejects_false_positive_substring():
@@ -144,20 +133,10 @@ def test_resolve_trellis_manifest_includes_trust_remote_code_capability():
     assert caps.get("supports_text_to_3d") is False
 
 
-def test_pip_extras_for_trellis_includes_transformers_and_trimesh():
-    from muse.modalities.model_3d_generation.hf import (
-        _TRELLIS_RUNTIME_PATH, _pip_extras_for,
-    )
-    extras = _pip_extras_for(_TRELLIS_RUNTIME_PATH)
-    assert any("transformers" in e for e in extras)
-    assert any("trimesh" in e for e in extras)
-    assert any("torch" in e for e in extras)
-
-
 def test_runtime_path_for_hunyuan3d_now_dispatches_to_Hunyuan3DRuntime():
     """v0.45.0 promotes Hunyuan3D-2 from TripoSR fallback to dedicated runtime."""
-    from muse.modalities.model_3d_generation.hf import _runtime_path_for
-    assert _runtime_path_for("tencent/Hunyuan3D-2").endswith(":Hunyuan3DRuntime")
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("tencent/Hunyuan3D-2").runtime_path.endswith(":Hunyuan3DRuntime")
 
 
 def test_family_for_hunyuan3d_has_trust_remote_code_true():
@@ -185,15 +164,3 @@ def test_resolve_hunyuan3d_manifest_includes_dual_direction_capabilities():
     assert caps.get("trust_remote_code") is True
     assert caps.get("supports_image_to_3d") is True
     assert caps.get("supports_text_to_3d") is True
-
-
-def test_pip_extras_for_hunyuan3d_includes_hy3dgen_git_url():
-    from muse.modalities.model_3d_generation.hf import (
-        _HUNYUAN3D_RUNTIME_PATH, _pip_extras_for,
-    )
-    extras = _pip_extras_for(_HUNYUAN3D_RUNTIME_PATH)
-    assert any("hy3dgen" in e or "Hunyuan3D" in e for e in extras), (
-        "pip_extras must include the hy3dgen SDK install URL"
-    )
-    assert any("trimesh" in e for e in extras)
-    assert any("torch" in e for e in extras)

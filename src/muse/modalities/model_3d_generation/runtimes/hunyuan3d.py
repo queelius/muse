@@ -1,68 +1,13 @@
 """Hunyuan3DRuntime: dual-direction 3D generation via Tencent's Hunyuan3D-2 SDK.
 
-First muse 3D runtime supporting BOTH image_to_3d and text_to_3d from
-one model. Wraps the Tencent SDK (hy3dgen package, installed from
-GitHub). API verified against the real SDK at implementation time;
-mocks reflect the actual return shapes, not speculation.
+First muse 3D runtime supporting BOTH image_to_3d and text_to_3d from one model.
+Text-to-3D is a two-stage pipeline: text -> HunyuanDiTPipeline -> PIL image ->
+Hunyuan3DDiTFlowMatchingPipeline -> GLB mesh.
 
-API VERIFIED (2026-05-06):
-
-  Shape pipeline: Hunyuan3DDiTFlowMatchingPipeline from hy3dgen.shapegen
-  Text-to-image pipeline: HunyuanDiTPipeline from hy3dgen.text2image
-
-  TEXT-TO-3D ARCHITECTURE (verified from gradio_app.py):
-    Text-to-3D is a two-stage pipeline: text -> HunyuanDiTPipeline ->
-    PIL image -> Hunyuan3DDiTFlowMatchingPipeline -> mesh.
-    The shape pipeline is image-only; there is NO native text-conditioned
-    3D pipeline. The T2I pipeline is loaded lazily (optional dep; only
-    required when text_to_3d is actually called).
-
-  Shape pipeline from_pretrained signature (from pipelines.py):
-    Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        model_path,
-        device='cuda',
-        dtype=torch.float16,
-        use_safetensors=True,
-        variant='fp16',
-        subfolder='hunyuan3d-dit-v2-0',
-    )
-    Device placement: .to(device, dtype) method exists and is used
-    internally by from_pretrained; device/dtype are passed directly
-    to from_pretrained, not chained afterward.
-
-  Shape pipeline call signature:
-    pipeline(
-        image=<PIL.Image.Image or path>,
-        num_inference_steps=50,
-        guidance_scale=5.0,
-        generator=None,
-        octree_resolution=384,
-        output_type='trimesh',  # default
-        **kwargs,
-    ) -> List[List[trimesh.Trimesh]]
-    Result is result[0][0] for the first mesh (outer list = batch,
-    inner list = samples per batch element).
-
-  Text-to-image pipeline:
-    HunyuanDiTPipeline(
-        'Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled',
-        device=device,
-    )
-    Call: t2i_pipeline(prompt) -> PIL.Image.Image
-
-  Mesh attributes: standard trimesh .vertices and .faces (the SDK's
-  internal export_to_trimesh already converts from .mesh_v/.mesh_f
-  before returning the trimesh.Trimesh objects).
-
-  Device placement: device and dtype kwargs to from_pretrained.
-  The .to() method is also available for explicit chaining.
-
-Verified against:
+API VERIFIED (2026-05-06) against:
   - https://github.com/Tencent/Hunyuan3D-2/blob/main/hy3dgen/shapegen/pipelines.py
   - https://github.com/Tencent/Hunyuan3D-2/blob/main/gradio_app.py
   - https://github.com/Tencent/Hunyuan3D-2/blob/main/minimal_demo.py
-  on 2026-05-06.
-
 If the SDK changes upstream, update mocks in
 tests/modalities/model_3d_generation/runtimes/test_hunyuan3d.py and the
 _HUNYUAN3D_PIPELINE / _HUNYUAN3D_T2I_PIPELINE sentinel logic here.
@@ -73,6 +18,7 @@ patch sentinels directly; _ensure_deps short-circuits on non-None.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from muse.core.runtime_helpers import (
@@ -93,15 +39,15 @@ trimesh: Any = None
 _LAST_IMPORT_ERROR: Exception | None = None
 
 
-def _ensure_deps() -> None:
+def _ensure_deps(load_t2i: bool = False) -> None:
     """Lazy-import torch + Hunyuan3D shape pipeline + trimesh.
 
-    The T2I pipeline (_HUNYUAN3D_T2I_PIPELINE) is intentionally NOT
-    loaded here; it is loaded on first call to text_to_3d via
-    _ensure_t2i_dep(). This avoids loading the heavier text-to-image
-    model for operators who only use image-to-3D.
+    When load_t2i=True, also imports the HunyuanDiT-v1.1 text-to-image
+    pipeline. The T2I import is gated so the shape-only path does not
+    pay the extra import cost.
     """
     global torch, _HUNYUAN3D_PIPELINE, trimesh, _LAST_IMPORT_ERROR
+    global _HUNYUAN3D_T2I_PIPELINE
     if torch is None:
         try:
             import torch as _t
@@ -123,17 +69,7 @@ def _ensure_deps() -> None:
         except Exception as e:  # noqa: BLE001
             logger.debug("Hunyuan3DRuntime trimesh unavailable: %s", e)
             _LAST_IMPORT_ERROR = e
-
-
-def _ensure_t2i_dep() -> None:
-    """Lazy-import HunyuanDiTPipeline for text-to-3D.
-
-    Called only on the first text_to_3d request. Populates the
-    _HUNYUAN3D_T2I_PIPELINE sentinel. Uses the same short-circuit
-    pattern: skips if already populated (tests pre-populate with mock).
-    """
-    global _HUNYUAN3D_T2I_PIPELINE, _LAST_IMPORT_ERROR
-    if _HUNYUAN3D_T2I_PIPELINE is None:
+    if load_t2i and _HUNYUAN3D_T2I_PIPELINE is None:
         try:
             from hy3dgen.text2image import HunyuanDiTPipeline as _p
             _HUNYUAN3D_T2I_PIPELINE = _p
@@ -165,7 +101,10 @@ class Hunyuan3DRuntime:
         shape generation. SDK default.
       - ``t2i_model_id`` (default 'Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled'):
         HF repo for the text-to-image model used in text_to_3d.
-        Lazily loaded on first text_to_3d call.
+        Lazily loaded on first text_to_3d call. Note: this is a separate
+        HF repo downloaded on first text_to_3d use; pre-cache via
+        `huggingface-cli download Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled`
+        for air-gapped hosts.
     """
 
     model_id: str
@@ -216,16 +155,15 @@ class Hunyuan3DRuntime:
         self._default_num_inference_steps = int(num_inference_steps)
         self._default_guidance_scale = float(guidance_scale)
         self._t2i_model_id = t2i_model_id
-        # Lazily loaded on first text_to_3d call.
+        # Lazily loaded on first text_to_3d call; guarded by _t2i_lock.
         self._t2i_pipeline: Any = None
+        self._t2i_lock = threading.Lock()
 
         src = local_dir or hf_repo
         with LoadTimer(f"loading Hunyuan3D-2 shape pipeline from {src}", logger):
             # from_pretrained signature (verified 2026-05-06):
-            #   from_pretrained(model_path, device, dtype, use_safetensors,
-            #                   variant, subfolder)
-            # device and dtype are forwarded directly; device placement is
-            # handled inside from_pretrained (calls .to(device, dtype) internally).
+            #   from_pretrained(model_path, device, dtype, ...)
+            # device and dtype are forwarded directly.
             self._pipeline = _HUNYUAN3D_PIPELINE.from_pretrained(
                 src,
                 device=self._device,
@@ -243,7 +181,7 @@ class Hunyuan3DRuntime:
         Uses _HUNYUAN3D_T2I_PIPELINE sentinel so tests can inject a mock
         without triggering a real download.
         """
-        _ensure_t2i_dep()
+        _ensure_deps(load_t2i=True)
         if _HUNYUAN3D_T2I_PIPELINE is None:
             raise RuntimeError(
                 "HunyuanDiTPipeline (text-to-image) is not loadable; the "
@@ -252,10 +190,39 @@ class Hunyuan3DRuntime:
                 "See: https://github.com/Tencent/Hunyuan3D-2"
             )
         with LoadTimer("loading Hunyuan3D-2 text-to-image pipeline", logger):
-            return _HUNYUAN3D_T2I_PIPELINE(
-                self._t2i_model_id,
-                device=self._device,
-            )
+            try:
+                return _HUNYUAN3D_T2I_PIPELINE(
+                    self._t2i_model_id,
+                    device=self._device,
+                )
+            except (OSError, EnvironmentError) as e:
+                raise RuntimeError(
+                    f"text_to_3d requires the HunyuanDiT-v1.1-Diffusers-Distilled "
+                    f"weights from {self._t2i_model_id!r}, which were not found in "
+                    f"the local HuggingFace cache and could not be downloaded. "
+                    f"Pre-cache the weights via "
+                    f"`huggingface-cli download {self._t2i_model_id}` before using "
+                    f"text_to_3d, or ensure network access from this host. "
+                    f"Original error: {e}"
+                ) from e
+
+    def _parse_call_kwargs(self, kwargs: dict) -> tuple[int, Any, int, float]:
+        """Read (n, seed, num_inference_steps, guidance_scale) from per-call kwargs."""
+        return (
+            int(kwargs.get("n", 1)),
+            kwargs.get("seed", self._default_seed),
+            int(kwargs.get("num_inference_steps", self._default_num_inference_steps)),
+            float(kwargs.get("guidance_scale", self._default_guidance_scale)),
+        )
+
+    def _make_result(self, output: Any) -> Generation3DResult:
+        """Convert a Hunyuan3D pipeline output to a Generation3DResult."""
+        mesh = output[0][0]
+        return Generation3DResult(
+            glb_bytes=bytes(mesh.export(file_type="glb")),
+            model_id=self.model_id,
+            format="glb",
+        )
 
     def image_to_3d(
         self, image: Any, **kwargs: Any,
@@ -281,14 +248,7 @@ class Hunyuan3DRuntime:
             One item per sample (n items total). Each item carries a
             geometry-only GLB blob.
         """
-        n = int(kwargs.get("n", 1))
-        seed = kwargs.get("seed", self._default_seed)
-        num_inference_steps = int(
-            kwargs.get("num_inference_steps", self._default_num_inference_steps)
-        )
-        guidance_scale = float(
-            kwargs.get("guidance_scale", self._default_guidance_scale)
-        )
+        n, seed, steps, gs = self._parse_call_kwargs(kwargs)
 
         generator = None
         if seed is not None and torch is not None:
@@ -303,18 +263,11 @@ class Hunyuan3DRuntime:
             # (the default). result[0][0] is the first mesh.
             output = self._pipeline(
                 image=image,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
+                num_inference_steps=steps,
+                guidance_scale=gs,
                 generator=generator,
             )
-            # output is List[List[trimesh.Trimesh]]: outer = batch, inner = samples.
-            mesh = output[0][0]
-            glb_bytes = mesh.export(file_type="glb")
-            results.append(Generation3DResult(
-                glb_bytes=bytes(glb_bytes),
-                model_id=self.model_id,
-                format="glb",
-            ))
+            results.append(self._make_result(output))
         return results
 
     def text_to_3d(
@@ -344,18 +297,13 @@ class Hunyuan3DRuntime:
         list[Generation3DResult]
             One item per sample (n items total).
         """
-        n = int(kwargs.get("n", 1))
-        seed = kwargs.get("seed", self._default_seed)
-        num_inference_steps = int(
-            kwargs.get("num_inference_steps", self._default_num_inference_steps)
-        )
-        guidance_scale = float(
-            kwargs.get("guidance_scale", self._default_guidance_scale)
-        )
+        n, seed, steps, gs = self._parse_call_kwargs(kwargs)
 
-        # Lazy-load the text-to-image pipeline on first use.
+        # Lazy-load the text-to-image pipeline on first use (double-checked lock).
         if self._t2i_pipeline is None:
-            self._t2i_pipeline = self._load_t2i_pipeline()
+            with self._t2i_lock:
+                if self._t2i_pipeline is None:  # re-check inside the lock
+                    self._t2i_pipeline = self._load_t2i_pipeline()
 
         generator = None
         if seed is not None and torch is not None:
@@ -370,15 +318,9 @@ class Hunyuan3DRuntime:
             # Stage 2: image -> mesh via Hunyuan3DDiTFlowMatchingPipeline.
             output = self._pipeline(
                 image=image,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
+                num_inference_steps=steps,
+                guidance_scale=gs,
                 generator=generator,
             )
-            mesh = output[0][0]
-            glb_bytes = mesh.export(file_type="glb")
-            results.append(Generation3DResult(
-                glb_bytes=bytes(glb_bytes),
-                model_id=self.model_id,
-                format="glb",
-            ))
+            results.append(self._make_result(output))
         return results
