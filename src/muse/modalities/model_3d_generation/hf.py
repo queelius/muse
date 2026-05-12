@@ -82,6 +82,30 @@ _TRELLIS_PIP_EXTRAS: tuple[str, ...] = (
     # per-model venv at ~/.muse/venvs/trellis-image/.
     "trellis @ git+https://github.com/microsoft/TRELLIS.git",
 )
+_HUNYUAN3D_RUNTIME_PATH = (
+    "muse.modalities.model_3d_generation.runtimes.hunyuan3d:Hunyuan3DRuntime"
+)
+# Hunyuan3D-2 uses Tencent's standalone SDK (NOT a transformers/diffusers
+# AutoPipeline). Verified at v0.45.0 implementation time. Tencent's
+# GitHub repo has native-build deps (kaolin, xformers, custom CUDA
+# extensions) that pip cannot install cleanly on all systems; Tencent's
+# setup script is the official install path. Users may need to follow
+# that script manually after `muse pull hunyuan3d-2` if the git
+# pip-install below fails. See: https://github.com/Tencent/Hunyuan3D-2/
+_HUNYUAN3D_PIP_EXTRAS: tuple[str, ...] = (
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "transformers>=4.46.0",
+    "diffusers>=0.27.0",
+    "trimesh",
+    "accelerate",
+    "Pillow",
+    "numpy",
+    # Tencent Hunyuan3D-2 SDK from GitHub. May fail on hosts without
+    # CUDA toolchain or compatible NVIDIA driver. Fallback: clone +
+    # follow setup.sh inside the per-model venv at ~/.muse/venvs/hunyuan3d-2/.
+    "hy3dgen @ git+https://github.com/Tencent/Hunyuan3D-2.git",
+)
 
 
 @dataclass(frozen=True)
@@ -114,7 +138,7 @@ class _Family:
 
 
 _FAMILIES: tuple[_Family, ...] = (
-    _Family(
+    _Family(  # Shap-E (unchanged from v0.43.x)
         name_hints=("shap-e", "shape-e"),
         runtime_path=_SHAPE_E_RUNTIME_PATH,
         pip_extras=_SHAPE_E_PIP_EXTRAS,
@@ -123,7 +147,7 @@ _FAMILIES: tuple[_Family, ...] = (
             "supports_text_to_3d": True,
         },
     ),
-    _Family(
+    _Family(  # TRELLIS (unchanged from v0.44.0)
         name_hints=("trellis",),
         runtime_path=_TRELLIS_RUNTIME_PATH,
         pip_extras=_TRELLIS_PIP_EXTRAS,
@@ -133,9 +157,17 @@ _FAMILIES: tuple[_Family, ...] = (
         },
         trust_remote_code=True,
     ),
-    # Future entries added here (one _Family per release):
-    #   _Family(name_hints=("wonder3d",), runtime_path=_WONDER3D_RUNTIME_PATH, ...),
-    #   _Family(name_hints=("hunyuan3d",), trust_remote_code=True, ...),
+    _Family(  # NEW v0.45.0: Hunyuan3D-2, dual-direction
+        name_hints=("hunyuan3d",),
+        runtime_path=_HUNYUAN3D_RUNTIME_PATH,
+        pip_extras=_HUNYUAN3D_PIP_EXTRAS,
+        capability_overrides={
+            "supports_image_to_3d": True,
+            "supports_text_to_3d": True,
+        },
+        trust_remote_code=True,
+    ),
+    # Wonder3D: deferred indefinitely (v0.44.0 decision).
 )
 
 _DEFAULT_FAMILY = _Family(
@@ -198,19 +230,17 @@ _NAME_HINTS = (
 )
 # Tag-based fallback. The canonical 3D generation tags on HF.
 _TAG_HINTS = ("image-to-3d", "text-to-3d")
-# Repo-name substrings whose model declares supports_text_to_3d=True.
-# These are the fallback hint-list for families NOT yet registered in
-# _FAMILIES above. Once a family gets a _Family entry with explicit
-# capability_overrides for supports_text_to_3d, it must be REMOVED from
-# this list to prevent double-dispatch (the override path owns it).
-# NOTE: Shap-E and TRELLIS are intentionally absent here. Both get
-# their supports_text_to_3d value via capability_overrides in _FAMILIES;
-# the guard in _resolve skips this check when capability_overrides has
-# already set the flag. Removing from the hint list enforces the
-# invariant tested by test_text_capable_hints_does_not_overlap_with_family_overrides.
-_TEXT_CAPABLE_NAME_HINTS = (
-    "hunyuan3d",     # remains until v0.45.0 wires it into a _Family entry
-)
+# Reserved tuple. All known text-capable 3D families now declare their
+# capability via _Family.capability_overrides; the hint-list path
+# is preserved as a fallback for ad-hoc URIs whose family is not yet
+# registered. Add a hint here only when a new ad-hoc text-capable
+# repo lands without a corresponding _Family entry.
+# NOTE: Shap-E, TRELLIS, and Hunyuan3D-2 are intentionally absent here.
+# All get their supports_text_to_3d value via capability_overrides in
+# _FAMILIES; the guard in _resolve skips this check when
+# capability_overrides has already set the flag. The invariant is
+# tested by test_text_capable_hints_does_not_overlap_with_family_overrides.
+_TEXT_CAPABLE_NAME_HINTS: tuple[str, ...] = ()
 
 
 def _model_id(repo_id: str) -> str:

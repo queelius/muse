@@ -152,3 +152,48 @@ def test_pip_extras_for_trellis_includes_transformers_and_trimesh():
     assert any("transformers" in e for e in extras)
     assert any("trimesh" in e for e in extras)
     assert any("torch" in e for e in extras)
+
+
+def test_runtime_path_for_hunyuan3d_now_dispatches_to_Hunyuan3DRuntime():
+    """v0.45.0 promotes Hunyuan3D-2 from TripoSR fallback to dedicated runtime."""
+    from muse.modalities.model_3d_generation.hf import _runtime_path_for
+    assert _runtime_path_for("tencent/Hunyuan3D-2").endswith(":Hunyuan3DRuntime")
+
+
+def test_family_for_hunyuan3d_has_trust_remote_code_true():
+    from muse.modalities.model_3d_generation.hf import _family_for
+    family = _family_for("tencent/Hunyuan3D-2")
+    assert family.trust_remote_code is True
+
+
+def test_family_for_hunyuan3d_has_dual_direction_capabilities():
+    """Hunyuan3D-2 is muse's first 3D runtime supporting BOTH directions."""
+    from muse.modalities.model_3d_generation.hf import _family_for
+    family = _family_for("tencent/Hunyuan3D-2")
+    assert family.capability_overrides.get("supports_image_to_3d") is True
+    assert family.capability_overrides.get("supports_text_to_3d") is True
+
+
+def test_resolve_hunyuan3d_manifest_includes_dual_direction_capabilities():
+    """Integration: synthesized manifest carries both flags + trust_remote_code."""
+    from unittest.mock import MagicMock
+    from muse.modalities.model_3d_generation.hf import _resolve
+    info = MagicMock()
+    info.card_data = None
+    resolved = _resolve("tencent/Hunyuan3D-2", None, info)
+    caps = resolved.manifest["capabilities"]
+    assert caps.get("trust_remote_code") is True
+    assert caps.get("supports_image_to_3d") is True
+    assert caps.get("supports_text_to_3d") is True
+
+
+def test_pip_extras_for_hunyuan3d_includes_hy3dgen_git_url():
+    from muse.modalities.model_3d_generation.hf import (
+        _HUNYUAN3D_RUNTIME_PATH, _pip_extras_for,
+    )
+    extras = _pip_extras_for(_HUNYUAN3D_RUNTIME_PATH)
+    assert any("hy3dgen" in e or "Hunyuan3D" in e for e in extras), (
+        "pip_extras must include the hy3dgen SDK install URL"
+    )
+    assert any("trimesh" in e for e in extras)
+    assert any("torch" in e for e in extras)

@@ -608,7 +608,7 @@
   uri: hf://tencent/Hunyuan3D-2
   modality: 3d/generation
   size_gb: 5.0
-  description: "Hunyuan3D-2 by Tencent: dual-direction (image and text), ~5GB at fp16, requires trust_remote_code (runtime arrives in v0.45.0)"
+  description: "Hunyuan3D-2 by Tencent: dual-direction (image and text), ~5GB at fp16, requires trust_remote_code"
   capabilities:
     memory_gb: 10.0
     device: cuda
