@@ -1,5 +1,7 @@
 # Muse
 
+[![PyPI](https://img.shields.io/pypi/v/museq)](https://pypi.org/project/museq/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/museq)](https://pypi.org/project/museq/)
 ![fresh-venv-smoke](https://github.com/queelius/muse/actions/workflows/fresh-venv-smoke.yml/badge.svg)
 
 Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface:

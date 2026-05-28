@@ -82,6 +82,6 @@ fallback covers in-tree imports without an installed muse.
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("muse")
+    __version__ = version("museq")
 except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
