@@ -188,13 +188,20 @@ class TripoSRRuntime:
 
     def image_to_3d(
         self,
-        image_path: str,
+        image: Any,
         *,
         n: int = 1,
         seed: int | None = None,
         **_: Any,
     ) -> list[Generation3DResult]:
         """Generate ``n`` 3D meshes from one input image.
+
+        Parameters
+        ----------
+        image:
+            A ``PIL.Image.Image`` (RGB or convertible to RGB). The route
+            layer decodes the incoming multipart/form-data file into a PIL
+            image before calling this method.
 
         Returns a list of ``Generation3DResult``, each carrying the GLB
         bytes for one mesh. ``n`` is capped at 2 by the route layer.
@@ -204,12 +211,12 @@ class TripoSRRuntime:
         ``seed`` kwarg is accepted for protocol uniformity (other
         backends use it) but ignored by TripoSR.
         """
-        # Open as RGB. TripoSR's no-remove-bg path expects an RGB image
+        # Convert to RGB. TripoSR's no-remove-bg path expects an RGB image
         # with the foreground already isolated against a near-uniform
         # background. The runtime intentionally does NOT call rembg or
         # resize_foreground (the latter requires RGBA input from rembg
         # anyway); operators wanting that pipeline preprocess upstream.
-        image = PIL_Image.open(image_path).convert("RGB")
+        image = image.convert("RGB")
 
         results: list[Generation3DResult] = []
         # Single forward pass produces one set of scene_codes that all
@@ -233,9 +240,8 @@ class TripoSRRuntime:
             # surface as a clear error rather than an empty GLB).
             if not meshes:
                 raise RuntimeError(
-                    f"TripoSR extract_mesh produced no meshes for "
-                    f"{image_path!r}; the input may not have a clear "
-                    f"foreground subject"
+                    "TripoSR extract_mesh produced no meshes; the input "
+                    "image may not have a clear foreground subject"
                 )
             mesh = meshes[0]
             results.append(mesh_to_glb_result(mesh, self.model_id))

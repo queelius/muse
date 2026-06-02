@@ -187,7 +187,7 @@ async def _decode_image_parts(
             elif ptype is None:
                 new_content.append(part)
             else:
-                # 1. unsupported content type — always reject first.
+                # 1. unsupported content type: always reject first.
                 raise _ImageDecodeError(
                     "unsupported_content_type",
                     f"content type {ptype!r} not supported; "
@@ -266,23 +266,30 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
 
         if not req.stream:
-            result = await asyncio.to_thread(model.chat, messages, **kwargs)
+            def _call_chat():
+                with model._inference_lock:
+                    return model.chat(messages, **kwargs)
+            result = await asyncio.to_thread(_call_chat)
             return result_to_openai_dict(result)
 
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def _producer():
-            # call_soon_threadsafe + put_nowait avoids blocking the
-            # producer thread on the event loop's scheduler. The earlier
-            # run_coroutine_threadsafe(...).result() pattern would
-            # deadlock if the loop was busy. Mirrors audio_speech.
+            # Acquire the per-model inference lock for the ENTIRE stream.
+            # A single GPU model cannot run two generations concurrently;
+            # holding the lock across the full stream serializes requests
+            # to one model without blocking siblings on the same worker.
+            # Lock is released in the finally block, which fires on normal
+            # completion, client disconnect, or exception (H2 fix).
+            model._inference_lock.acquire()
             try:
                 for chunk in model.chat_stream(messages, **kwargs):
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
             except Exception as e:
                 loop.call_soon_threadsafe(queue.put_nowait, e)
             finally:
+                model._inference_lock.release()
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
         threading.Thread(target=_producer, daemon=True).start()

@@ -22,9 +22,9 @@ the client.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
-import tempfile
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -33,6 +33,12 @@ from pydantic import BaseModel, Field
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.model_3d_generation.codec import encode_3d_response
+
+
+try:
+    from PIL import Image as _PIL_Image
+except Exception:  # noqa: BLE001
+    _PIL_Image = None  # type: ignore[assignment]
 
 
 MODALITY = "3d/generation"
@@ -211,14 +217,23 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"prompt instead",
             )
 
-        # Write the upload to a temp file so the backend can read it
-        # by path (mirrors audio_classification's probe-with-temp-file
-        # pattern + the v0.40.x cleanup discipline). delete=False
-        # because the inference thread reads it after this with-block;
-        # the finally block unlinks unconditionally.
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = tmp.name
+        # Decode the raw bytes to a PIL Image once, in the async layer,
+        # before entering the worker thread. All runtimes (TripoSR,
+        # TRELLIS, Hunyuan3D) accept PIL.Image.Image; the unified contract
+        # avoids runtime-specific path vs. PIL dispatching.
+        if _PIL_Image is None:
+            return error_response(
+                500, "internal_error",
+                "Pillow is not installed in this worker; cannot decode "
+                "the uploaded image. Run `muse models refresh <id>`.",
+            )
+        try:
+            pil_image = _PIL_Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception as e:  # noqa: BLE001
+            return error_response(
+                400, "invalid_image",
+                f"uploaded file is not a valid image: {e}",
+            )
 
         kwargs: dict = {"n": n}
         if seed is not None:
@@ -226,19 +241,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         def _call():
             with backend._inference_lock:
-                return backend.image_to_3d(tmp_path, **kwargs)
+                return backend.image_to_3d(pil_image, **kwargs)
 
         try:
-            try:
-                results = await asyncio.to_thread(_call)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("image_to_3d failed")
-                return error_response(500, "internal_error", str(e))
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            results = await asyncio.to_thread(_call)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("image_to_3d failed")
+            return error_response(500, "internal_error", str(e))
 
         body = encode_3d_response(
             results,

@@ -23,7 +23,7 @@ itself).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Union, runtime_checkable
+from typing import Any, Protocol, Union, runtime_checkable
 
 
 @dataclass
@@ -47,9 +47,13 @@ class ImageTo3DBackend(Protocol):
     """
 
     def image_to_3d(
-        self, image_path: str, **kwargs,
+        self, image: "Any", **kwargs,
     ) -> list[Generation3DResult]:
-        """Generate one or more 3D assets from a single image."""
+        """Generate one or more 3D assets from a single PIL.Image.Image.
+
+        The route layer decodes the incoming multipart/form-data file into
+        a PIL image (RGB) before calling this method.
+        """
         ...
 
 

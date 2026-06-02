@@ -102,18 +102,20 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 # so a long transcription (large-v3 on a 60s clip is
                 # multi-second wall time) doesn't block /health, the
                 # gateway's per-worker probing, or sibling requests.
-                # The `with` stays open across the await — tmp.name is
+                # The `with` stays open across the await -- tmp.name is
                 # valid for the duration of the thread.
-                result = await asyncio.to_thread(
-                    backend.transcribe,
-                    tmp.name,
-                    task=task,
-                    language=None if task == "translate" else language,
-                    prompt=prompt,
-                    temperature=temperature,
-                    word_timestamps=want_words,
-                    vad_filter=vad_filter,
-                )
+                def _transcribe():
+                    with backend._inference_lock:
+                        return backend.transcribe(
+                            tmp.name,
+                            task=task,
+                            language=None if task == "translate" else language,
+                            prompt=prompt,
+                            temperature=temperature,
+                            word_timestamps=want_words,
+                            vad_filter=vad_filter,
+                        )
+                result = await asyncio.to_thread(_transcribe)
             except Exception as e:  # noqa: BLE001
                 # PyAV/ffmpeg decode failures land here; we don't try to
                 # distinguish finely (message surface is good enough).

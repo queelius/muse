@@ -104,10 +104,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         # backend.rerank is sync (cross-encoder predict); offload so a
         # slow inference doesn't block sibling /health, /v1/models, or
-        # other in-flight requests on the same worker.
-        results = await asyncio.to_thread(
-            backend.rerank, req.query, req.documents, req.top_n,
-        )
+        # other in-flight requests on the same worker. Per-backend lock
+        # serializes calls into one model without blocking siblings on
+        # the same worker (H2 fix, v0.45.7).
+        def _rerank():
+            with backend._inference_lock:
+                return backend.rerank(req.query, req.documents, req.top_n)
+
+        results = await asyncio.to_thread(_rerank)
         body = encode_rerank_response(
             results,
             model_id=effective_id,

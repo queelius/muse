@@ -162,3 +162,35 @@ def test_rerank_default_model_resolves_first_registered():
     })
     assert r.status_code == 200
     assert r.json()["model"] == "bge-reranker-v2-m3"
+
+
+# H2 regression guard: backend.rerank must be called under _inference_lock.
+
+def test_rerank_called_under_inference_lock():
+    """backend.rerank must execute while _inference_lock is held (H2 fix)."""
+    import threading
+
+    class _LockAssertingBackend:
+        model_id = "bge-reranker-v2-m3"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+            self.lock_was_held = False
+
+        def rerank(self, query, documents, top_n):
+            self.lock_was_held = self._inference_lock.locked()
+            return [RerankResult(index=0, relevance_score=0.9, document_text="x")]
+
+    backend = _LockAssertingBackend()
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": backend.model_id})
+    from muse.modalities.text_rerank import build_router as _build
+    from muse.core.server import create_app as _create_app
+    from fastapi.testclient import TestClient as _TC
+    app = _create_app(registry=reg, routers={MODALITY: _build(reg)})
+    client = _TC(app)
+    r = client.post("/v1/rerank", json={"query": "q", "documents": ["x"]})
+    assert r.status_code == 200, r.text
+    assert backend.lock_was_held, (
+        "backend.rerank was called without holding _inference_lock"
+    )

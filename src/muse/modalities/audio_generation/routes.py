@@ -92,14 +92,15 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
         )
 
     def _call():
-        kwargs = {
-            "duration": req.duration,
-            "seed": req.seed,
-            "steps": req.steps,
-            "guidance": req.guidance,
-            "negative_prompt": req.negative_prompt,
-        }
-        return model.generate(req.prompt, **kwargs)
+        with model._inference_lock:
+            kwargs = {
+                "duration": req.duration,
+                "seed": req.seed,
+                "steps": req.steps,
+                "guidance": req.guidance,
+                "negative_prompt": req.negative_prompt,
+            }
+            return model.generate(req.prompt, **kwargs)
 
     try:
         result = await asyncio.to_thread(_call)

@@ -309,3 +309,166 @@ def test_route_silent_when_no_tools_requested(caplog):
     })
     assert r.status_code == 200
     assert caplog.text == ""
+
+
+# H2 regression guards: _inference_lock must be held around backend calls.
+
+def test_non_streaming_chat_called_under_inference_lock():
+    """Non-streaming model.chat() must execute while _inference_lock is held.
+
+    A backend that asserts self._inference_lock.locked() during chat() lets us
+    verify the route holds the lock across the blocking call (H2 fix).
+    """
+    import threading
+
+    class _LockAssertingModel:
+        model_id = "lock-chat"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+            self.lock_was_held = False
+
+        def chat(self, messages, **kwargs):
+            self.lock_was_held = self._inference_lock.locked()
+            return ChatResult(
+                id="x", model_id=self.model_id, created=0,
+                choices=[ChatChoice(
+                    index=0,
+                    message={"role": "assistant", "content": "ok"},
+                    finish_reason="stop",
+                )],
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        def chat_stream(self, messages, **kwargs):
+            return iter([])
+
+    model = _LockAssertingModel()
+    reg = ModalityRegistry()
+    reg.register("chat/completion", model)
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "lock-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert model.lock_was_held, (
+        "model.chat() was called without holding _inference_lock"
+    )
+
+
+def test_streaming_chat_lock_released_after_stream_completes():
+    """_inference_lock must be released after the stream completes.
+
+    The producer thread acquires the lock for the whole stream; the event
+    generator drains the queue. After the HTTP response is consumed, the
+    lock must be free again (H2 fix for streaming path).
+    """
+    import threading
+    import time
+
+    class _StreamingLockModel:
+        model_id = "lock-stream"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+
+        def chat(self, messages, **kwargs):
+            raise NotImplementedError
+
+        def chat_stream(self, messages, **kwargs):
+            # Verify the lock is held while streaming.
+            assert self._inference_lock.locked(), (
+                "lock should be held during chat_stream iteration"
+            )
+            yield ChatChunk(
+                id="s", model_id=self.model_id, created=0,
+                choice_index=0, delta={"content": "hi"}, finish_reason=None,
+            )
+            yield ChatChunk(
+                id="s", model_id=self.model_id, created=0,
+                choice_index=0, delta={}, finish_reason="stop",
+            )
+
+    model = _StreamingLockModel()
+    reg = ModalityRegistry()
+    reg.register("chat/completion", model)
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+    client = TestClient(app)
+
+    with client.stream(
+        "POST", "/v1/chat/completions",
+        json={
+            "model": "lock-stream",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as r:
+        assert r.status_code == 200
+        r.read()
+
+    # Give the producer thread a moment to finish and release the lock.
+    deadline = time.time() + 2.0
+    while model._inference_lock.locked() and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert not model._inference_lock.locked(), (
+        "_inference_lock was not released after streaming completed"
+    )
+
+
+def test_streaming_lock_released_after_chat_stream_raises():
+    """H2+H6 composition: when chat_stream raises mid-stream, the
+    _inference_lock must still be released (H2) AND the error must
+    surface as an SSE error event (H6 interaction with the route layer).
+    """
+    import threading
+    import time
+
+    class _ExplodingStreamModel:
+        model_id = "exploding"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+
+        def chat(self, messages, **kwargs):
+            raise NotImplementedError
+
+        def chat_stream(self, messages, **kwargs):
+            yield ChatChunk(
+                id="e", model_id=self.model_id, created=0,
+                choice_index=0, delta={"content": "partial"}, finish_reason=None,
+            )
+            raise RuntimeError("mid-stream kaboom")
+
+    model = _ExplodingStreamModel()
+    reg = ModalityRegistry()
+    reg.register("chat/completion", model)
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+    client = TestClient(app)
+
+    with client.stream(
+        "POST", "/v1/chat/completions",
+        json={
+            "model": "exploding",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = r.read().decode()
+
+    # Error must surface as SSE error event (not silent truncation).
+    assert "mid-stream kaboom" in body or "internal" in body
+
+    # Lock must be released after the stream (H2 must compose with H6).
+    deadline = time.time() + 2.0
+    while model._inference_lock.locked() and time.time() < deadline:
+        time.sleep(0.01)
+    assert not model._inference_lock.locked(), (
+        "_inference_lock was not released after chat_stream raised"
+    )

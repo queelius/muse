@@ -87,10 +87,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         # backend.summarize is sync (transformers generate); offload so a
         # slow inference doesn't block sibling /health, /v1/models, or
-        # other in-flight requests on the same worker.
-        result = await asyncio.to_thread(
-            backend.summarize, req.text, req.length, req.format,
-        )
+        # other in-flight requests on the same worker. Per-backend lock
+        # serializes calls into one model without blocking siblings on
+        # the same worker (H2 fix, v0.45.7).
+        def _summarize():
+            with backend._inference_lock:
+                return backend.summarize(req.text, req.length, req.format)
+
+        result = await asyncio.to_thread(_summarize)
         body = encode_summarization_response(result)
         return JSONResponse(content=body)
 

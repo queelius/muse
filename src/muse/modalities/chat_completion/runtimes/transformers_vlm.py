@@ -209,9 +209,18 @@ class HFVisionLanguageModel:
 
         generate_inputs = {**inputs, **gen_kwargs}
 
+        # Capture exceptions from the generate thread so they can be
+        # re-raised by the caller (H6 fix). On transformers >= 4.40,
+        # TextIteratorStreamer.__iter__ re-raises stored exceptions
+        # automatically. On 4.36-4.39 it does not; the explicit holder
+        # guarantees propagation on all supported transformers versions.
+        exc_holder: list[BaseException] = []
+
         def _generate_with_cleanup() -> None:
             try:
                 self._model.generate(**generate_inputs)
+            except Exception as e:  # noqa: BLE001
+                exc_holder.append(e)
             finally:
                 streamer.end()
 
@@ -229,6 +238,12 @@ class HFVisionLanguageModel:
                 finish_reason=None,
             )
         thread.join()
+        # Re-raise after the streamer is fully drained and thread joined.
+        # This ensures no partial output is left dangling; the exception
+        # propagates to chat_completion/routes.py's _producer, which
+        # forwards it to the SSE error event.
+        if exc_holder:
+            raise exc_holder[0]
         yield ChatChunk(
             id=chunk_id,
             model_id=self.model_id,

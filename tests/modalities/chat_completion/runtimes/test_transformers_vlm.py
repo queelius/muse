@@ -276,12 +276,44 @@ def test_chat_stream_calls_streamer_end_when_generate_raises():
     # Make generate raise inside the daemon thread.
     runtime._model.generate = MagicMock(side_effect=RuntimeError("CUDA OOM"))
 
-    chunks = list(runtime.chat_stream([{"role": "user", "content": "x"}]))
-    # The exception fires in the daemon thread; the consumer drains the
-    # empty streamer (end() was called in finally) and finishes cleanly.
+    # H6 fix: generate() exceptions now propagate through chat_stream.
+    # The streamer.end() call in finally must still fire (no deadlock),
+    # AND the exception must be re-raised after thread.join().
+    with pytest.raises(RuntimeError, match="CUDA OOM"):
+        list(runtime.chat_stream([{"role": "user", "content": "x"}]))
     fake_streamer.end.assert_called()
-    # The final finish_reason chunk must still be emitted.
-    assert chunks[-1].finish_reason == "stop"
+
+
+def test_chat_stream_generate_exception_propagates_not_swallowed():
+    """H6 regression guard: generate() failures must propagate through
+    chat_stream as exceptions, not silently produce a truncated response.
+
+    On transformers 4.36-4.39, TextIteratorStreamer.__iter__ does NOT
+    re-raise stored exceptions; the explicit exc_holder pattern ensures
+    propagation on all supported versions.
+    """
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+
+    # Streamer yields one token before generate raises in the background;
+    # simulates a mid-stream failure.
+    fake_streamer = MagicMock()
+    tokens_iter = iter(["partial-token"])
+    fake_streamer.__iter__ = MagicMock(return_value=tokens_iter)
+    fake_streamer.end = MagicMock()
+    mod.TextIteratorStreamer = MagicMock(return_value=fake_streamer)
+
+    runtime = mod.HFVisionLanguageModel(
+        model_id="m", hf_repo="x", device="cpu",
+    )
+    runtime._model.generate = MagicMock(
+        side_effect=RuntimeError("GPU out of memory")
+    )
+
+    with pytest.raises(RuntimeError, match="GPU out of memory"):
+        list(runtime.chat_stream([{"role": "user", "content": "x"}]))
+    # streamer.end() must still have been called (no deadlock).
+    fake_streamer.end.assert_called()
 
 
 def test_chat_stream_thread_is_daemon():

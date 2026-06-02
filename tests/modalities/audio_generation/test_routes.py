@@ -284,3 +284,41 @@ def test_response_is_bytes_not_json():
     r = client.post("/v1/audio/music", json={"prompt": "x"})
     assert r.headers["content-type"].startswith("audio/")
     assert "content-length" in {k.lower() for k in r.headers}
+
+
+# H2 regression guard: backend.generate must be called under _inference_lock.
+
+def test_music_generate_called_under_inference_lock():
+    """backend.generate must execute while _inference_lock is held (H2 fix).
+
+    A fake backend asserts the lock is locked when generate() is called.
+    """
+    import threading
+
+    class _LockAssertingBackend:
+        model_id = "lock-test"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+            self.lock_was_held = False
+            audio = np.zeros(4410, dtype=np.float32)
+            self._result = AudioGenerationResult(
+                audio=audio, sample_rate=44100, channels=1, duration_seconds=0.1,
+            )
+
+        def generate(self, prompt, **kwargs):
+            self.lock_was_held = self._inference_lock.locked()
+            return self._result
+
+    backend = _LockAssertingBackend()
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={
+        "model_id": backend.model_id, "modality": MODALITY, "capabilities": {},
+    })
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app)
+    r = client.post("/v1/audio/music", json={"prompt": "test"})
+    assert r.status_code == 200, r.text
+    assert backend.lock_was_held, (
+        "backend.generate was called without holding _inference_lock"
+    )

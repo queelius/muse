@@ -78,18 +78,19 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             width, height = map(int, req.size.split("x"))
 
         def _call_one(seed_offset: int):
-            kwargs = {
-                "negative_prompt": req.negative_prompt,
-                "frames": req.frames,
-                "fps": req.fps,
-                "width": width, "height": height,
-                "steps": req.steps, "guidance": req.guidance,
-                "init_image": init_image,
-                "strength": req.strength,
-            }
-            if req.seed is not None:
-                kwargs["seed"] = req.seed + seed_offset
-            return model.generate(req.prompt, **kwargs)
+            with model._inference_lock:
+                kwargs = {
+                    "negative_prompt": req.negative_prompt,
+                    "frames": req.frames,
+                    "fps": req.fps,
+                    "width": width, "height": height,
+                    "steps": req.steps, "guidance": req.guidance,
+                    "init_image": init_image,
+                    "strength": req.strength,
+                }
+                if req.seed is not None:
+                    kwargs["seed"] = req.seed + seed_offset
+                return model.generate(req.prompt, **kwargs)
 
         results = []
         for i in range(req.n):

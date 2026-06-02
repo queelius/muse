@@ -92,16 +92,18 @@ def _wire_basic_runtime(mod, *, glb_payload=b"fake-glb-bytes"):
 
 
 def test_image_to_3d_returns_glb_bytes():
-    """One image -> one GLB blob with format='glb' and the right model_id."""
+    """One PIL image -> one GLB blob with format='glb' and the right model_id."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    fake_model, fake_mesh, _ = _wire_basic_runtime(mod, glb_payload=b"glb-payload")
+    fake_model, fake_mesh, fake_pil = _wire_basic_runtime(mod, glb_payload=b"glb-payload")
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr-test",
         hf_repo="stabilityai/TripoSR",
         device="cpu",
     )
-    results = runtime.image_to_3d("/tmp/fake.png")
+    # Route now passes a PIL Image, not a file path.
+    pil_img = fake_pil.open.return_value
+    results = runtime.image_to_3d(pil_img)
 
     assert len(results) == 1
     assert results[0].glb_bytes == b"glb-payload"
@@ -115,14 +117,15 @@ def test_image_to_3d_returns_glb_bytes():
 def test_image_to_3d_n_equals_two_returns_two_results():
     """n=2 returns 2 results (TripoSR is deterministic, so they're identical bytes)."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    _wire_basic_runtime(mod, glb_payload=b"x")
+    fake_model, _, fake_pil = _wire_basic_runtime(mod, glb_payload=b"x")
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr",
         hf_repo="x",
         device="cpu",
     )
-    results = runtime.image_to_3d("/tmp/fake.png", n=2)
+    pil_img = fake_pil.open.return_value
+    results = runtime.image_to_3d(pil_img, n=2)
 
     assert len(results) == 2
     assert all(r.glb_bytes == b"x" for r in results)
@@ -132,13 +135,14 @@ def test_image_to_3d_n_equals_two_returns_two_results():
 def test_image_to_3d_n_zero_clamped_to_one():
     """n=0 (or negative) clamps up to 1 result; never returns an empty list."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    _wire_basic_runtime(mod)
+    _, _, fake_pil = _wire_basic_runtime(mod)
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
     )
+    pil_img = fake_pil.open.return_value
     # n=0 should still yield 1 result (max(1, n)).
-    results = runtime.image_to_3d("/tmp/fake.png", n=0)
+    results = runtime.image_to_3d(pil_img, n=0)
     assert len(results) == 1
 
 
@@ -149,41 +153,47 @@ def test_image_to_3d_seed_kwarg_accepted_but_ignored():
     deterministic so the seed is meaningless to the upstream model.
     """
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    _wire_basic_runtime(mod)
+    _, _, fake_pil = _wire_basic_runtime(mod)
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
     )
+    pil_img = fake_pil.open.return_value
     # Pass seed; expect no error and one result.
-    results = runtime.image_to_3d("/tmp/fake.png", seed=42)
+    results = runtime.image_to_3d(pil_img, seed=42)
     assert len(results) == 1
 
 
-def test_image_path_is_opened_via_pil():
-    """The runtime must open the path via PIL.Image.open(...).convert('RGB')."""
+def test_image_receives_convert_rgb_call():
+    """The runtime calls .convert('RGB') on the PIL image it receives.
+
+    The route layer now passes a PIL.Image.Image directly (not a path);
+    TripoSR still converts to RGB to satisfy its no-remove-bg expectation.
+    """
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
     _, _, fake_pil = _wire_basic_runtime(mod)
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
     )
-    runtime.image_to_3d("/path/to/input.png")
+    pil_img = fake_pil.open.return_value
+    runtime.image_to_3d(pil_img)
 
-    fake_pil.open.assert_called_once_with("/path/to/input.png")
-    # The opened image got .convert('RGB') called on it.
-    fake_pil.open.return_value.convert.assert_called_once_with("RGB")
+    # The passed image got .convert('RGB') called on it.
+    pil_img.convert.assert_called_once_with("RGB")
 
 
 def test_extract_mesh_called_with_resolution_and_vertex_color():
     """Constructor's mc_resolution + has_vertex_color flow into extract_mesh."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    fake_model, _, _ = _wire_basic_runtime(mod)
+    fake_model, _, fake_pil = _wire_basic_runtime(mod)
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
         mc_resolution=128, has_vertex_color=True,
     )
-    runtime.image_to_3d("/tmp/fake.png")
+    pil_img = fake_pil.open.return_value
+    runtime.image_to_3d(pil_img)
 
     args, kwargs = fake_model.extract_mesh.call_args
     # Second positional arg is has_vertex_color.
@@ -251,12 +261,13 @@ def test_config_and_weight_name_overrides_forwarded():
 def test_forward_call_passes_device():
     """The model forward call must be invoked with [image] and device=<resolved>."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    fake_model, _, _ = _wire_basic_runtime(mod)
+    fake_model, _, fake_pil = _wire_basic_runtime(mod)
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
     )
-    runtime.image_to_3d("/tmp/fake.png")
+    pil_img = fake_pil.open.return_value
+    runtime.image_to_3d(pil_img)
 
     # fake_model is callable; the runtime invokes it as
     # `self._model([image], device=self._device)`. Inspect the
@@ -271,28 +282,30 @@ def test_forward_call_passes_device():
 def test_empty_meshes_raises_clear_runtime_error():
     """If extract_mesh returns [], the runtime raises with a clear message."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    fake_model, _, _ = _wire_basic_runtime(mod)
+    fake_model, _, fake_pil = _wire_basic_runtime(mod)
     fake_model.extract_mesh = MagicMock(return_value=[])
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
     )
+    pil_img = fake_pil.open.return_value
     with pytest.raises(RuntimeError, match="produced no meshes"):
-        runtime.image_to_3d("/tmp/empty.png")
+        runtime.image_to_3d(pil_img)
 
 
 def test_glb_bytes_field_is_concrete_bytes():
     """If trimesh export returns a bytearray-like, the runtime coerces to bytes
     so downstream codec.b64encode never fails on a non-bytes object."""
     import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    fake_model, fake_mesh, _ = _wire_basic_runtime(mod)
+    fake_model, fake_mesh, fake_pil = _wire_basic_runtime(mod)
     # Some trimesh versions return memoryview / bytearray; coerce.
     fake_mesh.export = MagicMock(return_value=bytearray(b"ba"))
 
     runtime = mod.TripoSRRuntime(
         model_id="triposr", hf_repo="x", device="cpu",
     )
-    results = runtime.image_to_3d("/tmp/fake.png")
+    pil_img = fake_pil.open.return_value
+    results = runtime.image_to_3d(pil_img)
     assert isinstance(results[0].glb_bytes, bytes)
     assert results[0].glb_bytes == b"ba"
 

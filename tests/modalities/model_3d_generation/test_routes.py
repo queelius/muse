@@ -8,7 +8,7 @@ before the runtime is invoked.
 from __future__ import annotations
 
 import base64
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -29,7 +29,7 @@ class _FakeBackend:
     ) -> None:
         self.model_id = model_id
         self._glb_bytes = glb_bytes
-        self.last_input: str | None = None
+        self.last_input = None
         self.last_kwargs: dict | None = None
         self.image_called = 0
         self.text_called = 0
@@ -46,8 +46,8 @@ class _FakeBackend:
             for _ in range(n)
         ]
 
-    def image_to_3d(self, image_path, **kwargs):
-        self.last_input = image_path
+    def image_to_3d(self, image, **kwargs):
+        self.last_input = image
         self.last_kwargs = kwargs
         self.image_called += 1
         n = kwargs.get("n", 1) or 1
@@ -57,6 +57,22 @@ class _FakeBackend:
             )
             for _ in range(n)
         ]
+
+
+def _fake_pil_image():
+    """Return a mock PIL.Image that satisfies routes._PIL_Image checks."""
+    img = MagicMock(name="PIL.Image")
+    img.convert = MagicMock(return_value=img)
+    return img
+
+
+def _valid_png_bytes():
+    """Return bytes for a minimal 1x1 RGB PNG that PIL can decode."""
+    from PIL import Image as PILImage
+    import io as _io
+    buf = _io.BytesIO()
+    PILImage.new("RGB", (1, 1), color=(0, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _client(backend, manifest=None):
@@ -239,7 +255,7 @@ def test_image_route_returns_envelope():
     client = _client(backend)
     r = client.post(
         "/v1/3d/from-image",
-        files={"image": ("a.png", b"FAKE-PNG-BYTES", "image/png")},
+        files={"image": ("a.png", _valid_png_bytes(), "image/png")},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -257,7 +273,7 @@ def test_image_route_url_response_format():
     client = _client(backend)
     r = client.post(
         "/v1/3d/from-image",
-        files={"image": ("a.png", b"PNG", "image/png")},
+        files={"image": ("a.png", _valid_png_bytes(), "image/png")},
         data={"response_format": "url"},
     )
     assert r.status_code == 200, r.text
@@ -380,7 +396,7 @@ def test_image_route_forwards_n_and_seed_kwargs():
     client = _client(backend)
     r = client.post(
         "/v1/3d/from-image",
-        files={"image": ("a.png", b"PNG", "image/png")},
+        files={"image": ("a.png", _valid_png_bytes(), "image/png")},
         data={"n": "2", "seed": "99"},
     )
     assert r.status_code == 200, r.text
@@ -390,33 +406,42 @@ def test_image_route_forwards_n_and_seed_kwargs():
     assert len(r.json()["data"]) == 2
 
 
-def test_image_route_passes_path_to_backend():
-    """Route writes upload to a temp path; backend.image_to_3d gets a real path."""
-    import os
+def test_image_route_passes_pil_image_to_backend():
+    """Route decodes the upload to a PIL Image; backend.image_to_3d receives
+    a PIL.Image.Image (not a str path). This is the regression guard for H1."""
+    from PIL import Image as PILImage
     backend = _FakeBackend()
     client = _client(backend)
+    # Use a valid 1x1 PNG so PIL can actually decode it.
+    import io as _io
+    buf = _io.BytesIO()
+    PILImage.new("RGB", (1, 1), color=(255, 0, 0)).save(buf, format="PNG")
+    png_bytes = buf.getvalue()
     r = client.post(
         "/v1/3d/from-image",
-        files={"image": ("a.png", b"FAKE-PNG", "image/png")},
+        files={"image": ("a.png", png_bytes, "image/png")},
     )
     assert r.status_code == 200, r.text
     assert backend.last_input is not None
-    # The path is a real temp path (string), not the bytes themselves.
-    assert isinstance(backend.last_input, str)
-    # Temp file is cleaned up after the call.
-    assert not os.path.exists(backend.last_input)
+    # Must be a PIL Image instance, NOT a str path.
+    assert isinstance(backend.last_input, PILImage.Image), (
+        f"expected PIL.Image.Image, got {type(backend.last_input)}"
+    )
 
 
-def test_image_route_temp_file_cleaned_after_exception():
-    """Even when the backend raises, the temp file must be unlinked."""
+def test_image_route_backend_exception_no_temp_file_left():
+    """Even when the backend raises, no temp files should be left (no temp file
+    is created in the new PIL-based flow)."""
     import os
-    paths_seen: list[str] = []
+    import glob
+    import tempfile
+    inputs_seen: list = []
 
     backend = MagicMock()
     backend.model_id = "broken"
 
-    def _raise(path, **kwargs):
-        paths_seen.append(path)
+    def _raise(image, **kwargs):
+        inputs_seen.append(image)
         raise RuntimeError("boom")
 
     backend.image_to_3d = MagicMock(side_effect=_raise)
@@ -428,23 +453,34 @@ def test_image_route_temp_file_cleaned_after_exception():
             "supports_image_to_3d": True,
         },
     }
+    from PIL import Image as PILImage
+    import io as _io
+    buf = _io.BytesIO()
+    PILImage.new("RGB", (1, 1)).save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+
     reg = ModalityRegistry()
     reg.register(MODALITY, backend, manifest=manifest)
     app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
     c = TestClient(app)
     r = c.post(
         "/v1/3d/from-image",
-        files={"image": ("a.png", b"PNG", "image/png")},
+        files={"image": ("a.png", png_bytes, "image/png")},
     )
     assert r.status_code == 500, r.text
     assert r.json()["error"]["code"] == "internal_error"
     assert "boom" in r.json()["error"]["message"]
-    # Temp path was passed and is now unlinked even though the call failed.
-    assert paths_seen, "backend.image_to_3d was never called"
-    assert not os.path.exists(paths_seen[0])
+    # Backend was invoked with a PIL image.
+    assert inputs_seen, "backend.image_to_3d was never called"
 
 
 def test_image_route_backend_exception_returns_500():
+    from PIL import Image as PILImage
+    import io as _io
+    buf = _io.BytesIO()
+    PILImage.new("RGB", (1, 1)).save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+
     backend = MagicMock()
     backend.model_id = "broken"
     backend.image_to_3d = MagicMock(side_effect=RuntimeError("boom"))
@@ -461,7 +497,7 @@ def test_image_route_backend_exception_returns_500():
     c = TestClient(app)
     r = c.post(
         "/v1/3d/from-image",
-        files={"image": ("a.png", b"PNG", "image/png")},
+        files={"image": ("a.png", png_bytes, "image/png")},
     )
     assert r.status_code == 500, r.text
     body = r.json()
