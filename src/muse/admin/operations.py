@@ -551,9 +551,49 @@ def disable_model(model_id: str, *, state: SupervisorState) -> dict:
     try:
         _restart_worker_inplace(spec_to_restart, device=state.device)
     except Exception:
+        # M12: invariant on restart failure in the disable path.
+        #
+        # At this point:
+        #   - model_id has already been removed from spec_to_restart.models
+        #     (done in Phase 1, under the lock).
+        #   - The catalog `enabled` flag for model_id is already False
+        #     (set_enabled called in Phase 1).
+        #   - _restart_worker_inplace tried to SIGTERM the worker process
+        #     and respawn it. If the restart failed, the worker may be in
+        #     an unknown state: it could be dead, partially started, or
+        #     (if SIGTERM was not delivered) still serving the OLD model
+        #     list that includes model_id.
+        #
+        # INTENT of disable is "stop serving model_id." On restart failure
+        # we cannot guarantee the new process will not serve the stale
+        # model, so we adopt the defensive invariant:
+        #   REMOVE the worker from state.workers and terminate the process.
+        # This ensures model_id is NOT reachable via any gateway route
+        # (state.workers is the routing source of truth) even if the OS
+        # process is still alive for a moment.
+        #
+        # After this, the operator must re-enable the remaining sibling
+        # models explicitly if they want them served again. The dead spec
+        # is removed from state.workers (no zombie entry); the monitor
+        # will not try to restart it because it's gone from the list.
         with state.lock:
+            # Remove from the live worker list so the gateway cannot route
+            # to this worker. The spec may or may not still be in
+            # state.workers (a concurrent eviction could have removed it);
+            # discard() is safe either way.
+            try:
+                state.workers.remove(spec_to_restart)
+            except ValueError:
+                pass  # already removed by a concurrent operation
             spec_to_restart.status = "dead"
             spec_to_restart.job_id = None
+        # Best-effort SIGTERM: the process may already be dead from the
+        # failed restart attempt, but terminate it to be safe. Errors
+        # are swallowed; the process state is "best effort" at this point.
+        try:
+            _shutdown_workers([spec_to_restart])
+        except Exception:  # noqa: BLE001
+            pass
         raise
     with state.lock:
         spec_to_restart.job_id = None

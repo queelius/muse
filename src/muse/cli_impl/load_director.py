@@ -46,6 +46,15 @@ inside the eviction failure path). The callable injection seam
 (enable_fn, disable_fn, memory_probe) is what tests use; production
 wiring (Task E) will inject the real supervisor's spawn / shutdown
 callables.
+
+H4 (event.wait timeout): waiters on an in-flight cold load call
+  event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS) rather than an
+  unbounded wait(). If the load-winner thread is killed non-cooperatively
+  (SIGKILL/OOM during wait_for_ready), _abort/set() never runs and every
+  waiter would block forever without a timeout. On timeout, the waiter
+  re-enters the decision phase: if the winner succeeded the model will be
+  hot; if the winner failed there will be no LoadEntry and the waiter
+  becomes the new winner. This avoids both permanent hang and tight-spin.
 """
 from __future__ import annotations
 
@@ -61,22 +70,36 @@ from typing import Any, Callable, Literal
 # These are imported at module scope so tests can monkeypatch them on the
 # load_director module's namespace (see tests/cli_impl/test_load_director.py
 # `test_swallows_ioerror_during_write` etc.).
-from muse.core.catalog import _read_catalog, _write_catalog
+from muse.core.catalog import _CATALOG_WRITE_LOCK, _read_catalog, _write_catalog
+
+# M1: _WRITEBACK_LOCK is an alias to the catalog-level _CATALOG_WRITE_LOCK so
+# that the observed-peak writeback in _observed_peak_writeback (which does its
+# own _read_catalog -> mutate -> _write_catalog) participates in the same
+# shared lock as all other catalog RMW sites (probe.py, set_enabled, etc.).
+# Keeping the name _WRITEBACK_LOCK preserves backward compatibility with any
+# code or tests that reference it directly (the tests mock it at the
+# load_director module level, which still works because this binding points
+# at the same Lock object as _CATALOG_WRITE_LOCK in catalog.py).
+_WRITEBACK_LOCK = _CATALOG_WRITE_LOCK
+
+# H4: maximum seconds a waiter will block on an in-flight Event before
+# re-entering the decision phase. The value must exceed the load timeout
+# used by wait_for_ready (120s in production) plus some margin so normal
+# loads never time out. 180s is 60s of headroom above the worst-case
+# wait_for_ready window. A waiter that times out re-decides: if the
+# winner succeeded it takes the hot path; if the winner failed it becomes
+# the new winner. This avoids permanent hang when a winner thread is
+# killed non-cooperatively (SIGKILL / OOM / hardware reset) without
+# introducing a tight spin loop.
+_INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
 
 logger = logging.getLogger(__name__)
 
 
-# Task D: serialize observed-peak writebacks across models so concurrent
-# cold loads of DIFFERENT models cannot lose updates via interleaved
-# read-modify-write. The atomic write-then-rename in `_write_catalog`
-# ensures one writer's tmp -> final rename does not corrupt another's
-# pending tmp file, but it does NOT prevent thread A from reading the
-# catalog, thread B reading + rewriting it, and thread A then writing
-# its (now stale) version back -- losing B's update. A single global
-# Lock on the writeback path eliminates the read-modify-write race
-# without coupling to LoadDirector.lock (which is reserved for in-memory
-# state mutations on the request hot path).
-_WRITEBACK_LOCK = threading.Lock()
+# (M1: _WRITEBACK_LOCK is now an alias to catalog._CATALOG_WRITE_LOCK,
+# defined below near the catalog imports. The old module-level
+# threading.Lock() is removed to prevent two locks guarding the same
+# resource. See the import block above.)
 
 
 # Default headroom margins in GB. Subtracted from live free before the
@@ -274,12 +297,24 @@ class LoadDirector:
             if phase == "wait":
                 # We did not own the load; another thread did. Wait for
                 # its Event to fire and then re-decide.
+                #
+                # H4: use a bounded wait instead of unbounded wait().
+                # If the winner is killed non-cooperatively (SIGKILL/OOM
+                # during the ~120s wait_for_ready), _abort/set() never
+                # runs. With no timeout, every waiter blocks forever.
+                # With a timeout, the waiter wakes and re-enters _decide:
+                # if the winner succeeded the model will be hot; if the
+                # winner failed there will be no LoadEntry and this
+                # thread becomes the new winner. This breaks the permanent
+                # hang without introducing a tight spin loop because each
+                # iteration is bounded by _INFLIGHT_WAIT_TIMEOUT_SECONDS.
                 event = self._get_in_flight_event(model_id)
                 if event is not None:
-                    event.wait()
+                    event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS)
                 # Loop and re-decide. Either the entry is now hot (winner
-                # succeeded) or it's still cold (winner raised) and this
-                # thread will become the new winner.
+                # succeeded) or it's still cold (winner raised or was
+                # killed without calling _abort) and this thread will
+                # become the new winner.
                 continue
 
             if phase == "evict_and_retry":

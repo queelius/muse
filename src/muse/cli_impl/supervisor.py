@@ -409,9 +409,22 @@ def _monitor_workers(
 
     Exits when stop_event is set. Called from the monitor daemon thread
     started by run_supervisor (Task B4).
+
+    Concurrency: `specs` is the live `state.workers` list shared with
+    admin operations (enable/disable) that may call `state.workers.remove`
+    under `state.lock` while the monitor is iterating. To avoid
+    `RuntimeError: list changed size during iteration`, we snapshot the
+    list at the top of each poll tick with `list(specs)`. The snapshot
+    holds a reference to each WorkerSpec (not a copy), so in-place
+    mutations to spec fields (status, failure_count, etc.) are visible
+    to both the monitor and admin operations without extra coordination.
+    A spec removed from `state.workers` during the tick may still be
+    iterated in that tick; its process is already being torn down by the
+    operation that removed it, so any restart the monitor would trigger
+    is harmless (the spec will not be re-added to state.workers).
     """
     while not stop_event.is_set():
-        for spec in specs:
+        for spec in list(specs):  # snapshot: safe against concurrent remove()
             if stop_event.is_set():
                 return
             if spec.status == "dead":

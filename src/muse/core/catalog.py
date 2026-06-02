@@ -23,6 +23,7 @@ import contextlib
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,6 +174,49 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
 
 _known_models_cache: dict[str, CatalogEntry] | None = None
 
+# H5: guards the check-then-populate sequence in known_models() so that
+# two threads racing on the first call do not both run discover_models()
+# (which does importlib imports -- double-executing user script module
+# bodies) and both write the cache. Double-checked locking: outer
+# check outside the lock for the common hot path; inner check under the
+# lock only when the outer miss suggests a first-time build is needed.
+# Lock ordering: _KNOWN_MODELS_LOCK is always acquired BEFORE
+# _CATALOG_WRITE_LOCK (see M1 fix). Never hold _CATALOG_WRITE_LOCK when
+# acquiring _KNOWN_MODELS_LOCK.
+_KNOWN_MODELS_LOCK: threading.Lock = threading.Lock()
+
+# M1: shared lock for ALL catalog read-modify-write sequences.
+#
+# The atomic write-then-rename in _write_catalog prevents file corruption
+# but does NOT prevent lost updates: if thread A reads, thread B reads,
+# thread B writes, then thread A writes, B's update is silently erased.
+#
+# Sites that previously each did their own _read_catalog -> mutate ->
+# _write_catalog without coordination:
+#   - probe.py (_write_probe_results / run_probe)
+#   - admin/operations.py (disable_model's set_enabled + any future
+#     RMW that does not already go through catalog helpers)
+#   - load_director.py (_observed_peak_writeback, previously guarded by
+#     its own _WRITEBACK_LOCK)
+#
+# All callers must hold _CATALOG_WRITE_LOCK for the full
+# read -> mutate -> write sequence. Do NOT hold state.lock or
+# _KNOWN_MODELS_LOCK when acquiring _CATALOG_WRITE_LOCK; that would
+# invert the documented acquisition order (state.lock -> catalog lock).
+#
+# Lock ordering (always acquire in this order to prevent deadlocks):
+#   1. _KNOWN_MODELS_LOCK  (only when building the known_models cache)
+#   2. _CATALOG_WRITE_LOCK (when doing a catalog RMW)
+#   state.lock and _CATALOG_WRITE_LOCK are NEVER held simultaneously;
+#   the plan-under-state.lock then execute-outside-lock discipline in
+#   supervisor and admin operations already keeps catalog writes outside
+#   state.lock.
+#
+# load_director._WRITEBACK_LOCK is an alias to this lock (set when that
+# module imports from here) so existing code using the old name keeps
+# working without changes.
+_CATALOG_WRITE_LOCK: threading.Lock = threading.Lock()
+
 
 def _persisted_manifest_to_catalog_entry(manifest: dict) -> CatalogEntry:
     """Project a catalog-persisted manifest dict onto the CatalogEntry shape.
@@ -213,9 +257,26 @@ def known_models() -> dict[str, CatalogEntry]:
 
     Cached on first call; restart the process to pick up new scripts
     or new resolver pulls.
+
+    H5: double-checked locking around the cache population. The outer
+    check (cache is not None) is fast and lock-free for the common hot
+    path. The inner check under _KNOWN_MODELS_LOCK is the critical
+    section that prevents two concurrent threads from both seeing None,
+    both calling discover_models() (importlib imports -- double-executing
+    user script module bodies), and both writing the cache.
+    Lock ordering: _KNOWN_MODELS_LOCK is always acquired BEFORE
+    _CATALOG_WRITE_LOCK (never the other way around; see M1 note).
     """
     global _known_models_cache
-    if _known_models_cache is None:
+    # Fast path: cache already built.
+    if _known_models_cache is not None:
+        return _known_models_cache
+    # Slow path: acquire the lock and re-check inside it.
+    with _KNOWN_MODELS_LOCK:
+        if _known_models_cache is not None:
+            # Another thread won the race and built the cache while we
+            # waited for the lock.
+            return _known_models_cache
         discovered = discover_models(_model_dirs())
         entries = {
             model_id: _manifest_to_catalog_entry(d)
@@ -526,16 +587,20 @@ def _pull_bundled(model_id: str) -> None:
         else:
             local_dir = snapshot_download(repo_id=entry.hf_repo)
 
-    catalog = _read_catalog()
-    catalog[model_id] = {
-        "pulled_at": datetime.now(timezone.utc).isoformat(),
-        "hf_repo": entry.hf_repo,
-        "local_dir": str(local_dir),
-        "venv_path": str(venv_path),
-        "python_path": str(venv_python(venv_path)),
-        "enabled": True,
-    }
-    _write_catalog(catalog)
+    # M1: hold _CATALOG_WRITE_LOCK for the full read->mutate->write sequence.
+    # The heavy work (venv creation, pip install, HF download) happens above,
+    # outside any lock. Only the catalog file RMW is time-sensitive here.
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        catalog[model_id] = {
+            "pulled_at": datetime.now(timezone.utc).isoformat(),
+            "hf_repo": entry.hf_repo,
+            "local_dir": str(local_dir),
+            "venv_path": str(venv_path),
+            "python_path": str(venv_python(venv_path)),
+            "enabled": True,
+        }
+        _write_catalog(catalog)
     _reset_known_models_cache()
 
 
@@ -625,18 +690,22 @@ def _pull_via_resolver(
     with _hf_quiet_if_needed():
         local_dir = resolved.download(weights_cache)
 
-    catalog = _read_catalog()
-    catalog[model_id] = {
-        "pulled_at": datetime.now(timezone.utc).isoformat(),
-        "hf_repo": manifest["hf_repo"],
-        "local_dir": str(local_dir),
-        "venv_path": str(venv_path),
-        "python_path": str(venv_python(venv_path)),
-        "enabled": True,
-        "source": uri,
-        "manifest": manifest,
-    }
-    _write_catalog(catalog)
+    # M1: hold _CATALOG_WRITE_LOCK for the full read->mutate->write sequence.
+    # The heavy work (resolve, venv creation, pip install, HF download) happens
+    # above, outside any lock. Only the catalog file RMW is protected here.
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        catalog[model_id] = {
+            "pulled_at": datetime.now(timezone.utc).isoformat(),
+            "hf_repo": manifest["hf_repo"],
+            "local_dir": str(local_dir),
+            "venv_path": str(venv_path),
+            "python_path": str(venv_python(venv_path)),
+            "enabled": True,
+            "source": uri,
+            "manifest": manifest,
+        }
+        _write_catalog(catalog)
     _reset_known_models_cache()
 
 
@@ -657,14 +726,21 @@ def remove(model_id: str, *, purge: bool = False) -> None:
         right tool for it.
 
     Tolerates either path being already gone.
+
+    M1: holds _CATALOG_WRITE_LOCK for the full read->pop->write sequence.
+    The rmtree purge steps run OUTSIDE the lock (they are slow and do not
+    touch catalog.json).
     """
     import shutil
-    catalog = _read_catalog()
-    entry = catalog.get(model_id, {}) or {}
-    venv_path = entry.get("venv_path")
-    local_dir = entry.get("local_dir")
-    catalog.pop(model_id, None)
-    _write_catalog(catalog)
+    venv_path: str | None = None
+    local_dir: str | None = None
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        entry = catalog.get(model_id, {}) or {}
+        venv_path = entry.get("venv_path")
+        local_dir = entry.get("local_dir")
+        catalog.pop(model_id, None)
+        _write_catalog(catalog)
     # Resolver-pulled entries appear in known_models() via the persisted
     # manifest path; once removed, that cache must drop them too or
     # `muse models list` keeps reporting a model that no longer exists.
@@ -698,12 +774,17 @@ def set_enabled(model_id: str, enabled: bool) -> None:
 
     Raises KeyError if the model is not in the catalog (not pulled).
     Other catalog fields are preserved.
+
+    M1: holds _CATALOG_WRITE_LOCK for the full read->mutate->write
+    sequence so concurrent mutations on different keys do not lose
+    each other's updates.
     """
-    catalog = _read_catalog()
-    if model_id not in catalog:
-        raise KeyError(f"model {model_id!r} is not pulled")
-    catalog[model_id]["enabled"] = bool(enabled)
-    _write_catalog(catalog)
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        if model_id not in catalog:
+            raise KeyError(f"model {model_id!r} is not pulled")
+        catalog[model_id]["enabled"] = bool(enabled)
+        _write_catalog(catalog)
     # `enabled` flows through known_models() into the CatalogEntry
     # consumers see; without the reset, `muse models list` would
     # display the stale state until the process restarts.

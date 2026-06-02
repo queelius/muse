@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from muse.core.catalog import (
+    _CATALOG_WRITE_LOCK,
     _read_catalog,
     _reset_known_models_cache,
     _write_catalog,
@@ -108,13 +109,17 @@ def run_probe(
     # Persist under measurements.<device>. Per-device keying so the same
     # model can carry both a CPU and a GPU probe; `muse models list`
     # picks based on capabilities.device.
-    catalog = _read_catalog()
-    if model_id in catalog:
-        catalog[model_id].setdefault("measurements", {})
-        device_key = record.get("device", effective_device)
-        catalog[model_id]["measurements"][device_key] = record
-        _write_catalog(catalog)
-        _reset_known_models_cache()
+    # M1: hold _CATALOG_WRITE_LOCK for the full read->mutate->write to
+    # prevent a concurrent probe or observed-peak writeback from losing
+    # this measurement via an interleaved read-modify-write.
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        if model_id in catalog:
+            catalog[model_id].setdefault("measurements", {})
+            device_key = record.get("device", effective_device)
+            catalog[model_id]["measurements"][device_key] = record
+            _write_catalog(catalog)
+    _reset_known_models_cache()
 
     if as_json:
         print(json.dumps(record, indent=2))
