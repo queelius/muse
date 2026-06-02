@@ -129,6 +129,43 @@ def test_post_response_format_frames_b64(client_default):
     assert body["metadata"]["format"] == "frames_b64"
 
 
+def test_frames_b64_exceeding_cap_returns_400(client_default):
+    # RecordingModel emits 5 frames; lower the cap to 3 so frames_b64 trips
+    # the payload guard. mp4/webm are uncapped, so the cap is format-specific.
+    import muse.modalities.video_generation.routes as vroutes
+
+    client, _ = client_default
+    with patch.object(vroutes, "_MAX_FRAMES_B64", 3):
+        r = client.post(
+            "/v1/video/generations",
+            json={"prompt": "x", "model": "fake-vid",
+                  "response_format": "frames_b64"},
+        )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"]["code"] == "invalid_parameter"
+    assert "frames_b64" in body["error"]["message"]
+    assert "MUSE_VIDEO_MAX_FRAMES_B64" in body["error"]["message"]
+
+
+def test_mp4_not_subject_to_frames_b64_cap(client_default):
+    # The same 5-frame result is fine for mp4 even with the frame cap at 3:
+    # the cap only protects the inline-JSON frames_b64 path.
+    import muse.modalities.video_generation.routes as vroutes
+
+    client, _ = client_default
+    fake = _fake_imageio_factory(b"FAKEMP4")
+    with patch.object(vroutes, "_MAX_FRAMES_B64", 3), patch(
+        "muse.modalities.video_generation.codec._try_import_imageio",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/v1/video/generations",
+            json={"prompt": "x", "model": "fake-vid", "response_format": "mp4"},
+        )
+    assert r.status_code == 200
+
+
 def test_post_n_2_returns_two_videos_for_mp4(client_default):
     client, _ = client_default
     fake = _fake_imageio_factory(b"FAKEMP4")

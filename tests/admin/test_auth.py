@@ -84,6 +84,23 @@ class TestVerifyAdminToken:
         body = r.json()
         assert body["detail"]["error"]["type"] == "invalid_request_error"
 
+    def test_whitespace_only_token_treated_as_disabled(self, client, monkeypatch):
+        """A whitespace-only MUSE_ADMIN_TOKEN is an accident, not a secret:
+        treat it as unset (503 closed-by-default), even with a Bearer header."""
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "   ")
+        r = client.get("/protected", headers={"Authorization": "Bearer    "})
+        assert r.status_code == 503
+        assert r.json()["detail"]["error"]["code"] == "admin_disabled"
+
+    def test_token_with_trailing_newline_still_matches(self, client, monkeypatch):
+        """`MUSE_ADMIN_TOKEN=$(cat tokenfile)` leaves a trailing newline; the
+        operator's `Bearer secret` must still authenticate (the env token is
+        stripped before comparison)."""
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret\n")
+        r = client.get("/protected", headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
     def test_token_uses_constant_time_compare(self, client, monkeypatch):
         """Token comparison MUST go through secrets.compare_digest, not `!=`.
 

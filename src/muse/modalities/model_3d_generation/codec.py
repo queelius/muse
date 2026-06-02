@@ -42,6 +42,15 @@ def mesh_to_glb_result(mesh: Any, model_id: str) -> Generation3DResult:
     codec's base64.b64encode call safe on all trimesh releases.
     """
     glb_bytes = bytes(mesh.export(file_type="glb"))
+    # Guard against a degenerate export: a mesh with no vertices/faces (or a
+    # pipeline that silently produced an empty scene) yields zero or near-zero
+    # bytes. Emitting that as a "success" hands the client an unopenable GLB;
+    # fail loud here so the route surfaces a 500 the operator can act on.
+    if not glb_bytes:
+        raise ValueError(
+            "GLB export produced zero bytes; the mesh is empty "
+            "(no geometry was generated)"
+        )
     return Generation3DResult(
         glb_bytes=glb_bytes,
         model_id=model_id,

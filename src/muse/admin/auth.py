@@ -37,13 +37,20 @@ def verify_admin_token(authorization: str | None = Header(default=None)) -> None
     """FastAPI dependency: raise unless caller carries the admin bearer.
 
     Five paths:
-      - env var unset                    -> 503 admin_disabled
+      - env var unset / whitespace-only  -> 503 admin_disabled
       - header missing                   -> 401 missing_token
       - header malformed (no "Bearer ")  -> 401 missing_token
       - header bearer wrong              -> 403 invalid_token
       - header bearer matches            -> return None (route runs)
     """
     expected = os.environ.get(ADMIN_TOKEN_ENV)
+    # Strip the operator-supplied token: a whitespace-only value is treated
+    # as "unset" (closed-by-default), and this defends against the common
+    # `MUSE_ADMIN_TOKEN=$(cat tokenfile)` footgun, where a trailing newline
+    # would otherwise 403 every legitimate `Bearer <token>` request. The
+    # presented token is NOT stripped: it must match the real secret exactly.
+    if expected:
+        expected = expected.strip()
     if not expected:
         raise _err(
             503,

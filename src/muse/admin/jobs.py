@@ -118,12 +118,28 @@ class JobStore:
             return [self._jobs[jid] for jid in reversed(self._order) if jid in self._jobs]
 
     def shutdown(self, timeout: float = 5.0) -> None:
-        """Join live worker threads; called on gateway shutdown."""
+        """Join live worker threads; called on gateway shutdown.
+
+        ``timeout`` is the TOTAL budget shared across all threads (a single
+        deadline), not a per-thread timeout: N hung jobs can no longer
+        stretch shutdown to N*timeout. Threads not joined before the budget
+        is exhausted are daemon threads and die with the process; the count
+        is logged rather than silently dropped.
+        """
         with self._lock:
             threads = [j.thread for j in self._jobs.values() if j.thread is not None]
-        for t in threads:
+        deadline = time.monotonic() + timeout
+        for i, t in enumerate(threads):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "job-thread join budget (%.1fs) exhausted; %d of %d "
+                    "thread(s) left unjoined (daemon, die with process)",
+                    timeout, len(threads) - i, len(threads),
+                )
+                break
             try:
-                t.join(timeout=timeout)
+                t.join(timeout=remaining)
             except Exception as e:  # noqa: BLE001
                 logger.warning("error joining job thread: %s", e)
 

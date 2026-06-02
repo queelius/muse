@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -32,6 +33,14 @@ from muse.modalities.video_generation.codec import (
 MODALITY = "video/generation"
 
 logger = logging.getLogger(__name__)
+
+# frames_b64 inlines every frame as a base64 PNG in one JSON body. At the
+# request caps (duration<=30s, fps<=60) that can reach ~1800 frames, i.e. a
+# multi-hundred-MB response that the worker must hold in memory and serialize
+# at once. mp4/webm are container-compressed and have no such ceiling, so the
+# cap applies only to frames_b64. Tunable for power users; clips above it
+# should use response_format=mp4/webm.
+_MAX_FRAMES_B64 = int(os.environ.get("MUSE_VIDEO_MAX_FRAMES_B64", "240"))
 
 
 class VideoGenerationRequest(BaseModel):
@@ -85,6 +94,20 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         for i in range(req.n):
             r = await asyncio.to_thread(_call_one, i)
             results.append(r)
+
+        # frames_b64 inlines every frame; guard the response payload size.
+        # Checked post-generation because the frame count is only known once
+        # the model has run (duration_seconds/fps may be model defaults).
+        if req.response_format == "frames_b64":
+            total_frames = sum(len(r.frames) for r in results)
+            if total_frames > _MAX_FRAMES_B64:
+                return error_response(
+                    400, "invalid_parameter",
+                    f"frames_b64 would emit {total_frames} frames, exceeding "
+                    f"MUSE_VIDEO_MAX_FRAMES_B64={_MAX_FRAMES_B64}; request a "
+                    f"shorter clip or use response_format=mp4 or webm "
+                    f"(no frame cap).",
+                )
 
         data = []
         for r in results:

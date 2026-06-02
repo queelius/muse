@@ -138,3 +138,13 @@ def test_mesh_to_glb_result_coerces_bytearray_to_bytes():
 
     assert isinstance(result.glb_bytes, bytes)
     assert result.glb_bytes == b"ba-payload"
+
+
+def test_mesh_to_glb_result_raises_on_empty_export():
+    """An empty GLB export (degenerate / no-geometry mesh) must fail loud,
+    not hand the client a zero-byte 'success' it cannot open."""
+    fake_mesh = MagicMock()
+    fake_mesh.export = MagicMock(return_value=b"")
+
+    with pytest.raises(ValueError, match="zero bytes"):
+        mesh_to_glb_result(fake_mesh, "m")

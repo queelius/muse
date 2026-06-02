@@ -8,8 +8,26 @@ import pytest
 from muse.modalities.audio_speech.codec import (
     AudioFormatError,
     audio_to_wav_bytes,
+    float_to_pcm16,
     wav_bytes_to_opus,
 )
+
+
+def test_float_to_pcm16_reaches_full_negative_range():
+    # The shared helper must scale by 32768 (not 32767): -1.0 has to reach
+    # the int16 floor -32768. The streaming route used *32767 before it was
+    # unified onto this helper, which left -32768 unreachable.
+    pcm = float_to_pcm16(np.array([-1.0, 1.0, 0.0], dtype=np.float32))
+    assert pcm.dtype == np.int16
+    assert pcm[0] == -32768
+    assert pcm[1] == 32767  # +1.0 * 32768 = 32768, clipped down to 32767
+    assert pcm[2] == 0
+
+
+def test_float_to_pcm16_clips_out_of_range_input():
+    pcm = float_to_pcm16(np.array([5.0, -5.0], dtype=np.float32))
+    assert pcm[0] == 32767
+    assert pcm[1] == -32768
 
 
 def test_audio_to_wav_bytes_produces_valid_wav():

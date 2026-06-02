@@ -173,13 +173,18 @@ class BartSeq2SeqRuntime:
             input_ids,
             max_new_tokens=max_new_tokens,
         )
-        # Single batch element. Decode and count completion tokens
-        # post-decoding (more honest than the raw token-id sequence
-        # because generate may pad / start with a bos/decoder-start).
+        # Single batch element. Decode the summary with special tokens
+        # stripped, and count completion tokens the same way: exclude the
+        # decoder-start / bos / eos / pad ids that generate() emits so the
+        # billed count matches the text the caller actually received
+        # (raw output_ids.shape[-1] over-counts by ~1-2 special tokens).
         summary = self._tokenizer.decode(
             output_ids[0], skip_special_tokens=True,
         )
-        completion_tokens = int(output_ids.shape[-1])
+        special_ids = set(self._tokenizer.all_special_ids)
+        completion_tokens = sum(
+            1 for tok in output_ids[0].tolist() if tok not in special_ids
+        )
 
         metadata: dict[str, Any] = {}
         if full_len > self._max_input_tokens:

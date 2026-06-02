@@ -114,6 +114,16 @@ class DerivedImageProcessor:
                 f"image_std has {len(image_std)} values but "
                 f"num_channels is {self.num_channels}"
             )
+        # A zero (or negative) std channel makes the (arr - mean) / std
+        # normalization divide by zero -> inf/nan pixels that poison the
+        # whole forward pass silently. Reject it at construction with a
+        # message that points at the override hatch, since this only
+        # reaches here from an explicit capabilities.image_processor_overrides.
+        if image_std is not None and any(s <= 0 for s in image_std):
+            raise ValueError(
+                f"image_std values must all be positive; got {image_std}. "
+                f"A zero/negative std divides by zero during normalization."
+            )
         self.image_mean = image_mean or [0.5] * self.num_channels
         self.image_std = image_std or [0.5] * self.num_channels
 

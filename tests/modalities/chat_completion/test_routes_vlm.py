@@ -121,6 +121,84 @@ def test_multi_image_capability_mismatch_returns_400():
     assert r.json()["error"]["code"] == "too_many_images"
 
 
+def test_too_many_images_counts_per_conversation_not_per_message():
+    # A single-image model must reject 2 images even when split 1-per-message
+    # across two messages: per-message counting would admit them (each <= 1),
+    # but the backend still receives 2 images total. (M5)
+    model = _FakeChatModel(
+        "vlm-single", supports_vision=True, supports_multi_image=False,
+    )
+    client = _client_with_model(model)
+    data_url = _make_data_url()
+    r = client.post("/v1/chat/completions", json={
+        "model": "vlm-single",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+        ],
+    })
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"]["code"] == "too_many_images"
+    assert "conversation" in body["error"]["message"]
+
+
+def test_one_image_per_message_ok_for_multi_image_model():
+    # The same 1-per-message split is fine for a multi-image model.
+    model = _FakeChatModel(
+        "vlm-multi", supports_vision=True, supports_multi_image=True,
+    )
+    client = _client_with_model(model)
+    data_url = _make_data_url()
+    r = client.post("/v1/chat/completions", json={
+        "model": "vlm-multi",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+        ],
+    })
+    assert r.status_code == 200
+
+
+def test_supports_tools_read_from_manifest_not_instance(caplog):
+    # Resolver-pulled GGUFs carry supports_tools in the synthesized manifest,
+    # not as an instance attr. The route must read it from the manifest: a
+    # manifest-declared supports_tools=True suppresses the "tool support
+    # unknown" warning even though the model instance lacks the attribute. (M6)
+    import logging
+
+    model = _FakeChatModel("gguf-tools", supports_vision=False)
+    assert not hasattr(model, "supports_tools")  # capability lives in manifest only
+
+    registry = ModalityRegistry()
+    registry.register(
+        "chat/completion", model,
+        manifest={"model_id": "gguf-tools",
+                  "capabilities": {"supports_tools": True}},
+    )
+    app = FastAPI()
+    app.include_router(build_router(registry))
+    client = TestClient(app)
+
+    with caplog.at_level(logging.WARNING):
+        r = client.post("/v1/chat/completions", json={
+            "model": "gguf-tools",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function",
+                       "function": {"name": "f", "parameters": {}}}],
+        })
+    assert r.status_code == 200
+    assert not any("tool" in rec.message.lower() for rec in caplog.records)
+
+
 def test_invalid_content_part_missing_url_returns_400():
     model = _FakeChatModel("vlm", supports_vision=True, supports_multi_image=True)
     client = _client_with_model(model)

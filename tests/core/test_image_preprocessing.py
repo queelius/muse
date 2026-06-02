@@ -112,6 +112,24 @@ def test_derived_image_processor_validates_image_std_length():
         )
 
 
+def test_derived_image_processor_rejects_zero_std():
+    """A zero std channel would divide by zero during normalization."""
+    from muse.core.image_preprocessing import DerivedImageProcessor
+    with pytest.raises(ValueError, match="must all be positive"):
+        DerivedImageProcessor(
+            num_channels=3, image_size=32, image_std=[0.5, 0.0, 0.5],
+        )
+
+
+def test_derived_image_processor_rejects_negative_std():
+    """A negative std is physically meaningless and flips normalization."""
+    from muse.core.image_preprocessing import DerivedImageProcessor
+    with pytest.raises(ValueError, match="must all be positive"):
+        DerivedImageProcessor(
+            num_channels=1, image_size=32, image_std=[-0.5],
+        )
+
+
 def test_build_image_processor_overrides_skip_auto(tmp_path, monkeypatch):
     """Tier 1: when overrides is set, AutoImageProcessor is NOT called."""
     from muse.core import image_preprocessing as mod

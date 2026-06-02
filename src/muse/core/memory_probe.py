@@ -85,8 +85,11 @@ def gpu_free_gb(device_id: int = 0) -> float | None:
     """
     if not init_pynvml():
         return None
-    # init_pynvml() returning True implies the sentinel is populated.
-    assert pynvml is not None
+    # init_pynvml() returning True implies the sentinel is populated. Guard
+    # with an explicit None-return (not assert: asserts are stripped under
+    # `python -O`, and None is this function's established failure idiom).
+    if pynvml is None:  # pragma: no cover - invariant backstop
+        return None
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         mem = pynvml.nvmlDeviceGetMemoryInfo(handle)

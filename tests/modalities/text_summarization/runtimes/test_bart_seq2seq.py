@@ -22,6 +22,10 @@ def _fake_tensor(seq_len: int):
     t.to.return_value = t
     # tensor[0] -> tensor (decode walks the first batch element)
     t.__getitem__ = lambda self, idx: t
+    # tensor[0].tolist() -> range(seq_len); completion-token counting
+    # filters special ids out of this list (MagicMock's default iterator
+    # is empty, which would zero the count).
+    t.tolist.return_value = list(range(seq_len))
     return t
 
 
@@ -44,6 +48,9 @@ def _fake_tokenizer(input_len_full=200, input_len_truncated=200):
 
     tok.side_effect = _tok_call
     tok.decode.return_value = "summary text"
+    # ids 0 and 1 stand in for decoder-start / eos specials; with output
+    # ids range(seq_len), exactly these two are special.
+    tok.all_special_ids = [0, 1]
     return tok
 
 
@@ -246,10 +253,14 @@ def test_summarize_prompt_tokens_reflects_truncated_input():
     assert out.prompt_tokens == 1024
 
 
-def test_summarize_completion_tokens_reflects_output_length():
+def test_summarize_completion_tokens_excludes_special_tokens():
+    # output_ids = range(42); ids 0 and 1 are special (decoder-start / eos),
+    # so the honest completion count is 42 - 2 = 40. Raw output_ids.shape[-1]
+    # over-counts by those two specials, which the skip_special_tokens decode
+    # does not include.
     rt, _, _, _, _, _ = _patched_runtime(output_len=42)
     out = rt.summarize("hello")
-    assert out.completion_tokens == 42
+    assert out.completion_tokens == 40
 
 
 def test_runtime_raises_when_transformers_missing():

@@ -26,11 +26,17 @@ def _manifest():
 
 
 def _fake_tensor(seq_len: int):
-    """Return a MagicMock that mimics a torch tensor's shape access."""
+    """Return a MagicMock that mimics a torch tensor's shape access.
+
+    `.tolist()` yields range(seq_len) so completion-token counting (which
+    filters special ids out of the id sequence) sees a real list rather
+    than MagicMock's empty default iterator.
+    """
     t = MagicMock()
     t.shape = (1, seq_len)
     t.to.return_value = t
     t.__getitem__ = lambda self, idx: t
+    t.tolist.return_value = list(range(seq_len))
     return t
 
 
@@ -46,6 +52,9 @@ def _fake_tokenizer(input_len_full=200, input_len_truncated=200):
 
     tok.side_effect = _tok_call
     tok.decode.return_value = "a summary of the input text."
+    # ids 0 and 1 stand in for decoder-start / eos / pad specials; with
+    # output ids range(seq_len), exactly these two are special.
+    tok.all_special_ids = [0, 1]
     return tok
 
 
@@ -265,11 +274,15 @@ def test_summarize_prompt_tokens_reflects_truncated_input():
     assert out.prompt_tokens == 1024
 
 
-def test_summarize_completion_tokens_reflects_output_length():
+def test_summarize_completion_tokens_excludes_special_tokens():
+    # output_ids = range(42); ids 0 and 1 are special (decoder-start / eos),
+    # so the honest completion count is 42 - 2 = 40. Raw output_ids.shape[-1]
+    # would over-count by those two special tokens, which the decoded summary
+    # (skip_special_tokens=True) does not contain.
     bart, _, _, _, _, _ = _patched_setup(output_len=42)
     m = bart.Model(hf_repo="facebook/bart-large-cnn", local_dir=None)
     out = m.summarize("hello")
-    assert out.completion_tokens == 42
+    assert out.completion_tokens == 40
 
 
 def test_model_raises_when_transformers_missing():

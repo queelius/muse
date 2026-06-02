@@ -18,7 +18,12 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from muse.modalities.audio_speech.codec import AudioFormatError, audio_to_wav_bytes, wav_bytes_to_opus
+from muse.modalities.audio_speech.codec import (
+    AudioFormatError,
+    audio_to_wav_bytes,
+    float_to_pcm16,
+    wav_bytes_to_opus,
+)
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 
@@ -135,7 +140,7 @@ async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
                 logger.error("stream producer raised: %s", item)
                 yield {"event": "error", "data": str(item)}
                 break
-            pcm = (np.clip(item.audio, -1.0, 1.0) * 32767).astype(np.int16)
+            pcm = float_to_pcm16(item.audio)
             yield {"data": base64.b64encode(pcm.tobytes()).decode()}
         yield {"event": "done", "data": ""}
 

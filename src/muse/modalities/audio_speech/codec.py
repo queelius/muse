@@ -17,15 +17,25 @@ class AudioFormatError(ValueError):
     """Raised when audio data cannot be encoded to the requested format."""
 
 
+def float_to_pcm16(audio: np.ndarray) -> np.ndarray:
+    """Convert float32 [-1, 1] audio to an int16 PCM array.
+
+    Single source of truth for the float -> int16 conversion so the WAV
+    encoder and the SSE streaming path cannot drift. Scale by 32768 so
+    -1.0 -> -32768 and +1.0 -> +32768, then clip to the int16 range
+    [-32768, 32767] before casting. Using 32767 as the multiplier would
+    leave -32768 unreachable (the streaming route carried that bug before
+    it was unified onto this helper).
+    """
+    scaled = np.clip(audio, -1.0, 1.0) * 32768.0
+    return np.clip(scaled, -32768, 32767).astype(np.int16)
+
+
 def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
     """Convert float32 [-1, 1] audio to a 16-bit PCM WAV bytestring."""
     if audio.ndim != 1:
         raise AudioFormatError(f"expected 1-D audio, got shape {audio.shape}")
-    # Scale by 32768 so that -1.0 → -32768 and +1.0 → +32768, then clip to
-    # int16 range [-32768, 32767] before casting.  Using 32767 as the
-    # multiplier would leave -32768 unreachable (broken clipping test).
-    scaled = np.clip(audio, -1.0, 1.0) * 32768.0
-    pcm = np.clip(scaled, -32768, 32767).astype(np.int16)
+    pcm = float_to_pcm16(audio)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)

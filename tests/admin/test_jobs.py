@@ -118,6 +118,33 @@ class TestJobStore:
         store.shutdown(timeout=1.0)
         assert ran["n"] == 1
 
+    def test_shutdown_uses_shared_deadline_not_per_thread(self):
+        # Three threads that block past the budget. A per-thread timeout would
+        # make shutdown take ~3*budget; the shared deadline caps it near
+        # 1*budget so a few hung jobs can't stall gateway exit.
+        store = JobStore()
+        release = threading.Event()
+        threads = []
+        for i in range(3):
+            job = store.create(op="enable", model_id=f"m{i}")
+            t = threading.Thread(target=release.wait, daemon=True)
+            job.thread = t
+            t.start()
+            threads.append(t)
+        budget = 0.3
+        start = time.monotonic()
+        store.shutdown(timeout=budget)
+        elapsed = time.monotonic() - start
+        release.set()  # let the daemon threads exit cleanly
+        for t in threads:
+            t.join(timeout=1.0)
+        # Shared deadline => ~1*budget, not 3*budget. Generous upper bound
+        # (budget*2) tolerates scheduler jitter on a loaded CI box.
+        assert elapsed < budget * 2, (
+            f"shutdown took {elapsed:.2f}s for a {budget}s budget; "
+            f"per-thread timeout regression?"
+        )
+
 
 class TestDefaultStore:
     def test_get_default_store_returns_singleton(self):

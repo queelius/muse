@@ -120,14 +120,37 @@ async def _decode_image_parts(
       3. invalid_content_part       (url field present)
       4. decode                     (only after all gates pass)
 
-    The too_many_images count check runs in a first pass before the decode
-    loop so we don't waste fetches on messages that are about to 400.
+    The too_many_images count check runs in a first pass over the whole
+    conversation (total image_url parts across all messages, not per
+    message) before the decode loop, so a single-image model is gated on
+    the conversation total and we don't waste fetches on a request that is
+    about to 400.
 
     Raises _ImageDecodeError with a structured error code + message.
 
     Returns the original `messages` list unchanged when no image_url parts
     are found, preserving byte-identical behaviour for text-only requests.
     """
+    # First pass over the WHOLE conversation: gate too_many_images on the
+    # total image_url count, not per-message. A model with
+    # supports_multi_image=False handles exactly one image; N messages each
+    # carrying a single image still overflows it, yet per-message counting
+    # (image_count <= 1 in every message) would wrongly admit them. Counting
+    # here, before the decode loop, also avoids wasted HTTP fetches.
+    total_image_count = sum(
+        1
+        for msg in messages
+        if isinstance(msg.get("content"), list)
+        for part in msg["content"]
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    )
+    if total_image_count > 1 and not supports_multi_image:
+        raise _ImageDecodeError(
+            "too_many_images",
+            f"model {model_id!r} accepts only 1 image per conversation; "
+            f"got {total_image_count}",
+        )
+
     has_any_image = False
     new_messages: list[dict] = []
     for msg in messages:
@@ -135,19 +158,6 @@ async def _decode_image_parts(
         if not isinstance(content, list):
             new_messages.append(msg)
             continue
-
-        # First pass: count image_url parts to gate too_many_images BEFORE
-        # any decoding (avoids wasting HTTP fetches).
-        image_count = sum(
-            1 for part in content
-            if isinstance(part, dict) and part.get("type") == "image_url"
-        )
-        if image_count > 1 and not supports_multi_image:
-            raise _ImageDecodeError(
-                "too_many_images",
-                f"model {model_id!r} accepts only 1 image per message; "
-                f"got {image_count}",
-            )
 
         new_content: list[Any] = []
         for part in content:
@@ -248,7 +258,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # tool_calls may not appear and the model may emit raw text in
         # `content` instead.
         if req.tools is not None:
-            supports = getattr(model, "supports_tools", None)
+            # Read supports_tools from the manifest capabilities first (same
+            # source as the vision flags above) so resolver-pulled GGUFs,
+            # whose tool support lives in the synthesized manifest rather
+            # than on the instance, are gated correctly; fall back to the
+            # instance attribute for bundled scripts that set it directly.
+            supports = caps.get("supports_tools", getattr(model, "supports_tools", None))
             if supports is False:
                 logger.warning(
                     "model %s is not known to support tool calling; "

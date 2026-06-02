@@ -180,7 +180,14 @@ class Model:
         summary = self._tokenizer.decode(
             output_ids[0], skip_special_tokens=True,
         )
-        completion_tokens = int(output_ids.shape[-1])
+        # Count completion tokens with special ids excluded (decoder-start /
+        # bos / eos / pad), matching the special-token-stripped summary so
+        # the billed count reflects the text the caller received. Raw
+        # output_ids.shape[-1] over-counts by ~1-2 special tokens.
+        special_ids = set(self._tokenizer.all_special_ids)
+        completion_tokens = sum(
+            1 for tok in output_ids[0].tolist() if tok not in special_ids
+        )
 
         metadata: dict[str, Any] = {}
         if full_len > self._max_input_tokens:
