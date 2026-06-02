@@ -16,15 +16,15 @@ from __future__ import annotations
 
 import base64
 import io
-import ipaddress
 import logging
 import os
 import re
-import socket
-import urllib.parse
 from typing import Any
 
-import httpx
+from muse.core.net_fetch import (
+    afetch_url_bytes,
+    validate_public_host as _validate_public_host_impl,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -145,74 +145,25 @@ def _decode_data_url(value: str, *, max_bytes: int):
 
 
 async def _fetch_http_url(value: str, *, max_bytes: int):
-    _validate_public_host(value)
     try:
-        async with httpx.AsyncClient(
-            timeout=_HTTP_TIMEOUT, follow_redirects=True,
-        ) as client:
-            resp = await client.get(value)
-    except httpx.HTTPError as e:
+        raw = await afetch_url_bytes(value, max_bytes=max_bytes, timeout=_HTTP_TIMEOUT)
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001
         raise ValueError(f"fetch failed: {e}") from e
-    resp.raise_for_status()
-    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-    if ctype not in _ALLOWED_IMAGE_MIME:
-        raise ValueError(
-            f"content-type {ctype!r} not an allowed image MIME; "
-            f"allowed: {sorted(_ALLOWED_IMAGE_MIME)}"
-        )
-    raw = resp.content
-    if len(raw) > max_bytes:
-        raise ValueError(f"image bytes exceeds max ({len(raw)} > {max_bytes})")
     return _bytes_to_pil(raw)
 
 
 def _validate_public_host(url: str) -> None:
-    """Reject URLs whose host resolves to a non-public IP.
+    """Thin alias for muse.core.net_fetch.validate_public_host.
 
-    Without this check, an unauthenticated `image` field can reach:
-      - link-local: 169.254.169.254 (cloud instance metadata)
-      - loopback: 127.0.0.1, ::1 (the worker's own admin/health port)
-      - private LAN: 10.x, 172.16-31.x, 192.168.x (lateral scan)
-      - multicast/reserved (uncommon but still untrusted)
-
-    Operators on a trusted network who DO want to fetch from internal
-    services can opt out by setting MUSE_ALLOW_PRIVATE_FETCH=1.
-
-    Resolution is via `socket.gethostbyname` (IPv4 only). This is a
-    documented limitation: an IPv6-only attacker URL would slip past
-    if the hostname has only AAAA records. The fallback is acceptable
-    because httpx will then fail to connect anyway, but a future
-    hardening could use `socket.getaddrinfo` and reject if any returned
-    address is non-public.
+    Preserved for backward compatibility: existing tests and any external
+    callers that reference
+    ``muse.modalities.image_generation.image_input._validate_public_host``
+    continue to work. The real implementation lives in
+    ``muse.core.net_fetch.validate_public_host``.
     """
-    if os.environ.get("MUSE_ALLOW_PRIVATE_FETCH") == "1":
-        return
-    parsed = urllib.parse.urlparse(url)
-    host = parsed.hostname or ""
-    if not host:
-        raise ValueError("URL has no hostname")
-    try:
-        ip_str = socket.gethostbyname(host)
-    except OSError as e:
-        raise ValueError(f"DNS resolution of {host!r} failed: {e}") from e
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError as e:
-        raise ValueError(
-            f"host {host!r} resolved to non-IP {ip_str!r}: {e}"
-        ) from e
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
-        raise ValueError(
-            f"refusing to fetch URL whose host {host!r} resolves to "
-            f"non-public IP {ip!s}; set MUSE_ALLOW_PRIVATE_FETCH=1 to override"
-        )
+    _validate_public_host_impl(url)
 
 
 def _bytes_to_pil(raw: bytes):

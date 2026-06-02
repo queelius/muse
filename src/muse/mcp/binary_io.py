@@ -13,6 +13,18 @@ Outputs use MCP content blocks (TextContent + ImageContent +
 AudioContent). The pack helpers build plain dicts; the MCPServer
 converts those to SDK type instances at the call boundary so this
 module stays import-safe without the SDK installed.
+
+Security hardening (v0.45.6):
+  - URL inputs route through muse.core.net_fetch.fetch_url_bytes:
+      * SSRF guard: host must resolve to a public IP (C1)
+      * Size cap:   MUSE_IMAGE_INPUT_MAX_BYTES (default 10MB), streamed
+                    so no full body is buffered before the cap fires (C3)
+      * Open-redirect protection: each redirect hop re-validates the
+        Location header's host (H7, shared with image routes)
+  - Path inputs are gated by MUSE_MCP_ALLOWED_PATH_PREFIXES (C2):
+      * Unset (default): all path inputs raise ValueError.
+      * Set: the path is realpath()'d to defeat ../ traversal and
+        symlink escapes, then checked against the realpath()'d prefixes.
 """
 from __future__ import annotations
 
@@ -20,7 +32,8 @@ import base64
 import os
 from typing import Any
 
-import httpx
+from muse.core.net_fetch import fetch_url_bytes
+from muse.modalities.image_generation.image_input import _default_max_bytes
 
 
 def resolve_binary_input(
@@ -35,6 +48,10 @@ def resolve_binary_input(
     Exactly one of ``b64``, ``url``, ``path`` must be provided. Anything
     else raises ``ValueError`` so the MCP server reports a structured
     error the LLM can correct from on retry.
+
+    Security:
+      - URL inputs are SSRF-protected and size-capped via net_fetch.
+      - Path inputs require MUSE_MCP_ALLOWED_PATH_PREFIXES to be set.
     """
     provided = [k for k, v in (("b64", b64), ("url", url), ("path", path)) if v]
     if len(provided) == 0:
@@ -66,19 +83,58 @@ def resolve_binary_input(
                 raise ValueError(f"malformed data URL in {field_name}_url")
             return base64.b64decode(url[comma + 1:])
         if url.startswith(("http://", "https://")):
-            r = httpx.get(url, timeout=60.0, follow_redirects=True)
-            r.raise_for_status()
-            return r.content
+            # Route through the hardened primitive: SSRF guard, per-hop
+            # redirect re-validation, and streaming size cap.
+            cap = _default_max_bytes()
+            return fetch_url_bytes(url, max_bytes=cap)
         raise ValueError(
             f"unsupported {field_name}_url scheme: {url[:32]}; "
             f"expected http(s):// or data:"
         )
     if path is not None:
-        if not os.path.exists(path):
-            raise ValueError(f"{field_name}_path not found: {path}")
-        with open(path, "rb") as f:
-            return f.read()
+        return _resolve_path(path, field_name=field_name)
     raise AssertionError("unreachable")
+
+
+def _resolve_path(path: str, *, field_name: str) -> bytes:
+    """Read a local file, gated by MUSE_MCP_ALLOWED_PATH_PREFIXES.
+
+    Raises ``ValueError`` when:
+      - The env var is unset or empty (default-deny).
+      - The realpath of ``path`` is not under any allowed prefix (catches
+        ../ traversal and symlink escapes by resolving both sides before
+        comparing).
+      - The file does not exist.
+    """
+    raw_prefixes = os.environ.get("MUSE_MCP_ALLOWED_PATH_PREFIXES", "").strip()
+    if not raw_prefixes:
+        raise ValueError(
+            f"{field_name}_path input is disabled: set "
+            "MUSE_MCP_ALLOWED_PATH_PREFIXES to a "
+            + os.pathsep
+            + "-separated list of allowed directory prefixes to enable it"
+        )
+    # Realpath both the prefixes and the requested path so ../ traversal
+    # and symlinks cannot escape the allowlist.
+    allowed = [
+        os.path.realpath(p)
+        for p in raw_prefixes.split(os.pathsep)
+        if p.strip()
+    ]
+    real_path = os.path.realpath(path)
+    within = any(
+        real_path == prefix or real_path.startswith(prefix + os.sep)
+        for prefix in allowed
+    )
+    if not within:
+        raise ValueError(
+            f"{field_name}_path {path!r} is not within an allowed prefix; "
+            f"set MUSE_MCP_ALLOWED_PATH_PREFIXES to include its directory"
+        )
+    if not os.path.exists(real_path):
+        raise ValueError(f"{field_name}_path not found: {path}")
+    with open(real_path, "rb") as f:
+        return f.read()
 
 
 def binary_input_schema(field_name: str = "image") -> dict[str, Any]:
@@ -109,7 +165,8 @@ def binary_input_schema(field_name: str = "image") -> dict[str, Any]:
             "type": "string",
             "description": (
                 f"Local filesystem path to the {field_name}. Only "
-                f"valid when the MCP server has access to that path."
+                f"valid when the MCP server has access to that path "
+                f"and MUSE_MCP_ALLOWED_PATH_PREFIXES is configured."
             ),
         },
     }

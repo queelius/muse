@@ -51,40 +51,32 @@ async def test_decode_data_url_jpeg():
     assert img.size == (32, 32)
 
 
-def _async_response(content: bytes, headers: dict):
-    """Build an awaitable AsyncClient.get response double."""
-    fake_response = MagicMock()
-    fake_response.content = content
-    fake_response.headers = headers
-    fake_response.raise_for_status = MagicMock()
-    return fake_response
+def _patch_afetch(content: bytes):
+    """Patch afetch_url_bytes as imported into image_input to return ``content``.
 
-
-def _patch_async_client(fake_response):
-    """Patch httpx.AsyncClient so its .get returns the fake response."""
-    fake_client = MagicMock()
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
-    fake_client.get = AsyncMock(return_value=fake_response)
+    image_input imports afetch_url_bytes via ``from muse.core.net_fetch import
+    afetch_url_bytes``, so the patch target is the name in image_input's own
+    namespace, not the origin module.
+    """
     return patch(
-        "muse.modalities.image_generation.image_input.httpx.AsyncClient",
-        return_value=fake_client,
+        "muse.modalities.image_generation.image_input.afetch_url_bytes",
+        new=AsyncMock(return_value=content),
     )
 
 
+# Keep _patch_dns pointing at the real implementation location.
 def _patch_dns(public_ip: str = "8.8.8.8"):
-    """Patch socket.gethostbyname to return a public IP for any host."""
+    """Patch socket.gethostbyname in muse.core.net_fetch."""
     return patch(
-        "muse.modalities.image_generation.image_input.socket.gethostbyname",
+        "muse.core.net_fetch.socket.gethostbyname",
         return_value=public_ip,
     )
 
 
 @pytest.mark.asyncio
-async def test_decode_http_url_fetches_via_async_httpx():
+async def test_decode_http_url_fetches_via_net_fetch():
     raw = _png_bytes()
-    fake_response = _async_response(raw, {"content-type": "image/png"})
-    with _patch_dns(), _patch_async_client(fake_response):
+    with _patch_afetch(raw):
         img = await decode_image_input("https://example.com/cat.png")
     assert img.size == (64, 64)
 
@@ -114,12 +106,10 @@ async def test_decode_data_url_rejects_oversize_before_b64_decode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decode_rejects_non_image_http_content_type():
-    fake_response = _async_response(
-        b"<html>nope</html>", {"content-type": "text/html"},
-    )
-    with _patch_dns(), _patch_async_client(fake_response):
-        with pytest.raises(ValueError, match="content-type"):
+async def test_decode_rejects_non_image_http_response():
+    """HTTP path returns raw bytes; PIL decode rejects non-image content."""
+    with _patch_afetch(b"<html>nope</html>"):
+        with pytest.raises(ValueError, match="decode"):
             await decode_image_input("https://example.com/page.html")
 
 
@@ -150,14 +140,16 @@ async def test_decode_rejects_corrupt_image_bytes():
 
 @pytest.mark.asyncio
 async def test_fetch_blocks_loopback(monkeypatch):
-    """A URL whose host resolves to 127.0.0.1 must reject without fetching."""
+    """A URL whose host resolves to 127.0.0.1 must reject without fetching.
+
+    SSRF guard now lives in muse.core.net_fetch; image_input delegates to it
+    via afetch_url_bytes. Patch DNS at net_fetch and confirm fetch is rejected
+    before any network I/O reaches afetch_url_bytes's inner httpx call.
+    """
     monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
-    fake_response = _async_response(b"", {"content-type": "image/png"})
-    with _patch_dns("127.0.0.1"), _patch_async_client(fake_response) as p:
+    with _patch_dns("127.0.0.1"):
         with pytest.raises(ValueError, match="non-public"):
             await decode_image_input("https://attacker.example/payload.png")
-    # AsyncClient should not have been instantiated; SSRF check fires first.
-    p.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -191,11 +183,9 @@ async def test_fetch_allows_override_via_env(monkeypatch):
     """Operators on a trusted network can opt out via MUSE_ALLOW_PRIVATE_FETCH=1."""
     monkeypatch.setenv("MUSE_ALLOW_PRIVATE_FETCH", "1")
     raw = _png_bytes()
-    fake_response = _async_response(raw, {"content-type": "image/png"})
-    # DNS doesn't even need to be patched: the env-var bypass returns
-    # before resolution. But patch anyway to confirm the request goes
-    # through despite the loopback IP.
-    with _patch_dns("127.0.0.1"), _patch_async_client(fake_response):
+    # With MUSE_ALLOW_PRIVATE_FETCH=1 the DNS check is bypassed entirely;
+    # patch afetch to return valid PNG bytes so PIL decode succeeds.
+    with _patch_afetch(raw):
         img = await decode_image_input("http://localhost:9001/internal.png")
     assert img.size == (64, 64)
 

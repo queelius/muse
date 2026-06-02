@@ -165,23 +165,65 @@ class MCPServer:
             init_opts = self._server.create_initialization_options()
             await self._server.run(read, write, init_opts)
 
-    def build_http_app(self) -> Any:
+    def build_http_app(self, *, admin_token: str | None = None) -> Any:
         """Build (but don't run) the Starlette app for HTTP+SSE mode.
 
         Factored out so tests can mount the app on a TestClient without
         actually launching uvicorn. The session manager runs as a
         lifespan-bound background task; tests that exercise the full
         wire path can drive the app via httpx.AsyncClient.
+
+        Auth: when ``admin_token`` is provided (or ``MUSE_ADMIN_TOKEN`` is
+        set), every request to ``/mcp`` must carry
+        ``Authorization: Bearer <token>``.  Requests without a valid token
+        receive 401. When no token is configured the server starts with a
+        prominent WARNING log so operators know the endpoint is open.
         """
         import contextlib
+        import os as _os
+        import secrets as _secrets
 
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
         from starlette.applications import Starlette
+        from starlette.responses import Response
         from starlette.routing import Mount
+
+        token = admin_token or _os.environ.get("MUSE_ADMIN_TOKEN") or ""
 
         manager = StreamableHTTPSessionManager(app=self._server, stateless=True)
 
+        if not token:
+            log.warning(
+                "MCP HTTP transport is running WITHOUT authentication. "
+                "Any client that can reach this port can call all MCP tools. "
+                "Set MUSE_ADMIN_TOKEN (or pass --admin-token) and restart, "
+                "or bind to localhost and place the server behind an "
+                "authenticated reverse proxy."
+            )
+
         async def handle_streamable_http(scope, receive, send):
+            if token:
+                # Minimal bearer-token middleware: read the Authorization header
+                # directly from the ASGI scope without pulling in all of FastAPI.
+                headers = dict(scope.get("headers", []))
+                auth = headers.get(b"authorization", b"").decode("latin-1")
+                if not auth.startswith("Bearer "):
+                    resp = Response(
+                        content='{"error":{"code":"missing_token","message":"Authorization: Bearer <token> required"}}',
+                        status_code=401,
+                        media_type="application/json",
+                    )
+                    await resp(scope, receive, send)
+                    return
+                presented = auth[len("Bearer "):]
+                if not _secrets.compare_digest(presented, token):
+                    resp = Response(
+                        content='{"error":{"code":"invalid_token","message":"Bad MCP token"}}',
+                        status_code=403,
+                        media_type="application/json",
+                    )
+                    await resp(scope, receive, send)
+                    return
             await manager.handle_request(scope, receive, send)
 
         @contextlib.asynccontextmanager
@@ -198,11 +240,13 @@ class MCPServer:
         self,
         host: str = "127.0.0.1",
         port: int = 8088,
+        *,
+        admin_token: str | None = None,
     ) -> None:
         """Drive the MCP server over HTTP+SSE via uvicorn."""
         import uvicorn
 
-        app = self.build_http_app()
+        app = self.build_http_app(admin_token=admin_token)
         config = uvicorn.Config(
             app, host=host, port=port, log_level="info",
         )

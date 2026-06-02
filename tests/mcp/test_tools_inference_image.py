@@ -115,27 +115,23 @@ class TestEditImage:
         assert "image_b64" not in call.kwargs
         assert "mask_b64" not in call.kwargs
 
-    def test_resolves_path_input(self, server):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
-            f.write(SAMPLE_PNG)
-            ipath = f.name
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
-            f.write(SAMPLE_PNG)
-            mpath = f.name
-        try:
-            server.client.edit_image = MagicMock(
-                return_value={"data": [], "model": "x"},
-            )
-            server.call_handler("muse_edit_image", {
-                "prompt": "p",
-                "image_path": ipath,
-                "mask_path": mpath,
-            })
-            call = server.client.edit_image.call_args
-            assert call.kwargs["image"] == SAMPLE_PNG
-        finally:
-            os.unlink(ipath)
-            os.unlink(mpath)
+    def test_resolves_path_input(self, server, monkeypatch, tmp_path):
+        # Path inputs require MUSE_MCP_ALLOWED_PATH_PREFIXES (C2 fix).
+        monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", str(tmp_path))
+        ipath = tmp_path / "image.png"
+        ipath.write_bytes(SAMPLE_PNG)
+        mpath = tmp_path / "mask.png"
+        mpath.write_bytes(SAMPLE_PNG)
+        server.client.edit_image = MagicMock(
+            return_value={"data": [], "model": "x"},
+        )
+        server.call_handler("muse_edit_image", {
+            "prompt": "p",
+            "image_path": str(ipath),
+            "mask_path": str(mpath),
+        })
+        call = server.client.edit_image.call_args
+        assert call.kwargs["image"] == SAMPLE_PNG
 
     def test_missing_image_returns_error(self, server):
         server.client.edit_image = MagicMock()

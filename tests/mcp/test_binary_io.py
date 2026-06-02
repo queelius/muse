@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import os
-import tempfile
 
 import pytest
 
@@ -39,15 +38,13 @@ class TestResolveBinaryInput:
         out = resolve_binary_input(url=url, field_name="image")
         assert out == SAMPLE_BYTES
 
-    def test_path_roundtrip(self):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
-            f.write(SAMPLE_BYTES)
-            path = f.name
-        try:
-            out = resolve_binary_input(path=path, field_name="image")
-            assert out == SAMPLE_BYTES
-        finally:
-            os.unlink(path)
+    def test_path_roundtrip(self, monkeypatch, tmp_path):
+        # Path inputs require MUSE_MCP_ALLOWED_PATH_PREFIXES (C2 fix).
+        monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", str(tmp_path))
+        f = tmp_path / "sample.png"
+        f.write_bytes(SAMPLE_BYTES)
+        out = resolve_binary_input(path=str(f), field_name="image")
+        assert out == SAMPLE_BYTES
 
     def test_missing_input_raises(self):
         with pytest.raises(ValueError, match="missing audio input"):
@@ -62,7 +59,10 @@ class TestResolveBinaryInput:
         with pytest.raises(ValueError, match="unsupported"):
             resolve_binary_input(url="ftp://nope/path", field_name="image")
 
-    def test_path_not_found(self):
+    def test_path_not_found(self, monkeypatch):
+        # Path inputs need an allowlist; set /tmp as allowed so "not found"
+        # fires rather than "disabled".
+        monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", "/tmp")
         with pytest.raises(ValueError, match="not found"):
             resolve_binary_input(
                 path="/tmp/__definitely_not_a_real_path__.bin",
@@ -81,26 +81,26 @@ class TestResolveBinaryInput:
         with pytest.raises(ValueError, match="malformed data URL"):
             resolve_binary_input(url="data:image/png;base64", field_name="image")
 
-    def test_http_url_uses_httpx(self, monkeypatch):
-        # Patch httpx.get to return SAMPLE_BYTES directly (no network).
-        from unittest.mock import MagicMock
+    def test_http_url_routes_through_net_fetch(self, monkeypatch):
+        """URL inputs now route through muse.core.net_fetch.fetch_url_bytes
+        (SSRF-protected, size-capped). Patch at that boundary."""
+        from unittest.mock import patch as _patch
 
-        mock_resp = MagicMock()
-        mock_resp.content = SAMPLE_BYTES
-        mock_resp.raise_for_status = MagicMock()
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         called = {}
 
-        def fake_get(url, **kwargs):
+        def fake_fetch(url, *, max_bytes, **kwargs):
             called["url"] = url
-            return mock_resp
+            called["max_bytes"] = max_bytes
+            return SAMPLE_BYTES
 
-        import muse.mcp.binary_io as binary_io_mod
-        monkeypatch.setattr(binary_io_mod.httpx, "get", fake_get)
-        out = resolve_binary_input(
-            url="http://example.com/img.png", field_name="image",
-        )
+        with _patch("muse.mcp.binary_io.fetch_url_bytes", side_effect=fake_fetch):
+            out = resolve_binary_input(
+                url="http://example.com/img.png", field_name="image",
+            )
         assert out == SAMPLE_BYTES
         assert called["url"] == "http://example.com/img.png"
+        assert isinstance(called["max_bytes"], int)
 
 
 class TestPackOutputs:
