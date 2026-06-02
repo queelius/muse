@@ -24,6 +24,7 @@ from typing import Any
 from muse.core.runtime_helpers import (
     LoadTimer, dtype_for_name, select_device, set_inference_mode,
 )
+from muse.modalities.model_3d_generation.codec import mesh_to_glb_result
 from muse.modalities.model_3d_generation.protocol import Generation3DResult
 
 
@@ -215,15 +216,6 @@ class Hunyuan3DRuntime:
             float(kwargs.get("guidance_scale", self._default_guidance_scale)),
         )
 
-    def _make_result(self, output: Any) -> Generation3DResult:
-        """Convert a Hunyuan3D pipeline output to a Generation3DResult."""
-        mesh = output[0][0]
-        return Generation3DResult(
-            glb_bytes=bytes(mesh.export(file_type="glb")),
-            model_id=self.model_id,
-            format="glb",
-        )
-
     def image_to_3d(
         self, image: Any, **kwargs: Any,
     ) -> list[Generation3DResult]:
@@ -267,7 +259,7 @@ class Hunyuan3DRuntime:
                 guidance_scale=gs,
                 generator=generator,
             )
-            results.append(self._make_result(output))
+            results.append(mesh_to_glb_result(output[0][0], self.model_id))
         return results
 
     def text_to_3d(
@@ -322,5 +314,5 @@ class Hunyuan3DRuntime:
                 guidance_scale=gs,
                 generator=generator,
             )
-            results.append(self._make_result(output))
+            results.append(mesh_to_glb_result(output[0][0], self.model_id))
         return results

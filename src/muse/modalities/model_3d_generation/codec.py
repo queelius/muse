@@ -30,6 +30,25 @@ from typing import Any
 from muse.modalities.model_3d_generation.protocol import Generation3DResult
 
 
+def mesh_to_glb_result(mesh: Any, model_id: str) -> Generation3DResult:
+    """Export an already-extracted trimesh.Trimesh to a Generation3DResult.
+
+    Each 3D runtime reduces its SDK-specific pipeline output to a
+    trimesh.Trimesh first (the SDKs return different shapes), then calls
+    this to do the uniform GLB-export + result-wrapping tail.
+
+    The bytes() coercion is intentional: some trimesh versions return
+    memoryview or bytearray from export(); coercing to bytes keeps the
+    codec's base64.b64encode call safe on all trimesh releases.
+    """
+    glb_bytes = bytes(mesh.export(file_type="glb"))
+    return Generation3DResult(
+        glb_bytes=glb_bytes,
+        model_id=model_id,
+        format="glb",
+    )
+
+
 _VALID_RESPONSE_FORMATS = ("b64_json", "url")
 
 # Per glTF 2.0 spec, registered IANA MIME type for binary glTF.

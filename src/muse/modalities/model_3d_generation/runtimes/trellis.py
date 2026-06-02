@@ -39,6 +39,7 @@ from typing import Any
 from muse.core.runtime_helpers import (
     LoadTimer, dtype_for_name, select_device, set_inference_mode,
 )
+from muse.modalities.model_3d_generation.codec import mesh_to_glb_result
 from muse.modalities.model_3d_generation.protocol import Generation3DResult
 
 
@@ -213,12 +214,7 @@ class TRELLISRuntime:
             vertices = mesh_data.vertices.cpu().numpy()
             faces = mesh_data.faces.cpu().numpy()
             mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-            glb_bytes = mesh.export(file_type="glb")
-            results.append(Generation3DResult(
-                glb_bytes=bytes(glb_bytes),
-                model_id=self.model_id,
-                format="glb",
-            ))
+            results.append(mesh_to_glb_result(mesh, self.model_id))
         return results
 
     def text_to_3d(

@@ -1,9 +1,10 @@
 """Codec tests for 3d/generation."""
 import base64
+from unittest.mock import MagicMock
 
 import pytest
 
-from muse.modalities.model_3d_generation.codec import encode_3d_response
+from muse.modalities.model_3d_generation.codec import encode_3d_response, mesh_to_glb_result
 from muse.modalities.model_3d_generation.protocol import Generation3DResult
 
 
@@ -108,3 +109,32 @@ def test_format_field_passes_through():
     )]
     body = encode_3d_response(results, model_id="m")
     assert body["data"][0]["format"] == "usdz"
+
+
+# ---------------- mesh_to_glb_result helper ----------------
+
+
+def test_mesh_to_glb_result_returns_correct_result():
+    """mesh_to_glb_result wraps a trimesh-like mesh into a Generation3DResult."""
+    fake_mesh = MagicMock()
+    sentinel_bytes = b"fake-glb-sentinel"
+    fake_mesh.export = MagicMock(return_value=sentinel_bytes)
+
+    result = mesh_to_glb_result(fake_mesh, "some-model")
+
+    fake_mesh.export.assert_called_once_with(file_type="glb")
+    assert isinstance(result, Generation3DResult)
+    assert result.glb_bytes == sentinel_bytes
+    assert result.model_id == "some-model"
+    assert result.format == "glb"
+
+
+def test_mesh_to_glb_result_coerces_bytearray_to_bytes():
+    """bytes() coercion preserves safety when trimesh returns bytearray/memoryview."""
+    fake_mesh = MagicMock()
+    fake_mesh.export = MagicMock(return_value=bytearray(b"ba-payload"))
+
+    result = mesh_to_glb_result(fake_mesh, "m")
+
+    assert isinstance(result.glb_bytes, bytes)
+    assert result.glb_bytes == b"ba-payload"

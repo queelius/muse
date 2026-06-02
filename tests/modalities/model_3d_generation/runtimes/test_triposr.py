@@ -354,30 +354,3 @@ def test_raises_when_pillow_not_installed(monkeypatch):
         )
 
 
-# ---------------- module-level helpers ----------------
-
-
-def test_select_device_delegates_to_runtime_helper():
-    """The thin delegator must call the canonical select_device helper."""
-    import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    # The module-level _select_device is the thin delegator. With torch
-    # set and cuda unavailable, "auto" should resolve to "cpu".
-    fake_torch = MagicMock()
-    fake_torch.cuda.is_available.return_value = False
-    fake_torch.backends = MagicMock(mps=None)
-    mod.torch = fake_torch
-    assert mod._select_device("auto") == "cpu"
-    assert mod._select_device("cuda") == "cuda"
-
-
-def test_resolve_dtype_delegates_to_runtime_helper():
-    """The thin delegator returns the right torch dtype attribute."""
-    import muse.modalities.model_3d_generation.runtimes.triposr as mod
-    fake_torch = MagicMock()
-    fake_torch.float16 = "FP16-SENTINEL"
-    fake_torch.bfloat16 = "BF16-SENTINEL"
-    fake_torch.float32 = "FP32-SENTINEL"
-    mod.torch = fake_torch
-    assert mod._resolve_dtype("fp16") == "FP16-SENTINEL"
-    assert mod._resolve_dtype("bf16") == "BF16-SENTINEL"
-    assert mod._resolve_dtype("fp32") == "FP32-SENTINEL"

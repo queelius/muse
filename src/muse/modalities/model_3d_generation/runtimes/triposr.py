@@ -38,6 +38,7 @@ from typing import Any
 from muse.core.runtime_helpers import (
     LoadTimer, dtype_for_name, select_device, set_inference_mode,
 )
+from muse.modalities.model_3d_generation.codec import mesh_to_glb_result
 from muse.modalities.model_3d_generation.protocol import Generation3DResult
 
 
@@ -156,8 +157,8 @@ class TripoSRRuntime:
             )
 
         self.model_id = model_id
-        self._device = _select_device(device)
-        self._dtype = _resolve_dtype(dtype)
+        self._device = select_device(device, torch_module=torch)
+        self._dtype = dtype_for_name(dtype, torch_module=torch)
         self._chunk_size = int(chunk_size)
         self._mc_resolution = int(mc_resolution)
         self._has_vertex_color = bool(has_vertex_color)
@@ -237,23 +238,6 @@ class TripoSRRuntime:
                     f"foreground subject"
                 )
             mesh = meshes[0]
-            # trimesh's export(file_type='glb') returns the GLB bytes
-            # directly when no path is given. The 4-byte magic header
-            # is "glTF" (0x676c5446).
-            glb_bytes = mesh.export(file_type="glb")
-            results.append(Generation3DResult(
-                glb_bytes=bytes(glb_bytes),
-                model_id=self.model_id,
-            ))
+            results.append(mesh_to_glb_result(mesh, self.model_id))
         return results
 
-
-# Thin delegators preserved for test imports (matches sibling runtimes;
-# the meta-test in tests/core/test_runtime_helpers_meta.py flags
-# re-implementations).
-def _select_device(device: str) -> str:
-    return select_device(device, torch_module=torch)
-
-
-def _resolve_dtype(dtype: str):
-    return dtype_for_name(dtype, torch_module=torch)
