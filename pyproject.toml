@@ -107,6 +107,15 @@ muse = "muse.cli:main"
 where = ["src"]
 include = ["muse*"]
 
+# Ship non-Python runtime data. curated.yaml (recommended-models list) and
+# chat_formats.yaml (GGUF chat-template map) are loaded at runtime via
+# importlib.resources.files("muse"); without this they are excluded from
+# the wheel and every pip-installed user sees zero curated models and
+# degraded GGUF chat-format detection. The "*" key applies to all packages
+# so future per-modality yaml/json assets are picked up automatically.
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
