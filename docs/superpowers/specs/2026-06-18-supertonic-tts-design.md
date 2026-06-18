@@ -160,3 +160,117 @@ the pre-release verification.
 - `sample_rate`, preset voice list + default, wav dtype/range coercion,
   HF-cache vs auto-download behavior, exact `get_voice_style`/`synthesize`
   signatures.
+
+## B1 findings (2026-06-18)
+
+Verified with supertonic==1.3.1, onnxruntime==1.27.0, numpy==2.4.6 on CPU
+(Python 3.12, Linux) using a fresh venv at /tmp/supertonic-b1.
+
+### sample_rate
+
+44100 Hz. Confirmed from both `tts.sample_rate` attribute (set at __init__
+from `self.model.sample_rate`) and the ONNX config at
+`~/.cache/supertonic3/onnx/tts.json` (`"sample_rate": 44100` in two places).
+The implied rate from `len(wav.flatten()) / float(duration[0])` yields ~44203,
+which rounds to 44100; the small deviation is normal ONNX rounding.
+
+### preset voices and default
+
+10 built-in voices, enumerated via `tts.voice_style_names`:
+  ['F1', 'F2', 'F3', 'F4', 'F5', 'M1', 'M2', 'M3', 'M4', 'M5']
+
+5 female (F1-F5) and 5 male (M1-M5). Sensible default: "M1" (first male
+voice, matches the model card examples). Task 2 will hardcode voices=["F1",
+"F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"] and default="M1".
+
+### wav dtype and range
+
+  wav.dtype: float32
+  wav.shape: (1, N) -- NOTE: shape is (1, N), not (N,); use wav.flatten() or
+             wav.squeeze() before passing to the audio protocol (which expects
+             a 1-D or (N,) float32 array in [-1,1]).
+  observed range across two synthesis calls: [-0.37, +0.39] and [-0.32, +0.26].
+
+wav is already float32 in [-1,1]. No normalization or scaling needed. The muse
+`AudioResult` protocol expects float32 in [-1,1], so:
+  audio = np.asarray(wav, dtype=np.float32).flatten()
+is the correct coercion (flattening the leading channel dim, no range change).
+
+### synthesize return: (wav, duration_array)
+
+The return type annotation says `tuple[np.ndarray, np.ndarray]`. The second
+element is NOT a Python float; it is a numpy array of shape (1,) and dtype
+float32 containing the audio duration in seconds (e.g., array([3.058],
+dtype=float32)). Extract duration as `float(result[1][0])` if needed, or
+simply ignore it (the muse script does not use it).
+
+The spec's original pseudocode `wav, duration = tts.synthesize(...)` and
+`print("duration:", duration)` still works because tuple unpacking assigns
+the array to `duration`, and `float(duration)` on a 1-element array works;
+but callers must be aware it is an array, not a scalar.
+
+### exact signatures (from inspect.signature)
+
+  tts.get_voice_style(voice_name: str) -> Style
+  tts.synthesize(
+      text: str,
+      voice_style: Style,
+      total_steps: int = 8,
+      speed: float = 1.05,
+      max_chunk_length: Optional[int] = None,
+      silence_duration: float = 0.3,
+      lang: Optional[str] = None,
+      verbose: bool = False,
+  ) -> tuple[np.ndarray, np.ndarray]
+
+Additional kwargs vs design spec: `total_steps`, `speed`, `max_chunk_length`,
+`silence_duration`, `verbose`. These can be forwarded from the muse request
+kwargs or ignored. `lang=None` defaults to the "na" (language-agnostic)
+fallback inside the model; muse should default to "en" for English TTS
+conformance and pass `lang` through from the request.
+
+### cache behavior
+
+The SDK downloads to its own directory, NOT the standard HF_HOME/hub tree.
+Default location: `~/.cache/supertonic3/` (for model "supertonic-3").
+
+Three override mechanisms (in priority order):
+  1. `model_dir=<path>` constructor parameter: the SDK uses this directory
+     directly (no download needed if ONNX files are already there). This is
+     the cleanest integration point for muse: `muse pull` can download the HF
+     repo to `~/.muse/venvs/supertonic-3/` or honor `local_dir`, then pass
+     `model_dir=local_dir` to the TTS constructor.
+  2. `SUPERTONIC_CACHE_DIR` environment variable: overrides the default cache
+     dir for all models; honored on every constructor call (not snapshotted).
+  3. Default: `~/.cache/supertonic3/` -- the SDK calls
+     `huggingface_hub.snapshot_download(repo_id="Supertone/supertonic-3",
+     local_dir=<cache_dir>)` on first run and caches there. This is NOT the
+     standard HF_HOME cache path (`~/.cache/huggingface/hub/...`). Subsequent
+     runs with `auto_download=True` check the cache dir and skip re-download
+     if ONNX files exist.
+
+For the muse bundled script: pass `model_dir=local_dir` when `local_dir` is
+provided (muse pull path), otherwise let the SDK use its default
+`~/.cache/supertonic3/` and set `auto_download=True`. This mirrors how
+Kokoro uses `local_dir` vs its built-in download path.
+
+### TTS constructor signature
+
+  TTS(
+      model: str = "supertonic-3",
+      model_dir: Optional[Union[Path, str]] = None,
+      auto_download: bool = True,
+      intra_op_num_threads: Optional[int] = None,
+      inter_op_num_threads: Optional[int] = None,
+  )
+
+### total model size on disk
+
+~400 MB after first download (`~/.cache/supertonic3/onnx/` tree):
+  - duration_predictor.onnx: 3.5 MB
+  - text_encoder.onnx: 35 MB
+  - vocoder.onnx: 97 MB
+  - vector_estimator.onnx: 245 MB
+  - 10x voice_styles/*.json: ~2.9 MB total
+The `memory_gb: 0.5` annotation in the design spec is consistent (ONNX
+runtime working set is roughly the combined weights loaded in RAM).
