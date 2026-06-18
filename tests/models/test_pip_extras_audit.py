@@ -40,6 +40,7 @@ MODULE_TO_PYPI: dict[str, str] = {
     "kokoro": "kokoro",
     "misaki": "misaki",
     "soundfile": "soundfile",
+    "supertonic": "supertonic",
     "einops": "einops",
     "imageio": "imageio",
 }
