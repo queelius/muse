@@ -360,3 +360,52 @@ def test_resolve_via_modality_raises_when_no_plugin_for_modality():
         assert "image/segmentation" in msg
     else:
         raise AssertionError("expected ResolverError")
+
+
+# --- transient repo_info resilience (resolve does not crash on a flaky Hub) ---
+
+def test_repo_info_retries_transient_error_then_succeeds():
+    """A transient repo_info failure (e.g. the TypeError huggingface_hub
+    raises on a partial/rate-limited response) is retried, not propagated."""
+    from muse.core.resolvers_hf import HFResolver
+    good = _fake_repo_info(siblings=["model.safetensors"], tags=["x"])
+    with patch("muse.core.resolvers_hf.HfApi") as MockApi, \
+            patch("muse.core.resolvers_hf.time.sleep"):
+        api = MockApi.return_value
+        api.repo_info.side_effect = [
+            TypeError("unsupported format string passed to NoneType.__format__"),
+            TypeError("unsupported format string passed to NoneType.__format__"),
+            good,
+        ]
+        r = HFResolver(plugins=[])
+        assert r._repo_info("org/repo") is good
+        assert api.repo_info.call_count == 3
+
+
+def test_repo_info_repository_not_found_surfaces_without_retry():
+    """A missing/gated repo is deterministic: surface it immediately, do not
+    retry or mask it behind a generic 'rate-limited' message."""
+    from huggingface_hub.utils import RepositoryNotFoundError
+    from muse.core.resolvers_hf import HFResolver
+    with patch("muse.core.resolvers_hf.HfApi") as MockApi, \
+            patch("muse.core.resolvers_hf.time.sleep"):
+        api = MockApi.return_value
+        api.repo_info.side_effect = RepositoryNotFoundError("404 not found")
+        r = HFResolver(plugins=[])
+        with pytest.raises(RepositoryNotFoundError):
+            r._repo_info("org/missing")
+        assert api.repo_info.call_count == 1  # no retry on a meaningful error
+
+
+def test_repo_info_persistent_transient_wrapped_as_resolver_error():
+    """When transient failures exhaust the retry budget, the raw exception
+    is wrapped in a clear, retryable ResolverError (not leaked as TypeError)."""
+    from muse.core.resolvers_hf import HFResolver, _REPO_INFO_MAX_ATTEMPTS
+    with patch("muse.core.resolvers_hf.HfApi") as MockApi, \
+            patch("muse.core.resolvers_hf.time.sleep"):
+        api = MockApi.return_value
+        api.repo_info.side_effect = TypeError("boom")
+        r = HFResolver(plugins=[])
+        with pytest.raises(ResolverError, match="rate-limit|retry|metadata"):
+            r._repo_info("org/flaky")
+        assert api.repo_info.call_count == _REPO_INFO_MAX_ATTEMPTS
