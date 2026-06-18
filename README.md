@@ -518,7 +518,7 @@ Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or
   - `text_summarization/` (MODALITY `"text/summarization"`; Cohere `/v1/summarize` wire shape)
   - `video_generation/` (MODALITY `"video/generation"`; includes `runtimes/wan_runtime.py` and `runtimes/cogvideox_runtime.py`)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
-  - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py` (audio/speech)
+  - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py`, `supertonic_3.py` (audio/speech; `supertonic_3` is ONNX on-device CPU, 31 languages)
   - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
   - `sd_turbo.py` (image/generation)
   - `bge_reranker_v2_m3.py` (text/rerank)

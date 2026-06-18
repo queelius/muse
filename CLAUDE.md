@@ -10,7 +10,7 @@ nineteen modalities:
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
-- **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark)
+- **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark, Supertonic-3: the last is an ONNX on-device CPU engine, 31 languages, preset voice styles)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs AND vision-language models via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming + multimodal `messages` content; powered by llama-cpp-python for GGUF chat; `transformers.AutoModelForImageTextToText` for VLMs; SmolVLM, Qwen2-VL, LLaVA via the resolver)
 - **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
