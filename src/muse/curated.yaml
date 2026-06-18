@@ -43,6 +43,32 @@
   capabilities:
     memory_gb: 2.5
 
+# Qwen3 generation (hybrid thinking / non-thinking modes). The 0.6B is a
+# genuine CPU-runnable chat model; 4B and 8B are the quality steps.
+- id: qwen3-0.6b-q4
+  uri: hf://unsloth/Qwen3-0.6B-GGUF@q4_k_m
+  modality: chat/completion
+  size_gb: 0.5
+  description: "Qwen3 0.6B (Q4_K_M): tiny, CPU-friendly, hybrid thinking, Apache 2.0"
+  capabilities:
+    memory_gb: 1.0
+
+- id: qwen3-4b-q4
+  uri: hf://unsloth/Qwen3-4B-GGUF@q4_k_m
+  modality: chat/completion
+  size_gb: 2.5
+  description: "Qwen3 4B (Q4_K_M): strong small model, hybrid thinking, runs on 4GB+ GPU or CPU"
+  capabilities:
+    memory_gb: 3.5
+
+- id: qwen3-8b-q4
+  uri: hf://unsloth/Qwen3-8B-GGUF@q4_k_m
+  modality: chat/completion
+  size_gb: 5.0
+  description: "Qwen3 8B (Q4_K_M): high quality, hybrid thinking, 8GB+ GPU"
+  capabilities:
+    memory_gb: 6.5
+
 # ---------- chat/completion: vision-language models (v0.42.0+) ----------
 # All transformers-runtime VLMs. Bundled smolvlm-256m-instruct is the
 # CPU-friendly default; the entries below are quality steps that need
@@ -92,6 +118,17 @@
     supports_multi_image: true
     supports_tools: false
 
+- id: qwen2.5-vl-7b-instruct
+  description: Qwen2.5-VL-7B-Instruct. Upgrade over Qwen2-VL-7B; better OCR, document and video understanding, agentic grounding. 16GB+ VRAM.
+  uri: hf://Qwen/Qwen2.5-VL-7B-Instruct
+  modality: chat/completion
+  capabilities:
+    memory_gb: 18.0
+    device: cuda
+    supports_vision: true
+    supports_multi_image: true
+    supports_tools: false
+
 # ---------- embedding/text ----------
 
 - id: all-minilm-l6-v2
@@ -111,6 +148,27 @@
   capabilities:
     trust_remote_code: true
     memory_gb: 1.5
+
+# Multilingual heavyweight: dense + sparse + multi-vector retrieval,
+# 100+ languages, 8192 ctx. The go-to multilingual embedder.
+- id: bge-m3
+  uri: hf://BAAI/bge-m3
+  modality: embedding/text
+  size_gb: 2.3
+  description: "BGE-M3: 568M, 1024 dims, multilingual (100+ langs), 8192 ctx, MIT"
+  capabilities:
+    memory_gb: 2.5
+
+# Long-context English embedder with matryoshka dims. Needs
+# trust_remote_code for its custom architecture.
+- id: nomic-embed-text-v1.5
+  uri: hf://nomic-ai/nomic-embed-text-v1.5
+  modality: embedding/text
+  size_gb: 0.55
+  description: "Nomic Embed v1.5: 137M, 768 dims (matryoshka), 8192 ctx, Apache 2.0"
+  capabilities:
+    trust_remote_code: true
+    memory_gb: 1.0
 
 # ---------- audio/speech (TTS) ----------
 
@@ -168,6 +226,16 @@
   description: "Whisper large-v3 (1550M, ~2.9GB): SotA quality, 8GB+ GPU"
   capabilities:
     memory_gb: 3.0
+
+# Pruned/distilled large-v3: near-identical quality, far fewer decoder
+# layers so transcription is several times faster. CT2 build by deepdml.
+- id: whisper-large-v3-turbo
+  uri: hf://deepdml/faster-whisper-large-v3-turbo-ct2
+  modality: audio/transcription
+  size_gb: 1.6
+  description: "Whisper large-v3-turbo (809M, ~1.6GB): near-large-v3 quality, ~4x faster decode, MIT"
+  capabilities:
+    memory_gb: 2.0
 
 # ---------- text/classification (moderation, sentiment, zero-shot) ----------
 
@@ -409,6 +477,39 @@
     supports_detection: true
     memory_gb: 0.6
 
+# Newer RT-DETR generation: improved accuracy over rtdetr-r50vd at
+# similar speed.
+- id: rtdetr-v2-r50vd
+  uri: hf://PekingU/rtdetr_v2_r50vd
+  modality: image/cv
+  size_gb: 0.17
+  description: "RT-DETR v2 ResNet-50: ~170MB, improved real-time detection, Apache 2.0"
+  capabilities:
+    supports_detection: true
+    memory_gb: 0.6
+
+# Tiny ViT-based detector. Smallest detection option in the catalog.
+- id: yolos-small
+  uri: hf://hustvl/yolos-small
+  modality: image/cv
+  size_gb: 0.12
+  description: "YOLOS small: 31M, ViT-based object detection, tiny footprint, Apache 2.0"
+  capabilities:
+    supports_detection: true
+    memory_gb: 0.5
+
+# Top-quality Depth-Anything V2. License is CC-BY-NC-4.0
+# (NON-COMMERCIAL): like nougat, pull explicitly; not for commercial use.
+- id: depth-anything-v2-large
+  uri: hf://depth-anything/Depth-Anything-V2-Large-hf
+  modality: image/cv
+  size_gb: 1.3
+  description: "Depth-Anything V2 Large: 335M, best relative depth, CC-BY-NC-4.0 (non-commercial)"
+  capabilities:
+    supports_depth: true
+    metric_depth: false
+    memory_gb: 2.0
+
 # ---------- image/animation (AnimateDiff) ----------
 
 - id: animatediff-motion-v3
@@ -439,6 +540,17 @@
   description: "BART CNN samsum: dialog summarization (meetings, chats), ~400MB"
   capabilities:
     supports_dialog_summarization: true
+    device: cpu
+    memory_gb: 1.5
+
+# Distilled BART: ~2x faster than the bundled bart-large-cnn at close
+# quality. Good CPU default for news/article summaries.
+- id: distilbart-cnn-12-6
+  uri: hf://sshleifer/distilbart-cnn-12-6
+  modality: text/summarization
+  size_gb: 1.2
+  description: "DistilBART CNN 12-6: 306M, ~2x faster than bart-large-cnn, news/article summaries, Apache 2.0"
+  capabilities:
     device: cpu
     memory_gb: 1.5
 
@@ -485,6 +597,28 @@
     image_size: 224
     memory_gb: 1.2
 
+# Larger DINOv2 steps, same family as the bundled small. Image-only
+# (self-supervised features); no text tower.
+- id: dinov2-base
+  uri: hf://facebook/dinov2-base
+  modality: image/embedding
+  size_gb: 0.35
+  description: "DINOv2 base: 86M, 768-dim self-supervised image features, Apache 2.0"
+  capabilities:
+    dimensions: 768
+    image_size: 224
+    memory_gb: 0.8
+
+- id: dinov2-large
+  uri: hf://facebook/dinov2-large
+  modality: image/embedding
+  size_gb: 1.2
+  description: "DINOv2 large: 304M, 1024-dim image features, best in the family, Apache 2.0"
+  capabilities:
+    dimensions: 1024
+    image_size: 224
+    memory_gb: 1.5
+
 # ---------- image/upscale (super-resolution) ----------
 
 - id: stable-diffusion-x4-upscaler
@@ -513,6 +647,22 @@
   modality: image/segmentation
   size_gb: 0.25
   description: "SAM-2 Hiera large: best quality, 225MB, Apache 2.0"
+  capabilities:
+    max_masks: 64
+    memory_gb: 2.5
+    supports_text_prompts: false
+    supports_point_prompts: true
+    supports_box_prompts: true
+    supports_automatic: true
+
+# SAM 2.1 refined weights (same Hiera-large arch, served by SAM2Runtime).
+# Explicit modality: the priority sniff otherwise classifies it as
+# image/embedding, so the curated entry forces the segmentation plugin.
+- id: sam2.1-hiera-large
+  uri: hf://facebook/sam2.1-hiera-large
+  modality: image/segmentation
+  size_gb: 0.25
+  description: "SAM 2.1 Hiera large: refined SAM-2 weights, best quality, 225MB, Apache 2.0"
   capabilities:
     max_masks: 64
     memory_gb: 2.5

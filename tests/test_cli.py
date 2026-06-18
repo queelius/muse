@@ -159,15 +159,18 @@ def test_pull_curated_alias_registers_hf_resolver():
     error. The pull will likely fail later (network, missing HF repo,
     etc.) but that's a different, acceptable failure.
     """
-    # Pull a curated id whose URI is hf://... but point the HF call at
-    # a nonexistent repo so it fails fast. We're only checking that the
-    # resolver is registered before dispatch; any post-registration
-    # failure is fine.
+    # Pull a real curated id whose URI is hf://... (qwen3-8b-q4 -> a GGUF
+    # repo). HF_HUB_OFFLINE forces the post-registration HF call to fail
+    # fast instead of downloading ~5GB of weights: registration happens
+    # before resolve() touches the network, so the resolver-not-registered
+    # error must NOT appear, while the offline error is an acceptable
+    # post-registration failure.
     import tempfile
     import os
     with tempfile.TemporaryDirectory() as tmp:
         env = os.environ.copy()
         env["MUSE_CATALOG_DIR"] = tmp
+        env["HF_HUB_OFFLINE"] = "1"
         import subprocess
         r = subprocess.run(
             ["muse", "pull", "qwen3-8b-q4"],

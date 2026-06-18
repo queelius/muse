@@ -230,11 +230,42 @@ def test_load_curated_includes_whisper_entries():
     entries = load_curated()
     asr_ids = {e.id for e in entries if e.modality == "audio/transcription"}
     assert {"whisper-tiny", "whisper-base", "whisper-large-v3"}.issubset(asr_ids)
-    # Each points at a Systran HF URI
+    # Each points at a faster-whisper CT2 repo. The bundled trio are
+    # Systran builds; community CT2 conversions (e.g. deepdml's turbo) are
+    # equally valid, so assert the faster-whisper lineage, not the publisher.
     for e in entries:
         if e.modality == "audio/transcription":
             assert e.uri is not None
-            assert e.uri.startswith("hf://Systran/faster-whisper-")
+            assert e.uri.startswith("hf://")
+            assert "faster-whisper" in e.uri
+
+
+def test_load_curated_includes_v046_model_refresh():
+    """v0.46.0 model-refresh additions across existing modalities. Each is a
+    pure resolver-pull entry (no new runtime), verified to resolve to the
+    modality named here."""
+    by_id = {e.id: e for e in load_curated()}
+    expected = {
+        "qwen3-0.6b-q4": "chat/completion",
+        "qwen3-4b-q4": "chat/completion",
+        "qwen3-8b-q4": "chat/completion",
+        "qwen2.5-vl-7b-instruct": "chat/completion",
+        "bge-m3": "embedding/text",
+        "nomic-embed-text-v1.5": "embedding/text",
+        "whisper-large-v3-turbo": "audio/transcription",
+        "distilbart-cnn-12-6": "text/summarization",
+        "dinov2-base": "image/embedding",
+        "dinov2-large": "image/embedding",
+        "rtdetr-v2-r50vd": "image/cv",
+        "yolos-small": "image/cv",
+        "depth-anything-v2-large": "image/cv",
+        "sam2.1-hiera-large": "image/segmentation",
+    }
+    for cid, modality in expected.items():
+        assert cid in by_id, f"missing curated entry {cid!r}"
+        e = by_id[cid]
+        assert e.modality == modality, f"{cid}: {e.modality!r} != {modality!r}"
+        assert e.uri and e.uri.startswith("hf://")
 
 
 def test_load_curated_includes_sdxl_turbo_and_flux_schnell():
