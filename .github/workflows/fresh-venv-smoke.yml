@@ -29,6 +29,7 @@ jobs:
           - bart-large-cnn
           - bge-reranker-v2-m3
           - mert-v1-95m
+          - supertonic-3
           - twitter-roberta-base-sentiment-latest
           - deberta-v3-base-zeroshot-v2.0
           - trocr-base-printed

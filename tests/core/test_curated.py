@@ -403,3 +403,10 @@ def test_find_curated_by_uri_lets_uri_pull_inherit_capabilities():
     assert match is not None
     assert match.id == "text-moderation"
     assert match.capabilities.get("safe_labels") == ["OK"]
+
+
+def test_load_curated_includes_supertonic_3():
+    """v0.47.0: Supertonic-3 bundled TTS alias."""
+    by_id = {e.id: e for e in load_curated()}
+    assert "supertonic-3" in by_id
+    assert by_id["supertonic-3"].bundled is True

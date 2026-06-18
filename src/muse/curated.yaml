@@ -178,6 +178,9 @@
 - id: soprano-80m
   bundled: true
 
+- id: supertonic-3
+  bundled: true
+
 # ---------- image/generation ----------
 
 - id: sd-turbo
