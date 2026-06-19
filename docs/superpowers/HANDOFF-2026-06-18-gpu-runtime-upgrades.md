@@ -13,9 +13,12 @@
    `feedback_release_workflow.md`.
 3. Confirm the GPU: `nvidia-smi` (need a real CUDA GPU; ACE-Step wants ~12GB+,
    Wan2.2 wants 16GB+).
-4. Pick the next sub-project (recommended order below) and run the SAME pipeline
-   every prior runtime used: **brainstorming -> spec -> writing-plans ->
-   subagent-driven-development**, with a **B1 real-API verification step FIRST**.
+4. **ACE-Step is already designed** - start here: execute
+   `docs/superpowers/plans/2026-06-18-acestep-music.md` via
+   **superpowers:subagent-driven-development**. Its **Task 1 is the B1 step**
+   (install the real SDK on the GPU and confirm the API) - do it first and
+   correct the marked spots in the later tasks from its findings. Wan2.2 still
+   needs a fresh brainstorm (no spec/plan yet).
 
 ## Where things stand
 
@@ -29,28 +32,36 @@ came out of a HuggingFace model survey. Status:
 - REMOVED: **TRELLIS.2** (3D). Cut by the user (its `trellis2`+`o_voxel`
   standalone SDK with CUDA build deps was the gnarliest install of the four).
   Its spec/plan were deleted; recoverable from git history if ever wanted.
-- TODO (this session): **ACE-Step** (music) and **Wan2.2** (image-to-video).
-
-Neither remaining item has a spec or plan yet - they were GPU-gated, so they
-were left at the "scoped, not designed" stage. You start each with a fresh
-brainstorm.
+- DESIGNED, ready to build (this session): **ACE-Step** (music). Spec +
+  implementation plan committed on the CPU host:
+  `docs/superpowers/specs/2026-06-18-acestep-music-design.md` and
+  `docs/superpowers/plans/2026-06-18-acestep-music.md`. Execute the plan; Task 1
+  is B1 on the GPU.
+- TODO, still needs a fresh brainstorm: **Wan2.2** (image-to-video). Scoped only;
+  no spec/plan yet (it also needs a video-modality wire change).
 
 ## The two remaining sub-projects
 
-### 1. ACE-Step (music generation) - recommended first
+### 1. ACE-Step (music generation) - DESIGNED, build first
 
-- Model: `ACE-Step/Ace-Step1.5` (HF). `transformers` + `diffusers`,
-  `custom_code` (trust_remote_code), multi-component (Qwen3-Embedding-0.6B +
-  acestep LM 1.7B + turbo + VAE). Full song generation (vocals + lyrics +
-  style). GPU. License: MIT.
-- Fits the EXISTING `audio/generation` modality (`/v1/audio/music`,
-  `/v1/audio/sfx`). New runtime in
-  `src/muse/modalities/audio_generation/runtimes/` (mirror the existing
-  `stable_audio.py`). The wire mostly exists; you will likely add a `lyrics`
-  request field (ACE-Step is lyrics-conditioned).
-- Effort: medium. Risk: trust_remote_code SDK + multi-model load; verify the
-  real pipeline API at B1 before mocking.
-- Suggested release: v0.48.0.
+- **Spec:** `docs/superpowers/specs/2026-06-18-acestep-music-design.md`
+- **Plan (5 tasks, TDD):** `docs/superpowers/plans/2026-06-18-acestep-music.md`
+- Model: `ACE-Step/Ace-Step1.5`. Full song generation (vocals + lyrics + style).
+  GPU, MIT.
+- **Scope correction discovered during design** (do not trust the older
+  "mirror stable_audio / medium effort" framing): ACE-Step 1.5 is a TWO-handler
+  system (`AceStepHandler` DIT + `LLMHandler` planner, default `backend="vllm"`)
+  driven by a functional `generate_music(...)`, installed from
+  github.com/ace-step/ACE-Step-1.5 (the `ace-step` PyPI v0.1.0 is the OLD v1).
+  Closer to the standalone-SDK 3D runtimes than to Stable Audio. The API was
+  researched from the repo's `docs/en/INFERENCE.md` and is captured in the
+  plan's code (best-evidence; Task 1 B1 confirms init args, vllm necessity,
+  tensor orientation, sample rate, VRAM).
+- Fits the EXISTING `audio/generation` modality; new `ACEStepRuntime`; the wire
+  adds one optional `lyrics` field (lyrics-only per the design); curated
+  GPU-only `ace-step-1.5` entry. Ships v0.48.0.
+- **Execute:** superpowers:subagent-driven-development on the plan; Task 1 (B1)
+  runs the real install + generate on the GPU before the runtime body is fixed.
 
 ### 2. Wan2.2 image-to-video - heavier, do second
 
@@ -146,14 +157,16 @@ pip install -e ".[dev,server,audio,images,embeddings]"   # dev env
 pytest tests/ -m "not slow" -q  # confirm green baseline (expect ~3160 passed)
 ```
 
-Then tell Claude: "Build ACE-Step (music) next per the handoff doc" and it should
-invoke superpowers:brainstorming for the ACE-Step sub-project. Ask the user the
-real open questions (e.g. lyrics field shape, which ACE-Step variant/size,
-turbo vs base, bundled-vs-curated) before designing.
+Then tell Claude: "Execute the ACE-Step plan
+(docs/superpowers/plans/2026-06-18-acestep-music.md) via
+subagent-driven-development" - it is already brainstormed + spec'd + planned
+(design approved on the CPU host). Task 1 of that plan is the GPU B1 step; run it
+first and correct the B1-marked spots in the runtime/curated tasks from its
+findings. After ACE-Step ships, brainstorm Wan2.2 fresh.
 
 ## Roadmap recap
 
 - v0.47.0 Supertonic-3 TTS (CPU) - DONE
-- v0.48.0 ACE-Step music (GPU) - next
-- v0.49.0 Wan2.2 image-to-video (GPU, wire change) - after
+- v0.48.0 ACE-Step music (GPU) - spec + plan READY; execute on GPU
+- v0.49.0 Wan2.2 image-to-video (GPU, wire change) - needs brainstorm
 - TRELLIS.2 3D - removed (recover from git if revived)
