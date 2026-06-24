@@ -133,7 +133,7 @@ class Model:
             voice (str): voice name (default ``'af_heart'``).
             speed (float): speaking speed multiplier (default 1.0).
         """
-        voice = kwargs.get("voice", "af_heart")
+        voice = kwargs.get("voice") or "af_heart"
         speed = kwargs.get("speed", 1.0)
 
         chunks = []
@@ -154,7 +154,7 @@ class Model:
 
     def synthesize_stream(self, text: str, **kwargs) -> Iterator[AudioChunk]:
         """Sentence-level streaming: yields one chunk per sentence."""
-        voice = kwargs.get("voice", "af_heart")
+        voice = kwargs.get("voice") or "af_heart"
         speed = kwargs.get("speed", 1.0)
 
         for result in self._pipeline(text, voice=voice, speed=speed):

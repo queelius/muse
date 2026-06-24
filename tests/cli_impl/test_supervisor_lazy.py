@@ -250,6 +250,40 @@ class TestValidateCatalogAtBoot:
         validate_catalog_at_boot(state, memory_probe=probe)
         assert "probed-model" not in state.unservable_reasons
 
+    def test_does_not_flag_bundled_model_probed_on_other_device(self, tmp_catalog):
+        """Bundled models have no persisted manifest in catalog.json, so the
+        manifest-derived device defaults to 'cpu'. A probe records under the
+        real device (e.g. 'cuda'). Boot validation must consult the probe
+        measurement (adopting its recorded device) rather than flagging the
+        model 'no memory estimate' forever. Regression: `muse models probe`
+        on a bundled GPU model never cleared the flag (probe writes
+        measurements.cuda; the lookup read measurements.cpu).
+        """
+        _seed_catalog({
+            "bundled-gpu": {
+                "pulled_at": "...",
+                "hf_repo": "x/y",
+                "local_dir": "/tmp/x",
+                "venv_path": "/v",
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                # NO "manifest" key: exactly how bundled models appear.
+                "measurements": {
+                    "cuda": {
+                        "peak_bytes": 3_000_000_000,
+                        "device": "cuda",
+                        "weights_bytes": 2_500_000_000,
+                    },
+                },
+            },
+        })
+        state = SupervisorState()
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 10.0   # 3GB fits in 10 - headroom
+        probe.cpu_free_gb.return_value = 32.0
+        validate_catalog_at_boot(state, memory_probe=probe)
+        assert "bundled-gpu" not in state.unservable_reasons
+
     def test_skips_disabled_models(self, tmp_catalog):
         """Disabled entries are not validated; they can't 503."""
         _seed_catalog({

@@ -910,4 +910,17 @@ def get_manifest(model_id: str) -> dict:
     entry = catalog_known[model_id]
     module_path, _ = entry.backend_path.split(":", 1)
     module = _import_backend_module(module_path)
-    return dict(getattr(module, "MANIFEST", {}))
+    manifest = getattr(module, "MANIFEST", None)
+    # Most bundled scripts define `class Model` in the script itself, so
+    # backend_path's module IS the script and carries the MANIFEST. But a
+    # script may alias its Model to a shared runtime class (e.g.
+    # `from ...runtimes.transformers_vlm import HFVisionLanguageModel as Model`),
+    # which makes backend_path point at the runtime module - and that module
+    # has no MANIFEST (or one for a different model). In that case the
+    # capabilities (supports_vision, etc.) would be silently lost and routes
+    # would mis-gate the model. Recover the real MANIFEST from discovery.
+    if not manifest or manifest.get("model_id") != model_id:
+        discovered = discover_models(_model_dirs()).get(model_id)
+        if discovered is not None:
+            return dict(discovered.manifest)
+    return dict(manifest or {})

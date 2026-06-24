@@ -43,6 +43,20 @@ class TestKokoroModel:
         adapter.synthesize("Hello", voice="am_adam", speed=1.2)
         adapter._pipeline.assert_called_once_with("Hello", voice="am_adam", speed=1.2)
 
+    def test_synthesize_defaults_voice_when_none(self):
+        # The /v1/audio/speech route declares `voice: str | None = None` and
+        # always forwards `voice=req.voice`, so an omitted voice arrives as an
+        # explicit None. The default must still apply (kwargs.get default only
+        # fires when the key is absent, not when it is present-but-None).
+        adapter = self._make_adapter()
+        adapter.synthesize("Hello", voice=None)
+        adapter._pipeline.assert_called_once_with("Hello", voice="af_heart", speed=1.0)
+
+    def test_stream_defaults_voice_when_none(self):
+        adapter = self._make_adapter()
+        list(adapter.synthesize_stream("Hello", voice=None))
+        adapter._pipeline.assert_called_once_with("Hello", voice="af_heart", speed=1.0)
+
     def test_stream_yields_chunks(self):
         adapter = self._make_adapter()
         chunks = list(adapter.synthesize_stream("Hello"))

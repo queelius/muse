@@ -31,3 +31,20 @@ def test_model_id_in_manifest_matches_filename():
     underscores."""
     from muse.models import smolvlm_256m_instruct
     assert smolvlm_256m_instruct.MANIFEST["model_id"] == "smolvlm-256m-instruct"
+
+
+def test_get_manifest_recovers_capabilities_for_aliased_model():
+    """Regression: because the script aliases `Model = HFVisionLanguageModel`,
+    the CatalogEntry's backend_path points at the runtime module (which has no
+    MANIFEST). get_manifest must still return the script's real capabilities -
+    otherwise the chat route reads supports_vision=False and 400s every VLM
+    request with 'vision_not_supported'.
+    """
+    from muse.core.catalog import get_manifest
+    m = get_manifest("smolvlm-256m-instruct")
+    caps = m.get("capabilities") or {}
+    assert caps.get("supports_vision") is True
+    assert caps.get("supports_multi_image") is True
+    # full manifest is recovered, not a lossy reconstruction
+    assert m.get("license") == "apache-2.0"
+    assert m.get("model_id") == "smolvlm-256m-instruct"

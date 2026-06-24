@@ -23,6 +23,10 @@ MANIFEST = {
     "license": "apache-2.0",
     "pip_extras": [
         "torch>=2.1.0",
+        # torchvision: transformers>=5 builds the SmolVLM image processor via
+        # torchvision-backed ops; without it AutoProcessor fails to load the
+        # model ("Unrecognized image processor").
+        "torchvision",
         "transformers>=4.46.0",
         "accelerate",
         "Pillow",

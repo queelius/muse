@@ -25,7 +25,11 @@ MANIFEST = {
     ),
     "license": "Apache 2.0",
     "pip_extras": [
-        "torch>=2.1.0", "transformers>=4.46.0", "Pillow", "numpy",
+        # torchvision: transformers>=5 builds the DPT/DepthAnything image
+        # processor via torchvision-backed ops; without it AutoImageProcessor
+        # raises "requires the Torchvision library". (detr-resnet-50 gets it
+        # transitively through timm; this model declares neither, so list it.)
+        "torch>=2.1.0", "torchvision", "transformers>=4.46.0", "Pillow", "numpy",
     ],
     "system_packages": [],
     "capabilities": {

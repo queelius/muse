@@ -540,6 +540,23 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
     measurement_key = "cuda" if device == "gpu" else device
     measured = (measurements.get(measurement_key) or {}).get("peak_bytes")
 
+    # Bundled models have no persisted manifest in catalog.json, so `device`
+    # falls back to "cpu" above even when the probe ran on cuda. If the
+    # manifest-derived device has no measurement but the catalog has one for
+    # another device, use it and adopt the measurement's own recorded device
+    # so the capacity check below picks the right memory pool. Without this,
+    # `muse models probe` never clears a bundled GPU model's "no memory
+    # estimate" flag (the probe writes measurements.cuda; the lookup reads
+    # measurements.cpu).
+    if measured is None:
+        for dev_key, rec in measurements.items():
+            rec = rec or {}
+            peak = rec.get("peak_bytes")
+            if peak:
+                measured = peak
+                device = str(rec.get("device") or dev_key).lower() or device
+                break
+
     if declared is not None:
         try:
             declared_gb = float(declared)
