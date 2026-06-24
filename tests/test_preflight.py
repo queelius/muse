@@ -65,6 +65,7 @@ def test_forwards_trailing_args_to_pytest(monkeypatch):
                         lambda cmd, *a, **k: captured.__setitem__("cmd", cmd) or FakeProc())
     assert pf.main(["--", "-k", "resolver"]) == 0
     assert captured["cmd"][-2:] == ["-k", "resolver"]
+    assert "--" not in captured["cmd"]
 
 
 def test_propagates_pytest_returncode(monkeypatch):
