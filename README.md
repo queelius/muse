@@ -1,5 +1,6 @@
 # Muse
 
+[![tests](https://github.com/queelius/muse/actions/workflows/tests.yml/badge.svg)](https://github.com/queelius/muse/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/museq)](https://pypi.org/project/museq/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/museq)](https://pypi.org/project/museq/)
 ![fresh-venv-smoke](https://github.com/queelius/muse/actions/workflows/fresh-venv-smoke.yml/badge.svg)

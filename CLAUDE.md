@@ -620,6 +620,13 @@ Binary I/O conventions:
 # Install (dev)
 pip install -e ".[dev,server,audio,images]"
 
+# Full dev stack (CPU torch) - what CI installs and what preflight expects
+pip install -e ".[dev,server,audio,images,embeddings]" \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Gate the fast lane on a non-drifted venv (used in the release ritual)
+python scripts/preflight.py
+
 # Fast lane: unit tests only (excludes slow e2e + integration)
 pytest tests/ -q -m "not slow"
 
@@ -724,6 +731,26 @@ PY
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 - **CLI is typer + rich (v0.39.0+).** Per-subcommand parameter binding lives in `src/muse/cli.py` as typer command functions; the heavy logic lives in `src/muse/cli_impl/<command>.py`. New subcommands add a `@app.command(...)` plus a sibling `cli_impl/*.py` module; do not put logic in `cli.py`. Long-form output that goes to a TTY is rendered via `rich.Table` from `cli_impl/console.py`'s shared `Console`; non-TTY output (subprocess, pipe, redirect) is plain text with no ANSI and no truncation, so `muse models list | grep` always sees full content. Status encoding for `models list` and `refresh --all` uses single colored glyphs (`STATUS_STYLE` in `cli_impl/console.py`): `●` enabled, `○` disabled, `★` recommended, `·` available; `✓` ok, `✗` failed for refresh outcomes. `--json` is the canonical machine-readable output across `list` / `probe` / `refresh`.
 - **Shared image preprocessing** (`muse.core.image_preprocessing`, v0.42.1+): four-tier dispatch ladder for image-side preprocessor selection. Public API: `read_encoder_hints(src)` (read encoder hyperparams from config.json), `DerivedImageProcessor` (synthesize a minimal preprocessor from explicit num_channels / image_size / image_mean / image_std), `build_image_processor(src, *, overrides, model_id)` (the orchestrator: override-first, then AutoImageProcessor, then encoder-hints-derived, then fail loud), and `ImageProcessorError` (structured exception pointing at the override hatch). Manifest hatch: `capabilities.image_processor_overrides: {num_channels, image_size, image_mean?, image_std?}` lets curated entries declare ground-truth preprocessing when AutoImageProcessor's sniff would be wrong (TexTeller is the canonical example: 1-channel grayscale at 448x448). Tier 3 (ViT defaults) was dropped in v0.42.1 because it produced silently wrong output for the very class of repos this fallback targets; failures now raise `ImageProcessorError` pointing at the override hatch. Currently consumed by `image_ocr`; other modalities can adopt as needed.
+
+## Continuous integration
+
+Two GitHub Actions workflows run on every push to `main` and every PR:
+
+- `.github/workflows/tests.yml` runs the fast lane (`pytest -m "not slow"`)
+  in a single Python-3.11 job with the full CPU stack
+  (`pip install -e ".[dev,server,audio,images,embeddings]"` against the
+  `download.pytorch.org/whl/cpu` index). Dependencies float on latest (no
+  lockfile), so an upstream breaking release surfaces here on the next push
+  rather than shipping silently. Model tests are mocked, so no weights are
+  downloaded.
+- `.github/workflows/fresh-venv-smoke.yml` (below) validates the per-model
+  fresh-venv install/load path.
+
+Locally, run the fast lane through the preflight guard so a drifted venv
+fails loudly instead of running a partial suite:
+
+    python scripts/preflight.py            # check deps, then run the lane
+    python scripts/preflight.py --check-only
 
 ## Fresh-venv smoke test (CI)
 
