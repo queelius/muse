@@ -6,14 +6,22 @@ The CLI surface is deliberately modality-agnostic:
 No per-modality subcommands — those would be hardcoded modality→verb
 mappings (the anti-pattern this CLI design rejects).
 """
+import os
 import subprocess
 import sys
 
 
 def _run(*args, timeout=30):
+    # Force a deterministic, wide terminal width. On some CI runners stdout is a
+    # pipe whose os.get_terminal_size() reports 0 columns; shutil/rich then
+    # render typer help into a near-zero-width box that wraps option names
+    # character-by-character, so e.g. "--no-probe" is no longer a literal
+    # substring. A positive COLUMNS short-circuits that broken path in both
+    # shutil.get_terminal_size and rich.
+    env = {**os.environ, "COLUMNS": "200"}
     return subprocess.run(
         [sys.executable, "-m", "muse.cli", *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, timeout=timeout, env=env,
     )
 
 
