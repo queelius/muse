@@ -1,0 +1,34 @@
+{
+  "modality": "chat/completion",
+  "model": "smolvlm-256m-instruct",
+  "endpoint": "POST /v1/chat/completions",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T08:20:47Z",
+  "runs": [
+    {
+      "artifact": "response.txt",
+      "request": {
+        "endpoint": "POST /v1/chat/completions",
+        "model": "smolvlm-256m-instruct",
+        "prompt": "In one short sentence, describe a serene mountain lake at sunset.",
+        "max_tokens": 48,
+        "mode": "text-only"
+      },
+      "latency_seconds": 19.976,
+      "output": {
+        "content": "The number of people who have been diagnosed with a certain condition is 1000. The number of people who have been diagnosed with a certain condition is 1000. The number of people who have been diagnosed with a",
+        "usage": {
+          "prompt_tokens": 9,
+          "completion_tokens": 48,
+          "total_tokens": 57
+        }
+      },
+      "note": "model is a VLM; supports_vision gate fixed (P4) and the route accepts image_url input, but CPU VLM image inference is too slow to demo here, so this call is text-only",
+      "timestamp": "2026-06-24T08:20:47Z",
+      "status": "ok"
+    }
+  ]
+}

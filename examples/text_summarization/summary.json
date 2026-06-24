@@ -1,0 +1,17 @@
+{
+  "input": "The James Webb Space Telescope, launched in December 2021, is the largest and most powerful space telescope ever built. Positioned at the second Lagrange point about 1.5 million kilometres from Earth, it observes the universe primarily in the infrared. Its 6.5-metre segmented gold-coated mirror lets it peer through cosmic dust and capture light from the first galaxies that formed after the Big Bang. In its first years of operation it has imaged star-forming regions, exoplanet atmospheres, and some of the most distant galaxies ever observed, reshaping our understanding of the early universe.",
+  "response": {
+    "id": "sum-bdfc1dbaa8bc48b58c0ec3e8",
+    "model": "bart-large-cnn",
+    "summary": "The James Webb Space Telescope, launched in December 2021, is the largest and most powerful space telescope ever built. Positioned at the second Lagrange point about 1.5 million kilometres from Earth, it observes the universe primarily in the infrared. Its 6.5-metre segmented gold-coated mirror lets it peer through cosmic dust and capture light from the first galaxies that formed after",
+    "usage": {
+      "prompt_tokens": 124,
+      "completion_tokens": 78,
+      "total_tokens": 202
+    },
+    "meta": {
+      "length": "short",
+      "format": "paragraph"
+    }
+  }
+}

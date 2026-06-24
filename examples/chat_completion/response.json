@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-1782289247646",
+  "object": "chat.completion",
+  "created": 1782289247,
+  "model": "smolvlm-256m-instruct",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The number of people who have been diagnosed with a certain condition is 1000. The number of people who have been diagnosed with a certain condition is 1000. The number of people who have been diagnosed with a"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 9,
+    "completion_tokens": 48,
+    "total_tokens": 57
+  }
+}

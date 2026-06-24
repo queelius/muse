@@ -1,0 +1,27 @@
+{
+  "modality": "audio/transcription",
+  "model": "whisper-base",
+  "endpoint": "POST /v1/audio/transcriptions",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T05:56:45Z",
+  "runs": [
+    {
+      "artifact": "transcript.json",
+      "request": {
+        "endpoint": "POST /v1/audio/transcriptions",
+        "model": "whisper-base",
+        "response_format": "verbose_json"
+      },
+      "derived_from": "examples/audio_speech/kokoro-82m_hello.wav",
+      "latency_seconds": 8.89,
+      "output": {
+        "text": "Hello from Muse. This sentence was synthesized on a CPU by the Kakoro text-to-speech model."
+      },
+      "timestamp": "2026-06-24T05:56:45Z",
+      "status": "ok"
+    }
+  ]
+}

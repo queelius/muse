@@ -1,0 +1,96 @@
+{
+  "modality": "image/cv",
+  "model": "depth-anything-v2-small, detr-resnet-50",
+  "endpoint": "POST /v1/images/{depth,detect}",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T07:54:03Z",
+  "runs": [
+    {
+      "artifact": "depth_map.png",
+      "request": {
+        "endpoint": "POST /v1/images/depth",
+        "model": "depth-anything-v2-small",
+        "response_format": "png16"
+      },
+      "derived_from": "examples/image_generation/sd-turbo_mountain_lake.png",
+      "latency_seconds": 13.313,
+      "output": {
+        "format": "png16",
+        "size": "512x512",
+        "min_depth": -0.0245102159678936,
+        "max_depth": 8.201635360717773
+      },
+      "timestamp": "2026-06-24T07:53:26Z",
+      "status": "ok"
+    },
+    {
+      "artifact": "detections.json",
+      "request": {
+        "endpoint": "POST /v1/images/detect",
+        "model": "detr-resnet-50",
+        "threshold": 0.5,
+        "input_prompt": "a person riding a bicycle on a city street with parked cars, daytime, photograph"
+      },
+      "derived_from": "examples/image_cv/detect_input.png (sd-turbo generated)",
+      "latency_seconds": 16.574,
+      "output": {
+        "n_detections": 48,
+        "labels": [
+          "car(1.00)",
+          "car(1.00)",
+          "car(0.99)",
+          "car(0.99)",
+          "car(0.99)",
+          "car(0.99)",
+          "car(0.98)",
+          "bicycle(0.98)",
+          "car(0.97)",
+          "person(0.97)",
+          "car(0.97)",
+          "car(0.95)",
+          "car(0.95)",
+          "bicycle(0.94)",
+          "person(0.94)",
+          "bicycle(0.93)",
+          "bicycle(0.90)",
+          "person(0.90)",
+          "person(0.90)",
+          "person(0.90)",
+          "car(0.89)",
+          "car(0.89)",
+          "car(0.88)",
+          "car(0.85)",
+          "bicycle(0.82)",
+          "bicycle(0.82)",
+          "car(0.80)",
+          "car(0.79)",
+          "truck(0.78)",
+          "car(0.74)",
+          "person(0.74)",
+          "traffic light(0.70)",
+          "person(0.68)",
+          "bicycle(0.67)",
+          "bicycle(0.66)",
+          "traffic light(0.66)",
+          "traffic light(0.65)",
+          "person(0.64)",
+          "traffic light(0.62)",
+          "person(0.62)",
+          "person(0.59)",
+          "person(0.59)",
+          "car(0.58)",
+          "car(0.58)",
+          "car(0.58)",
+          "traffic light(0.57)",
+          "traffic light(0.53)",
+          "person(0.52)"
+        ]
+      },
+      "timestamp": "2026-06-24T07:54:03Z",
+      "status": "ok"
+    }
+  ]
+}

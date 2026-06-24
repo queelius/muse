@@ -1,0 +1,28 @@
+{
+  "modality": "text/rerank",
+  "model": "bge-reranker-v2-m3",
+  "endpoint": "POST /v1/rerank",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T06:04:42Z",
+  "runs": [
+    {
+      "artifact": "rerank.json",
+      "request": {
+        "endpoint": "POST /v1/rerank",
+        "model": "bge-reranker-v2-m3",
+        "query": "How do I reset my password?",
+        "n_documents": 4
+      },
+      "latency_seconds": 10.15,
+      "output": {
+        "top_index": 0,
+        "top_score": 0.7078121304512024
+      },
+      "timestamp": "2026-06-24T06:04:42Z",
+      "status": "ok"
+    }
+  ]
+}

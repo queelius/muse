@@ -1,0 +1,48 @@
+{
+  "query": "How do I reset my password?",
+  "documents": [
+    "To reset your password, click 'Forgot password' on the login page.",
+    "Our office is open Monday to Friday, 9am to 5pm.",
+    "Password requirements: at least 12 characters with a symbol.",
+    "The weather today is sunny with a high of 24 degrees."
+  ],
+  "response": {
+    "id": "rrk-e080f558b66446bc905a15d7",
+    "model": "bge-reranker-v2-m3",
+    "results": [
+      {
+        "index": 0,
+        "relevance_score": 0.7078121304512024,
+        "document": {
+          "text": "To reset your password, click 'Forgot password' on the login page."
+        }
+      },
+      {
+        "index": 2,
+        "relevance_score": 0.0004095963668078184,
+        "document": {
+          "text": "Password requirements: at least 12 characters with a symbol."
+        }
+      },
+      {
+        "index": 3,
+        "relevance_score": 1.634640466363635e-05,
+        "document": {
+          "text": "The weather today is sunny with a high of 24 degrees."
+        }
+      },
+      {
+        "index": 1,
+        "relevance_score": 1.6126472473843023e-05,
+        "document": {
+          "text": "Our office is open Monday to Friday, 9am to 5pm."
+        }
+      }
+    ],
+    "meta": {
+      "billed_units": {
+        "search_units": 1
+      }
+    }
+  }
+}

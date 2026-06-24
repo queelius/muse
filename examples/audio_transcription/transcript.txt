@@ -1,0 +1,1 @@
+Hello from Muse. This sentence was synthesized on a CPU by the Kakoro text-to-speech model.

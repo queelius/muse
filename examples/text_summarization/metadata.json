@@ -1,0 +1,29 @@
+{
+  "modality": "text/summarization",
+  "model": "bart-large-cnn",
+  "endpoint": "POST /v1/summarize",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T07:53:12Z",
+  "runs": [
+    {
+      "artifact": "summary.txt",
+      "request": {
+        "endpoint": "POST /v1/summarize",
+        "model": "bart-large-cnn",
+        "length": "short",
+        "format": "paragraph",
+        "input_chars": 597
+      },
+      "latency_seconds": 30.059,
+      "output": {
+        "summary": "The James Webb Space Telescope, launched in December 2021, is the largest and most powerful space telescope ever built. Positioned at the second Lagrange point about 1.5 million kilometres from Earth, it observes the universe primarily in the infrared. Its 6.5-metre segmented gold-coated mirror lets it peer through cosmic dust and capture light from the first galaxies that formed after",
+        "summary_chars": 388
+      },
+      "timestamp": "2026-06-24T07:53:12Z",
+      "status": "ok"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "modality": "embedding/text",
+  "model": "qwen3-embedding-0.6b",
+  "endpoint": "POST /v1/embeddings",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T05:55:58Z",
+  "runs": [
+    {
+      "artifact": "embeddings.json",
+      "request": {
+        "endpoint": "POST /v1/embeddings",
+        "model": "qwen3-embedding-0.6b",
+        "input": [
+          "The cat sat on the mat.",
+          "A feline rested on the rug.",
+          "Quarterly revenue rose 12%."
+        ]
+      },
+      "latency_seconds": 26.514,
+      "output": {
+        "dims": 1024,
+        "n": 3,
+        "cosine_similarities": {
+          "0-1 (paraphrase)": 0.7198,
+          "0-2 (unrelated)": 0.2501
+        }
+      },
+      "timestamp": "2026-06-24T05:55:58Z",
+      "status": "ok"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "modality": "text/classification",
+  "model": "text-moderation",
+  "endpoint": "POST /v1/moderations",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T05:56:13Z",
+  "runs": [
+    {
+      "artifact": "moderations.json",
+      "request": {
+        "endpoint": "POST /v1/moderations",
+        "model": "text-moderation",
+        "input": [
+          "I love this, what a wonderful day!",
+          "I will hurt you and everyone you love."
+        ]
+      },
+      "latency_seconds": 15.62,
+      "output": {
+        "n": 2
+      },
+      "timestamp": "2026-06-24T05:56:13Z",
+      "status": "ok"
+    }
+  ]
+}

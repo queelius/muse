@@ -1,0 +1,32 @@
+{
+  "modality": "image/generation",
+  "model": "sd-turbo",
+  "endpoint": "POST /v1/images/generations",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T06:04:32Z",
+  "runs": [
+    {
+      "artifact": "sd-turbo_mountain_lake.png",
+      "request": {
+        "endpoint": "POST /v1/images/generations",
+        "prompt": "a serene mountain lake at sunset, oil painting, warm light",
+        "model": "sd-turbo",
+        "size": "512x512",
+        "steps": 1,
+        "seed": 42
+      },
+      "latency_seconds": 13.625,
+      "output": {
+        "format": "png",
+        "bytes": 372798,
+        "size": "512x512",
+        "mode": "RGB"
+      },
+      "timestamp": "2026-06-24T06:04:32Z",
+      "status": "ok"
+    }
+  ]
+}

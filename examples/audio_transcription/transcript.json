@@ -1,0 +1,14 @@
+{
+  "task": "transcribe",
+  "language": "en",
+  "duration": 6.7,
+  "text": "Hello from Muse. This sentence was synthesized on a CPU by the Kakoro text-to-speech model.",
+  "segments": [
+    {
+      "id": 0,
+      "start": 0.0,
+      "end": 7.0,
+      "text": "Hello from Muse. This sentence was synthesized on a CPU by the Kakoro text-to-speech model."
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "inputs": [
+    "I love this, what a wonderful day!",
+    "I will hurt you and everyone you love."
+  ],
+  "results": [
+    {
+      "flagged": false,
+      "categories": {
+        "H": false,
+        "H2": false,
+        "HR": false,
+        "OK": false,
+        "S": false,
+        "S3": false,
+        "SH": false,
+        "V": false,
+        "V2": false
+      },
+      "category_scores": {
+        "H": 0.005061119329184294,
+        "H2": 0.0006669508293271065,
+        "HR": 0.0015184241347014904,
+        "OK": 0.981109619140625,
+        "S": 0.0013662819983437657,
+        "S3": 0.0008489589090459049,
+        "SH": 0.005647055804729462,
+        "V": 0.0024956846609711647,
+        "V2": 0.0012860044371336699
+      }
+    },
+    {
+      "flagged": false,
+      "categories": {
+        "H": false,
+        "H2": false,
+        "HR": false,
+        "OK": false,
+        "S": false,
+        "S3": false,
+        "SH": false,
+        "V": false,
+        "V2": false
+      },
+      "category_scores": {
+        "H": 0.15196439623832703,
+        "H2": 0.1543053239583969,
+        "HR": 0.06865301728248596,
+        "OK": 0.029444754123687744,
+        "S": 0.016779428347945213,
+        "S3": 0.010647467337548733,
+        "SH": 0.20436283946037292,
+        "V": 0.3068132698535919,
+        "V2": 0.057029519230127335
+      }
+    }
+  ]
+}

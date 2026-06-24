@@ -1,0 +1,33 @@
+{
+  "modality": "audio/speech",
+  "model": "kokoro-82m",
+  "endpoint": "POST /v1/audio/speech",
+  "muse_version": "0.47.0",
+  "server_commit": "7e9cbca",
+  "server_url": "http://localhost:8000",
+  "device": "auto",
+  "generated_at": "2026-06-24T05:55:11Z",
+  "runs": [
+    {
+      "artifact": "kokoro-82m_hello.wav",
+      "request": {
+        "endpoint": "POST /v1/audio/speech",
+        "input": "Hello from muse. This sentence was synthesized on a CPU by the Kokoro text to speech model.",
+        "response_format": "wav",
+        "model": "kokoro-82m",
+        "voice": "af_heart (muse default; client omitted voice)"
+      },
+      "latency_seconds": 26.041,
+      "output": {
+        "format": "wav",
+        "bytes": 321644,
+        "channels": 1,
+        "sample_rate": 24000,
+        "frames": 160800,
+        "seconds": 6.7
+      },
+      "timestamp": "2026-06-24T05:55:11Z",
+      "status": "ok"
+    }
+  ]
+}
