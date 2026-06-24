@@ -1,0 +1,47 @@
+name: tests
+
+# Run the fast unit/contract lane (pytest -m "not slow") on every push to
+# main and every PR. Distinct from fresh-venv-smoke.yml, which validates the
+# per-model fresh-venv install/load path. Deps float on latest (no lockfile)
+# so upstream drift surfaces here on the next push. CPU torch only; model
+# tests are mocked, so no model weights are downloaded.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  fast-lane:
+    name: pytest -m "not slow" (py3.11, cpu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-tests-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-tests-
+            ${{ runner.os }}-pip-
+
+      - name: install muse with full CPU extras
+        env:
+          PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,server,audio,images,embeddings]"
+
+      - name: run fast lane
+        run: pytest -m "not slow" -q
