@@ -98,7 +98,7 @@ embeddings = [
 ]
 
 # Development
-dev = ["pytest", "pytest-cov", "pytest-asyncio", "pytest-timeout"]
+dev = ["pytest", "pytest-cov", "pytest-asyncio", "pytest-timeout", "tomli; python_version < \"3.11\""]
 
 [project.scripts]
 muse = "muse.cli:main"
