@@ -6,22 +6,14 @@ The CLI surface is deliberately modality-agnostic:
 No per-modality subcommands — those would be hardcoded modality→verb
 mappings (the anti-pattern this CLI design rejects).
 """
-import os
 import subprocess
 import sys
 
 
 def _run(*args, timeout=30):
-    # Force a deterministic, wide terminal width. On some CI runners stdout is a
-    # pipe whose os.get_terminal_size() reports 0 columns; shutil/rich then
-    # render typer help into a near-zero-width box that wraps option names
-    # character-by-character, so e.g. "--no-probe" is no longer a literal
-    # substring. A positive COLUMNS short-circuits that broken path in both
-    # shutil.get_terminal_size and rich.
-    env = {**os.environ, "COLUMNS": "200"}
     return subprocess.run(
         [sys.executable, "-m", "muse.cli", *args],
-        capture_output=True, text=True, timeout=timeout, env=env,
+        capture_output=True, text=True, timeout=timeout,
     )
 
 
@@ -149,11 +141,23 @@ def test_pull_unknown_model_nonzero_exit():
 
 
 def test_pull_help_documents_no_probe_flag():
-    """muse pull --help must list the new --no-probe opt-out flag."""
+    """The `pull` command must expose the --no-probe opt-out flag.
+
+    `--help` must run cleanly; the flag's presence is verified by typer
+    introspection rather than by grepping the rendered help. The rendered
+    help's line-wrapping is environment-dependent: some CI runners pipe
+    stdout, so os.get_terminal_size() reports 0 columns and rich wraps
+    option names character-by-character, dropping "--no-probe" as a literal
+    substring. Introspecting the command's options is render-independent.
+    """
+    import typer
+    from muse.cli import app
+
     r = _run("pull", "--help")
     assert r.returncode == 0
-    combined = r.stdout + r.stderr
-    assert "--no-probe" in combined
+    pull = typer.main.get_command(app).commands["pull"]
+    opts = [opt for param in pull.params for opt in param.opts]
+    assert "--no-probe" in opts
 
 
 def test_pull_curated_alias_registers_hf_resolver():
@@ -202,12 +206,21 @@ def test_help_is_fast(tmp_path):
 
 
 def test_worker_subcommand_accepts_port_and_model():
-    """`muse _worker --port N --model X` must parse without error."""
+    """`muse _worker` must accept --port and --model.
+
+    `--help` must run cleanly; option presence is verified by typer
+    introspection (see test_pull_help_documents_no_probe_flag for why
+    grepping rendered help is environment-fragile).
+    """
+    import typer
+    from muse.cli import app
+
     r = _run("_worker", "--port", "9999", "--model", "soprano-80m", "--help")
     assert r.returncode == 0
-    combined = r.stdout + r.stderr
-    assert "--port" in combined
-    assert "--model" in combined
+    worker = typer.main.get_command(app).commands["_worker"]
+    opts = [opt for param in worker.params for opt in param.opts]
+    assert "--port" in opts
+    assert "--model" in opts
 
 
 def test_models_enable_subcommand_parses():
