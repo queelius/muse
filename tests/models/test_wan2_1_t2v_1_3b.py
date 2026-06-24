@@ -79,7 +79,12 @@ def test_construction_falls_back_to_diffusion_pipeline_when_wan_absent():
     fake_diffusion = MagicMock()
     fake_diffusion.from_pretrained.return_value = _patched_pipe()
 
+    # _ensure_deps must be suppressed: if WanPipeline is patched to None,
+    # _ensure_deps would re-import the real WanPipeline (diffusers 0.32+
+    # exports it) and overwrite the sentinel, defeating the fallback test.
     with patch(
+        "muse.models.wan2_1_t2v_1_3b._ensure_deps", lambda: None,
+    ), patch(
         "muse.models.wan2_1_t2v_1_3b.WanPipeline", None,
     ), patch(
         "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", fake_diffusion,

@@ -6,6 +6,27 @@ import pytest
 from muse.cli_impl.worker import run_worker
 
 
+def _collect_route_paths(app) -> set:
+    """Collect all route paths from a FastAPI app.
+
+    Starlette >= 1.3 uses _IncludedRouter wrapper objects (no `.path`
+    attribute) instead of flattening include_router() calls to APIRoute
+    instances at the app level.  We recurse into original_router.routes
+    to reach the actual APIRoute objects.
+    """
+    paths: set = set()
+    for r in app.routes:
+        if hasattr(r, "path"):
+            paths.add(r.path)
+        # _IncludedRouter (Starlette >= 1.3): included routers are wrapped
+        # rather than flattened; descend one level to find the real routes.
+        elif hasattr(r, "original_router"):
+            for sub in r.original_router.routes:
+                if hasattr(sub, "path"):
+                    paths.add(sub.path)
+    return paths
+
+
 @patch("muse.cli_impl.worker.uvicorn")
 @patch("muse.cli_impl.worker.load_backend")
 @patch("muse.cli_impl.worker.is_pulled", return_value=True)
@@ -119,12 +140,11 @@ def test_worker_mounts_all_bundled_modality_routers(mock_uvicorn):
 
     mock_uvicorn.run.assert_called_once()
     app = mock_uvicorn.run.call_args.args[0]
-    route_paths = {getattr(r, "path", "") for r in app.routes}
-    paths_str = "\n".join(route_paths)
-    assert "/v1/audio/speech" in paths_str
-    assert "/v1/images/generations" in paths_str
-    assert "/v1/embeddings" in paths_str
-    assert "/v1/chat/completions" in paths_str
+    route_paths = _collect_route_paths(app)
+    assert "/v1/audio/speech" in route_paths
+    assert "/v1/images/generations" in route_paths
+    assert "/v1/embeddings" in route_paths
+    assert "/v1/chat/completions" in route_paths
 
 
 @patch("muse.cli_impl.worker.uvicorn")
@@ -149,7 +169,7 @@ def test_worker_mounts_routers_from_discovery(mock_discover, mock_uvicorn):
     # The router from the discovered build function was mounted
     sentinel_build.assert_called_once()
     app = mock_uvicorn.run.call_args.args[0]
-    route_paths = {getattr(r, "path", "") for r in app.routes}
+    route_paths = _collect_route_paths(app)
     assert "/v1/sentinel/ping" in route_paths
 
 
