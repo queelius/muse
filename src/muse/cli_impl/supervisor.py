@@ -548,7 +548,14 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
     # `muse models probe` never clears a bundled GPU model's "no memory
     # estimate" flag (the probe writes measurements.cuda; the lookup reads
     # measurements.cpu).
-    if measured is None:
+    #
+    # Gate on `declared is None`: this recovery only matters when there is no
+    # declared memory_gb (the bundled-model case). A model that DOES declare
+    # memory_gb already trusts its manifest device below, so we must not let a
+    # stale cross-device measurement (e.g. a CPU probe of a declared-cuda model
+    # pulled with --no-probe) overwrite that device and mis-size the GPU model
+    # against the CPU pool.
+    if measured is None and declared is None:
         for dev_key, rec in measurements.items():
             rec = rec or {}
             peak = rec.get("peak_bytes")

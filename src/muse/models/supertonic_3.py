@@ -110,8 +110,12 @@ class Model:
 
         Unknown kwargs are silently ignored per the TTSModel protocol.
         """
-        voice = kwargs.get("voice", DEFAULT_VOICE)
-        lang = kwargs.get("lang", "en")
+        # `or` (not the dict-default) so an explicit None defaults too: the
+        # /v1/audio/speech route declares `voice: str | None = None` and always
+        # forwards `voice=req.voice`, so an omitted voice arrives present-but-None
+        # (the same trap fixed in kokoro_82m.py, commit d28c82a).
+        voice = kwargs.get("voice") or DEFAULT_VOICE
+        lang = kwargs.get("lang") or "en"
         style = self._tts.get_voice_style(voice_name=voice)
         # SDK returns (wav, duration); wav has shape (1, N) float32 in [-1, 1].
         # Flatten to (N,) to satisfy the AudioResult contract.

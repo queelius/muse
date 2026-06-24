@@ -67,9 +67,31 @@ def test_synthesize_defaults_voice_and_lang():
     assert a._tts.synthesize.call_args.kwargs.get("lang") == "en"
 
 
+def test_synthesize_defaults_voice_when_none():
+    # The /v1/audio/speech route declares `voice: str | None = None` and always
+    # forwards `voice=req.voice`, so an omitted voice arrives as explicit None.
+    # The default must still apply (mirrors the kokoro fix in d28c82a; a dict
+    # default only fires when the key is absent, not present-but-None).
+    from muse.models.supertonic_3 import DEFAULT_VOICE
+    a = _make_adapter()
+    a.synthesize("Hi", voice=None)
+    a._tts.get_voice_style.assert_called_once_with(voice_name=DEFAULT_VOICE)
+
+
+def test_stream_defaults_voice_when_none():
+    from muse.models.supertonic_3 import DEFAULT_VOICE
+    a = _make_adapter()
+    list(a.synthesize_stream("Hi", voice=None))
+    a._tts.get_voice_style.assert_called_once_with(voice_name=DEFAULT_VOICE)
+
+
 def test_synthesize_ignores_unknown_kwargs():
-    # protocol: unknown kwargs silently ignored
-    _make_adapter().synthesize("Hi", temperature=0.9, nonsense=True)
+    # protocol: unknown kwargs silently ignored, i.e. NOT forwarded to the SDK.
+    a = _make_adapter()
+    r = a.synthesize("Hi", temperature=0.9, nonsense=True)
+    assert isinstance(r, AudioResult)
+    call = a._tts.synthesize.call_args
+    assert "temperature" not in call.kwargs and "nonsense" not in call.kwargs
 
 
 def test_stream_yields_one_chunk():

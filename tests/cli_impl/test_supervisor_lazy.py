@@ -1186,3 +1186,39 @@ class TestIdleSweeperWiredAtBoot:
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         assert seen["interval"] == 0.1
+
+
+class TestHasMemoryData:
+    """Unit tests for _has_memory_data's (has, gb, device) tuple."""
+
+    def test_bundled_model_adopts_cross_device_measurement(self):
+        """A bundled model (no persisted manifest -> device defaults 'cpu', no
+        declared memory_gb) probed only on cuda must adopt the cuda measurement
+        AND its recorded device, so the capacity check uses the GPU pool."""
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        has, gb, device = _has_memory_data({
+            "measurements": {
+                "cuda": {"peak_bytes": 3 * 1024 ** 3, "device": "cuda"},
+            },
+        })
+        assert has is True
+        assert device == "cuda"
+        assert round(gb) == 3
+
+    def test_declared_device_not_overwritten_by_stale_measurement(self):
+        """Regression: a model that DECLARES device=cuda + memory_gb but whose
+        only measurement is a stale CPU probe (e.g. pulled with --no-probe then
+        probed on a CPU host) must keep device='cuda' so its GPU estimate is
+        sized against the GPU pool, not silently mis-sized against CPU."""
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        has, gb, device = _has_memory_data({
+            "manifest": {"capabilities": {"device": "cuda", "memory_gb": 14.0}},
+            "measurements": {
+                "cpu": {"peak_bytes": 1 * 1024 ** 3, "device": "cpu"},
+            },
+        })
+        assert has is True
+        assert gb == 14.0
+        assert device == "cuda"  # NOT overwritten to 'cpu' by the recovery loop

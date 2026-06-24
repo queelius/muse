@@ -390,7 +390,13 @@ def test_repo_info_repository_not_found_surfaces_without_retry():
     with patch("muse.core.resolvers_hf.HfApi") as MockApi, \
             patch("muse.core.resolvers_hf.time.sleep"):
         api = MockApi.return_value
-        api.repo_info.side_effect = RepositoryNotFoundError("404 not found")
+        # RepositoryNotFoundError inherits HfHubHTTPError, whose __init__ takes a
+        # required keyword-only `response` (huggingface_hub >= 1.x). Construct it
+        # accordingly so the test exercises the no-retry path instead of crashing
+        # at setup (regression: positional-only construction raised TypeError on
+        # hf_hub 1.20.1, silently voiding this test's coverage).
+        api.repo_info.side_effect = RepositoryNotFoundError(
+            "404 not found", response=MagicMock())
         r = HFResolver(plugins=[])
         with pytest.raises(RepositoryNotFoundError):
             r._repo_info("org/missing")
