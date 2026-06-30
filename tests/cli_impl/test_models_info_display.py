@@ -133,19 +133,31 @@ class TestFormatInfo:
         assert "not running" not in out
         assert "MUSE_ADMIN_TOKEN" in out
 
-    def test_public_not_loaded_says_not_loaded_not_unreachable(self):
-        """A reachable server that reports the model unloaded must say
-        'not loaded', not 'supervisor unreachable'."""
+    def test_reachable_unloaded_differs_from_unreachable(self):
+        """The fix's end-to-end payoff: a REACHABLE server reporting the
+        model unloaded ({"loaded": False, ...}, non-None) shows
+        'not loaded', while an UNREACHABLE supervisor (online_status=None)
+        shows 'not running'. format_info must distinguish the two -- the
+        public fallback now yields a non-None status for a reachable
+        server, so the old 'supervisor unreachable' line no longer
+        appears just because the operator lacks an admin token.
+        """
         catalog_known = {"kokoro-82m": _entry()}
-        out = format_info(
-            "kokoro-82m",
+        kw = dict(
             catalog_known=catalog_known,
             catalog_data={"enabled": True, "venv_path": "/v"},
-            online_status={"loaded": False, "detail_source": "public"},
         )
-        assert "enabled, not loaded" in out
-        assert "not running" not in out
-        assert "not loaded" in out.lower()
+        reachable = format_info(
+            "kokoro-82m", online_status={"loaded": False, "detail_source": "public"}, **kw,
+        )
+        unreachable = format_info("kokoro-82m", online_status=None, **kw)
+
+        # Reachable-but-unloaded: 'not loaded', NOT the offline view.
+        assert "enabled, not loaded" in reachable
+        assert "not running" not in reachable
+        assert "not loaded" in reachable.lower()
+        # Unreachable: the offline 'not running' view fires.
+        assert "not running" in unreachable
 
     def test_known_capability_keys_render_with_label(self):
         catalog_known = {"sd-turbo": _entry(

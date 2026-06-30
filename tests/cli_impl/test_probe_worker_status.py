@@ -54,3 +54,20 @@ def test_probe_falls_back_to_public_without_admin():
     with patch.object(cli, "_probe_admin_worker_status", return_value=None), \
          patch.object(cli, "_public_loaded_status", return_value=pub_status):
         assert cli._probe_online_worker_status("m") == pub_status
+
+
+def test_probe_admin_worker_status_returns_none_without_token(monkeypatch):
+    """No admin token -> the admin probe returns None (so the caller falls
+    back to the public path) without constructing an AdminClient."""
+    from muse import cli
+
+    monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+    constructed = {"count": 0}
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            constructed["count"] += 1
+
+    monkeypatch.setattr("muse.admin.client.AdminClient", _Boom, raising=False)
+    assert cli._probe_admin_worker_status("m") is None
+    assert constructed["count"] == 0

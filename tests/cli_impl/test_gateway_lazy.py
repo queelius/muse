@@ -878,6 +878,26 @@ class TestV1ModelsLoadedAtJoin:
         assert by_id["hot-model"]["last_loaded_at"] is not None
         assert by_id["ghost-model"]["last_loaded_at"] is None
 
+    def test_existing_non_null_last_loaded_at_not_overwritten(self):
+        # If a worker ever reports its own non-null timestamp, the join
+        # must not clobber it with the director's value.
+        state = self._running_state_with_loaded("hot-model", 9001)
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        sentinel = "2099-01-01T00:00:00+00:00"
+        p, factory = self._patch_worker_models([
+            {"id": "hot-model", "object": "model",
+             "loaded": True, "last_loaded_at": sentinel},
+        ])
+        with p as mock_cls:
+            mock_cls.return_value = factory()
+            with patch("muse.cli_impl.gateway._read_catalog", return_value={}):
+                r = client.get("/v1/models")
+
+        by_id = {e["id"]: e for e in r.json()["data"]}
+        assert by_id["hot-model"]["last_loaded_at"] == sentinel
+
 
 class TestHealthReflectsCatalog:
     """Fix #6 (v0.47.4): /health lists enabled-but-unloaded catalog models

@@ -704,15 +704,13 @@ def _public_loaded_status(model_id: str) -> dict | None:
     is reachable, else None. A reachable server that does not list the
     model reports loaded=False (reachable, not resident).
     """
-    from muse.cli_impl.runtime_state import fetch_public_models
+    from muse.cli_impl.runtime_state import fetch_public_models, loaded_ids
     data = fetch_public_models()
     if data is None:
         return None
-    loaded = any(
-        isinstance(m, dict) and m.get("id") == model_id and bool(m.get("loaded"))
-        for m in data
-    )
-    return {"loaded": loaded, "detail_source": "public"}
+    # Reuse loaded_ids so `muse models info` and `muse models list` answer
+    # "is this loaded?" with the SAME predicate (strict `loaded is True`).
+    return {"loaded": model_id in loaded_ids(data), "detail_source": "public"}
 
 
 def _try_admin_action(action: str, model_id: str) -> bool:
