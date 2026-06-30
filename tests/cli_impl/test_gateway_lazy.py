@@ -879,6 +879,82 @@ class TestV1ModelsLoadedAtJoin:
         assert by_id["ghost-model"]["last_loaded_at"] is None
 
 
+class TestHealthReflectsCatalog:
+    """Fix #6 (v0.47.4): /health lists enabled-but-unloaded catalog models
+    and their modalities, not just resident workers, so the serviceable
+    surface it reports matches /v1/models.
+    """
+
+    def _catalog(self):
+        return {
+            "hot-model": {  # also resident; must not be double-listed
+                "enabled": True, "python_path": "/v/bin/python",
+                "manifest": {"model_id": "hot-model",
+                             "modality": "audio/speech", "capabilities": {}},
+            },
+            "cold-model": {  # enabled, not resident -> should appear
+                "enabled": True, "python_path": "/v/bin/python",
+                "manifest": {"model_id": "cold-model",
+                             "modality": "embedding/text", "capabilities": {}},
+            },
+            "disabled-model": {  # disabled -> must not appear
+                "enabled": False, "python_path": "/v/bin/python",
+                "manifest": {"model_id": "disabled-model",
+                             "modality": "image/generation", "capabilities": {}},
+            },
+        }
+
+    def _worker_health(self, payload: dict):
+        def _factory():
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = payload
+
+            async def fake_get(url, **kwargs):
+                return resp
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            return mock_client
+
+        return patch("muse.cli_impl.gateway.httpx.AsyncClient"), _factory
+
+    def test_health_includes_enabled_unloaded(self):
+        from muse.cli_impl.supervisor import WorkerSpec
+
+        state = _make_state_with_director()
+        state.workers.append(WorkerSpec(
+            models=["hot-model"], python_path="/v/bin/python",
+            port=9001, status="running",
+        ))
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        catalog = self._catalog()
+        p, factory = self._worker_health({
+            "status": "ok", "modalities": ["audio/speech"], "models": ["hot-model"],
+        })
+        with p as mock_cls:
+            mock_cls.return_value = factory()
+            with patch(
+                "muse.cli_impl.gateway._read_catalog", return_value=catalog,
+            ), patch(
+                "muse.cli_impl.gateway.get_manifest",
+                side_effect=lambda mid: catalog[mid]["manifest"],
+            ):
+                r = client.get("/health")
+
+        body = r.json()
+        assert body["status"] == "ok"
+        assert "hot-model" in body["models"]
+        assert "cold-model" in body["models"]
+        assert "disabled-model" not in body["models"]
+        assert "audio/speech" in body["modalities"]
+        assert "embedding/text" in body["modalities"]
+        assert "image/generation" not in body["modalities"]
+
+
 class TestLegacyStaticRoutesStillWork:
     """The build_gateway(routes=...) signature used by tests must keep
     working for tests that pre-date Task F. The static-routes path is the

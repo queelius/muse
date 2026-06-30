@@ -285,6 +285,17 @@ def build_gateway(
                 continue
             modalities.update(body.get("modalities", []))
             models.update(body.get("models", []))
+        # v0.47.4: also report enabled-but-unloaded catalog models so the
+        # serviceable surface matches /v1/models. A request naming one of
+        # these triggers an on-demand load; reporting only resident
+        # workers under-stated what the gateway can actually serve.
+        state = app.state.routes_state
+        if state is not None:
+            already = [{"id": m} for m in models]
+            for entry in _unloaded_catalog_entries(state, already):
+                models.add(entry["id"])
+                if entry.get("modality"):
+                    modalities.add(entry["modality"])
         return {
             "status": "degraded" if any_down else "ok",
             "modalities": sorted(modalities),
