@@ -11,7 +11,7 @@ def test_manifest_required_keys():
 def test_manifest_capabilities():
     """Default printed-text OCR; no handwritten or math support."""
     caps = MANIFEST["capabilities"]
-    assert caps["device"] == "cpu"
+    assert caps["device"] == "auto"
     assert caps["memory_gb"] == 0.7
     assert caps["max_new_tokens"] == 256
     assert caps["supports_handwritten"] is False

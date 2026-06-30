@@ -100,6 +100,31 @@ class TestMemoryRoute:
         assert record["weights_gb"] == 1.0
         assert record["peak_gb"] == 2.0
 
+    def test_auto_device_model_resolves_to_gpu_side_on_cuda_supervisor(self, tmp_catalog):
+        """A device='auto' bundled model (e.g. kokoro-82m) is accounted on
+        the GPU side when the supervisor runs --device cuda, and NOT on the
+        CPU side. This pins the auto-resolution that the cpu->auto default
+        flip depends on (else auto models would always bucket to GPU)."""
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cuda": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/v/bin/python", port=9001,
+        )
+        set_supervisor_state(SupervisorState(workers=[spec], device="cuda"))
+        from muse.admin.routes.memory import _per_model_breakdown
+        gpu_side = _per_model_breakdown("cuda", "gpu")
+        cpu_side = _per_model_breakdown("cpu", "cpu")
+        assert [r["model_id"] for r in gpu_side] == ["kokoro-82m"]
+        assert cpu_side == []
+
     def test_per_model_breakdown_filters_gpu_when_target_cpu(self, tmp_catalog):
         """A GPU-side measurement should NOT appear in the cpu bucket."""
         # sd-turbo defaults to GPU (capability device != cpu), so a cpu
@@ -126,6 +151,82 @@ class TestMemoryRoute:
         assert all(r["model_id"] != "sd-turbo" for r in out_cpu)
         # GPU model present in GPU bucket
         assert any(r["model_id"] == "sd-turbo" for r in out_gpu)
+
+    def test_auto_device_model_resolves_to_cpu_side_on_cpu_supervisor(self, tmp_catalog):
+        """The non-tautological companion to the cuda-supervisor case: on a
+        --device cpu supervisor a device='auto' bundled model must bucket to
+        the CPU side, NOT the GPU side. Before _per_model_breakdown resolved
+        'auto', it fell through to GPU (on_cpu = 'auto' == 'cpu' -> False),
+        so this case FAILS against the unfixed code -- which the cuda case
+        could not show (on a GPU host 'auto' buckets to GPU either way)."""
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/v/bin/python", port=9001,
+        )
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        from muse.admin.routes.memory import _per_model_breakdown
+        cpu_side = _per_model_breakdown("cpu", "cpu")
+        gpu_side = _per_model_breakdown("cuda", "gpu")
+        assert [r["model_id"] for r in cpu_side] == ["kokoro-82m"]
+        assert gpu_side == []
+
+
+class TestResolveAutoSide:
+    """Direct unit tests for _resolve_auto_side's full branch table: the
+    supervisor --device flag wins first, then live GPU detection decides
+    for an 'auto' supervisor, with mps and any probe exception both
+    grouping to the CPU side. The breakdown tests above exercise this
+    only through the cuda/cpu --device flags; these pin the auto-detection
+    and exception branches the flags can't reach."""
+
+    def test_cuda_flag_resolves_gpu(self):
+        set_supervisor_state(SupervisorState(workers=[], device="cuda"))
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "gpu"
+
+    def test_cpu_flag_resolves_cpu(self):
+        set_supervisor_state(SupervisorState(workers=[], device="cpu"))
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "cpu"
+
+    def test_mps_flag_resolves_cpu(self):
+        set_supervisor_state(SupervisorState(workers=[], device="mps"))
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "cpu"
+
+    def test_auto_flag_with_gpu_detected_resolves_gpu(self, monkeypatch):
+        set_supervisor_state(SupervisorState(workers=[], device="auto"))
+        from muse.core import memory_probe
+        monkeypatch.setattr(memory_probe, "gpu_free_gb", lambda: 12.0)
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "gpu"
+
+    def test_auto_flag_without_gpu_resolves_cpu(self, monkeypatch):
+        set_supervisor_state(SupervisorState(workers=[], device="auto"))
+        from muse.core import memory_probe
+        monkeypatch.setattr(memory_probe, "gpu_free_gb", lambda: None)
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "cpu"
+
+    def test_auto_flag_probe_exception_resolves_cpu(self, monkeypatch):
+        set_supervisor_state(SupervisorState(workers=[], device="auto"))
+        from muse.core import memory_probe
+
+        def boom():
+            raise RuntimeError("pynvml exploded")
+
+        monkeypatch.setattr(memory_probe, "gpu_free_gb", boom)
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "cpu"
 
 
 class TestRecentDecisions:

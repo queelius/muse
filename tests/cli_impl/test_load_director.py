@@ -1596,3 +1596,100 @@ class TestWarmup:
         # Newcomer at refcount=0 (warmup default).
         assert snapshot["newcomer"]["refcount"] == 0
         assert "victim" not in snapshot
+
+
+class TestAutoDevicePoolSelection:
+    """Regression for the v0.48.0 control-plane bug.
+
+    A model declaring `device: "auto"` (the new default for CUDA-safe
+    bundled models) loads on the GPU when one is present. The director
+    must therefore SIZE / ADMIT / EVICT it against the VRAM pool, not
+    host RAM. Before the fix, `_free_for_device` / `_available_for_device`
+    fell through their `else` branch and accounted "auto" as CPU, so an
+    auto model could "fit" against terabytes of host RAM while the GPU
+    OOM'd -- the director would never evict resident GPU models to make
+    room. The resolution mirrors `observed_peak`'s existing auto handling:
+    gpu_free_gb() is not None -> "cuda", else "cpu".
+    """
+
+    def test_free_for_device_auto_reads_gpu_pool_when_gpu_present(self):
+        probe = _make_probe(gpu_free=7.0, cpu_free=512.0)
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+        # auto resolves to the GPU pool (7.0), NOT host RAM (512.0).
+        assert director._free_for_device("auto") == 7.0
+
+    def test_free_for_device_auto_reads_cpu_pool_when_no_gpu(self):
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None  # pynvml absent / CPU-only host
+        probe.cpu_free_gb.return_value = 512.0
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+        # No GPU: auto falls back to host RAM, exactly as runtime select_device does.
+        assert director._free_for_device("auto") == 512.0
+
+    def test_available_for_device_auto_uses_gpu_headroom_when_gpu_present(self):
+        probe = _make_probe(gpu_free=7.0, cpu_free=512.0)
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+            gpu_headroom_gb=1.0,
+            cpu_headroom_gb=2.0,
+        )
+        free, available = director._available_for_device("auto")
+        assert free == 7.0
+        # GPU headroom (1.0) must apply, NOT CPU headroom (2.0).
+        assert available == 6.0
+
+    def test_auto_model_evicts_idle_gpu_victim_to_fit_vram(self, catalog_dir):
+        # GPU host. A 6 GB idle "auto" victim is resident; loading it drops
+        # the GPU to 2 GB free. A 5 GB "auto" newcomer cannot fit live VRAM
+        # and must evict the victim. With the pre-fix bug (auto sized against
+        # the 512 GB CPU pool), the director would believe the newcomer fits
+        # without eviction and never call disable_fn -> GPU OOM. The fix
+        # sizes auto against the VRAM pool, so disable_fn fires exactly once.
+        gpu_free_state = {"value": 8.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.side_effect = lambda: gpu_free_state["value"]
+        probe.cpu_free_gb.return_value = 512.0
+
+        def enable_side_effect(model_id: str) -> int:
+            if model_id == "victim":
+                gpu_free_state["value"] = 2.0
+                return 9001
+            if model_id == "newcomer":
+                return 9002
+            raise AssertionError(f"unexpected enable: {model_id}")
+
+        def disable_side_effect(model_id: str) -> None:
+            gpu_free_state["value"] = 8.0
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+        disable_fn = MagicMock(side_effect=disable_side_effect)
+
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            gpu_headroom_gb=1.0,
+        )
+
+        # Pre-load victim: gpu_free=8, headroom=1, available=7 >= 6, fits.
+        director.acquire("victim", manifest=_manifest(memory_gb=6.0, device="auto"))
+        director.release("victim")
+        assert director.status()["victim"]["refcount"] == 0
+
+        # Newcomer at 5 GB: gpu_free=2, available=1, shortfall -> evict victim.
+        port = director.acquire("newcomer", manifest=_manifest(memory_gb=5.0, device="auto"))
+        assert port == 9002
+        disable_fn.assert_called_once_with("victim")
+        snapshot = director.status()
+        assert "newcomer" in snapshot
+        assert "victim" not in snapshot

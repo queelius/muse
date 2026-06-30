@@ -14,7 +14,7 @@ def test_manifest_capabilities():
     assert caps["supports_keypoints"] is False
     assert caps["supports_detection"] is False
     assert caps["metric_depth"] is False  # relative depth
-    assert caps["device"] == "cpu"
+    assert caps["device"] == "auto"
 
 
 def test_model_inherits_runtime():

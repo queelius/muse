@@ -29,7 +29,7 @@ MANIFEST = {
     "capabilities": {
         "supports_classification": False,
         "supports_zero_shot": True,
-        "device": "cpu",
+        "device": "auto",
         "memory_gb": 1.2,
     },
 }

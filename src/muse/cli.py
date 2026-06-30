@@ -507,6 +507,66 @@ def models_disable(
     )
 
 
+@models_app.command("set-device")
+def models_set_device(
+    model_id: Annotated[str, typer.Argument()],
+    device: Annotated[
+        Optional[Device],
+        typer.Argument(
+            help="device to pin the model to (auto|cpu|cuda|mps); omit with --clear",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", help="remove the override (revert to manifest / --device)"),
+    ] = False,
+) -> None:
+    """Pin a model's load device, overriding its manifest device + --device flag.
+
+    Writes a per-model `device_override` to the catalog. Precedence at
+    load time: override > manifest capabilities.device pin > --device flag
+    > auto. Use `cuda` to force a cpu-pinned model (e.g. kokoro-82m) onto
+    the GPU, `cpu` to keep a model off scarce VRAM, or `auto` to un-pin and
+    let muse pick cuda-if-available. `--clear` removes the override.
+
+    Catalog-only state: takes effect on the model's NEXT cold load. To
+    apply it to an already-resident worker, evict it (idle/memory pressure)
+    or restart the supervisor.
+    """
+    from muse.core.catalog import set_device_override
+
+    if clear:
+        target = None
+    elif device is None:
+        typer.echo(
+            "error: provide a device (auto|cpu|cuda|mps) or pass --clear",
+            err=True,
+        )
+        raise typer.Exit(2)
+    else:
+        target = device.value
+
+    try:
+        set_device_override(model_id, target)
+    except KeyError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(2)
+    except ValueError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(2)
+
+    if target is None:
+        typer.echo(
+            f"cleared device override for {model_id} "
+            "(takes effect on next cold load)"
+        )
+    else:
+        typer.echo(
+            f"set {model_id} device override -> {target} "
+            "(takes effect on next cold load)"
+        )
+
+
 @models_app.command("warmup")
 def models_warmup(
     model_id: Annotated[str, typer.Argument()],
@@ -788,8 +848,14 @@ def main(argv: list[str] | None = None) -> int:
     """
     import click
     try:
-        app(args=argv, standalone_mode=False)
-        return 0
+        rv = app(args=argv, standalone_mode=False)
+        # With standalone_mode=False, click catches `typer.Exit` itself and
+        # *returns* its exit code as app()'s return value (it does not
+        # re-raise). Honor that int so a command's `raise typer.Exit(2)`
+        # actually exits 2 on the real `muse` binary; a normal command
+        # returns None -> 0. (Subprocess tests use `python -m muse.cli` ->
+        # app() in standalone mode, so they never exercised this path.)
+        return rv if isinstance(rv, int) and not isinstance(rv, bool) else 0
     except typer.Exit as e:
         return e.exit_code
     except SystemExit as e:

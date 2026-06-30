@@ -3,8 +3,14 @@
 GET /v1/admin/memory returns aggregate CPU/GPU usage plus a per-model
 breakdown derived from each enabled model's `measurements` block in
 catalog.json. The breakdown is grouped by device:
-  - GPU: models whose capabilities.device != "cpu" -> read measurements.cuda
-  - CPU: models whose capabilities.device == "cpu" -> read measurements.cpu
+  - GPU: models whose effective device is cuda/mps -> read measurements.cuda
+  - CPU: models whose effective device is cpu -> read measurements.cpu
+
+A model declaring device="auto" (the default for CUDA-safe bundled
+models) is resolved to the side it actually loads on, mirroring the
+runtime's select_device("auto"): the supervisor's --device flag when set,
+else live GPU detection. So an auto-device model shows under GPU on a GPU
+host and under CPU on a CPU-only host.
 
 Live system totals come from psutil (CPU) and pynvml (GPU). Both are
 optional: when neither is installed, the corresponding section is null.
@@ -99,6 +105,29 @@ def _enabled_loaded_model_ids() -> set[str]:
     return ids
 
 
+def _resolve_auto_side() -> str:
+    """Which memory side ('cpu' | 'gpu') an auto-device model loads on.
+
+    Mirrors the runtime's select_device('auto'): a model with
+    device='auto' (the default for CUDA-safe bundled models) loads on the
+    GPU when one is available, else CPU. We honor the supervisor's
+    --device flag first (the operator's explicit choice), then fall back
+    to live GPU detection for an 'auto' supervisor. 'mps' groups with the
+    CPU side because the GPU summary is pynvml/CUDA-only.
+    """
+    state = get_supervisor_state()
+    dev = (getattr(state, "device", None) or "auto").lower()
+    if dev in ("cuda", "gpu"):
+        return "gpu"
+    if dev in ("cpu", "mps"):
+        return "cpu"
+    try:
+        from muse.core import memory_probe
+        return "gpu" if memory_probe.gpu_free_gb() is not None else "cpu"
+    except Exception:  # noqa: BLE001
+        return "cpu"
+
+
 def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict]:
     """Return [{model_id, weights_gb, peak_gb}] for currently loaded models
     whose capabilities.device matches the target side (CPU vs GPU).
@@ -116,6 +145,11 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
         if model_id in catalog_known:
             cap_device = (catalog_known[model_id].extra or {}).get("device", "auto")
         cap_device = (cap_device or "auto").lower()
+        if cap_device == "auto":
+            # Resolve to the side this model actually loads on so an
+            # auto-device model is accounted under GPU on a GPU host and
+            # CPU on a CPU-only host (mirrors runtime select_device).
+            cap_device = "cpu" if _resolve_auto_side() == "cpu" else "cuda"
         on_cpu = cap_device == "cpu"
         if target_device_label == "gpu" and on_cpu:
             continue

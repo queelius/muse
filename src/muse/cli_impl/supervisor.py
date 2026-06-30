@@ -671,6 +671,15 @@ def _servability_reason(
     has_data, sized_gb, device = _has_memory_data(entry)
     if not has_data:
         return "no memory estimate; run `muse models probe` to populate"
+    # Resolve the manifest "auto"/"" convention to the concrete pool this
+    # model loads on, mirroring the runtime select_device + the
+    # LoadDirector: a GPU is present iff we have live VRAM info
+    # (gpu_available_gb is not None). Without this, an auto-device model on
+    # a GPU host would be sized against the (large) CPU pool and never
+    # 503 even when it cannot fit VRAM -- deferring an impossible model
+    # into the director's evict-everything-then-fail path.
+    if device in ("auto", ""):
+        device = "cuda" if gpu_available_gb is not None else "cpu"
     if device in ("cuda", "gpu"):
         if gpu_available_gb is None:
             return (

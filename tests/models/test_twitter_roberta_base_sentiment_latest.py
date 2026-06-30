@@ -12,7 +12,7 @@ def test_manifest_capabilities():
     caps = MANIFEST["capabilities"]
     assert caps["supports_classification"] is True
     assert caps["supports_zero_shot"] is False
-    assert caps["device"] == "cpu"
+    assert caps["device"] == "auto"
     assert caps["memory_gb"] == 0.6
 
 

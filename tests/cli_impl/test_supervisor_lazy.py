@@ -1224,6 +1224,46 @@ class TestHasMemoryData:
         assert device == "cuda"  # NOT overwritten to 'cpu' by the recovery loop
 
 
+class TestServabilityAutoDevice:
+    """v0.48.0: a resolver-pulled model declaring device='auto' must be
+    sized against the pool it actually loads on. On a GPU host the
+    servability check has to use the VRAM pool, not the (large) host-RAM
+    pool -- otherwise an auto model that cannot fit VRAM is waved through
+    at boot/request and only fails after the director evicts the whole
+    idle working set. Mirrors the LoadDirector's auto resolution: a GPU is
+    present iff live VRAM info is available (gpu_available_gb is not None).
+    """
+
+    def test_auto_device_sized_against_gpu_pool_when_gpu_present(self):
+        from muse.cli_impl.supervisor import _servability_reason
+
+        entry = {
+            "enabled": True,
+            "manifest": {"capabilities": {"device": "auto", "memory_gb": 20.0}},
+        }
+        # 20 GB fits the 500 GB CPU pool but NOT the 8 GB GPU pool.
+        reason = _servability_reason(
+            entry, cpu_available_gb=500.0, gpu_available_gb=8.0
+        )
+        assert reason is not None
+        assert "exceeds device capacity" in reason
+        assert "20.0 GB > 8.0 GB" in reason
+
+    def test_auto_device_sized_against_cpu_pool_when_no_gpu(self):
+        from muse.cli_impl.supervisor import _servability_reason
+
+        entry = {
+            "enabled": True,
+            "manifest": {"capabilities": {"device": "auto", "memory_gb": 20.0}},
+        }
+        # CPU-only host (gpu_available_gb is None): auto falls back to the
+        # CPU pool, where 20 GB fits 500 GB -> servable.
+        reason = _servability_reason(
+            entry, cpu_available_gb=500.0, gpu_available_gb=None
+        )
+        assert reason is None
+
+
 # ---------------------------------------------------------------------------
 # v0.47.3 Bug #2: revalidate_servability re-evaluates one model's
 # "no memory estimate" stamp against the LIVE catalog, so a `muse models

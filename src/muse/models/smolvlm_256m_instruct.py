@@ -33,7 +33,7 @@ MANIFEST = {
     ],
     "capabilities": {
         "memory_gb": 1.0,
-        "device": "cpu",
+        "device": "auto",
         "supports_vision": True,
         "supports_multi_image": True,
         "supports_tools": False,

@@ -275,6 +275,55 @@ runtimes like `LlamaCppModel` receive `gguf_file`, `chat_template`,
 exist. The generic runtime also gets `model_id` injected, since one
 class serves many models.
 
+### Device placement precedence (v0.48.0+)
+
+Which device a model loads on is resolved in `load_backend`, most
+authoritative first:
+
+1. **catalog `device_override`** -- an operator pin set via
+   `muse models set-device <id> <auto|cpu|cuda|mps>` (clear with
+   `--clear`). Stored as a top-level field on the model's catalog entry
+   (NOT in the manifest), read live from `catalog.json` at load time.
+   Beats everything below, so an operator can force a cpu-pinned model
+   onto cuda (or pin a model to cpu to save VRAM) per deployment without
+   editing the bundled script. `set-device <id> auto` un-pins to
+   auto-detect.
+2. **manifest `capabilities.device` pin** (model-author affinity) -- a
+   value other than `"auto"` overrides the `--device` flag. Heavy
+   GPU-only models declare `"cuda"`; the lone CPU-only model
+   (`supertonic-3`, ONNX) declares `"cpu"`.
+3. **`--device` server flag** (`muse serve --device ...`, default
+   `auto`), folded into the runtime kwargs.
+4. **`"auto"`** -- the runtime's `select_device` picks cuda if available,
+   else mps, else cpu.
+
+**Default is `auto`, not `cpu` (v0.48.0).** Every CUDA-safe bundled model
+declares `device: "auto"` so it lands on the GPU automatically on a GPU
+host and on CPU on a CPU-only host -- generally faster, and safe because
+lazy-load + LRU/idle eviction size the live working set to fit VRAM. Only
+`supertonic-3` stays pinned `cpu` (its ONNX runtime ignores a cuda
+device). `set-device` is catalog state: it takes effect on the model's
+**next cold load**, so evict or restart an already-resident worker to
+apply it.
+
+**`auto` resolves to a concrete memory POOL consistently across the
+control plane (v0.48.0).** An `auto` model that loads on the GPU must be
+*sized, admitted, and evicted* against the VRAM pool, not host RAM -- else
+the LoadDirector would think it "fits" against terabytes of host RAM while
+the GPU OOMs. Three sites share one resolution (a GPU is present iff live
+VRAM info is available): `LoadDirector._resolve_pool_device` (admission /
+LRU eviction), `supervisor._servability_reason` (boot + request-path
+capacity check), and `memory._resolve_auto_side` (the `/v1/admin/memory`
+per-model breakdown, which also honors the supervisor `--device` flag
+first). The `IdleSweeper` does not resolve independently -- it delegates
+to `LoadDirector._free_for_device` so its decision-log readings can't
+drift from the director's. `mps` is its own case: it pools against host RAM for sizing
+(pynvml is CUDA-only, and MPS is unified memory) but keeps its own `mps`
+measurements bucket in `_record_observed_peak`, matching what
+`muse models probe` persists. This bug never surfaced in CI because a
+CPU-only host degrades `auto`->cpu, which happens to match the buggy
+CPU-pool accounting; it only bites on a GPU host.
+
 ### No shared supertype across modalities
 
 `AudioResult` and `ImageResult` do NOT share a common base. Streaming semantics
@@ -764,6 +813,8 @@ muse pull hf://unsloth/Qwen3.5-9B-GGUF@q4_k_m  # resolver URI
 muse pull kokoro-82m                           # bundled bare id
 muse models info <id>
 muse models enable <id> / disable <id>
+muse models set-device <id> cuda               # operator device pin (overrides manifest device)
+muse models set-device <id> --clear            # remove the pin
 muse models remove <id>
 muse models refresh <id>                       # re-install muse[server,extras] into one venv
 muse models refresh --all                      # all pulled venvs, alphabetical
@@ -827,6 +878,7 @@ PY
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 - **CLI is typer + rich (v0.39.0+).** Per-subcommand parameter binding lives in `src/muse/cli.py` as typer command functions; the heavy logic lives in `src/muse/cli_impl/<command>.py`. New subcommands add a `@app.command(...)` plus a sibling `cli_impl/*.py` module; do not put logic in `cli.py`. Long-form output that goes to a TTY is rendered via `rich.Table` from `cli_impl/console.py`'s shared `Console`; non-TTY output (subprocess, pipe, redirect) is plain text with no ANSI and no truncation, so `muse models list | grep` always sees full content. Status encoding for `models list` and `refresh --all` uses single colored glyphs (`STATUS_STYLE` in `cli_impl/console.py`): `●` enabled, `○` disabled, `★` recommended, `·` available; `✓` ok, `✗` failed for refresh outcomes. `--json` is the canonical machine-readable output across `list` / `probe` / `refresh`.
+- **CLI exit codes propagate through `main` (v0.48.0).** Commands signal errors with `raise typer.Exit(<code>)`. `muse.cli:main` runs the app with `standalone_mode=False`, where click handles `typer.Exit` itself and *returns* the code as `app()`'s value rather than raising; `main` now returns that int (None -> 0) so the shipped `muse` binary actually exits nonzero on error. Before v0.48.0 `main` discarded the return and always exited 0; the `python -m muse.cli` subprocess tests hit `app()` in standalone mode (correct exit), so they never caught it. New `main()`-level exit-code regressions belong in `tests/cli_impl/test_set_device_cli.py`.
 - **CLI runtime state reads the PUBLIC `/v1/models`, not admin endpoints (v0.47.4).** `muse models list`'s `enabled_loaded` glyph and `muse models info`'s header + worker-status block derive "is this model loaded right now?" from the public `GET /v1/models` `loaded` flag (no `MUSE_ADMIN_TOKEN` required). The shared `muse.cli_impl.runtime_state` module (`fetch_public_models` + `loaded_ids`) centralizes the fetch, failure policy (None = unreachable; both `list` and the `info` "loaded?" predicate treat it identically via `loaded_ids`), and httpx-log quieting. `muse models info` still prefers the admin API first for rich worker pid/uptime/restart detail and falls back to the public loaded state, rendering `loaded (set MUSE_ADMIN_TOKEN for worker pid / uptime / restarts)` instead of faking detail or falsely claiming the supervisor is unreachable. Before v0.47.4 these read admin-only endpoints, so anyone without a token saw every model as `enabled_unloaded` and "supervisor unreachable" even against a live server.
 - **Shared image preprocessing** (`muse.core.image_preprocessing`, v0.42.1+): four-tier dispatch ladder for image-side preprocessor selection. Public API: `read_encoder_hints(src)` (read encoder hyperparams from config.json), `DerivedImageProcessor` (synthesize a minimal preprocessor from explicit num_channels / image_size / image_mean / image_std), `build_image_processor(src, *, overrides, model_id)` (the orchestrator: override-first, then AutoImageProcessor, then encoder-hints-derived, then fail loud), and `ImageProcessorError` (structured exception pointing at the override hatch). Manifest hatch: `capabilities.image_processor_overrides: {num_channels, image_size, image_mean?, image_std?}` lets curated entries declare ground-truth preprocessing when AutoImageProcessor's sniff would be wrong (TexTeller is the canonical example: 1-channel grayscale at 448x448). Tier 3 (ViT defaults) was dropped in v0.42.1 because it produced silently wrong output for the very class of repos this fallback targets; failures now raise `ImageProcessorError` pointing at the override hatch. Currently consumed by `image_ocr`; other modalities can adopt as needed.
 

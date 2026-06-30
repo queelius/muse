@@ -61,7 +61,7 @@ MANIFEST = {
     "capabilities": {
         "sample_rate": KOKORO_SAMPLE_RATE,
         "voices": KOKORO_VOICES,
-        "device": "cpu",
+        "device": "auto",
         # Conservative architecture-derived peak-inference estimate.
         # ~82M params at fp32 is ~330 MB; with phonemizer + activation
         # working set, ~0.5 GB total fits this 82M-param model on CPU.

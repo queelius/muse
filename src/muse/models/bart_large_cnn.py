@@ -72,7 +72,7 @@ MANIFEST = {
     "system_packages": (),
     "capabilities": {
         # CPU-friendly is the muse story for this model. Honest annotation.
-        "device": "cpu",
+        "device": "auto",
         "default_length": "medium",
         "default_format": "paragraph",
         "supports_dialog_summarization": False,

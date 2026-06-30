@@ -565,3 +565,32 @@ class TestStopEventExitsThreadPromptly:
         thread.join(timeout=2.0)
 
         assert not thread.is_alive()
+
+
+class TestFreeForDeviceResolvesAuto:
+    """The sweeper's free-memory reading for the decision log must agree
+    with the LoadDirector's pool resolution. After the v0.48.0 director fix
+    (auto -> VRAM pool on a GPU host), the sweeper's local copy drifted: it
+    treated 'auto' as CPU, so an auto model's free_before/after_gb in the
+    idle-eviction decision log would report host RAM instead of VRAM. The
+    sweeper now delegates to the director, so there is one resolution."""
+
+    def test_free_for_device_auto_reads_gpu_pool_when_gpu_present(self):
+        probe = _make_probe(gpu_free=7.0, cpu_free=512.0)
+        director = _director(probe=probe)
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory({}),
+        )
+        assert sweeper._free_for_device("auto") == 7.0
+
+    def test_free_for_device_auto_reads_cpu_pool_when_no_gpu(self):
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 512.0
+        director = _director(probe=probe)
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory({}),
+        )
+        assert sweeper._free_for_device("auto") == 512.0

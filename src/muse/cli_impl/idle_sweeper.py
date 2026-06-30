@@ -265,16 +265,14 @@ class IdleSweeper:
     def _free_for_device(self, device: str) -> float:
         """Live free memory in GB for the relevant device.
 
-        Mirrors LoadDirector._free_for_device but called from the
-        sweeper. Replicated locally rather than reaching into the
-        director's private API so the sweeper remains a clean client
-        of the documented public surface.
+        Delegates to LoadDirector._free_for_device so the sweeper's
+        decision-log readings use the SAME pool resolution as admission
+        and on-demand eviction -- including the "auto" -> VRAM-if-GPU-else
+        -host-RAM mapping. A previous local copy drifted from the director
+        when the latter learned to resolve "auto" (v0.48.0); delegating
+        keeps one source of truth and prevents that class of drift.
         """
-        probe = self.director.memory_probe
-        if device in ("cuda", "gpu"):
-            free = probe.gpu_free_gb()
-            return float(free) if free is not None else 0.0
-        return float(probe.cpu_free_gb())
+        return self.director._free_for_device(device)
 
     def _run(self) -> None:
         """Thread loop body. Runs until `_stop_event` is set."""

@@ -10,7 +10,7 @@ def test_manifest_required_keys():
 
 def test_manifest_capabilities():
     caps = MANIFEST["capabilities"]
-    assert caps["device"] == "cpu"
+    assert caps["device"] == "auto"
     assert caps["multi_label"] is True
     assert caps["num_labels"] == 527
 

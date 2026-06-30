@@ -113,7 +113,7 @@ def test_manifest_required_fields():
 
 def test_manifest_capabilities_shape():
     caps = _manifest()["capabilities"]
-    assert caps["device"] == "cpu"
+    assert caps["device"] == "auto"
     assert caps["default_length"] == "medium"
     assert caps["default_format"] == "paragraph"
     assert caps["supports_dialog_summarization"] is False

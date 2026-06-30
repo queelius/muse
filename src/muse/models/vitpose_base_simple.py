@@ -31,7 +31,7 @@ MANIFEST = {
         "supports_depth": False,
         "supports_keypoints": True,
         "supports_detection": False,
-        "device": "cpu",
+        "device": "auto",
         "memory_gb": 0.6,
     },
 }

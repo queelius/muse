@@ -30,7 +30,7 @@ MANIFEST = {
     ],
     "system_packages": [],
     "capabilities": {
-        "device": "cpu",
+        "device": "auto",
         "memory_gb": 0.7,
         "multi_label": True,
         "num_labels": 527,

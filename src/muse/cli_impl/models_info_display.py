@@ -240,6 +240,12 @@ def format_info(
         lines.append(f"  description:     {entry.description}")
     if catalog_data.get("source"):
         lines.append(f"  source:          {catalog_data['source']}")
+    override = catalog_data.get("device_override") if is_pulled else None
+    if override:
+        lines.append(
+            f"  device override: {override} "
+            "(operator pin via `muse models set-device`; overrides manifest device)"
+        )
 
     # Storage
     if is_pulled:

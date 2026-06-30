@@ -791,6 +791,47 @@ def set_enabled(model_id: str, enabled: bool) -> None:
     _reset_known_models_cache()
 
 
+VALID_DEVICE_OVERRIDES = ("auto", "cpu", "cuda", "mps")
+
+
+def set_device_override(model_id: str, device: str | None) -> None:
+    """Set or clear the per-model device override for a pulled model.
+
+    `device` in {auto, cpu, cuda, mps} pins the model's load device,
+    overriding both the manifest `capabilities.device` pin and the
+    supervisor `--device` flag (see `load_backend`'s precedence). The
+    special value "auto" un-pins a cpu-pinned model so the runtime's
+    `select_device` picks cuda when a GPU is present. Passing ``None``
+    removes the override entirely (revert to manifest pin / --device).
+
+    Catalog state only: takes effect on the model's next cold load. To
+    apply it to an already-resident worker, evict or restart that worker.
+
+    Raises ValueError for an unrecognized device label and KeyError when
+    the model is not pulled. Holds _CATALOG_WRITE_LOCK for the full
+    read->mutate->write so concurrent mutations on different keys do not
+    clobber each other (mirrors `set_enabled`).
+    """
+    if device is not None and device not in VALID_DEVICE_OVERRIDES:
+        raise ValueError(
+            f"invalid device {device!r}; expected one of "
+            f"{', '.join(VALID_DEVICE_OVERRIDES)} or None to clear"
+        )
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        if model_id not in catalog:
+            raise KeyError(f"model {model_id!r} is not pulled")
+        if device is None:
+            catalog[model_id].pop("device_override", None)
+        else:
+            catalog[model_id]["device_override"] = device
+        _write_catalog(catalog)
+    # device_override is read live from the catalog in load_backend, but
+    # `muse models info` surfaces it via known_models()-adjacent reads;
+    # reset for display consistency (mirrors set_enabled).
+    _reset_known_models_cache()
+
+
 def _import_backend_module(module_path: str):
     """Local indirection for `importlib.import_module`.
 
@@ -829,7 +870,8 @@ def load_backend(model_id: str, **kwargs) -> Any:
     module = _import_backend_module(module_path)
     cls = getattr(module, class_name)
     catalog = _read_catalog()
-    local_dir = catalog[model_id]["local_dir"]
+    entry_data = catalog[model_id]
+    local_dir = entry_data["local_dir"]
     # entry.extra holds capabilities from either the bundled MANIFEST
     # (read live from source by known_models() each call) or the persisted
     # manifest in catalog.json (resolver-pulled). Reading from entry here
@@ -837,13 +879,21 @@ def load_backend(model_id: str, **kwargs) -> Any:
     # honored at load time, not just resolver-pulled ones.
     capabilities = entry.extra
     merged: dict = {"model_id": model_id, **capabilities, **kwargs}
-    # Capability device pin: a model declaring capabilities.device overrides
-    # the supervisor's --device flag. Other capability keys lose to kwargs
-    # (the documented contract). device is the exception because it's the
-    # only capability-declared placement preference and the supervisor's
-    # --device flag is a server-wide default that should defer to per-model
-    # preferences when set.
-    if "device" in capabilities and capabilities["device"] != "auto":
+    # Device precedence, most authoritative first:
+    #   1. catalog `device_override`  (operator, via `muse models set-device`)
+    #   2. manifest `capabilities.device` pin (model-author affinity, e.g.
+    #      kokoro's "cpu") -- overrides the supervisor --device flag
+    #   3. caller kwargs device (the --device flag), already folded into kwargs
+    #   4. "auto" (runtime select_device picks cuda if available, else cpu)
+    # The override beats even the manifest pin so an operator can force a
+    # cpu-pinned model onto cuda (or back to cpu to save VRAM) per deployment
+    # without editing the bundled script. override="auto" un-pins a model to
+    # auto-detect. Other capability keys still lose to kwargs (the documented
+    # contract); device is the exception because it is a placement preference.
+    override = entry_data.get("device_override")
+    if override:
+        merged["device"] = override
+    elif "device" in capabilities and capabilities["device"] != "auto":
         merged["device"] = capabilities["device"]
     return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **merged)
 

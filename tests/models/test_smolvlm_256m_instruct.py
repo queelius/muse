@@ -12,7 +12,7 @@ def test_manifest_fields():
     assert caps["supports_vision"] is True
     assert caps["supports_multi_image"] is True
     assert caps["supports_tools"] is False
-    assert caps["device"] == "cpu"
+    assert caps["device"] == "auto"
     assert caps["memory_gb"] == 1.0
 
 

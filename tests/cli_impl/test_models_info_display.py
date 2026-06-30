@@ -159,6 +159,30 @@ class TestFormatInfo:
         # Unreachable: the offline 'not running' view fires.
         assert "not running" in unreachable
 
+    def test_device_override_shown_when_set(self):
+        """A catalog device_override is surfaced in `models info` so the
+        operator can see the pin (the 'discoverable' half of set-device)."""
+        catalog_known = {"kokoro-82m": _entry()}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True, "venv_path": "/v", "device_override": "cuda"},
+            online_status=None,
+        )
+        assert "device override" in out
+        assert "cuda" in out
+        assert "set-device" in out
+
+    def test_device_override_absent_when_unset(self):
+        catalog_known = {"kokoro-82m": _entry()}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True, "venv_path": "/v"},
+            online_status=None,
+        )
+        assert "device override" not in out
+
     def test_known_capability_keys_render_with_label(self):
         catalog_known = {"sd-turbo": _entry(
             model_id="sd-turbo",

@@ -24,7 +24,7 @@ MANIFEST = {
     "pip_extras": ["torch>=2.1.0", "transformers>=4.40.0", "Pillow"],
     "system_packages": [],
     "capabilities": {
-        "device": "cpu",
+        "device": "auto",
         "memory_gb": 0.7,
         "max_new_tokens": 256,
         "supports_handwritten": False,

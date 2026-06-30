@@ -1100,6 +1100,141 @@ def test_load_backend_kwargs_win_when_no_capability_device(tmp_catalog):
     assert fake_class.call_args.kwargs["device"] == "mps"
 
 
+def _override_catalog_state(device_override=None, capability_device="cpu"):
+    """Build a one-model catalog dict for device_override precedence tests."""
+    caps = {}
+    if capability_device is not None:
+        caps["device"] = capability_device
+    entry = {
+        "pulled_at": "2026-01-01T00:00:00+00:00",
+        "hf_repo": "org/repo",
+        "local_dir": "/fake/weights",
+        "venv_path": "/fake/venv",
+        "python_path": "/fake/py",
+        "enabled": True,
+        "manifest": {
+            "model_id": "ov-model",
+            "modality": "embedding/text",
+            "hf_repo": "org/repo",
+            "pip_extras": [],
+            "system_packages": [],
+            "capabilities": caps,
+            "backend_path": "fake.module:FakeRuntime",
+        },
+    }
+    if device_override is not None:
+        entry["device_override"] = device_override
+    return {"ov-model": entry}
+
+
+def test_load_backend_device_override_beats_capability_pin(tmp_catalog):
+    """A catalog device_override outranks the manifest capabilities.device pin.
+
+    kokoro-style models pin device='cpu'; an operator `set-device` override
+    must force the requested device anyway.
+    """
+    from unittest.mock import patch, MagicMock
+    from muse.core.catalog import load_backend, _write_catalog, _reset_known_models_cache
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.FakeRuntime = fake_class
+
+    _write_catalog(_override_catalog_state(device_override="cuda", capability_device="cpu"))
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
+        _reset_known_models_cache()
+        load_backend("ov-model", device="cpu")
+
+    assert fake_class.call_args.kwargs["device"] == "cuda"
+
+
+def test_load_backend_device_override_beats_caller_kwarg(tmp_catalog):
+    """device_override wins even when there is no manifest pin."""
+    from unittest.mock import patch, MagicMock
+    from muse.core.catalog import load_backend, _write_catalog, _reset_known_models_cache
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.FakeRuntime = fake_class
+
+    _write_catalog(_override_catalog_state(device_override="cuda", capability_device=None))
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
+        _reset_known_models_cache()
+        load_backend("ov-model", device="cpu")
+
+    assert fake_class.call_args.kwargs["device"] == "cuda"
+
+
+def test_load_backend_device_override_auto_unpins_cpu(tmp_catalog):
+    """override='auto' un-pins a cpu-pinned model: device flows as 'auto'
+    so the runtime's select_device picks cuda when a GPU is present."""
+    from unittest.mock import patch, MagicMock
+    from muse.core.catalog import load_backend, _write_catalog, _reset_known_models_cache
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    fake_module.FakeRuntime = fake_class
+
+    _write_catalog(_override_catalog_state(device_override="auto", capability_device="cpu"))
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
+        _reset_known_models_cache()
+        load_backend("ov-model", device="cpu")
+
+    assert fake_class.call_args.kwargs["device"] == "auto"
+
+
+def test_set_device_override_writes_field(tmp_catalog):
+    from muse.core.catalog import (
+        pull, set_device_override, _read_catalog,
+    )
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+
+    set_device_override("soprano-80m", "cuda")
+    assert _read_catalog()["soprano-80m"]["device_override"] == "cuda"
+
+
+def test_set_device_override_clears_with_none(tmp_catalog):
+    from muse.core.catalog import (
+        pull, set_device_override, _read_catalog,
+    )
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+
+    set_device_override("soprano-80m", "cuda")
+    set_device_override("soprano-80m", None)
+    assert "device_override" not in _read_catalog()["soprano-80m"]
+
+
+def test_set_device_override_validates_device(tmp_catalog):
+    from muse.core.catalog import (
+        pull, set_device_override,
+    )
+    with patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]):
+        pull("soprano-80m")
+
+    with pytest.raises(ValueError, match="device"):
+        set_device_override("soprano-80m", "gpu")  # not a valid device label
+
+
+def test_set_device_override_raises_for_unpulled(tmp_catalog):
+    from muse.core.catalog import set_device_override
+    with pytest.raises(KeyError, match="not pulled"):
+        set_device_override("never-pulled-xyz", "cuda")
+
+
 def test_load_backend_bundled_path_unchanged(tmp_catalog):
     """Regression: bundled-path load_backend still works (no manifest in catalog).
 

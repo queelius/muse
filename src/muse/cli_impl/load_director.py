@@ -419,17 +419,19 @@ class LoadDirector:
 
         # Normalize the bucket key. Three cases:
         #   "gpu" -> "cuda": legacy alias.
-        #   "auto" / "": resolved to "cuda" if memory_probe reports a
-        #     GPU is available, else "cpu". Without this, manifests
-        #     declaring `device: "auto"` would split-brain against
-        #     probe records that always write the resolved name.
-        #   anything else: passed through verbatim ("cpu", "cuda",
-        #     "mps", etc.).
+        #   "auto" / "": resolved via the SHARED _auto_resolves_to_cuda so
+        #     the writeback bucket lands in the same pool the fit/evict
+        #     accounting sized against. Without this, manifests declaring
+        #     `device: "auto"` would split-brain against probe records that
+        #     always write the resolved name.
+        #   anything else (cpu / cuda / mps): passed through verbatim, so an
+        #     MPS load keeps its own "mps" bucket matching what
+        #     `muse models probe` writes -- distinct from the host-RAM POOL
+        #     that _resolve_pool_device("mps") sizes against.
         if device == "gpu":
             device_key = "cuda"
         elif device in ("auto", ""):
-            gpu_free = self.memory_probe.gpu_free_gb()
-            device_key = "cuda" if gpu_free is not None else "cpu"
+            device_key = "cuda" if self._auto_resolves_to_cuda() else "cpu"
         else:
             device_key = device
 
@@ -873,18 +875,56 @@ class LoadDirector:
     # Memory accounting helpers
     # ------------------------------------------------------------------
 
+    def _auto_resolves_to_cuda(self) -> bool:
+        """Whether a `device: "auto"` model binds to the GPU/VRAM pool here.
+
+        Mirrors the runtime's select_device("auto"): a CUDA GPU is visible
+        when pynvml reports a free-VRAM number (gpu_free_gb() is not None).
+        Shared by both the admission/eviction pool selection and the
+        observed-peak bucket key so they can never disagree about where an
+        auto model lives.
+        """
+        return self.memory_probe.gpu_free_gb() is not None
+
+    def _resolve_pool_device(self, device: str) -> str:
+        """Map a declared device to the concrete memory POOL it draws from.
+
+        Returns "cuda" or "cpu" -- the two pools muse sizes admission and
+        eviction against:
+
+          - "gpu"        -> "cuda" (legacy alias)
+          - "auto" / ""  -> "cuda" if a GPU is visible, else "cpu". This is
+                            THE fix for the v0.48.0 control-plane bug: an
+                            auto-device model on a GPU host loads on the GPU,
+                            so it must be sized against the VRAM pool, not
+                            host RAM.
+          - "cuda"       -> "cuda"
+          - "mps" / etc. -> "cpu" (host-RAM accounting; the GPU pool is
+                            pynvml/CUDA-only, and MPS is unified memory)
+
+        Note this is the POOL, not the measurements bucket key: "mps" pools
+        against host RAM here but keeps its own "mps" bucket in
+        _record_observed_peak (matching what `muse models probe` writes).
+        """
+        if device in ("cuda", "gpu"):
+            return "cuda"
+        if device in ("auto", ""):
+            return "cuda" if self._auto_resolves_to_cuda() else "cpu"
+        # mps and anything else account against host RAM.
+        return "cpu"
+
     def _free_for_device(self, device: str) -> float:
         """Live free memory in GB for the relevant device.
 
         For CPU: cpu_free_gb. For CUDA: gpu_free_gb (which may return
         None if pynvml is unavailable; caller treats None as 0.0 so we
         don't accidentally classify GPU loads as fitting under unknown
-        conditions).
+        conditions). "auto"/"" resolve to the pool the model actually
+        loads on (see _resolve_pool_device).
         """
-        if device in ("cuda", "gpu"):
+        if self._resolve_pool_device(device) == "cuda":
             free = self.memory_probe.gpu_free_gb()
             return float(free) if free is not None else 0.0
-        # cpu, mps, auto, anything else: treat as host-RAM accounting
         return float(self.memory_probe.cpu_free_gb())
 
     def _available_for_device(self, device: str) -> tuple[float, float]:
@@ -895,7 +935,7 @@ class LoadDirector:
         completely-loaded host still gets a sane fit-check.
         """
         free = self._free_for_device(device)
-        if device in ("cuda", "gpu"):
+        if self._resolve_pool_device(device) == "cuda":
             budget = self.gpu_budget_gb
             headroom = self.gpu_headroom_gb
         else:
