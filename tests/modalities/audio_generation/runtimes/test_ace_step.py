@@ -78,18 +78,42 @@ def fake_pipeline(monkeypatch):
     return calls
 
 
-def _runtime():
+def _runtime(device="cuda"):
     return AceStepRuntime(
         model_id="ace-step-v1-3.5b",
         hf_repo="ACE-Step/ACE-Step-v1-3.5B",
         local_dir="/fake/weights",
-        device="cpu",
+        device=device,
     )
 
 
 def test_construct_passes_checkpoint_dir(fake_pipeline):
     _runtime()
     assert fake_pipeline["init"]["checkpoint_dir"] == "/fake/weights"
+
+
+def test_cuda_device_passes_device_id_zero(fake_pipeline):
+    # A cuda pin is honored: ACE-Step indexes the GPU by integer id.
+    _runtime(device="cuda")
+    assert fake_pipeline["init"]["device_id"] == 0
+
+
+def test_indexed_cuda_device_maps_to_its_index(fake_pipeline):
+    # A future "cuda:1" pin targets GPU 1, not 0 (override genuinely honored).
+    _runtime(device="cuda:1")
+    assert fake_pipeline["init"]["device_id"] == 1
+
+
+def test_cpu_device_pin_rejected_clearly(fake_pipeline):
+    # ACE-Step is GPU-only; a cpu pin must fail loudly at load, not silently
+    # run on cuda:0 (the v0.48.0 override-is-honored contract).
+    with pytest.raises(RuntimeError, match="GPU-only"):
+        _runtime(device="cpu")
+
+
+def test_mps_device_pin_rejected_clearly(fake_pipeline):
+    with pytest.raises(RuntimeError, match="GPU-only"):
+        _runtime(device="mps")
 
 
 def test_construct_maps_bf16_to_acestep_dtype_string(fake_pipeline):

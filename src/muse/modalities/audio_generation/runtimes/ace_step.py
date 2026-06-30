@@ -179,8 +179,12 @@ class AceStepRuntime:
 
         acestep_dt = _acestep_dtype(dtype)
         self._dtype = acestep_dt
-        # ACE-Step indexes the GPU by integer id; it is GPU-oriented.
-        device_id = 0
+        # ACE-Step indexes the GPU by integer id and has no CPU path.
+        # Honor the resolved device (which already reflects an operator's
+        # set-device override per the v0.48.0 precedence): a cuda pin maps
+        # to its GPU index; a cpu/mps pin is rejected loudly here rather
+        # than silently running on cuda:0 or crashing opaquely later.
+        device_id = self._cuda_index_or_reject(self._device)
 
         src = local_dir or hf_repo
         logger.info(
@@ -194,6 +198,23 @@ class AceStepRuntime:
             cpu_offload=cpu_offload,
             overlapped_decode=overlapped_decode,
             torch_compile=torch_compile,
+        )
+
+    @staticmethod
+    def _cuda_index_or_reject(device: str) -> int:
+        """Map a resolved device label to an ACE-Step GPU index.
+
+        ``"cuda"`` -> 0, ``"cuda:N"`` -> N. ``"cpu"`` / ``"mps"`` (or
+        anything else) raise: ACE-Step v1 3.5B is GPU-only, so a non-cuda
+        pin cannot be honored and is surfaced as a clear load-time error.
+        """
+        if device.startswith("cuda"):
+            _, _, idx = device.partition(":")
+            return int(idx) if idx else 0
+        raise RuntimeError(
+            f"ACE-Step v1 3.5B is GPU-only; cannot honor device={device!r}. "
+            "Clear the pin (`muse models set-device ace-step-v1-3.5b --clear`) "
+            "or set it to cuda."
         )
 
     def generate(

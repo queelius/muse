@@ -75,7 +75,7 @@ def test_instance_satisfies_audio_generation_protocol(monkeypatch):
         model_id="ace-step-v1-3.5b",
         hf_repo="ACE-Step/ACE-Step-v1-3.5B",
         local_dir="/fake",
-        device="cpu",
+        device="cuda",  # ACE-Step is GPU-only; a cpu pin is rejected.
     )
     assert isinstance(inst, AudioGenerationModel)
     assert inst.model_id == "ace-step-v1-3.5b"
