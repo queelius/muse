@@ -139,6 +139,19 @@ def build_model_entry(
     entry["id"] = model_id
     entry["modality"] = modality
     entry["object"] = "model"
+    # OpenAI-compat fields. `created` is a unix epoch the SDK expects on
+    # every model object; muse has no per-model creation time, so we emit
+    # a stable 0 rather than a wall-clock now() (which would be
+    # nondeterministic and meaningless). `owned_by` is the HF org slug
+    # (the part before the '/'), falling back to "muse" for bundled
+    # custom models that declare no hf_repo. Written after the splat so
+    # capabilities can't clobber them.
+    entry["created"] = 0
+    hf_repo = manifest.get("hf_repo")
+    entry["owned_by"] = (
+        hf_repo.split("/", 1)[0] if isinstance(hf_repo, str) and "/" in hf_repo
+        else "muse"
+    )
     entry["loaded"] = loaded
     entry["last_loaded_at"] = last_loaded_at
     entry["unservable_reason"] = unservable_reason

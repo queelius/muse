@@ -557,6 +557,7 @@ def test_build_model_entry_capabilities_cannot_clobber_authoritative_fields():
         "capabilities": {
             "id": "EVIL", "modality": "EVIL", "object": "EVIL",
             "loaded": "EVIL", "unservable_reason": "EVIL",
+            "created": "EVIL", "owned_by": "EVIL",
         },
     }
     e = build_model_entry(
@@ -570,3 +571,32 @@ def test_build_model_entry_capabilities_cannot_clobber_authoritative_fields():
     assert e["loaded"] is True
     assert e["last_loaded_at"] == "2026-01-01T00:00:00+00:00"
     assert e["unservable_reason"] is None
+    # OpenAI-compat fields cannot be clobbered by capabilities either.
+    assert e["created"] == 0
+    assert e["owned_by"] == "muse"
+
+
+def test_build_model_entry_openai_compat_fields():
+    from muse.core.server import build_model_entry
+
+    # hf_repo present: owned_by is the org slug (before the '/').
+    e = build_model_entry(
+        "foo", "audio/speech",
+        {"hf_repo": "hexgrad/Kokoro-82M"},
+        loaded=False, last_loaded_at=None, unservable_reason=None,
+    )
+    assert e["object"] == "model"
+    assert e["created"] == 0
+    assert e["owned_by"] == "hexgrad"
+
+
+def test_build_model_entry_owned_by_defaults_to_muse_without_hf_repo():
+    from muse.core.server import build_model_entry
+
+    # No hf_repo (bundled custom model): owned_by falls back to "muse".
+    e = build_model_entry(
+        "soprano", "audio/speech", {},
+        loaded=False, last_loaded_at=None, unservable_reason=None,
+    )
+    assert e["owned_by"] == "muse"
+    assert e["created"] == 0
