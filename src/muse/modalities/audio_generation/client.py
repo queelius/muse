@@ -44,6 +44,7 @@ class _AudioGenerationClient:
         steps: int | None,
         guidance: float | None,
         negative_prompt: str | None,
+        lyrics: str | None = None,
     ) -> bytes:
         body: dict[str, Any] = {"prompt": prompt}
         if model is not None:
@@ -60,6 +61,8 @@ class _AudioGenerationClient:
             body["guidance"] = guidance
         if negative_prompt is not None:
             body["negative_prompt"] = negative_prompt
+        if lyrics is not None:
+            body["lyrics"] = lyrics
         r = requests.post(
             f"{self.server_url}{self._route}",
             json=body,
@@ -88,12 +91,14 @@ class MusicClient(_AudioGenerationClient):
         steps: int | None = None,
         guidance: float | None = None,
         negative_prompt: str | None = None,
+        lyrics: str | None = None,
     ) -> bytes:
         return self._post(
             prompt,
             model=model, duration=duration, seed=seed,
             response_format=response_format,
             steps=steps, guidance=guidance, negative_prompt=negative_prompt,
+            lyrics=lyrics,
         )
 
 
@@ -116,10 +121,12 @@ class SFXClient(_AudioGenerationClient):
         steps: int | None = None,
         guidance: float | None = None,
         negative_prompt: str | None = None,
+        lyrics: str | None = None,
     ) -> bytes:
         return self._post(
             prompt,
             model=model, duration=duration, seed=seed,
             response_format=response_format,
             steps=steps, guidance=guidance, negative_prompt=negative_prompt,
+            lyrics=lyrics,
         )

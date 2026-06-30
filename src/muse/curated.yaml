@@ -531,6 +531,11 @@
 - id: stable-audio-open-1.0
   bundled: true
 
+# ACE-Step v1 3.5B: text-to-music + full songs (genre prompt + optional
+# structured lyrics), 48kHz stereo. GPU-required; comfortable on 12GB.
+- id: ace-step-v1-3.5b
+  bundled: true
+
 # ---------- text/summarization (BART / PEGASUS seq2seq) ----------
 
 - id: bart-large-cnn

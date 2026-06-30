@@ -45,12 +45,18 @@ class AudioGenerationRequest(BaseModel):
     """
     prompt: str = Field(..., min_length=1, max_length=4000)
     model: str | None = None
-    duration: float | None = Field(default=None, ge=0.5, le=120.0)
+    # Ceiling raised to 240s in v0.49.0 for ACE-Step's long clips; the
+    # per-model runtime still clamps to its own capabilities.max_duration
+    # (Stable Audio remains 47s).
+    duration: float | None = Field(default=None, ge=0.5, le=240.0)
     seed: int | None = Field(default=None, ge=0)
     response_format: str = Field(default="wav", pattern="^(wav|mp3|opus|flac)$")
     steps: int | None = Field(default=None, ge=1, le=200)
     guidance: float | None = Field(default=None, ge=0.0, le=20.0)
     negative_prompt: str | None = None
+    # Optional structured lyrics for song models (ACE-Step). None/empty =>
+    # instrumental. Models that ignore lyrics (Stable Audio) simply drop it.
+    lyrics: str | None = Field(default=None, max_length=8000)
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -99,6 +105,7 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
                 "steps": req.steps,
                 "guidance": req.guidance,
                 "negative_prompt": req.negative_prompt,
+                "lyrics": req.lyrics,
             }
             return model.generate(req.prompt, **kwargs)
 

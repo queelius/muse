@@ -52,5 +52,6 @@ class AudioGenerationModel(Protocol):
         steps: int | None = None,
         guidance: float | None = None,
         negative_prompt: str | None = None,
+        lyrics: str | None = None,
         **kwargs: Any,
     ) -> AudioGenerationResult: ...

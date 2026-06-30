@@ -170,3 +170,24 @@ def test_omits_optional_fields_when_none():
     body = fake_post.call_args.kwargs["json"]
     # Only `prompt` should be present; everything else should be omitted.
     assert set(body.keys()) == {"prompt"}
+
+
+def test_music_client_forwards_lyrics():
+    """Lyrics (ACE-Step song mode) reach the wire body verbatim."""
+    with patch("muse.modalities.audio_generation.client.requests.post",
+               return_value=_ok_response()) as fake_post:
+        c = MusicClient(server_url="http://x:8000")
+        c.generate("pop, upbeat", model="ace-step-v1-3.5b",
+                   lyrics="[verse]\nhello world")
+    body = fake_post.call_args.kwargs["json"]
+    assert body["lyrics"] == "[verse]\nhello world"
+
+
+def test_lyrics_omitted_when_none():
+    """No lyrics kwarg => no `lyrics` field on the wire (instrumental default)."""
+    with patch("muse.modalities.audio_generation.client.requests.post",
+               return_value=_ok_response()) as fake_post:
+        c = MusicClient(server_url="http://x:8000")
+        c.generate("ambient piano")
+    body = fake_post.call_args.kwargs["json"]
+    assert "lyrics" not in body

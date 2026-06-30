@@ -208,6 +208,49 @@ def test_request_kwargs_forwarded_to_backend():
     assert kwargs["negative_prompt"] == "noise"
 
 
+def test_lyrics_field_forwarded_to_backend():
+    """ACE-Step's lyrics field must reach model.generate (added v0.49.0).
+
+    The route forwards a fixed kwargs set; lyrics has to be in it or it is
+    silently dropped before the backend.
+    """
+    backend = _fake_backend()
+    client = _make_client(backend)
+    r = client.post("/v1/audio/music", json={
+        "prompt": "pop, female vocal, upbeat",
+        "lyrics": "[verse]\nhello world\n[chorus]\nla la la",
+    })
+    assert r.status_code == 200
+    kwargs = backend.generate.call_args.kwargs
+    assert kwargs["lyrics"] == "[verse]\nhello world\n[chorus]\nla la la"
+
+
+def test_lyrics_defaults_to_none_when_omitted():
+    """Omitting lyrics forwards None (the runtime treats None as instrumental)."""
+    backend = _fake_backend()
+    client = _make_client(backend)
+    r = client.post("/v1/audio/music", json={"prompt": "ambient piano"})
+    assert r.status_code == 200
+    assert backend.generate.call_args.kwargs["lyrics"] is None
+
+
+def test_long_duration_accepted_up_to_240s():
+    """ACE-Step needs long clips; the route ceiling is 240s (was 120s)."""
+    backend = _fake_backend()
+    client = _make_client(backend)
+    r = client.post("/v1/audio/music", json={"prompt": "x", "duration": 200.0})
+    assert r.status_code == 200
+    assert backend.generate.call_args.kwargs["duration"] == 200.0
+
+
+def test_duration_above_240s_still_rejected():
+    """The raised ceiling is 240s, not unbounded."""
+    backend = _fake_backend()
+    client = _make_client(backend)
+    r = client.post("/v1/audio/music", json={"prompt": "x", "duration": 300.0})
+    assert r.status_code == 422
+
+
 def test_music_and_sfx_call_backend_with_same_kwargs():
     """Routes share the handler; only the capability key differs."""
     backend = _fake_backend()

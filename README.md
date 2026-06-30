@@ -146,6 +146,13 @@ curl -X POST http://localhost:8000/v1/audio/sfx \
   -d '{"prompt":"footsteps on gravel","model":"stable-audio-open-1.0","duration":3.0}' \
   --output footsteps.wav
 
+# Full song with lyrics (ACE-Step; GPU-required, 48kHz stereo).
+# Omit "lyrics" (or leave it empty) for an instrumental backing track.
+curl -X POST http://localhost:8000/v1/audio/music \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"dreamy synthpop, female vocal","model":"ace-step-v1-3.5b","duration":120.0,"lyrics":"[verse]\nneon rain on empty streets\n[chorus]\nwe are electric"}' \
+  --output song.wav
+
 # Image inpainting (multipart: image + mask + prompt)
 # White mask pixels are regenerated; black pixels are kept.
 curl -X POST http://localhost:8000/v1/images/edits \
@@ -524,6 +531,7 @@ Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or
   - `sd_turbo.py` (image/generation)
   - `bge_reranker_v2_m3.py` (text/rerank)
   - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
+  - `ace_step_v1_3_5b.py` (audio/generation; ACE-Step v1 3.5B full songs + lyrics, Apache 2.0, GPU-required)
   - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
   - `dinov2_small.py` (image/embedding; facebook/dinov2-small, Apache 2.0, 88MB, 384-dim CPU-friendly)
   - `mert_v1_95m.py` (audio/embedding; m-a-p/MERT-v1-95M, MIT, 95MB, 768-dim music understanding via mean-pool over time)

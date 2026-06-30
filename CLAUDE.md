@@ -9,7 +9,7 @@ nineteen modalities:
 
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
-- **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0; per-model capability gates on `supports_music` / `supports_sfx`)
+- **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0 bundled; ACE-Step v1 3.5B for full songs with optional structured lyrics + instrumentals; per-model capability gates on `supports_music` / `supports_sfx`; optional `lyrics` field on `/v1/audio/music`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark, Supertonic-3: the last is an ONNX on-device CPU engine, 31 languages, preset voice styles)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs AND vision-language models via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming + multimodal `messages` content; powered by llama-cpp-python for GGUF chat; `transformers.AutoModelForImageTextToText` for VLMs; SmolVLM, Qwen2-VL, LLaVA via the resolver)
@@ -113,6 +113,32 @@ to `/v1/audio/music` would silently produce a 30-second loop of
 footsteps treated as music; routing the same prompt to `/v1/audio/sfx`
 makes the user's intent explicit to operators reading logs and to the
 model itself.
+
+ACE-Step v1 3.5B (v0.49.0) is the second audio/generation backend and
+muse's first *song* model: a genre/style `prompt` plus optional
+structured `lyrics` (`[verse]`/`[chorus]` tags) produce a sung song;
+empty/None lyrics produce an instrumental (the runtime substitutes
+ACE-Step's literal `[instrumental]` tag). It is a bundled script
+(`ace-step-v1-3.5b`) that aliases the shared `AceStepRuntime` as `Model`
+(the VLM-bundled pattern), declares `supports_music: true` /
+`supports_sfx: false` (so `/v1/audio/sfx` returns 400 for it), and pins
+`device: cuda` (3.5B is impractical on CPU). The optional `lyrics` field
+(max 8000 chars) was added to `AudioGenerationRequest` and the
+`generate` protocol; models that ignore lyrics (Stable Audio) simply
+drop it. The route `duration` ceiling was raised 120s -> 240s for
+ACE-Step's long clips; the per-model runtime still clamps to its own
+`max_duration`. Unlike StableAudio (which returns in-memory numpy
+arrays), ACE-Step *writes WAV file(s) to disk and returns the path(s)*:
+`AceStepRuntime` hands the pipeline a temp `save_path`, resolves the
+on-disk output defensively (returned path if present, else the
+`save_path`), reads it back via `soundfile`, and deletes the temp dir in
+a `finally` (leak-safe, per the #200 temp-WAV lesson). `trust_remote_code`
+is NOT needed (`from acestep.pipeline_ace_step import ACEStepPipeline` is
+a direct package import). Install pins the git source (`acestep @
+git+https://github.com/ace-step/ACE-Step.git`; the PyPI `ace-step` is a
+stale v0.1.0). The `cpu_offload` / `overlapped_decode` / `torch_compile`
+low-VRAM knobs are exposed as optional manifest capabilities (default
+off) and forwarded to the pipeline constructor.
 
 The `/v1/images/generations` route also accepts optional `image` (data URL or http(s):// URL) + `strength` (0.0 to 1.0, default 0.5) fields for img2img since v0.17.0. OpenAI SDK clients pass them via `extra_body`:
 
