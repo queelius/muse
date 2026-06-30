@@ -29,6 +29,10 @@ from muse.cli_impl.supervisor import (
 def app():
     app = FastAPI()
     app.include_router(build_admin_router())
+    # Match the gateway wiring: unwrap admin auth's OpenAI-shaped
+    # HTTPException details to a bare {"error": {...}} envelope.
+    from muse.admin.errors import install_admin_error_handler
+    install_admin_error_handler(app)
     return app
 
 
@@ -69,6 +73,27 @@ def _seed(data: dict) -> None:
     _reset_known_models_cache()
 
 
+class TestGatewayAdminErrorEnvelope:
+    """Fix #4 (v0.47.4): admin auth errors use the bare OpenAI envelope
+    {"error": {...}} on the real gateway, matching the route-level admin
+    errors, not the double-wrapped {"detail": {"error": {...}}} that
+    FastAPI's default HTTPException handler would produce.
+    """
+
+    def test_gateway_admin_auth_error_is_unwrapped(self, monkeypatch):
+        from muse.cli_impl.gateway import build_gateway
+
+        monkeypatch.delenv(ADMIN_TOKEN_ENV, raising=False)
+        app = build_gateway(state=SupervisorState(workers=[], device="cpu"))
+        c = TestClient(app, raise_server_exceptions=False)
+        r = c.get("/v1/admin/workers")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["error"]["code"] == "admin_disabled"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert "detail" not in body
+
+
 class TestAuthEnvelope:
     def test_no_token_configured_returns_503(self, app, monkeypatch):
         monkeypatch.delenv(ADMIN_TOKEN_ENV, raising=False)
@@ -82,7 +107,7 @@ class TestAuthEnvelope:
         ]:
             r = c.get(path)
             assert r.status_code == 503, path
-            assert r.json()["detail"]["error"]["code"] == "admin_disabled"
+            assert r.json()["error"]["code"] == "admin_disabled"
 
     def test_no_header_returns_401(self, client, monkeypatch):
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret-test-token")

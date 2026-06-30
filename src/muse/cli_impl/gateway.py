@@ -311,8 +311,14 @@ def build_gateway(
     # admin module out of the import path of muse.cli_impl.worker
     # (which loads inside per-model venvs that may not have fastapi
     # extras installed).
+    from muse.admin.errors import install_admin_error_handler
     from muse.admin.routes import build_admin_router
     app.include_router(build_admin_router())
+    # Unwrap the admin auth dependency's OpenAI-shaped HTTPException
+    # details so /v1/admin/* auth errors emit a bare {"error": {...}}
+    # envelope, matching the route-level admin errors instead of the
+    # default {"detail": {"error": {...}}} double-wrap.
+    install_admin_error_handler(app)
 
     @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(request: Request, full_path: str):

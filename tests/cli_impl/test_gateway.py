@@ -524,7 +524,11 @@ class TestAdminMount:
         client = TestClient(app, raise_server_exceptions=False)
         r = client.get("/v1/admin/workers")
         assert r.status_code == 503
-        assert r.json()["detail"]["error"]["code"] == "admin_disabled"
+        # v0.47.4: bare OpenAI envelope, not the double-wrapped
+        # {"detail": {"error": ...}} the default handler would produce.
+        body = r.json()
+        assert body["error"]["code"] == "admin_disabled"
+        assert "detail" not in body
 
     def test_admin_path_with_token_passes_auth(self, monkeypatch):
         from muse.admin.auth import ADMIN_TOKEN_ENV

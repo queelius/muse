@@ -10,17 +10,24 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from muse.admin.auth import ADMIN_TOKEN_ENV, verify_admin_token
+from muse.admin.errors import install_admin_error_handler
 
 
 @pytest.fixture
 def app():
-    """A trivial FastAPI app whose only route requires the admin token."""
+    """A trivial FastAPI app whose only route requires the admin token.
+
+    The OpenAI-envelope-unwrapping handler is installed exactly as the
+    gateway installs it, so these tests assert the real wire shape
+    (bare {"error": {...}}), not the dependency's raw HTTPException.
+    """
     app = FastAPI()
 
     @app.get("/protected", dependencies=[Depends(verify_admin_token)])
     def protected():
         return {"ok": True}
 
+    install_admin_error_handler(app)
     return app
 
 
@@ -36,7 +43,7 @@ class TestVerifyAdminToken:
         r = client.get("/protected")
         assert r.status_code == 503
         body = r.json()
-        assert body["detail"]["error"]["code"] == "admin_disabled"
+        assert body["error"]["code"] == "admin_disabled"
 
     def test_no_token_configured_even_with_bearer_returns_503(self, client, monkeypatch):
         """A request CAN'T succeed if the env var is unset, even with a header."""
@@ -48,20 +55,20 @@ class TestVerifyAdminToken:
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
         r = client.get("/protected")
         assert r.status_code == 401
-        assert r.json()["detail"]["error"]["code"] == "missing_token"
+        assert r.json()["error"]["code"] == "missing_token"
 
     def test_token_set_malformed_header_returns_401(self, client, monkeypatch):
         """An "Authorization: Token X" or other non-Bearer prefix -> 401."""
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
         r = client.get("/protected", headers={"Authorization": "Token secret"})
         assert r.status_code == 401
-        assert r.json()["detail"]["error"]["code"] == "missing_token"
+        assert r.json()["error"]["code"] == "missing_token"
 
     def test_token_set_wrong_bearer_returns_403(self, client, monkeypatch):
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
         r = client.get("/protected", headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 403
-        assert r.json()["detail"]["error"]["code"] == "invalid_token"
+        assert r.json()["error"]["code"] == "invalid_token"
 
     def test_token_set_correct_bearer_passes(self, client, monkeypatch):
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
@@ -82,7 +89,7 @@ class TestVerifyAdminToken:
         r = client.get("/protected")
         assert r.status_code == 401
         body = r.json()
-        assert body["detail"]["error"]["type"] == "invalid_request_error"
+        assert body["error"]["type"] == "invalid_request_error"
 
     def test_whitespace_only_token_treated_as_disabled(self, client, monkeypatch):
         """A whitespace-only MUSE_ADMIN_TOKEN is an accident, not a secret:
@@ -90,7 +97,7 @@ class TestVerifyAdminToken:
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "   ")
         r = client.get("/protected", headers={"Authorization": "Bearer    "})
         assert r.status_code == 503
-        assert r.json()["detail"]["error"]["code"] == "admin_disabled"
+        assert r.json()["error"]["code"] == "admin_disabled"
 
     def test_token_with_trailing_newline_still_matches(self, client, monkeypatch):
         """`MUSE_ADMIN_TOKEN=$(cat tokenfile)` leaves a trailing newline; the
