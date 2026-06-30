@@ -81,18 +81,6 @@ def create_app(
         director_status, unservable_reasons = _supervisor_view()
         data = []
         for info in registry.list_all():
-            entry: dict = {}
-            # Splat capabilities (sample_rate, voices, default_size, ...) first
-            entry.update(info.manifest.get("capabilities", {}))
-            # Then top-level manifest metadata when present
-            for k in ("description", "license", "hf_repo"):
-                if k in info.manifest:
-                    entry[k] = info.manifest[k]
-            # Authoritative fields written last so nothing in the manifest
-            # or capabilities can clobber id/modality/object.
-            entry["id"] = info.model_id
-            entry["modality"] = info.modality
-            entry["object"] = "model"
             # v0.40.0 lazy-load fields. Always present on every entry so
             # SDKs / clients can rely on the shape.
             loaded_meta = director_status.get(info.model_id)
@@ -101,18 +89,18 @@ def create_app(
                 # as the source of truth -- if it's registered, it's
                 # loaded -- but we cannot derive a meaningful
                 # last_loaded_at because no monotonic baseline exists.
-                entry["loaded"] = True
-                entry["last_loaded_at"] = None
+                loaded, last_loaded_at = True, None
             elif loaded_meta is not None and loaded_meta.get("loaded"):
-                entry["loaded"] = True
-                entry["last_loaded_at"] = _format_loaded_at(loaded_meta)
+                loaded, last_loaded_at = True, _format_loaded_at(loaded_meta)
             else:
                 # The director is bound and reports this model as not
                 # currently loaded.
-                entry["loaded"] = False
-                entry["last_loaded_at"] = None
-            entry["unservable_reason"] = unservable_reasons.get(info.model_id)
-            data.append(entry)
+                loaded, last_loaded_at = False, None
+            data.append(build_model_entry(
+                info.model_id, info.modality, info.manifest,
+                loaded=loaded, last_loaded_at=last_loaded_at,
+                unservable_reason=unservable_reasons.get(info.model_id),
+            ))
         return {"object": "list", "data": data}
 
     for name, router in routers.items():
@@ -121,6 +109,40 @@ def create_app(
 
     app.state.registry = registry
     return app
+
+
+def build_model_entry(
+    model_id: str,
+    modality: str,
+    manifest: Mapping[str, Any],
+    *,
+    loaded: bool,
+    last_loaded_at: str | None,
+    unservable_reason: str | None,
+) -> dict:
+    """Shape one /v1/models entry from a manifest + lazy-load state.
+
+    Capabilities (sample_rate, voices, default_size, ...) and select
+    top-level manifest metadata are splatted first; the authoritative
+    fields (id / modality / object + the lazy-load surface) are written
+    last so nothing in the manifest or capabilities can clobber them.
+
+    Shared by `create_app`'s /v1/models (per-worker registry view) and the
+    gateway's /v1/models (which also lists enabled-but-unloaded catalog
+    models) so both render an identical entry shape.
+    """
+    entry: dict = {}
+    entry.update(manifest.get("capabilities", {}) or {})
+    for k in ("description", "license", "hf_repo"):
+        if k in manifest:
+            entry[k] = manifest[k]
+    entry["id"] = model_id
+    entry["modality"] = modality
+    entry["object"] = "model"
+    entry["loaded"] = loaded
+    entry["last_loaded_at"] = last_loaded_at
+    entry["unservable_reason"] = unservable_reason
+    return entry
 
 
 # Sentinel marking "no supervisor state was registered, treat registered

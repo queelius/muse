@@ -36,9 +36,22 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 # Imported at module-top so tests can patch
-# `muse.cli_impl.gateway.get_manifest` to inject manifests or simulate
-# unknown-model KeyErrors without touching catalog state on disk.
-from muse.core.catalog import get_manifest
+# `muse.cli_impl.gateway.get_manifest` / `._read_catalog` to inject
+# manifests or a catalog snapshot without touching state on disk.
+# `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
+# models (v0.47.3); it is mtime-cached so per-request reads are cheap.
+from muse.core.catalog import _read_catalog, get_manifest
+from muse.core.server import build_model_entry
+
+# Module-top (no import cycle: supervisor imports gateway only lazily).
+# `revalidate_servability` re-checks a stale boot unservable stamp against
+# the live catalog; `backfill_manifest_memory` sizes the load from the
+# catalog when the manifest declares no memory_gb. Both are on the request
+# hot path, so importing per-request would pay a needless cost.
+from muse.cli_impl.supervisor import (
+    backfill_manifest_memory,
+    revalidate_servability,
+)
 
 # OperationError lives at module-top because `_route_via_director` must
 # trap director.acquire() failures; importing inside a hot-path function
@@ -229,6 +242,17 @@ def build_gateway(
             results = await asyncio.gather(*[_one(u) for u in worker_urls])
         for items in results:
             aggregated.extend(items)
+
+        # v0.47.3: also advertise enabled-but-unloaded catalog models so
+        # /v1/models reflects the catalog, not just resident workers. The
+        # loaded workers above are authoritative for loaded=True; here we
+        # append every enabled catalog row not already present, with
+        # loaded=False + its boot unservable_reason (if any). Skipped in
+        # legacy static-routes mode (no SupervisorState to read the
+        # unservable map from).
+        state = app.state.routes_state
+        if state is not None:
+            aggregated.extend(_unloaded_catalog_entries(state, aggregated))
         return {"object": "list", "data": aggregated}
 
     @app.get("/health")
@@ -315,6 +339,44 @@ def build_gateway(
     return app
 
 
+def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
+    """Build /v1/models entries for enabled-but-unloaded catalog models.
+
+    `loaded` is the entries already aggregated from resident workers; their
+    ids are skipped. Returns one entry per enabled catalog row with a
+    `python_path` that isn't already loaded, marked loaded=False with its
+    boot `unservable_reason` (if any). Best-effort: a catalog read failure
+    yields no extra entries rather than failing the endpoint.
+    """
+    loaded_ids = {e.get("id") for e in loaded}
+    try:
+        catalog = _read_catalog()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/models: catalog read failed: %s", e)
+        return []
+    with state.lock:
+        reasons = dict(getattr(state, "unservable_reasons", {}) or {})
+    out: list[dict] = []
+    for model_id, entry in catalog.items():
+        if model_id in loaded_ids:
+            continue
+        if not entry.get("enabled", True):
+            continue
+        if not entry.get("python_path"):
+            continue  # pre-worker entry; cannot load
+        try:
+            manifest = get_manifest(model_id)
+        except KeyError:
+            manifest = entry.get("manifest", {}) or {}
+        modality = manifest.get("modality") or entry.get("modality", "")
+        out.append(build_model_entry(
+            model_id, modality, manifest,
+            loaded=False, last_loaded_at=None,
+            unservable_reason=reasons.get(model_id),
+        ))
+    return out
+
+
 async def _route_via_director(
     request: Request,
     full_path: str,
@@ -346,11 +408,23 @@ async def _route_via_director(
          streaming responses, the relay generator's own finally clause
          calls release at end-of-iteration (NOT at first-chunk dispatch).
     """
-    # 1. Unservable short-circuit (BEFORE acquire). Reading
-    # state.unservable_reasons under the state lock keeps it consistent
-    # with concurrent admin operations that mutate the dict.
+    # 1. Unservable short-circuit (BEFORE acquire). The boot-time
+    # validate_catalog_at_boot snapshot can go stale: a `muse models probe`
+    # (or weights landing on disk) that arrives after boot makes a
+    # previously-unsizable model sizable, and freed memory can make a model
+    # that did not fit at boot fit now. When a stamp exists, re-derive the
+    # full verdict for THIS one model against the LIVE catalog + live free
+    # memory, so the probe (or memory change) takes effect without a
+    # supervisor restart. revalidate_servability clears the stamp (returns
+    # None) only when the model is sizable AND fits; a genuine "exceeds
+    # device capacity" stamp is RETAINED, so an impossible-to-fit model 503s
+    # here and never reaches the director's eviction loop (which would
+    # otherwise evict the whole idle working set before 503'ing). Reading +
+    # mutating the dict happens under state.lock inside revalidate_servability.
     with state.lock:
         unservable_reason = state.unservable_reasons.get(model_id)
+    if unservable_reason is not None:
+        unservable_reason = revalidate_servability(state, model_id)
     if unservable_reason is not None:
         return _openai_error(
             503,
@@ -372,6 +446,13 @@ async def _route_via_director(
             404, "model_not_found",
             f"model {model_id!r} is not in the catalog",
         )
+
+    # 2b. Size the load. The director sizes loads + drives LRU eviction
+    # from capabilities.memory_gb; a probed-only or never-probed model
+    # declares none, so backfill it from the catalog (probe measurement,
+    # else on-disk weights) -- otherwise the director treats the model as
+    # 0 GB and never evicts to make room for it.
+    manifest = backfill_manifest_memory(manifest, model_id)
 
     # 3. Acquire. The director may load (cold), evict (LRU), or
     # short-circuit (already loaded). It returns the worker port hosting

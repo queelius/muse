@@ -513,20 +513,57 @@ class _MemoryProbeAdapter:
         return memory_probe.cpu_free_gb()
 
 
-def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
-    """Return (has_data, declared_memory_gb, device).
+def _weights_size_gb(catalog_entry: dict) -> float:
+    """On-disk size of a model's downloaded weights, in GB (0.0 if unknown).
 
-    Two sources of memory data, in order of preference:
+    Last resort in the sizing ladder: a model that was never probed and
+    declares no `memory_gb` can still be sized from the bytes already on
+    disk, so it loads on demand (evicting LRU as needed) instead of being
+    503'd "no memory estimate". Sums regular-file sizes under the entry's
+    `local_dir` (an HF snapshot dir whose weight files are symlinks into
+    the blob store; `os.path.getsize` follows them). Returns 0.0 when
+    `local_dir` is absent, missing, or unreadable.
+
+    This UNDERestimates live runtime (no activations / KV cache); the
+    LoadDirector's observed-peak writeback self-heals the estimate upward
+    after the first real load, and the auto-restart monitor recovers a
+    worker that an initial under-estimate happens to OOM.
+    """
+    local_dir = catalog_entry.get("local_dir")
+    if not local_dir:
+        return 0.0
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(local_dir):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    continue
+    except OSError:
+        return 0.0
+    return total / (1024 ** 3)
+
+
+def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
+    """Return (has_data, memory_gb, device).
+
+    Sizing ladder, in order of preference:
       1. `manifest.capabilities.memory_gb` annotation (hand-set or
          from a script's MANIFEST).
-      2. `measurements.<device>.peak_bytes` from a probe run.
+      2. `measurements.<device>.peak_bytes` from a probe run / self-healed
+         lazy-load observation.
+      3. on-disk weights size summed from the entry's `local_dir`.
 
     `device` is read from `manifest.capabilities.device` and lowercased.
     Falls back to "cpu" when absent (the catalog default).
 
-    `has_data` is True when either source is present; False when both
-    are absent. The boot validation flags False entries as unservable
-    with the probe-prompt reason.
+    `has_data` is True when ANY source is present; False only when the
+    model declares nothing, was never probed, AND has no weights on disk.
+    The boot validation flags False entries as unservable with the
+    probe-prompt reason. Because pulled models always have weights on
+    disk, that 503 path is effectively reserved for pre-worker / removed
+    entries.
     """
     manifest = catalog_entry.get("manifest", {}) or {}
     capabilities = manifest.get("capabilities", {}) or {}
@@ -577,7 +614,78 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
             measured_gb = 0.0
         return True, measured_gb, device
 
+    # Last resort: size the model from the bytes already on disk so a
+    # never-probed model still loads on demand instead of 503'ing.
+    weights_gb = _weights_size_gb(catalog_entry)
+    if weights_gb > 0:
+        return True, weights_gb, device
+
     return False, 0.0, device
+
+
+def _available_pools(
+    memory_probe: "Any",
+    *,
+    gpu_headroom_gb: float,
+    cpu_headroom_gb: float,
+) -> tuple[float, "float | None"]:
+    """Live (CPU, GPU) available pools in GB, each minus its headroom.
+
+    GPU is None when no live VRAM info is available (pynvml absent / AMD /
+    driver mismatch). Shared by boot validation and the request-path
+    re-check so both size capacity from the SAME live readings.
+    """
+    cpu_free_gb = float(memory_probe.cpu_free_gb())
+    cpu_available_gb = max(0.0, cpu_free_gb - cpu_headroom_gb)
+    gpu_free = memory_probe.gpu_free_gb()
+    if gpu_free is None:
+        gpu_available_gb = None
+    else:
+        gpu_available_gb = max(0.0, float(gpu_free) - gpu_headroom_gb)
+    return cpu_available_gb, gpu_available_gb
+
+
+def _servability_reason(
+    entry: dict,
+    *,
+    cpu_available_gb: float,
+    gpu_available_gb: "float | None",
+) -> "str | None":
+    """The unservable reason for one catalog entry, or None if servable.
+
+    Single source of truth for boot validation AND the live request-path
+    re-check (`revalidate_servability`), so the two verdicts never drift.
+    Applies the sizing ladder (`_has_memory_data`) then a device-capacity
+    check against the caller-supplied available pools.
+
+    Returns:
+      - "no memory estimate ..." when the model is not sizable at all
+        (no annotation, no probe, no weights on disk).
+      - "exceeds device capacity ..." when sized but it does not fit the
+        device's available pool (or a cuda model on a host with no live
+        VRAM info). This is a HARD stop: the gateway 503s without deferring
+        to the director, because a model that does not fit even an empty
+        working set can only make the director evict everything and 503.
+      - None when sizable AND it fits.
+    """
+    has_data, sized_gb, device = _has_memory_data(entry)
+    if not has_data:
+        return "no memory estimate; run `muse models probe` to populate"
+    if device in ("cuda", "gpu"):
+        if gpu_available_gb is None:
+            return (
+                "exceeds device capacity (no GPU info available; "
+                "install nvidia-ml-py / pynvml or set memory budget)"
+            )
+        available_gb = gpu_available_gb
+    else:
+        available_gb = cpu_available_gb
+    if sized_gb > available_gb:
+        return (
+            f"exceeds device capacity ({sized_gb:.1f} GB > "
+            f"{available_gb:.1f} GB available on {device})"
+        )
+    return None
 
 
 def validate_catalog_at_boot(
@@ -609,14 +717,11 @@ def validate_catalog_at_boot(
         memory_probe = _MemoryProbeAdapter()
 
     catalog = _read_catalog()
-    cpu_free_gb = float(memory_probe.cpu_free_gb())
-    cpu_available_gb = max(0.0, cpu_free_gb - cpu_headroom_gb)
-
-    gpu_free = memory_probe.gpu_free_gb()
-    if gpu_free is None:
-        gpu_available_gb = None
-    else:
-        gpu_available_gb = max(0.0, float(gpu_free) - gpu_headroom_gb)
+    cpu_available_gb, gpu_available_gb = _available_pools(
+        memory_probe,
+        gpu_headroom_gb=gpu_headroom_gb,
+        cpu_headroom_gb=cpu_headroom_gb,
+    )
 
     for model_id, entry in catalog.items():
         if not entry.get("enabled", True):
@@ -625,34 +730,102 @@ def validate_catalog_at_boot(
         if not entry.get("python_path"):
             continue
 
-        has_data, declared_gb, device = _has_memory_data(entry)
-        if not has_data:
-            state.unservable_reasons[model_id] = (
-                "no memory estimate; run `muse models probe` to populate"
-            )
-            continue
+        reason = _servability_reason(
+            entry,
+            cpu_available_gb=cpu_available_gb,
+            gpu_available_gb=gpu_available_gb,
+        )
+        if reason is not None:
+            state.unservable_reasons[model_id] = reason
 
-        # Pick the relevant device's available pool.
-        if device in ("cuda", "gpu"):
-            available_gb = gpu_available_gb
-            if available_gb is None:
-                # pynvml unavailable; we cannot say it fits. Until probe
-                # data lands or pynvml installs, mark unservable so
-                # callers get a 503 instead of a load attempt that ends
-                # in a crashed worker.
-                state.unservable_reasons[model_id] = (
-                    "exceeds device capacity (no GPU info available; "
-                    "install nvidia-ml-py / pynvml or set memory budget)"
-                )
-                continue
+
+def revalidate_servability(
+    state: SupervisorState,
+    model_id: str,
+    *,
+    memory_probe: "Any | None" = None,
+    gpu_headroom_gb: float = 1.0,
+    cpu_headroom_gb: float = 2.0,
+) -> str | None:
+    """Re-derive one model's unservable verdict against the LIVE catalog.
+
+    `validate_catalog_at_boot` stamps `state.unservable_reasons` once at
+    boot. That snapshot goes stale two ways: a `muse models probe` (or a
+    manifest edit, or weights simply landing on disk) makes a previously
+    unsizable model sizable; or memory frees up so a model that did not fit
+    at boot now does. This re-reads the (mtime-cached) catalog for ONE model
+    and re-runs the SAME `_servability_reason` boot uses -- the estimate AND
+    the device-capacity check against LIVE free memory -- then updates the
+    stamp, so the gateway reflects reality WITHOUT a supervisor restart.
+
+    Crucially this preserves a genuine "exceeds device capacity" stamp: a
+    model that cannot fit even an empty working set is NOT cleared just
+    because it became sizable. Clearing it would route an impossible request
+    into the director, whose eviction loop would tear down the whole idle
+    working set before 503'ing. The gateway 503s such a model directly.
+
+    Scoped to one model: no full-catalog walk. Reads live memory via the
+    probe (defaults to the production adapter; tests inject a MagicMock).
+    Returns the current reason (None when now servable). Mutations to
+    `state.unservable_reasons` are made under `state.lock`; the probe read
+    and `_servability_reason` run outside the lock.
+    """
+    if memory_probe is None:
+        memory_probe = _MemoryProbeAdapter()
+    catalog = _read_catalog()
+    entry = catalog.get(model_id)
+    if entry is None:
+        # Removed from the catalog since boot. Clear the now-stale stamp and
+        # return None so the gateway falls through to get_manifest, which
+        # 404s `model_not_found` if truly gone (or serves a bundled fallback)
+        # -- rather than 503'ing with a reason that names a model that no
+        # longer exists.
+        with state.lock:
+            state.unservable_reasons.pop(model_id, None)
+        return None
+    cpu_available_gb, gpu_available_gb = _available_pools(
+        memory_probe,
+        gpu_headroom_gb=gpu_headroom_gb,
+        cpu_headroom_gb=cpu_headroom_gb,
+    )
+    reason = _servability_reason(
+        entry,
+        cpu_available_gb=cpu_available_gb,
+        gpu_available_gb=gpu_available_gb,
+    )
+    with state.lock:
+        if reason is None:
+            state.unservable_reasons.pop(model_id, None)
         else:
-            available_gb = cpu_available_gb
+            state.unservable_reasons[model_id] = reason
+        return reason
 
-        if declared_gb > available_gb:
-            state.unservable_reasons[model_id] = (
-                f"exceeds device capacity ({declared_gb:.1f} GB > "
-                f"{available_gb:.1f} GB available on {device})"
-            )
+
+def backfill_manifest_memory(manifest: dict, model_id: str) -> dict:
+    """Return a copy of `manifest` sized from the catalog when it declares no
+    `capabilities.memory_gb`.
+
+    The LoadDirector sizes loads (and drives LRU eviction) from
+    `capabilities.memory_gb`. A probed-only or never-probed model declares
+    none, so without this the director would treat it as 0 GB -- "fits
+    anywhere", never evicting. We fill it from the sizing ladder
+    (`_has_memory_data`: probe measurement, else on-disk weights size). An
+    explicit declared `memory_gb` always wins; the input is never mutated.
+    """
+    caps = manifest.get("capabilities", {}) or {}
+    if caps.get("memory_gb") is not None:
+        return manifest
+    entry = _read_catalog().get(model_id)
+    if entry is None:
+        return manifest
+    has_data, gb, _device = _has_memory_data(entry)
+    if not has_data or gb <= 0:
+        return manifest
+    out = dict(manifest)
+    out_caps = dict(caps)
+    out_caps["memory_gb"] = gb
+    out["capabilities"] = out_caps
+    return out
 
 
 def _build_load_director(state: SupervisorState) -> "Any":

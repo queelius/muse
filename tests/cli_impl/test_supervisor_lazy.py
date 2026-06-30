@@ -1222,3 +1222,403 @@ class TestHasMemoryData:
         assert has is True
         assert gb == 14.0
         assert device == "cuda"  # NOT overwritten to 'cpu' by the recovery loop
+
+
+# ---------------------------------------------------------------------------
+# v0.47.3 Bug #2: revalidate_servability re-evaluates one model's
+# "no memory estimate" stamp against the LIVE catalog, so a `muse models
+# probe` that lands after boot takes effect without a supervisor restart.
+# ---------------------------------------------------------------------------
+
+
+class TestRevalidateServability:
+    def _probe_stamp(self) -> str:
+        return "no memory estimate; run `muse models probe` to populate"
+
+    def test_clears_stamp_when_measurement_present(self, tmp_catalog):
+        """A model boot-stamped 'no memory estimate' whose catalog now
+        carries a measurement is cleared (returns None) and removed from
+        state.unservable_reasons -- the probe-then-serve fix.
+        """
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({
+            "probed-model": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "probed-model",
+                    "modality": "embedding/text",
+                    "capabilities": {"device": "cpu"},  # no memory_gb
+                },
+                "measurements": {
+                    "cpu": {"peak_bytes": 800_000_000, "device": "cpu"},
+                },
+            },
+        })
+        state = SupervisorState()
+        state.unservable_reasons["probed-model"] = self._probe_stamp()
+
+        reason = revalidate_servability(state, "probed-model")
+
+        assert reason is None
+        assert "probed-model" not in state.unservable_reasons
+
+    def test_clears_stamp_when_declared_memory_added(self, tmp_catalog):
+        """A capabilities.memory_gb annotation also resolves the stamp."""
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({
+            "annotated": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "annotated",
+                    "modality": "embedding/text",
+                    "capabilities": {"device": "cpu", "memory_gb": 1.0},
+                },
+            },
+        })
+        state = SupervisorState()
+        state.unservable_reasons["annotated"] = self._probe_stamp()
+
+        reason = revalidate_servability(state, "annotated")
+
+        assert reason is None
+        assert "annotated" not in state.unservable_reasons
+
+    def test_keeps_stamp_when_still_no_estimate(self, tmp_catalog):
+        """A model still lacking any estimate keeps the probe-prompt 503."""
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({
+            "needs-probe": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "needs-probe",
+                    "modality": "embedding/text",
+                    "capabilities": {"device": "cpu"},  # no memory data
+                },
+            },
+        })
+        state = SupervisorState()
+        state.unservable_reasons["needs-probe"] = self._probe_stamp()
+
+        reason = revalidate_servability(state, "needs-probe")
+
+        assert reason is not None
+        assert "no memory estimate" in reason
+        assert "needs-probe" in state.unservable_reasons
+
+    def test_clears_stale_stamp_when_model_absent_from_catalog(self, tmp_catalog):
+        """A model removed from the catalog since boot has its stale stamp
+        CLEARED (returns None), so the gateway falls through to get_manifest
+        and 404s `model_not_found` (or serves a bundled fallback) instead of
+        503'ing with a stamp that refers to a model that no longer exists.
+
+        Regression guard for the adversarial-review LOW finding: the prior
+        cut returned the retained stale reason here, short-circuiting the
+        gateway to 503 and contradicting the documented 404 path.
+        """
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({})
+        state = SupervisorState()
+        state.unservable_reasons["ghost"] = "some prior reason"
+
+        reason = revalidate_servability(state, "ghost")
+
+        assert reason is None
+        assert "ghost" not in state.unservable_reasons
+
+    def _capacity_probe(self, cpu_free=16.0, gpu_free=None):
+        probe = MagicMock()
+        probe.cpu_free_gb.return_value = cpu_free
+        probe.gpu_free_gb.return_value = gpu_free
+        return probe
+
+    def test_keeps_capacity_stamp_for_oversized_model(self, tmp_catalog):
+        """v0.47.3 regression guard: a model boot-stamped 'exceeds device
+        capacity' must NOT be cleared merely because it is sizable. Clearing
+        it would route an impossible-to-fit request into the director, whose
+        eviction loop tears down the entire idle working set before 503'ing.
+        revalidate must re-derive the FULL verdict (estimate AND capacity)
+        and keep the capacity stamp.
+        """
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({
+            "huge": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "huge",
+                    "modality": "audio/speech",
+                    "capabilities": {"device": "cpu", "memory_gb": 200.0},
+                },
+            },
+        })
+        state = SupervisorState()
+        state.unservable_reasons["huge"] = (
+            "exceeds device capacity (200.0 GB > 14.0 GB available on cpu)"
+        )
+
+        reason = revalidate_servability(
+            state, "huge", memory_probe=self._capacity_probe(cpu_free=16.0),
+        )
+
+        assert reason is not None
+        assert "exceeds device capacity" in reason
+        assert "huge" in state.unservable_reasons
+
+    def test_keeps_capacity_stamp_for_gpu_without_pynvml(self, tmp_catalog):
+        """A cuda model on a host with no live VRAM info (pynvml absent) is
+        not sizable-for-fit; revalidate keeps the capacity stamp so the
+        gateway 503s instead of deferring to the director (which would size
+        available GPU at 0 and evict the world).
+        """
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({
+            "gpu-model": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "gpu-model",
+                    "modality": "image/generation",
+                    "capabilities": {"device": "cuda", "memory_gb": 8.0},
+                },
+            },
+        })
+        state = SupervisorState()
+        state.unservable_reasons["gpu-model"] = (
+            "exceeds device capacity (no GPU info available; ...)"
+        )
+
+        reason = revalidate_servability(
+            state, "gpu-model",
+            memory_probe=self._capacity_probe(gpu_free=None),
+        )
+
+        assert reason is not None
+        assert "exceeds device capacity" in reason
+        assert "gpu-model" in state.unservable_reasons
+
+    def test_clears_capacity_stamp_when_memory_now_available(self, tmp_catalog):
+        """The live re-check uses LIVE free memory, not the stale boot
+        snapshot: a model stamped at boot (when free was low) is cleared once
+        enough memory is actually free now -- this is the legitimate
+        'load later when memory frees' path, distinct from the oversized one.
+        """
+        from muse.cli_impl.supervisor import revalidate_servability
+
+        _seed_catalog({
+            "fits-now": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "fits-now",
+                    "modality": "audio/speech",
+                    "capabilities": {"device": "cpu", "memory_gb": 4.0},
+                },
+            },
+        })
+        state = SupervisorState()
+        state.unservable_reasons["fits-now"] = (
+            "exceeds device capacity (4.0 GB > 1.0 GB available on cpu)"
+        )
+
+        reason = revalidate_servability(
+            state, "fits-now", memory_probe=self._capacity_probe(cpu_free=16.0),
+        )
+
+        assert reason is None
+        assert "fits-now" not in state.unservable_reasons
+
+
+# ---------------------------------------------------------------------------
+# v0.47.3 Gap #2b: backfill_manifest_memory sizes a probed-only model from
+# its catalog measurement so the LoadDirector's fit/eviction accounting is
+# accurate (the director reads capabilities.memory_gb; the probe writes
+# measurements.<device>.peak_bytes).
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillManifestMemory:
+    def test_sets_memory_gb_from_measurement(self, tmp_catalog):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({
+            "probed-model": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "probed-model",
+                    "capabilities": {"device": "cpu"},
+                },
+                "measurements": {
+                    "cpu": {"peak_bytes": 800_000_000, "device": "cpu"},
+                },
+            },
+        })
+        manifest = {
+            "model_id": "probed-model",
+            "modality": "embedding/text",
+            "capabilities": {"device": "cpu"},  # no memory_gb
+        }
+
+        out = backfill_manifest_memory(manifest, "probed-model")
+
+        assert out["capabilities"]["memory_gb"] == pytest.approx(
+            800_000_000 / 1024 ** 3, rel=1e-6,
+        )
+        # Input is not mutated (copy semantics).
+        assert "memory_gb" not in manifest["capabilities"]
+
+    def test_declared_memory_wins(self, tmp_catalog):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({
+            "declared": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"peak_bytes": 800_000_000, "device": "cpu"},
+                },
+            },
+        })
+        manifest = {
+            "model_id": "declared",
+            "capabilities": {"device": "cpu", "memory_gb": 2.0},
+        }
+
+        out = backfill_manifest_memory(manifest, "declared")
+
+        assert out["capabilities"]["memory_gb"] == 2.0
+
+    def test_noop_when_no_measurement(self, tmp_catalog):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({
+            "bare": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {"capabilities": {"device": "cpu"}},
+            },
+        })
+        manifest = {"model_id": "bare", "capabilities": {"device": "cpu"}}
+
+        out = backfill_manifest_memory(manifest, "bare")
+
+        assert out["capabilities"].get("memory_gb") is None
+
+    def test_noop_when_model_absent(self, tmp_catalog):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({})
+        manifest = {"model_id": "ghost", "capabilities": {}}
+
+        out = backfill_manifest_memory(manifest, "ghost")
+
+        assert out["capabilities"].get("memory_gb") is None
+
+
+# ---------------------------------------------------------------------------
+# v0.47.3 Fix A: on-disk weights-size fallback. A never-probed model is
+# still sizable from its downloaded weights (catalog local_dir), so it
+# loads on demand (evicting as needed) instead of 503 model_unservable.
+# ---------------------------------------------------------------------------
+
+
+class TestWeightsSizeFallback:
+    def _make_weights_dir(self, tmp_path, *sizes_bytes: int):
+        d = tmp_path / "weights"
+        d.mkdir()
+        for i, n in enumerate(sizes_bytes):
+            (d / f"model-{i}.safetensors").write_bytes(b"\0" * n)
+        # A tiny non-weight file (config) should be summed too; it's
+        # negligible vs weights. We sum all regular files for simplicity.
+        (d / "config.json").write_text("{}")
+        return d
+
+    def test_weights_size_sums_files(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+
+        d = self._make_weights_dir(tmp_path, 1_000_000, 2_000_000)
+        gb = _weights_size_gb({"local_dir": str(d)})
+        # ~3 MB plus the 2-byte config; assert within the MB band.
+        assert gb == pytest.approx(3_000_002 / 1024 ** 3, rel=1e-3)
+
+    def test_weights_size_zero_when_no_local_dir(self):
+        from muse.cli_impl.supervisor import _weights_size_gb
+
+        assert _weights_size_gb({}) == 0.0
+
+    def test_weights_size_zero_when_dir_missing(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+
+        assert _weights_size_gb({"local_dir": str(tmp_path / "nope")}) == 0.0
+
+    def test_has_memory_data_falls_back_to_weights(self, tmp_path):
+        """No declared memory_gb and no measurements, but weights on disk:
+        has_data is True and gb reflects the on-disk size.
+        """
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        d = self._make_weights_dir(tmp_path, 800_000_000)
+        has, gb, device = _has_memory_data({
+            "local_dir": str(d),
+            "manifest": {"capabilities": {"device": "cpu"}},
+        })
+        assert has is True
+        assert gb == pytest.approx(800_000_002 / 1024 ** 3, rel=1e-3)
+        assert device == "cpu"
+
+    def test_declared_memory_wins_over_weights(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        d = self._make_weights_dir(tmp_path, 800_000_000)
+        has, gb, _ = _has_memory_data({
+            "local_dir": str(d),
+            "manifest": {"capabilities": {"device": "cpu", "memory_gb": 5.0}},
+        })
+        assert has is True
+        assert gb == 5.0
+
+    def test_measurement_wins_over_weights(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        d = self._make_weights_dir(tmp_path, 800_000_000)
+        has, gb, _ = _has_memory_data({
+            "local_dir": str(d),
+            "manifest": {"capabilities": {"device": "cpu"}},
+            "measurements": {"cpu": {"peak_bytes": 1_500_000_000, "device": "cpu"}},
+        })
+        assert has is True
+        assert gb == pytest.approx(1_500_000_000 / 1024 ** 3, rel=1e-6)
+
+    def test_boot_does_not_flag_model_with_weights_on_disk(self, tmp_catalog, tmp_path):
+        """A never-probed enabled model with weights on disk must NOT be
+        stamped unservable at boot -- it can be sized + loaded on demand.
+        """
+        d = self._make_weights_dir(tmp_path, 800_000_000)
+        _seed_catalog({
+            "never-probed": {
+                "python_path": "/v/bin/python",
+                "local_dir": str(d),
+                "enabled": True,
+                "manifest": {
+                    "model_id": "never-probed",
+                    "modality": "embedding/text",
+                    "capabilities": {"device": "cpu"},  # no memory_gb
+                },
+                # no measurements
+            },
+        })
+        state = SupervisorState()
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 32.0
+        validate_catalog_at_boot(state, memory_probe=probe)
+        assert "never-probed" not in state.unservable_reasons

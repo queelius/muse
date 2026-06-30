@@ -283,6 +283,21 @@ class TestAcquireRelease:
 
 
 class TestUnservableShortCircuit:
+    # Each test seeds a catalog where `fake-model` stays genuinely unservable
+    # (enabled, but no memory estimate and no weights on disk), so the
+    # request-path `revalidate_servability` re-derives the same reason and
+    # keeps the stamp -- the realistic in-catalog short-circuit. (A stamped
+    # model ABSENT from the catalog is now cleared + 404'd; see
+    # TestStaleUnservableRevalidation and the supervisor unit tests.)
+    _UNSERVABLE_CATALOG = {
+        "fake-model": {
+            "enabled": True,
+            "python_path": "/v/bin/python",
+            "local_dir": "/tmp/does-not-exist-fake",  # no weights on disk
+            "manifest": {"capabilities": {"device": "cpu"}},  # no estimate
+        },
+    }
+
     def test_unservable_returns_503_with_reason(self):
         reason = "no memory estimate; run `muse models probe` to populate"
         state = _make_state_with_director(
@@ -291,7 +306,10 @@ class TestUnservableShortCircuit:
         app = build_gateway(state=state)
         client = TestClient(app)
 
-        with _patch_get_manifest():
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog",
+            return_value=self._UNSERVABLE_CATALOG,
+        ), _patch_get_manifest():
             r = client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -305,14 +323,16 @@ class TestUnservableShortCircuit:
         # The reason text is surfaced to the client.
 
     def test_unservable_does_not_call_acquire(self):
-        reason = "exceeds device capacity"
         state = _make_state_with_director(
-            unservable={"fake-model": reason},
+            unservable={"fake-model": "no memory estimate"},
         )
         app = build_gateway(state=state)
         client = TestClient(app)
 
-        with _patch_get_manifest():
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog",
+            return_value=self._UNSERVABLE_CATALOG,
+        ), _patch_get_manifest():
             client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -325,12 +345,15 @@ class TestUnservableShortCircuit:
     def test_unservable_uses_unservable_error_code(self):
         """The 503 envelope's code is `model_unservable`, not 503-default."""
         state = _make_state_with_director(
-            unservable={"fake-model": "test reason"},
+            unservable={"fake-model": "no memory estimate"},
         )
         app = build_gateway(state=state)
         client = TestClient(app)
 
-        with _patch_get_manifest():
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog",
+            return_value=self._UNSERVABLE_CATALOG,
+        ), _patch_get_manifest():
             r = client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -549,6 +572,215 @@ class TestStreamingRelease:
 # =============================================================================
 # Backward-compat: legacy static-routes path still works (when state is None)
 # =============================================================================
+
+
+# =============================================================================
+# v0.47.3 Bug #2: a stale boot unservable stamp is re-checked against the
+# live catalog before 503, so `muse models probe` takes effect without a
+# supervisor restart.
+# =============================================================================
+
+
+class TestStaleUnservableRevalidation:
+    def test_proceeds_to_acquire_when_estimate_appeared(self):
+        """Boot stamped 'no memory estimate', but the catalog now carries an
+        estimate (probe landed). The request must NOT 503; it proceeds to
+        acquire and the stamp is cleared.
+        """
+        reason = "no memory estimate; run `muse models probe` to populate"
+        state = _make_state_with_director(
+            acquire_port=9001, unservable={"fake-model": reason},
+        )
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        fresh_catalog = {
+            "fake-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {"capabilities": {"memory_gb": 0.5, "device": "cpu"}},
+            },
+        }
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
+        ), _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_async_client_json(mock_cls)
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 200
+        state.director.acquire.assert_called_once()
+        assert "fake-model" not in state.unservable_reasons
+
+    def test_still_503_when_estimate_absent(self):
+        """If the model still has no estimate, the 503 stands and acquire is
+        never called.
+        """
+        reason = "no memory estimate; run `muse models probe` to populate"
+        state = _make_state_with_director(unservable={"fake-model": reason})
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        fresh_catalog = {
+            "fake-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {"capabilities": {"device": "cpu"}},  # no estimate
+            },
+        }
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
+        ), _patch_get_manifest():
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "model_unservable"
+        state.director.acquire.assert_not_called()
+
+
+# =============================================================================
+# v0.47.3 Gap #2b: the manifest handed to the director is sized from the
+# catalog measurement / weights when it declares no memory_gb, so the
+# director accounts for the load instead of treating it as 0 GB.
+# =============================================================================
+
+
+class TestManifestMemoryBackfill:
+    def test_acquire_receives_manifest_sized_from_measurement(self):
+        state = _make_state_with_director(acquire_port=9001)
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        bare_manifest = {
+            "model_id": "fake-model",
+            "modality": "audio/speech",
+            "capabilities": {"device": "cpu"},  # no memory_gb
+        }
+        fresh_catalog = {
+            "fake-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {"capabilities": {"device": "cpu"}},
+                "measurements": {
+                    "cpu": {"peak_bytes": 800_000_000, "device": "cpu"},
+                },
+            },
+        }
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
+        ), _patch_get_manifest(bare_manifest), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_async_client_json(mock_cls)
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 200
+        _, kwargs = state.director.acquire.call_args
+        sized = kwargs["manifest"]
+        assert sized["capabilities"]["memory_gb"] == pytest.approx(
+            800_000_000 / 1024 ** 3, rel=1e-6,
+        )
+
+
+# =============================================================================
+# v0.47.3 Bug #1: /v1/models lists enabled-but-unloaded catalog models.
+# =============================================================================
+
+
+class TestV1ModelsListsUnloaded:
+    def test_lists_enabled_unloaded_with_loaded_false(self):
+        state = _make_state_with_director()  # no workers loaded
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        fresh_catalog = {
+            "cold-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {
+                    "model_id": "cold-model",
+                    "modality": "embedding/text",
+                    "description": "a cold one",
+                    "capabilities": {"device": "cpu", "memory_gb": 0.5},
+                },
+            },
+            "disabled-model": {
+                "enabled": False,
+                "python_path": "/v/bin/python",
+                "manifest": {
+                    "model_id": "disabled-model",
+                    "modality": "embedding/text",
+                    "capabilities": {},
+                },
+            },
+        }
+
+        def _gm(mid: str) -> dict:
+            return fresh_catalog[mid]["manifest"]
+
+        with patch(
+            "muse.cli_impl.gateway._read_catalog", return_value=fresh_catalog,
+        ), patch("muse.cli_impl.gateway.get_manifest", side_effect=_gm):
+            r = client.get("/v1/models")
+
+        assert r.status_code == 200
+        data = r.json()["data"]
+        by_id = {e["id"]: e for e in data}
+        assert "cold-model" in by_id
+        assert by_id["cold-model"]["loaded"] is False
+        assert by_id["cold-model"]["last_loaded_at"] is None
+        assert by_id["cold-model"]["modality"] == "embedding/text"
+        assert by_id["cold-model"]["description"] == "a cold one"
+        # disabled models are not advertised
+        assert "disabled-model" not in by_id
+
+    def test_unloaded_entry_carries_unservable_reason(self):
+        state = _make_state_with_director(
+            unservable={"cold-model": "exceeds device capacity"},
+        )
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        fresh_catalog = {
+            "cold-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {
+                    "model_id": "cold-model",
+                    "modality": "embedding/text",
+                    "capabilities": {"device": "cpu"},
+                },
+            },
+        }
+        with patch(
+            "muse.cli_impl.gateway._read_catalog", return_value=fresh_catalog,
+        ), patch(
+            "muse.cli_impl.gateway.get_manifest",
+            side_effect=lambda mid: fresh_catalog[mid]["manifest"],
+        ):
+            r = client.get("/v1/models")
+
+        by_id = {e["id"]: e for e in r.json()["data"]}
+        assert by_id["cold-model"]["unservable_reason"] == "exceeds device capacity"
+
+    def test_empty_catalog_returns_empty_list(self):
+        state = _make_state_with_director()
+        app = build_gateway(state=state)
+        client = TestClient(app)
+        with patch(
+            "muse.cli_impl.gateway._read_catalog", return_value={},
+        ):
+            r = client.get("/v1/models")
+        assert r.status_code == 200
+        assert r.json() == {"object": "list", "data": []}
 
 
 class TestLegacyStaticRoutesStillWork:

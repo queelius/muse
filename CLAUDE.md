@@ -309,9 +309,11 @@ Each pulled model gets its own venv at `~/.muse/venvs/<model-id>/`
 with exactly the pip_extras it declares. Workers run the existing
 `muse.cli_impl.worker.run_worker` logic via `muse _worker`
 (hidden subcommand). The supervisor brings the gateway up immediately,
-runs catalog boot validation (flags models with no memory estimate or
-estimates exceeding device capacity as `unservable_reason`), then waits.
-Workers spawn on demand through `LoadDirector.acquire`; the historical
+runs catalog boot validation (stamps an advisory `unservable_reason` on
+models that are not sizable at all or whose estimate exceeds device
+capacity; the stamp is re-checked live on first request, see "Lazy load
++ LRU eviction" below), then waits. Workers spawn on demand through
+`LoadDirector.acquire`; the historical
 "poll FIRST worker then promote others" boot dance is gone. Operators
 who want eager loading run `muse models warmup <id>` for each model in
 their startup script (see "Lazy load + LRU eviction" below).
@@ -385,6 +387,33 @@ observed delta exceeds `measurements.<device>.peak_bytes` it gets
 written back via atomic write-then-rename. Estimates self-heal upward
 toward reality on every load.
 
+A model's load size comes from a three-tier sizing ladder (in
+`supervisor.py:_has_memory_data`), most-honest first:
+
+1. `capabilities.memory_gb` (declared annotation), or
+   `measurements.<device>.peak_bytes` from a prior probe -- the
+   authoritative numbers.
+2. *Weights-on-disk fallback* (v0.47.3): when neither exists, the
+   supervisor sizes the model from the bytes already in its `local_dir`
+   (sum over the HF snapshot tree, symlinks followed). A pulled model
+   that was never probed is therefore sized from its weights and loads
+   on demand rather than 503'ing with "no memory estimate." This is the
+   common case -- every `muse pull` leaves weights on disk -- so the old
+   "run `muse models probe` first" wall is gone.
+3. Nothing sizable (no annotation, no probe, no weights on disk): the
+   model is flagged `unservable_reason` and 503s before any worker
+   spawn.
+
+`backfill_manifest_memory` applies the same ladder to the manifest the
+gateway hands `director.acquire`, so the director sizes a never-probed
+model from its weights too (not from a default 0.0). A model that DOES
+fit (possibly after evicting idle LRU models) loads on demand; the
+director runs the live fit/evict decision. A model that cannot fit even
+an empty device is caught earlier by the request-path servability
+re-check (see below) and 503s at the gateway WITHOUT reaching the
+eviction loop -- deferring an impossible model to the director would
+only evict the whole idle working set before 503'ing.
+
 Configuration env vars (all optional):
 
 - `MUSE_GPU_BUDGET_GB`: declared cap on GPU memory; muse uses
@@ -417,11 +446,16 @@ their startup script.
 
 `muse pull` runs probe at the end (`--no-probe` opts out for
 cross-device pulls, e.g., pulling on a CPU host for later GPU
-deployment). This means freshly-pulled models always have a memory
-estimate, so the supervisor doesn't reject them at first request with
-"no memory estimate" 503s. Pulled models still need an explicit
-`muse models enable <id>` to start serving traffic, since enabling is
-a separate operator decision from "have weights on disk."
+deployment). This gives freshly-pulled models a measured memory
+estimate up front. As of v0.47.3 the estimate is no longer *required*
+to serve: even a `--no-probe` pull (or a probe that was skipped) loads
+on demand, because the supervisor falls back to sizing the model from
+its on-disk weights (tier 2 of the sizing ladder above). Probe still
+matters -- it yields a more honest peak than raw weights size, and it
+self-heals on every subsequent load -- but it is an optimization, not a
+gate. Pulled models still need an explicit `muse models enable <id>` to
+start serving traffic, since enabling is a separate operator decision
+from "have weights on disk."
 
 Decoupling principle: `enabled` is catalog state; `loaded` is runtime
 state. Two new admin operations, `load_model_into_worker` and
@@ -438,6 +472,36 @@ gains self-healing semantics (passively updated on every cold load),
 and older muse readers ignore unknown fields. `/v1/models` gains
 `loaded: bool`, `last_loaded_at: iso8601 | null`, and `unservable_reason:
 str | null` per entry; the OpenAI-shape envelope is otherwise unchanged.
+
+The gateway's `/v1/models` lists *every enabled catalog model*, not just
+the ones with a live worker (v0.47.3). Loaded workers are aggregated
+from their own `/v1/models`; enabled-but-unloaded catalog entries are
+appended with `loaded: false` (skipping disabled models and any without
+a `python_path`). Both paths render through the shared
+`muse.core.server.build_model_entry` helper so the entry shape is
+identical whether the model is resident or cold. Before v0.47.3 the
+gateway listed only loaded workers, so a freshly-booted lazy supervisor
+reported an empty `/v1/models` until the first request warmed a worker
+-- a doc-vs-code drift that hid the entire enabled-but-unloaded set from
+clients.
+
+Servability is re-checked live at request time, not frozen at boot.
+Boot and the request-path re-check share ONE verdict function,
+`_servability_reason(entry, ...)` (sizing ladder, then a device-capacity
+check against live free memory), so the two can never drift.
+`validate_catalog_at_boot` stamps `unservable_reason` once on startup;
+`revalidate_servability` re-derives the full verdict on the first
+request to a stamped model against the LIVE catalog + live free memory.
+It clears the stamp only when the model is sizable AND fits: a probe or
+weights landing after boot clears a "no memory estimate" stamp, and
+freed memory clears a stale "exceeds device capacity" stamp -- both
+without a supervisor restart. A GENUINE "exceeds device capacity" stamp
+(the model cannot fit even an empty device) is RETAINED, so the gateway
+503s `model_unservable` directly instead of routing an impossible model
+into the director's eviction loop. So `muse models probe <id>` (which
+writes a measurement to the catalog) takes effect on the *next request*.
+The mtime-cached `_read_catalog` is the read path; a probe's catalog
+write bumps the mtime so the re-check sees fresh measurements.
 
 Lock discipline:
 

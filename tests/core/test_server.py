@@ -517,3 +517,56 @@ def test_validation_error_uses_openai_envelope():
     assert "detail" not in body
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["code"] == "invalid_request"
+
+
+# ---------------------------------------------------------------------------
+# v0.47.3: build_model_entry shared shape (reused by the gateway to list
+# enabled-but-unloaded catalog models).
+# ---------------------------------------------------------------------------
+
+
+def test_build_model_entry_shape():
+    from muse.core.server import build_model_entry
+
+    manifest = {
+        "capabilities": {"sample_rate": 24000},
+        "description": "d",
+        "license": "MIT",
+        "hf_repo": "x/y",
+    }
+    e = build_model_entry(
+        "foo", "audio/speech", manifest,
+        loaded=False, last_loaded_at=None, unservable_reason="r",
+    )
+    assert e["id"] == "foo"
+    assert e["modality"] == "audio/speech"
+    assert e["object"] == "model"
+    assert e["loaded"] is False
+    assert e["last_loaded_at"] is None
+    assert e["unservable_reason"] == "r"
+    assert e["sample_rate"] == 24000
+    assert e["description"] == "d"
+    assert e["license"] == "MIT"
+    assert e["hf_repo"] == "x/y"
+
+
+def test_build_model_entry_capabilities_cannot_clobber_authoritative_fields():
+    from muse.core.server import build_model_entry
+
+    manifest = {
+        "capabilities": {
+            "id": "EVIL", "modality": "EVIL", "object": "EVIL",
+            "loaded": "EVIL", "unservable_reason": "EVIL",
+        },
+    }
+    e = build_model_entry(
+        "foo", "audio/speech", manifest,
+        loaded=True, last_loaded_at="2026-01-01T00:00:00+00:00",
+        unservable_reason=None,
+    )
+    assert e["id"] == "foo"
+    assert e["modality"] == "audio/speech"
+    assert e["object"] == "model"
+    assert e["loaded"] is True
+    assert e["last_loaded_at"] == "2026-01-01T00:00:00+00:00"
+    assert e["unservable_reason"] is None

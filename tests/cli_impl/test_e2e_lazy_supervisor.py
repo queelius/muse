@@ -503,9 +503,17 @@ class TestUnservable503ImmediatelyAtBoot:
         director_mock.acquire.assert_not_called()
         director_mock.release.assert_not_called()
 
-    def test_unservable_reason_for_oversized_model(self, tmp_catalog):
-        """Second flavor of unservable: declared memory_gb exceeds host
-        capacity. Gateway 503s with the device-capacity reason text.
+    def test_oversized_model_hard_503s_at_gateway(self, tmp_catalog):
+        """v0.47.3 (corrected after adversarial review): a model that cannot
+        fit even an EMPTY working set is hard-503'd at the gateway with
+        `model_unservable`. revalidate_servability re-derives the capacity
+        verdict and KEEPS the stamp, so the request never reaches the
+        director -- no eviction of the idle working set, no worker spawn.
+
+        An earlier draft wrongly cleared the capacity stamp and deferred to
+        the director; the director's eviction loop would then tear down every
+        idle model before discovering the model can never fit and 503'ing --
+        a working-set wipe repeated on every retry. The review caught it.
         """
         from muse.cli_impl.supervisor import validate_catalog_at_boot
 
@@ -513,7 +521,7 @@ class TestUnservable503ImmediatelyAtBoot:
             "huge-model": {
                 "pulled_at": "...",
                 "hf_repo": "x/y",
-                "local_dir": "/tmp/x",
+                "local_dir": "/tmp/does-not-exist-huge",  # no weights on disk
                 "venv_path": "/v",
                 "python_path": "/v/bin/python",
                 "enabled": True,
@@ -522,24 +530,31 @@ class TestUnservable503ImmediatelyAtBoot:
                     "modality": "audio/speech",
                     "hf_repo": "x/y",
                     "backend_path": "muse.core.runtime:Whatever",
+                    # Unfittable on any conceivable host, so the gateway's
+                    # live re-check (real memory probe) keeps the stamp
+                    # regardless of the CI runner's actual free RAM.
                     "capabilities": {
-                        "memory_gb": 200.0,  # way over any sane host
+                        "memory_gb": 100000.0,
                         "device": "cpu",
                     },
                 },
             },
         })
 
-        director_mock = MagicMock()
-        state = SupervisorState(workers=[], device="cpu")
-        state.director = director_mock
-
         probe = MagicMock()
         probe.gpu_free_gb.return_value = None
         probe.cpu_free_gb.return_value = 16.0
-        validate_catalog_at_boot(state, memory_probe=probe)
+        enable_fn = MagicMock()  # must never be called: model cannot fit
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
+        )
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
 
-        assert "huge-model" in state.unservable_reasons
+        validate_catalog_at_boot(state, memory_probe=probe)
         assert "exceeds device capacity" in state.unservable_reasons["huge-model"]
 
         app = build_gateway(state=state)
@@ -547,18 +562,159 @@ class TestUnservable503ImmediatelyAtBoot:
 
         with patch(
             "muse.cli_impl.gateway.get_manifest",
-            return_value=_manifest("huge-model", memory_gb=200.0),
+            return_value=_manifest("huge-model", memory_gb=100000.0),
         ):
             r = client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "huge-model"},
             )
 
+        # Hard 503 at the gateway; the director is never consulted.
         assert r.status_code == 503
-        body = r.json()
-        assert body["error"]["code"] == "model_unservable"
-        assert "exceeds device capacity" in body["error"]["message"]
-        director_mock.acquire.assert_not_called()
+        assert r.json()["error"]["code"] == "model_unservable"
+        assert "exceeds device capacity" in r.json()["error"]["message"]
+        enable_fn.assert_not_called()  # no worker spawn, no eviction
+        # The capacity stamp is RETAINED (re-derived live), not cleared.
+        assert "huge-model" in state.unservable_reasons
+
+
+class TestLiveServability:
+    """v0.47.3: enabled-but-unloaded models load on demand. A never-probed
+    model is sized from its on-disk weights; a probe that lands after boot
+    is honored without a supervisor restart.
+    """
+
+    def test_never_probed_model_with_weights_loads_on_demand(
+        self, tmp_catalog, tmp_path,
+    ):
+        from muse.cli_impl.supervisor import validate_catalog_at_boot
+
+        weights = tmp_path / "w"
+        weights.mkdir()
+        (weights / "model.safetensors").write_bytes(b"\0" * 500_000_000)
+
+        _seed_catalog({
+            "weighty": {
+                "pulled_at": "...",
+                "hf_repo": "x/y",
+                "local_dir": str(weights),
+                "venv_path": "/v",
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {
+                    "model_id": "weighty",
+                    "modality": "audio/speech",
+                    "hf_repo": "x/y",
+                    "backend_path": "muse.core.runtime:Whatever",
+                    "capabilities": {"device": "cpu"},  # no memory_gb, no probe
+                },
+            },
+        })
+
+        cpu_free_state = {"value": 16.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        def enable_side_effect(model_id: str) -> int:
+            cpu_free_state["value"] -= 0.5
+            return 9001
+
+        enable_fn = MagicMock(side_effect=enable_side_effect)
+        director = LoadDirector(
+            enable_fn=enable_fn, disable_fn=MagicMock(),
+            memory_probe=probe, cpu_headroom_gb=2.0,
+        )
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+
+        validate_catalog_at_boot(state, memory_probe=probe)
+        # Fix A: weights on disk -> sizable -> NOT unservable.
+        assert "weighty" not in state.unservable_reasons
+
+        bare_manifest = {
+            "model_id": "weighty", "modality": "audio/speech",
+            "capabilities": {"device": "cpu"},  # no memory_gb
+        }
+        app = build_gateway(state=state)
+        client = TestClient(app)
+        with patch(
+            "muse.cli_impl.gateway.get_manifest", return_value=bare_manifest,
+        ), patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_async_client_json(mock_cls)
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "weighty"},
+            )
+
+        assert r.status_code == 200
+        enable_fn.assert_called_once()
+        # The director loaded with a non-zero size backfilled from weights.
+        loads = [d for d in director.recent_decisions if d.action == "load"]
+        assert loads and loads[-1].memory_gb == pytest.approx(
+            500_000_000 / 1024 ** 3, rel=1e-2,
+        )
+
+    def test_probe_after_boot_serves_without_restart(self, tmp_catalog):
+        from muse.cli_impl.supervisor import validate_catalog_at_boot
+        from muse.core.catalog import _reset_read_catalog_cache
+
+        base_entry = {
+            "pulled_at": "...", "hf_repo": "x/y",
+            "local_dir": "/tmp/no-such-weights-dir",  # no weights on disk
+            "venv_path": "/v", "python_path": "/v/bin/python", "enabled": True,
+            "manifest": {
+                "model_id": "late-probe", "modality": "audio/speech",
+                "hf_repo": "x/y", "backend_path": "muse.core.runtime:Whatever",
+                "capabilities": {"device": "cpu"},  # no memory_gb
+            },
+        }
+        _seed_catalog({"late-probe": base_entry})
+
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 16.0
+        enable_fn = MagicMock(return_value=9001)
+        director = LoadDirector(
+            enable_fn=enable_fn, disable_fn=MagicMock(),
+            memory_probe=probe, cpu_headroom_gb=2.0,
+        )
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+        validate_catalog_at_boot(state, memory_probe=probe)
+        assert "late-probe" in state.unservable_reasons  # no weights -> unservable
+
+        bare_manifest = {
+            "model_id": "late-probe", "modality": "audio/speech",
+            "capabilities": {"device": "cpu"},
+        }
+        app = build_gateway(state=state)
+        client = TestClient(app)
+        with patch(
+            "muse.cli_impl.gateway.get_manifest", return_value=bare_manifest,
+        ), patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_async_client_json(mock_cls)
+
+            r1 = client.post(
+                "/v1/audio/speech", json={"input": "hi", "model": "late-probe"},
+            )
+            assert r1.status_code == 503  # still unservable
+
+            # Simulate `muse models probe`: write a measurement to the catalog.
+            probed = dict(base_entry)
+            probed["measurements"] = {
+                "cpu": {"peak_bytes": 700_000_000, "device": "cpu"},
+            }
+            _seed_catalog({"late-probe": probed})
+            _reset_read_catalog_cache()
+
+            r2 = client.post(
+                "/v1/audio/speech", json={"input": "hi", "model": "late-probe"},
+            )
+            assert r2.status_code == 200  # served WITHOUT a restart
+
+        enable_fn.assert_called_once()
+        assert "late-probe" not in state.unservable_reasons
 
 
 # ----------------------------------------------------------------------
