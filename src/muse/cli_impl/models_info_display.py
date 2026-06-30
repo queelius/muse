@@ -319,7 +319,13 @@ def format_info(
     # Worker status
     lines.append("")
     lines.append("Worker status:")
-    if loaded_worker is not None:
+    if loaded_worker is not None and loaded_worker.get("detail_source") == "public":
+        # Loaded state came from the public /v1/models endpoint (no admin
+        # token): we know it's resident but not pid/uptime/restarts.
+        lines.append(
+            "  loaded (set MUSE_ADMIN_TOKEN for worker pid / uptime / restarts)"
+        )
+    elif loaded_worker is not None:
         pid = loaded_worker.get("worker_pid")
         uptime = loaded_worker.get("worker_uptime_seconds")
         status_value = loaded_worker.get("worker_status") or "running"

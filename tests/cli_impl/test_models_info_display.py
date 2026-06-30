@@ -116,6 +116,37 @@ class TestFormatInfo:
         assert "4711" in out
         assert "1h 30m" in out
 
+    def test_public_loaded_without_admin_detail(self):
+        """v0.47.4: a public /v1/models-derived status (no admin token)
+        reports loaded in the header but cannot show worker pid/uptime;
+        it points the operator at MUSE_ADMIN_TOKEN instead of faking
+        them or claiming the supervisor is unreachable."""
+        catalog_known = {"kokoro-82m": _entry()}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True, "venv_path": "/v"},
+            online_status={"loaded": True, "detail_source": "public"},
+        )
+        assert "enabled, loaded" in out
+        # No fabricated worker detail, no false "unreachable" claim.
+        assert "not running" not in out
+        assert "MUSE_ADMIN_TOKEN" in out
+
+    def test_public_not_loaded_says_not_loaded_not_unreachable(self):
+        """A reachable server that reports the model unloaded must say
+        'not loaded', not 'supervisor unreachable'."""
+        catalog_known = {"kokoro-82m": _entry()}
+        out = format_info(
+            "kokoro-82m",
+            catalog_known=catalog_known,
+            catalog_data={"enabled": True, "venv_path": "/v"},
+            online_status={"loaded": False, "detail_source": "public"},
+        )
+        assert "enabled, not loaded" in out
+        assert "not running" not in out
+        assert "not loaded" in out.lower()
+
     def test_known_capability_keys_render_with_label(self):
         catalog_known = {"sd-turbo": _entry(
             model_id="sd-turbo",

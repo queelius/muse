@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from dataclasses import dataclass
 from typing import Optional
@@ -106,53 +105,22 @@ def _is_enabled_for_row(model_id: str) -> bool:
 
 
 def _director_loaded_ids() -> set[str]:
-    """Set of model ids the running supervisor's director reports as loaded.
+    """Set of model ids the running server reports as currently loaded.
 
-    The CLI may be invoked anywhere (no running `muse serve`, no admin
-    token, behind a firewall, etc.). When the director cannot be
-    reached, return an empty set so callers default-classify every
-    catalog-enabled row as `enabled_unloaded`. This is correct from the
-    CLI's vantage point: the CLI cannot observe runtime state without
-    the admin API.
+    Reads the PUBLIC `GET /v1/models` endpoint (no admin token needed):
+    each entry carries `loaded: bool` since v0.47.3. We return the ids
+    of entries whose `loaded` is True, so `muse models list` shows the
+    enabled_loaded glyph for anyone who can reach the server, not just
+    operators holding MUSE_ADMIN_TOKEN.
 
-    Implementation: a single GET /v1/admin/memory call to AdminClient.
-    The aggregated memory endpoint already surfaces every model the
-    director considers loaded, grouped by device, under
-    `gpu.models[].model_id` and `cpu.models[].model_id`. We union the
-    two lists. On any failure (no token, server unreachable, malformed
-    response) -> empty set; the CLI defaults every enabled row to
-    `enabled_unloaded`. We deliberately do NOT fall back to N per-id
-    `client.status(mid)` calls: with 10+ enabled models on a slow link
-    that pattern hangs the CLI for tens of seconds.
+    The CLI may run anywhere (no running `muse serve`, behind a firewall,
+    httpx not installed). On any failure (server unreachable, non-200,
+    malformed body, no httpx) -> empty set, so callers default-classify
+    every catalog-enabled row as `enabled_unloaded`.
     """
-    if not os.environ.get("MUSE_ADMIN_TOKEN"):
-        return set()
-    try:
-        from muse.admin.client import AdminClient
-    except Exception:  # noqa: BLE001
-        return set()
-    client = AdminClient(timeout=2.0)
-    try:
-        resp = client.memory()
-    except Exception:  # noqa: BLE001
-        return set()
-    if not isinstance(resp, dict):
-        return set()
-    loaded: set[str] = set()
-    for side in ("gpu", "cpu"):
-        section = resp.get(side)
-        if not isinstance(section, dict):
-            continue
-        models = section.get("models")
-        if not isinstance(models, list):
-            continue
-        for m in models:
-            if not isinstance(m, dict):
-                continue
-            mid = m.get("model_id")
-            if isinstance(mid, str) and mid:
-                loaded.add(mid)
-    return loaded
+    from muse.cli_impl.runtime_state import fetch_public_models, loaded_ids
+    data = fetch_public_models()
+    return loaded_ids(data) if data is not None else set()
 
 
 def _classify_pulled(

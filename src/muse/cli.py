@@ -659,19 +659,34 @@ def models_refresh(
 
 
 def _probe_online_worker_status(model_id: str) -> dict | None:
-    """Best-effort lookup of live worker status via the admin API.
+    """Best-effort lookup of live worker status.
 
-    Returns a dict shaped like the /v1/admin/models/{id}/status response
-    on success; None when the supervisor isn't reachable, the admin
-    endpoint isn't enabled (no MUSE_ADMIN_TOKEN), or the credentials are
-    rejected. Caller treats None as "no live data; show offline view."
+    Prefers the admin API (rich worker pid / uptime / restart detail)
+    when MUSE_ADMIN_TOKEN is set and the supervisor is reachable. Falls
+    back to the PUBLIC /v1/models endpoint, which reports loaded state
+    without a token, so `muse models info` shows loaded/not-loaded for
+    anyone who can reach the server. Returns None only when nothing is
+    reachable; the caller then shows the offline "unreachable" view.
+
+    Shapes:
+      - admin:  the /v1/admin/models/{id}/status dict (loaded + worker_*).
+      - public: {"loaded": bool, "detail_source": "public"}.
+      - None:   nothing reachable.
     """
+    admin = _probe_admin_worker_status(model_id)
+    if admin is not None:
+        return admin
+    return _public_loaded_status(model_id)
+
+
+def _probe_admin_worker_status(model_id: str) -> dict | None:
+    """Admin-API worker status, or None without a token / on any failure."""
     import os
+    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+        return None
     try:
         from muse.admin.client import AdminClient, AdminClientError
     except Exception:  # noqa: BLE001
-        return None
-    if not os.environ.get("MUSE_ADMIN_TOKEN"):
         return None
     client = AdminClient(timeout=2.0)
     try:
@@ -680,6 +695,24 @@ def _probe_online_worker_status(model_id: str) -> dict | None:
         return None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _public_loaded_status(model_id: str) -> dict | None:
+    """Loaded state from the public /v1/models endpoint (no admin token).
+
+    Returns {"loaded": bool, "detail_source": "public"} when the server
+    is reachable, else None. A reachable server that does not list the
+    model reports loaded=False (reachable, not resident).
+    """
+    from muse.cli_impl.runtime_state import fetch_public_models
+    data = fetch_public_models()
+    if data is None:
+        return None
+    loaded = any(
+        isinstance(m, dict) and m.get("id") == model_id and bool(m.get("loaded"))
+        for m in data
+    )
+    return {"loaded": loaded, "detail_source": "public"}
 
 
 def _try_admin_action(action: str, model_id: str) -> bool:

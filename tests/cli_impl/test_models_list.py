@@ -247,141 +247,133 @@ class _FakeKnown:
         self.extra = {}
 
 
-# v0.40.0 follow-up: batch-fetch loaded ids -------------------------------
+# v0.47.4: read loaded ids from the PUBLIC /v1/models endpoint ------------
 
 
-def test_director_loaded_ids_uses_single_memory_call(monkeypatch):
-    """`_director_loaded_ids` must batch via one GET /v1/admin/memory
-    rather than fan out N per-id status calls. With 10+ enabled models
-    on a slow link, the per-id pattern hangs the CLI for tens of
-    seconds; the memory endpoint already aggregates the loaded set
-    under gpu.models[]/cpu.models[]."""
-    from muse.cli_impl import models_list as ml
+class _FakeResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
 
-    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "tok")
+    def json(self):
+        return self._payload
 
-    call_counter = {"memory": 0, "status": 0}
 
-    class FakeAdminClient:
+def _fake_httpx_client(*, captured_urls, resp=None, raise_exc=None):
+    """Build a fake httpx.Client class recording GET urls."""
+
+    class _FakeClient:
         def __init__(self, *a, **kw):
             pass
 
-        def memory(self):
-            call_counter["memory"] += 1
-            return {
-                "gpu": {
-                    "used_gb": 6.0, "total_gb": 24.0, "headroom_gb": 18.0,
-                    "models": [
-                        {"model_id": "gpu-loaded-a", "weights_gb": 1.5},
-                        {"model_id": "gpu-loaded-b", "weights_gb": 2.0},
-                    ],
-                },
-                "cpu": {
-                    "used_gb": 3.0, "total_gb": 32.0,
-                    "models": [
-                        {"model_id": "cpu-loaded-c", "weights_gb": 0.5},
-                    ],
-                },
-                "recent_decisions": [],
-            }
+        def __enter__(self):
+            return self
 
-        def status(self, model_id):  # pragma: no cover -- must not be called
-            call_counter["status"] += 1
-            raise AssertionError(
-                "status() should not be called; _director_loaded_ids must batch via memory()"
-            )
+        def __exit__(self, *a):
+            return False
 
-    monkeypatch.setattr(
-        "muse.admin.client.AdminClient", FakeAdminClient,
-    )
+        def get(self, url):
+            captured_urls.append(url)
+            if raise_exc is not None:
+                raise raise_exc
+            return resp
 
-    loaded = ml._director_loaded_ids()
-    assert loaded == {"gpu-loaded-a", "gpu-loaded-b", "cpu-loaded-c"}
-    assert call_counter["memory"] == 1, (
-        "expected exactly one GET /v1/admin/memory; "
-        f"saw {call_counter['memory']}"
-    )
-    assert call_counter["status"] == 0, (
-        "must not fall back to per-id status() probing; "
-        f"saw {call_counter['status']} calls"
-    )
+    return _FakeClient
 
 
-def test_director_loaded_ids_no_token_returns_empty(monkeypatch):
-    """No admin token -> the CLI cannot reach the supervisor; return
-    empty so every catalog-enabled row falls back to enabled_unloaded.
-    Importantly, no AdminClient is constructed (no httpx import / no
-    needless work)."""
+def test_director_loaded_ids_uses_public_v1_models(monkeypatch):
+    """`_director_loaded_ids` reads the PUBLIC GET /v1/models endpoint
+    (no admin token), returning the ids of entries with loaded == True.
+    /v1/models carries `loaded: bool` per entry since v0.47.3."""
     from muse.cli_impl import models_list as ml
 
     monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
-    constructed = {"count": 0}
+    monkeypatch.setenv("MUSE_SERVER", "http://server:8000")
 
-    class FakeAdminClient:
-        def __init__(self, *a, **kw):
-            constructed["count"] += 1
-
-        def memory(self):
-            raise AssertionError("AdminClient should not be constructed without a token")
-
+    urls: list[str] = []
+    payload = {"object": "list", "data": [
+        {"id": "hot-a", "loaded": True},
+        {"id": "hot-b", "loaded": True},
+        {"id": "cold-c", "loaded": False},
+    ]}
     monkeypatch.setattr(
-        "muse.admin.client.AdminClient", FakeAdminClient,
+        "httpx.Client",
+        _fake_httpx_client(captured_urls=urls, resp=_FakeResp(200, payload)),
     )
 
-    assert ml._director_loaded_ids() == set()
-    assert constructed["count"] == 0
+    loaded = ml._director_loaded_ids()
+    assert loaded == {"hot-a", "hot-b"}
+    assert urls == ["http://server:8000/v1/models"]
 
 
-def test_director_loaded_ids_memory_failure_returns_empty(monkeypatch):
-    """When the memory endpoint is unreachable / errors, return an
-    empty set rather than retrying. The CLI can survive without runtime
-    state (every row falls back to enabled_unloaded)."""
+def test_director_loaded_ids_works_without_token(monkeypatch):
+    """The endpoint is public: a loaded set is returned even with no
+    MUSE_ADMIN_TOKEN set (the old admin-only path returned empty here)."""
     from muse.cli_impl import models_list as ml
 
-    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "tok")
+    monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("MUSE_SERVER", raising=False)
 
-    class BrokenAdminClient:
-        def __init__(self, *a, **kw):
-            pass
+    urls: list[str] = []
+    payload = {"data": [{"id": "loaded-one", "loaded": True}]}
+    monkeypatch.setattr(
+        "httpx.Client",
+        _fake_httpx_client(captured_urls=urls, resp=_FakeResp(200, payload)),
+    )
 
-        def memory(self):
-            raise RuntimeError("server is down")
+    assert ml._director_loaded_ids() == {"loaded-one"}
+    # Default base URL when MUSE_SERVER is unset.
+    assert urls == ["http://localhost:8000/v1/models"]
 
-        def status(self, model_id):  # pragma: no cover
-            raise AssertionError("must not fall back to per-id status() probing")
+
+def test_director_loaded_ids_server_unreachable_returns_empty(monkeypatch):
+    """When /v1/models is unreachable, return an empty set so every
+    catalog-enabled row falls back to enabled_unloaded."""
+    import httpx
+
+    from muse.cli_impl import models_list as ml
 
     monkeypatch.setattr(
-        "muse.admin.client.AdminClient", BrokenAdminClient,
+        "httpx.Client",
+        _fake_httpx_client(
+            captured_urls=[],
+            raise_exc=httpx.ConnectError("down", request=None),
+        ),
     )
     assert ml._director_loaded_ids() == set()
 
 
-def test_director_loaded_ids_handles_partial_response(monkeypatch):
-    """Tolerate missing / malformed sections (e.g. CPU section absent
-    when psutil isn't installed). Whatever IS present should still
+def test_director_loaded_ids_non_200_returns_empty(monkeypatch):
+    """A non-200 /v1/models response yields an empty loaded set."""
+    from muse.cli_impl import models_list as ml
+
+    monkeypatch.setattr(
+        "httpx.Client",
+        _fake_httpx_client(
+            captured_urls=[], resp=_FakeResp(503, {"data": []}),
+        ),
+    )
+    assert ml._director_loaded_ids() == set()
+
+
+def test_director_loaded_ids_ignores_unloaded_and_malformed(monkeypatch):
+    """Entries that are unloaded, malformed, or missing an id do not
     contribute to the loaded set."""
     from muse.cli_impl import models_list as ml
 
-    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "tok")
-
-    class FakeAdminClient:
-        def __init__(self, *a, **kw):
-            pass
-
-        def memory(self):
-            # cpu section is null (psutil missing); only gpu surfaces models
-            return {
-                "gpu": {
-                    "used_gb": 4.0, "total_gb": 16.0,
-                    "models": [{"model_id": "only-gpu-id"}],
-                },
-                "cpu": None,
-            }
-
+    payload = {"data": [
+        {"id": "good", "loaded": True},
+        {"id": "unloaded", "loaded": False},
+        {"loaded": True},          # no id
+        {"id": "", "loaded": True},  # empty id
+        "not-a-dict",
+        {"id": "no-loaded-key"},   # absent loaded -> treated as not loaded
+    ]}
     monkeypatch.setattr(
-        "muse.admin.client.AdminClient", FakeAdminClient,
+        "httpx.Client",
+        _fake_httpx_client(captured_urls=[], resp=_FakeResp(200, payload)),
     )
-    assert ml._director_loaded_ids() == {"only-gpu-id"}
+    assert ml._director_loaded_ids() == {"good"}
 
 
 def test_json_output_no_memory_for_unprobed_unannotated():
