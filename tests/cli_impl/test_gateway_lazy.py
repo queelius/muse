@@ -783,6 +783,102 @@ class TestV1ModelsListsUnloaded:
         assert r.json() == {"object": "list", "data": []}
 
 
+class TestV1ModelsLoadedAtJoin:
+    """Fix #2 (v0.47.4): the gateway fills last_loaded_at on resident
+    entries from the director's LoadEntry. Workers self-report
+    last_loaded_at=None (they run outside a supervisor and have no
+    director); the gateway owns the load timestamps via
+    state.director.loaded[id].loaded_at.
+    """
+
+    def _running_state_with_loaded(self, model_id: str, port: int):
+        import time
+
+        from muse.cli_impl.load_director import LoadEntry
+        from muse.cli_impl.supervisor import WorkerSpec
+
+        state = _make_state_with_director()
+        state.workers.append(WorkerSpec(
+            models=[model_id], python_path="/v/bin/python",
+            port=port, status="running",
+        ))
+        now = time.monotonic()
+        state.director.loaded = {
+            model_id: LoadEntry(
+                model_id=model_id, worker_port=port, memory_gb=0.5,
+                refcount=0, last_touched_at=now, loaded_at=now,
+            ),
+        }
+        state.director.lock = threading.RLock()
+        return state
+
+    def _patch_worker_models(self, data: list[dict]):
+        """Patch httpx.AsyncClient so every worker /v1/models returns `data`."""
+        def _factory():
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {"object": "list", "data": data}
+
+            async def fake_get(url, **kwargs):
+                return resp
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            return mock_client
+
+        p = patch("muse.cli_impl.gateway.httpx.AsyncClient")
+        return p, _factory
+
+    def test_resident_entry_gets_last_loaded_at_from_director(self):
+        from datetime import datetime
+
+        state = self._running_state_with_loaded("hot-model", 9001)
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        # The worker self-reports last_loaded_at=None (the bug source).
+        p, factory = self._patch_worker_models([
+            {"id": "hot-model", "modality": "embedding/text",
+             "object": "model", "loaded": True, "last_loaded_at": None},
+        ])
+        with p as mock_cls:
+            mock_cls.return_value = factory()
+            with patch("muse.cli_impl.gateway._read_catalog", return_value={}):
+                r = client.get("/v1/models")
+
+        assert r.status_code == 200
+        by_id = {e["id"]: e for e in r.json()["data"]}
+        assert by_id["hot-model"]["loaded"] is True
+        loaded_at = by_id["hot-model"]["last_loaded_at"]
+        assert loaded_at is not None
+        assert isinstance(loaded_at, str)
+        # Parseable ISO-8601 (raises if not).
+        datetime.fromisoformat(loaded_at)
+
+    def test_entry_not_in_director_keeps_self_reported_value(self):
+        # hot-model is loaded per the director; ghost-model is reported by
+        # a worker but absent from director.loaded -> its null stays null.
+        state = self._running_state_with_loaded("hot-model", 9001)
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        p, factory = self._patch_worker_models([
+            {"id": "hot-model", "object": "model",
+             "loaded": True, "last_loaded_at": None},
+            {"id": "ghost-model", "object": "model",
+             "loaded": True, "last_loaded_at": None},
+        ])
+        with p as mock_cls:
+            mock_cls.return_value = factory()
+            with patch("muse.cli_impl.gateway._read_catalog", return_value={}):
+                r = client.get("/v1/models")
+
+        by_id = {e["id"]: e for e in r.json()["data"]}
+        assert by_id["hot-model"]["last_loaded_at"] is not None
+        assert by_id["ghost-model"]["last_loaded_at"] is None
+
+
 class TestLegacyStaticRoutesStillWork:
     """The build_gateway(routes=...) signature used by tests must keep
     working for tests that pre-date Task F. The static-routes path is the

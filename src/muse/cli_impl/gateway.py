@@ -41,7 +41,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
 # models (v0.47.3); it is mtime-cached so per-request reads are cheap.
 from muse.core.catalog import _read_catalog, get_manifest
-from muse.core.server import build_model_entry
+from muse.core.server import _format_loaded_at, build_model_entry
 
 # Module-top (no import cycle: supervisor imports gateway only lazily).
 # `revalidate_servability` re-checks a stale boot unservable stamp against
@@ -243,6 +243,14 @@ def build_gateway(
         for items in results:
             aggregated.extend(items)
 
+        # v0.47.4: fill last_loaded_at on resident entries. Workers
+        # self-report it as null (they run outside a supervisor and have
+        # no director); the gateway owns the load timestamps via
+        # state.director.loaded[id].loaded_at, so we join them in here
+        # before appending the unloaded rows.
+        state = app.state.routes_state
+        if state is not None:
+            _enrich_loaded_at(state, aggregated)
         # v0.47.3: also advertise enabled-but-unloaded catalog models so
         # /v1/models reflects the catalog, not just resident workers. The
         # loaded workers above are authoritative for loaded=True; here we
@@ -250,7 +258,6 @@ def build_gateway(
         # loaded=False + its boot unservable_reason (if any). Skipped in
         # legacy static-routes mode (no SupervisorState to read the
         # unservable map from).
-        state = app.state.routes_state
         if state is not None:
             aggregated.extend(_unloaded_catalog_entries(state, aggregated))
         return {"object": "list", "data": aggregated}
@@ -337,6 +344,52 @@ def build_gateway(
         return await _forward(request, target_url, app.state.timeout)
 
     return app
+
+
+def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
+    """Fill last_loaded_at on resident /v1/models entries, in place.
+
+    Per-model workers self-report last_loaded_at=None because they run
+    outside a supervisor and own no LoadDirector. The gateway holds the
+    load timestamps in state.director.loaded[id].loaded_at (monotonic
+    seconds), so it joins them onto the worker-reported rows here.
+
+    Best-effort and non-fatal: a missing director, a non-dict `loaded`
+    (e.g. a bare MagicMock in tests), or any read failure leaves the
+    entries untouched. Entries that already carry a non-null
+    last_loaded_at are never overwritten.
+    """
+    director = getattr(state, "director", None)
+    if director is None:
+        return
+    loaded = getattr(director, "loaded", None)
+    if not isinstance(loaded, dict):
+        return
+    # Snapshot id -> loaded_at under the director lock (held briefly); the
+    # monotonic->wall-clock render happens outside the lock.
+    lock = getattr(director, "lock", None)
+    try:
+        if lock is not None:
+            with lock:
+                snap = {
+                    mid: getattr(e, "loaded_at", None)
+                    for mid, e in loaded.items()
+                }
+        else:
+            snap = {
+                mid: getattr(e, "loaded_at", None)
+                for mid, e in loaded.items()
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/models: loaded_at join failed: %s", e)
+        return
+    for entry in aggregated:
+        if entry.get("last_loaded_at") is not None:
+            continue
+        mono = snap.get(entry.get("id"))
+        if mono is None:
+            continue
+        entry["last_loaded_at"] = _format_loaded_at({"loaded_at": mono})
 
 
 def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
