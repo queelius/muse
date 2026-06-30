@@ -471,7 +471,14 @@ Catalog format stays backward-compatible. `measurements.<device>.peak_bytes`
 gains self-healing semantics (passively updated on every cold load),
 and older muse readers ignore unknown fields. `/v1/models` gains
 `loaded: bool`, `last_loaded_at: iso8601 | null`, and `unservable_reason:
-str | null` per entry; the OpenAI-shape envelope is otherwise unchanged.
+str | null` per entry, plus the OpenAI-compat `created: int` (a stable
+`0`; muse has no per-model creation time) and `owned_by: str` (the HF org
+slug from `hf_repo`, else `"muse"`) added in v0.47.4 so strict OpenAI SDK
+clients that validate the model-object shape accept it. The OpenAI-shape
+envelope is otherwise unchanged. All these fields are written *after* the
+`capabilities` splat in `build_model_entry`, so a manifest can never
+clobber the authoritative `id`/`object`/`created`/`owned_by`/`loaded`
+keys.
 
 The gateway's `/v1/models` lists *every enabled catalog model*, not just
 the ones with a live worker (v0.47.3). Loaded workers are aggregated
@@ -484,6 +491,19 @@ gateway listed only loaded workers, so a freshly-booted lazy supervisor
 reported an empty `/v1/models` until the first request warmed a worker
 -- a doc-vs-code drift that hid the entire enabled-but-unloaded set from
 clients.
+
+Worker-reported `last_loaded_at` is filled in by the gateway, not the
+worker (v0.47.4). Per-model workers run outside the supervisor and own no
+`LoadDirector`, so their own `/v1/models` reports `last_loaded_at: null`
+even for a resident model. The gateway's `_enrich_loaded_at` joins the
+real load timestamp from `state.director.loaded[id].loaded_at` (snapshot
+under the director lock, rendered via the shared `_format_loaded_at`)
+onto each aggregated resident entry before appending the unloaded rows;
+it never overwrites an already-non-null value. `/health` is broadened the
+same way: it unions enabled-but-unloaded catalog models + modalities into
+its `models`/`modalities` sets (via `_unloaded_catalog_entries`) so a
+zero-worker lazy supervisor reports the full serviceable surface, not an
+empty one.
 
 Servability is re-checked live at request time, not frozen at boot.
 Boot and the request-path re-check share ONE verdict function,
@@ -581,6 +601,19 @@ Token leakage rules: the configured token is never echoed in any
 error message, log line, or job record. `tests/admin/test_e2e_admin_router.py
 ::TestAuthEnvelope::test_token_never_appears_in_error_body` is a
 regression watchdog.
+
+Admin error envelope: auth failures use the bare OpenAI envelope
+`{"error": {code, message, type}}`, matching the route-level admin errors
+(which return it directly via `JSONResponse`). The auth dependency
+(`verify_admin_token`) raises `HTTPException(detail={"error": ...})`,
+which FastAPI's default handler would double-wrap as `{"detail":
+{"error": ...}}`; `muse.admin.errors.install_admin_error_handler`
+(installed by `build_gateway` right after mounting the admin router)
+unwraps any HTTPException whose `detail` is already OpenAI-shaped and
+delegates to FastAPI's default for everything else (so plain-string
+details elsewhere keep their `{"detail": ...}` shape). Safe-degrading: an
+includer that forgets the handler still gets a valid (if double-wrapped)
+error, never a 500. `AdminClient` parses both shapes (v0.47.4).
 
 `muse.admin.client.AdminClient` wraps every endpoint. `wait(job_id)`
 polls `/jobs/{id}` until done/failed for "fire and block" usage. The
@@ -794,6 +827,7 @@ PY
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.
 - **CLI is typer + rich (v0.39.0+).** Per-subcommand parameter binding lives in `src/muse/cli.py` as typer command functions; the heavy logic lives in `src/muse/cli_impl/<command>.py`. New subcommands add a `@app.command(...)` plus a sibling `cli_impl/*.py` module; do not put logic in `cli.py`. Long-form output that goes to a TTY is rendered via `rich.Table` from `cli_impl/console.py`'s shared `Console`; non-TTY output (subprocess, pipe, redirect) is plain text with no ANSI and no truncation, so `muse models list | grep` always sees full content. Status encoding for `models list` and `refresh --all` uses single colored glyphs (`STATUS_STYLE` in `cli_impl/console.py`): `●` enabled, `○` disabled, `★` recommended, `·` available; `✓` ok, `✗` failed for refresh outcomes. `--json` is the canonical machine-readable output across `list` / `probe` / `refresh`.
+- **CLI runtime state reads the PUBLIC `/v1/models`, not admin endpoints (v0.47.4).** `muse models list`'s `enabled_loaded` glyph and `muse models info`'s header + worker-status block derive "is this model loaded right now?" from the public `GET /v1/models` `loaded` flag (no `MUSE_ADMIN_TOKEN` required). The shared `muse.cli_impl.runtime_state` module (`fetch_public_models` + `loaded_ids`) centralizes the fetch, failure policy (None = unreachable; both `list` and the `info` "loaded?" predicate treat it identically via `loaded_ids`), and httpx-log quieting. `muse models info` still prefers the admin API first for rich worker pid/uptime/restart detail and falls back to the public loaded state, rendering `loaded (set MUSE_ADMIN_TOKEN for worker pid / uptime / restarts)` instead of faking detail or falsely claiming the supervisor is unreachable. Before v0.47.4 these read admin-only endpoints, so anyone without a token saw every model as `enabled_unloaded` and "supervisor unreachable" even against a live server.
 - **Shared image preprocessing** (`muse.core.image_preprocessing`, v0.42.1+): four-tier dispatch ladder for image-side preprocessor selection. Public API: `read_encoder_hints(src)` (read encoder hyperparams from config.json), `DerivedImageProcessor` (synthesize a minimal preprocessor from explicit num_channels / image_size / image_mean / image_std), `build_image_processor(src, *, overrides, model_id)` (the orchestrator: override-first, then AutoImageProcessor, then encoder-hints-derived, then fail loud), and `ImageProcessorError` (structured exception pointing at the override hatch). Manifest hatch: `capabilities.image_processor_overrides: {num_channels, image_size, image_mean?, image_std?}` lets curated entries declare ground-truth preprocessing when AutoImageProcessor's sniff would be wrong (TexTeller is the canonical example: 1-channel grayscale at 448x448). Tier 3 (ViT defaults) was dropped in v0.42.1 because it produced silently wrong output for the very class of repos this fallback targets; failures now raise `ImageProcessorError` pointing at the override hatch. Currently consumed by `image_ocr`; other modalities can adopt as needed.
 
 ## Continuous integration
