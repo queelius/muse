@@ -391,6 +391,30 @@ class TestAttemptRestart:
         assert spec.restart_count == 1  # counter still increments
         assert spec.status != "running"  # spawn tried, but didn't become ready
 
+    def test_oserror_from_spawn_does_not_propagate(self):
+        """M10: a broken/missing venv python makes subprocess.Popen raise
+        FileNotFoundError (an OSError, NOT a SubprocessError). It must be
+        caught and marked unhealthy, not propagate and kill the monitor
+        thread (which would disable supervision for ALL workers)."""
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/gone/python", port=9001,
+                          device="cpu")
+        spec.process = MagicMock(poll=MagicMock(return_value=1))
+        stop_event = threading.Event()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn:
+            mock_spawn.side_effect = FileNotFoundError(
+                2, "No such file or directory", "/gone/python",
+            )
+            # Must not raise.
+            _attempt_restart(spec, stop_event=stop_event, max_restarts=10,
+                             backoff_base=0)
+
+        assert spec.restart_count == 1
+        assert spec.status == "unhealthy"
+
     def test_respects_stop_event_during_backoff(self):
         """If stop_event is set during backoff wait, skip the restart."""
         from muse.cli_impl.supervisor import _attempt_restart

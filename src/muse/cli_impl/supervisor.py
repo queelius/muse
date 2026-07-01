@@ -392,7 +392,13 @@ def _attempt_restart(
         spec.failure_count = 0
         spec.status = "running"
         logger.info("worker on port %d: successfully restarted", spec.port)
-    except (subprocess.SubprocessError, TimeoutError) as e:
+    except (subprocess.SubprocessError, TimeoutError, OSError) as e:
+        # OSError covers FileNotFoundError / PermissionError from Popen when
+        # the venv python is missing or non-executable (e.g. the venv was
+        # deleted, or its python symlink broke on a system upgrade). Without
+        # catching it, the exception escapes _monitor_workers and kills the
+        # monitor daemon thread, silently disabling health-monitoring and
+        # auto-restart for ALL workers (M10).
         logger.error("worker on port %d: restart failed: %s", spec.port, e)
         spec.status = "unhealthy"
 
