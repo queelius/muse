@@ -454,6 +454,46 @@ def test_img2img_bumps_steps_to_satisfy_strength_contract():
     assert fake_i2i_pipe.call_args.kwargs["strength"] == 0.4
 
 
+def test_img2img_floors_zero_strength_to_keep_effective_steps_nonzero():
+    """L12: strength=0.0 is schema-valid (ge=0.0) but yields zero effective
+    denoise steps (int(steps*0.0)=0), emptying the timestep schedule and
+    crashing the VAE. Bumping only num_inference_steps does not help because
+    steps*0.0 is still 0. The runtime must floor the strength VALUE passed
+    to the pipeline so steps*strength >= 1 is actually reachable.
+    """
+    from PIL import Image
+
+    fake_t2i_class = MagicMock()
+    fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+    fake_i2i_class = MagicMock()
+    fake_i2i_pipe = _patched_pipe()
+    fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
+
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_t2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+        fake_i2i_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir="/tmp/fake", device="cpu",
+            model_id="m", default_steps=1,
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("repaint", init_image=init_img, strength=0.0)
+
+    call = fake_i2i_pipe.call_args.kwargs
+    strength = call["strength"]
+    steps = call["num_inference_steps"]
+    assert strength > 0.0, "zero strength must be floored above 0"
+    # The whole point of the floor: effective denoise steps stay >= 1.
+    assert int(steps * strength) >= 1
+
+
 def test_img2img_does_not_bump_when_steps_already_sufficient():
     """If user explicitly requests enough steps, don't bump."""
     from PIL import Image

@@ -252,9 +252,14 @@ class DiffusersText2ImageModel:
 
         # img2img diffusers contract: num_inference_steps * strength must be >= 1
         # (lower values round to 0 effective denoise steps and crash the VAE).
-        # Bump steps to satisfy the contract while preserving the user's
-        # requested strength.
-        min_steps_for_strength = max(1, math.ceil(1.0 / max(s, 0.01)))
+        # Floor the strength itself, not just the step computation: the schema
+        # allows strength=0.0 (ge=0.0), and with strength=0 the effective steps
+        # int(num_inference_steps * 0) stay 0 no matter how high we bump steps,
+        # so the timestep schedule empties and the VAE crashes. Clamping the
+        # value we actually pass to the pipeline makes steps*strength >= 1
+        # reachable.
+        s = max(s, 0.01)
+        min_steps_for_strength = max(1, math.ceil(1.0 / s))
         if n_steps < min_steps_for_strength:
             logger.info(
                 "img2img bumping num_inference_steps from %d to %d to satisfy "
