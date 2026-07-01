@@ -39,6 +39,32 @@ from muse.core.venv import find_free_port
 logger = logging.getLogger(__name__)
 
 
+# Worker statuses that cannot serve traffic and will not recover on their
+# own: a "dead" worker exhausted its restart budget (or failed its initial
+# spawn); an "unhealthy" one is failing health checks. Both linger in
+# state.workers with job_id=None (the monitor never removes dead specs), so
+# the "already running / already loaded" fast paths in enable_model and
+# load_model_into_worker must NOT treat them as serviceable: they are
+# dropped so the caller falls through to a fresh spawn (H1).
+_UNSERVICEABLE_STATUSES = ("dead", "unhealthy")
+
+
+def _drop_unserviceable(state: SupervisorState, model_id: str) -> WorkerSpec | None:
+    """Return the live spec listing model_id, or None.
+
+    If the matching spec is dead/unhealthy, remove it from state.workers and
+    return None so the caller respawns instead of claiming a stale port.
+    Must be called while holding state.lock.
+    """
+    existing = next(
+        (s for s in state.workers if model_id in s.models), None,
+    )
+    if existing is not None and existing.status in _UNSERVICEABLE_STATUSES:
+        state.workers.remove(existing)
+        return None
+    return existing
+
+
 class OperationError(Exception):
     """Raised by sync operations on user-facing failures.
 
@@ -129,10 +155,7 @@ def enable_model(
         with state.lock:
             set_enabled(model_id, True)
 
-            existing = next(
-                (s for s in state.workers if model_id in s.models),
-                None,
-            )
+            existing = _drop_unserviceable(state, model_id)
             if existing is not None:
                 if existing.status == "running" or existing.job_id is None:
                     # Either truly running, or a legacy / test-built spec
@@ -329,10 +352,7 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
     spec_ref: WorkerSpec | None = None
 
     with state.lock:
-        existing = next(
-            (s for s in state.workers if model_id in s.models),
-            None,
-        )
+        existing = _drop_unserviceable(state, model_id)
         if existing is not None and (
             existing.status == "running" or existing.job_id is None
         ):

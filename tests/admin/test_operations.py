@@ -163,6 +163,64 @@ class TestEnableModel:
         assert job.state == "failed"
         assert "not pulled" in job.error
 
+    def test_enable_respawns_dead_worker(self, tmp_catalog, state, store):
+        """H1: a worker that exhausted its restart budget lingers in
+        state.workers with status='dead' and job_id=None. enable_model must
+        respawn it, not report it as already-loaded."""
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        dead = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        dead.status = "dead"
+        dead.job_id = None
+        state.workers.append(dead)
+        job = store.create("enable", "kokoro-82m")
+        with patch("muse.admin.operations.spawn_worker") as mock_spawn, \
+             patch("muse.admin.operations.wait_for_ready"), \
+             patch("muse.admin.operations.find_free_port", return_value=9200):
+            enable_model("kokoro-82m", state=state, store=store, job=job)
+        assert job.state == "done", f"got {job.state} err={job.error}"
+        # Must actually respawn, not silently claim the dead spec.
+        mock_spawn.assert_called_once()
+        assert job.result["spawned_new"] is True
+        assert job.result["worker_port"] == 9200
+
+
+class TestLoadModelIntoWorkerDeadSpec:
+    def test_respawns_dead_worker_instead_of_returning_dead_port(
+        self, tmp_catalog, state,
+    ):
+        """H1: load_model_into_worker (the director's cold-load path) must
+        not commit a hot LoadEntry pointing at a dead worker's port. A dead
+        spec with job_id=None must trigger a fresh spawn."""
+        from muse.admin.operations import load_model_into_worker
+
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        dead = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        dead.status = "dead"
+        dead.job_id = None
+        state.workers.append(dead)
+        with patch("muse.admin.operations.spawn_worker") as mock_spawn, \
+             patch("muse.admin.operations.wait_for_ready"), \
+             patch("muse.admin.operations.find_free_port", return_value=9200):
+            port = load_model_into_worker("kokoro-82m", state=state)
+        mock_spawn.assert_called_once()
+        assert port == 9200
+
     def test_concurrent_enable_coalesces_to_one_spawn(
         self, tmp_catalog, state, store, monkeypatch,
     ):
