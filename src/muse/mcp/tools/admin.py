@@ -58,7 +58,13 @@ def _handle_list_models(client: MuseClient, args: dict) -> list[dict]:
     if (m := args.get("filter_modality")):
         rows = [r for r in rows if r.get("modality") == m]
     if (s := args.get("filter_status")):
-        rows = [r for r in rows if r.get("status") == s]
+        # /v1/models entries carry the boolean `loaded`, not a `status`
+        # string (disabled models are omitted from the list entirely), so
+        # filter on load state. Unrecognized values leave rows unfiltered
+        # rather than silently returning zero (M8).
+        want = {"loaded": True, "unloaded": False}.get(s)
+        if want is not None:
+            rows = [r for r in rows if bool(r.get("loaded")) is want]
     return [_json_block({"data": rows, "count": len(rows)})]
 
 
@@ -204,7 +210,12 @@ ADMIN_TOOLS.extend([
                     },
                     "filter_status": {
                         "type": "string",
-                        "description": "Filter by status, e.g. 'enabled' or 'disabled'.",
+                        "enum": ["loaded", "unloaded"],
+                        "description": (
+                            "Filter by runtime load state: 'loaded' (resident "
+                            "on a worker) or 'unloaded' (enabled but cold). The "
+                            "list only includes enabled models."
+                        ),
                     },
                 },
             },

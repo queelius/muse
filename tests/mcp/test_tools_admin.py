@@ -89,18 +89,25 @@ class TestListModels:
         assert out["count"] == 1
         assert out["data"][0]["id"] == "x"
 
-    def test_filter_status(self, server):
+    def test_filter_status_on_loaded_flag(self, server):
+        """M8: /v1/models entries carry `loaded` (bool), never a `status`
+        key, so filter_status must operate on `loaded` ('loaded'/'unloaded').
+        The old test filtered a fabricated `status` key that the real wire
+        shape never emits, so any filter returned zero rows."""
         server.client.list_models = MagicMock(
             return_value={"data": [
-                {"id": "x", "status": "enabled"},
-                {"id": "y", "status": "disabled"},
+                {"id": "x", "loaded": True},
+                {"id": "y", "loaded": False},
             ]},
         )
-        out = _parse(server.call_handler(
-            "muse_list_models", {"filter_status": "disabled"},
+        loaded = _parse(server.call_handler(
+            "muse_list_models", {"filter_status": "loaded"},
         ))
-        assert out["count"] == 1
-        assert out["data"][0]["id"] == "y"
+        assert [r["id"] for r in loaded["data"]] == ["x"]
+        unloaded = _parse(server.call_handler(
+            "muse_list_models", {"filter_status": "unloaded"},
+        ))
+        assert [r["id"] for r in unloaded["data"]] == ["y"]
 
 
 class TestGetModelInfo:
