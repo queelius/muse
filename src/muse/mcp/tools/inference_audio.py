@@ -32,6 +32,24 @@ def _json_block(payload: Any) -> dict:
     return {"type": "text", "text": json.dumps(payload, indent=2)}
 
 
+# response_format -> audio MIME. Speech emits wav/opus; music/sfx emit
+# wav/mp3/opus/flac. opus rides in an OGG container (audio/ogg), matching
+# what the speech + audio_generation routes set as Content-Type. Unknown
+# formats fall back to a generic binary type rather than mislabeling.
+_AUDIO_MIME = {
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+    "opus": "audio/ogg",
+    "flac": "audio/flac",
+}
+
+
+def _audio_mime(response_format: Any) -> str:
+    return _AUDIO_MIME.get(
+        str(response_format or "wav").lower(), "application/octet-stream"
+    )
+
+
 def _filter_keys(args: dict, prefixes: tuple[str, ...]) -> dict:
     out = {}
     for k, v in args.items():
@@ -49,7 +67,7 @@ def _handle_speak(client: MuseClient, args: dict) -> list[dict]:
     body = _filter_keys(args, prefixes=())
     audio = client.speak(**body)
     return [
-        pack_audio_output(audio, mime="audio/wav"),
+        pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
         _json_block({
             "model": body.get("model"),
             "size_bytes": len(audio),
@@ -77,7 +95,7 @@ def _handle_generate_music(client: MuseClient, args: dict) -> list[dict]:
     body = _filter_keys(args, prefixes=())
     audio = client.generate_music(**body)
     return [
-        pack_audio_output(audio, mime="audio/wav"),
+        pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
         _json_block({
             "model": body.get("model"),
             "duration": body.get("duration"),
@@ -90,7 +108,7 @@ def _handle_generate_sfx(client: MuseClient, args: dict) -> list[dict]:
     body = _filter_keys(args, prefixes=())
     audio = client.generate_sfx(**body)
     return [
-        pack_audio_output(audio, mime="audio/wav"),
+        pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
         _json_block({
             "model": body.get("model"),
             "duration": body.get("duration"),

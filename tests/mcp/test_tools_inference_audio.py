@@ -71,6 +71,17 @@ class TestSpeak:
         assert summary["model"] == "kokoro-82m"
         assert summary["size_bytes"] == len(SAMPLE_WAV)
 
+    def test_opus_response_format_sets_ogg_mime(self, server):
+        # L15: response_format=opus returns ogg bytes; the MCP audio block
+        # must be labeled audio/ogg, not the hardcoded audio/wav.
+        server.client.speak = MagicMock(return_value=SAMPLE_WAV)
+        blocks = server.call_handler("muse_speak", {
+            "input": "hello", "model": "kokoro-82m",
+            "response_format": "opus",
+        })
+        audios, _, _ = _split(blocks)
+        assert audios[0]["mimeType"] == "audio/ogg"
+
 
 class TestTranscribe:
     def test_resolves_audio_binary(self, server):
@@ -123,6 +134,22 @@ class TestMusicAndSfx:
         })
         audios, _, texts = _split(blocks)
         assert len(audios) == 1
+
+    def test_music_mp3_response_format_sets_mpeg_mime(self, server):
+        server.client.generate_music = MagicMock(return_value=SAMPLE_WAV)
+        blocks = server.call_handler("muse_generate_music", {
+            "prompt": "ambient pad", "response_format": "mp3",
+        })
+        audios, _, _ = _split(blocks)
+        assert audios[0]["mimeType"] == "audio/mpeg"
+
+    def test_sfx_flac_response_format_sets_flac_mime(self, server):
+        server.client.generate_sfx = MagicMock(return_value=SAMPLE_WAV)
+        blocks = server.call_handler("muse_generate_sfx", {
+            "prompt": "thunder", "response_format": "flac",
+        })
+        audios, _, _ = _split(blocks)
+        assert audios[0]["mimeType"] == "audio/flac"
 
 
 class TestEmbedAudio:
