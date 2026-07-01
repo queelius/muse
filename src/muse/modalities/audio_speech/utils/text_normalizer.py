@@ -152,7 +152,7 @@ def _expand_time(m):
     else:
         hours, minutes, seconds = match
         if int(hours) != 0:
-            return f"{hours} {'oh oh' if minutes == '00' else f'oh {minutes}' if minutes.startswith('0') else {minutes}} {'' if seconds == '00' else f'oh {seconds}' if seconds.startswith('0') else seconds}"
+            return f"{hours} {'oh oh' if minutes == '00' else f'oh {minutes}' if minutes.startswith('0') else minutes} {'' if seconds == '00' else f'oh {seconds}' if seconds.startswith('0') else seconds}"
         elif minutes != '00':
             return f"{minutes} {'oh oh' if seconds == '00' else f'oh {seconds}' if seconds.startswith('0') else seconds}"
         else:
