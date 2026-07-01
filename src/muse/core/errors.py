@@ -10,9 +10,13 @@ from fastapi.responses import JSONResponse
 
 
 def error_response(status: int, code: str, message: str) -> JSONResponse:
+    # OpenAI tags 5xx envelopes with type "server_error" and 4xx with
+    # "invalid_request_error"; SDKs that branch on error.type expect the
+    # server-side class for a 500/503, not a client-error label.
+    error_type = "server_error" if status >= 500 else "invalid_request_error"
     return JSONResponse(
         status_code=status,
-        content={"error": {"code": code, "message": message, "type": "invalid_request_error"}},
+        content={"error": {"code": code, "message": message, "type": error_type}},
     )
 
 
