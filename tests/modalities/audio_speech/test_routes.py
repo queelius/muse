@@ -156,4 +156,6 @@ def test_encoding_failure_returns_openai_error_envelope(monkeypatch):
     err = body["error"]
     assert err["code"] == "encoding_failed"
     assert "PCM out of range" in err["message"]
-    assert err["type"] == "invalid_request_error"
+    # 5xx statuses carry type "server_error" (L10: error_type is derived
+    # from the status code, not hardcoded to invalid_request_error).
+    assert err["type"] == "server_error"
