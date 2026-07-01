@@ -525,6 +525,48 @@ class TestRemoveModel:
         out = remove_model("kokoro-82m", state=state, purge=False)
         assert out == {"model_id": "kokoro-82m", "removed": True, "purged": False}
 
+    def test_dead_worker_spec_does_not_block_removal(self, tmp_catalog, state):
+        # A dead worker (exhausted its restart budget) lingers in
+        # state.workers with the model still in spec.models, but its process
+        # is gone: it holds no FDs against the venv. remove_model must NOT
+        # 409 telling the operator to "disable it first".
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k",
+                "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        dead = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        dead.status = "dead"
+        state.workers.append(dead)
+        out = remove_model("kokoro-82m", state=state, purge=False)
+        assert out == {"model_id": "kokoro-82m", "removed": True, "purged": False}
+
+    def test_unhealthy_worker_spec_still_blocks_removal(self, tmp_catalog, state):
+        # An unhealthy worker MAY still own a live subprocess holding FDs
+        # against the venv, so removal must still 409 until the operator
+        # disables it (which reaps the process).
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k",
+                "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        unhealthy = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        unhealthy.status = "unhealthy"
+        state.workers.append(unhealthy)
+        with pytest.raises(OperationError) as exc:
+            remove_model("kokoro-82m", state=state, purge=False)
+        assert exc.value.status == 409
+
 
 class TestProbeAndPull:
     def test_probe_runs_subprocess(self, tmp_catalog, store):

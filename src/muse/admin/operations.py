@@ -741,7 +741,20 @@ def remove_model(model_id: str, *, state: SupervisorState, purge: bool) -> dict:
         raise OperationError(
             "model_not_found", f"unknown model {model_id!r}", status=404,
         )
-    if find_worker_for_model(state, model_id) is not None:
+    # A "dead" spec (exhausted its restart budget or failed initial spawn)
+    # lingers in state.workers but its process is gone, so it holds no FDs
+    # against the venv we're about to delete: it must NOT block removal.
+    # Every other status (running / pending / restarting / unhealthy) may
+    # still own a live subprocess, so those still 409 until the operator
+    # disables first (which reaps the process). See _drop_unserviceable for
+    # why "unhealthy" is treated as possibly-live. We check EVERY hosting
+    # spec, not just the first found, so a dead spec listed ahead of a live
+    # one can't mask the live one.
+    with state.lock:
+        live_host = any(
+            model_id in s.models and s.status != "dead" for s in state.workers
+        )
+    if live_host:
         raise OperationError(
             "model_loaded",
             f"model {model_id!r} is currently loaded; disable it first",
