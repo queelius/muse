@@ -111,7 +111,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             with backend._inference_lock:
                 return backend.rerank(req.query, req.documents, req.top_n)
 
-        results = await asyncio.to_thread(_rerank)
+        try:
+            results = await asyncio.to_thread(_rerank)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("rerank failed")
+            return error_response(500, "internal_error", str(e))
         body = encode_rerank_response(
             results,
             model_id=effective_id,

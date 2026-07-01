@@ -202,3 +202,22 @@ def test_oversized_item_returns_400(monkeypatch):
     })
     assert r.status_code == 400
     assert "MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM=10" in r.json()["error"]["message"]
+
+
+def test_embed_backend_error_returns_500_envelope():
+    """L14: a backend exception surfaces as the OpenAI 500 envelope."""
+    class _RaisingModel:
+        model_id = "fake-embed"
+        dimensions = 4
+
+        def embed(self, input, *, dimensions=None, **_):
+            raise RuntimeError("model exploded")
+
+    reg = ModalityRegistry()
+    reg.register("embedding/text", _RaisingModel())
+    app = create_app(registry=reg, routers={"embedding/text": build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/embeddings", json={"input": "hello", "model": "fake-embed"})
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "internal_error"

@@ -302,3 +302,21 @@ def test_post_unsupported_format_returns_400_when_imageio_absent(
         )
     assert r.status_code == 400
     assert "imageio" in r.json()["error"]["message"]
+
+
+def test_video_backend_error_returns_500_envelope():
+    """L14: a backend exception surfaces as the OpenAI 500 envelope."""
+    class _RaisingModel:
+        model_id = "fake-vid"
+
+        def generate(self, prompt, **kwargs):
+            raise RuntimeError("model exploded")
+
+    reg = ModalityRegistry()
+    reg.register(MODALITY, _RaisingModel(), manifest={"model_id": "fake-vid"})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/video/generations", json={"prompt": "a cat", "model": "fake-vid"})
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "internal_error"

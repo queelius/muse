@@ -194,3 +194,21 @@ def test_rerank_called_under_inference_lock():
     assert backend.lock_was_held, (
         "backend.rerank was called without holding _inference_lock"
     )
+
+
+def test_rerank_backend_error_returns_500_envelope():
+    """L14: a backend exception must surface as the OpenAI 500 envelope,
+    not a bare Starlette 500 that escapes the documented error contract."""
+    backend = MagicMock()
+    backend.model_id = "bge-reranker-v2-m3"
+    backend.rerank.side_effect = RuntimeError("model exploded")
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": "bge-reranker-v2-m3"})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/rerank", json={"query": "q", "documents": ["a", "b"]})
+    assert r.status_code == 500
+    body = r.json()
+    assert "error" in body
+    assert body["error"]["code"] == "internal_error"

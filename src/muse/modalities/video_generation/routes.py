@@ -90,10 +90,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     kwargs["seed"] = req.seed + seed_offset
                 return model.generate(req.prompt, **kwargs)
 
-        results = []
-        for i in range(req.n):
-            r = await asyncio.to_thread(_call_one, i)
-            results.append(r)
+        try:
+            results = []
+            for i in range(req.n):
+                r = await asyncio.to_thread(_call_one, i)
+                results.append(r)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("video generation failed")
+            return error_response(500, "internal_error", str(e))
 
         # frames_b64 inlines every frame; guard the response payload size.
         # Checked post-generation because the frame count is only known once

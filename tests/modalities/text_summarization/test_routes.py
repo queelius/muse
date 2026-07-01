@@ -256,3 +256,19 @@ def test_summarize_returns_model_id_from_backend_not_request():
     r = client.post("/v1/summarize", json={"text": "hello"})
     body = r.json()
     assert body["model"] == "bart-large-cnn"
+
+
+def test_summarize_backend_error_returns_500_envelope():
+    """L14: a backend exception surfaces as the OpenAI 500 envelope."""
+    backend = MagicMock()
+    backend.model_id = "bart-large-cnn"
+    backend.summarize.side_effect = RuntimeError("model exploded")
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": "bart-large-cnn"})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/summarize", json={"text": "some long text here"})
+    assert r.status_code == 500
+    body = r.json()
+    assert body["error"]["code"] == "internal_error"

@@ -106,7 +106,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             with model._inference_lock:
                 return model.embed(req.input, dimensions=req.dimensions)
 
-        result = await asyncio.to_thread(_call)
+        try:
+            result = await asyncio.to_thread(_call)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("embed failed")
+            return error_response(500, "internal_error", str(e))
 
         data = []
         for i, vec in enumerate(result.embeddings):

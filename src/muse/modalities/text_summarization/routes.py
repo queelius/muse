@@ -94,7 +94,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             with backend._inference_lock:
                 return backend.summarize(req.text, req.length, req.format)
 
-        result = await asyncio.to_thread(_summarize)
+        try:
+            result = await asyncio.to_thread(_summarize)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("summarize failed")
+            return error_response(500, "internal_error", str(e))
         body = encode_summarization_response(result)
         return JSONResponse(content=body)
 
