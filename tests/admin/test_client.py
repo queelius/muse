@@ -127,6 +127,52 @@ class TestErrorEnvelope:
             client.workers()
         assert exc.value.code == "missing_token"
 
+    def test_string_detail_raises_AdminClientError_not_AttributeError(
+        self, client, mock_httpx_client,
+    ):
+        # FastAPI's default 404 handler returns {"detail": "Not Found"}, a
+        # plain string. Extracting the error must NOT call .get() on the
+        # string (AttributeError would escape the try/except and mask the
+        # real 404 status).
+        r = MagicMock()
+        r.status_code = 404
+        r.json.return_value = {"detail": "Not Found"}
+        r.text = "Not Found"
+        mock_httpx_client.request.return_value = r
+        with pytest.raises(AdminClientError) as exc:
+            client.workers()
+        assert exc.value.status == 404
+
+    def test_list_detail_raises_AdminClientError_not_AttributeError(
+        self, client, mock_httpx_client,
+    ):
+        # FastAPI's 422 validation handler returns {"detail": [ {...} ]}, a
+        # list. Extracting the error must NOT call .get() on the list.
+        r = MagicMock()
+        r.status_code = 422
+        r.json.return_value = {
+            "detail": [{"loc": ["body", "identifier"], "msg": "field required"}],
+        }
+        r.text = "unprocessable"
+        mock_httpx_client.request.return_value = r
+        with pytest.raises(AdminClientError) as exc:
+            client.pull("")
+        assert exc.value.status == 422
+
+    def test_top_level_list_body_raises_AdminClientError(
+        self, client, mock_httpx_client,
+    ):
+        # A pathological upstream may return a bare JSON list on error.
+        # body.get(...) would raise AttributeError on a list.
+        r = MagicMock()
+        r.status_code = 500
+        r.json.return_value = ["oops"]
+        r.text = "oops"
+        mock_httpx_client.request.return_value = r
+        with pytest.raises(AdminClientError) as exc:
+            client.workers()
+        assert exc.value.status == 500
+
 
 class TestWait:
     def test_wait_returns_when_done(self, client, mock_httpx_client):

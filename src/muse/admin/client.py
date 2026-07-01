@@ -39,6 +39,31 @@ class AdminClientError(Exception):
         self.body = body
 
 
+def _extract_error(body: Any) -> dict:
+    """Pull the OpenAI-shaped ``{code, message, ...}`` dict out of a body.
+
+    Handles three error-body shapes without assuming ``detail`` is a dict:
+      - ``{"error": {...}}``              muse's native envelope
+      - ``{"detail": {"error": {...}}}``  FastAPI HTTPException wrapping it
+      - anything else (``{"detail": "Not Found"}``, ``{"detail": [ ... ]}``,
+        a bare list, ``{"raw": "..."}``) -> ``{}``, so the caller falls back
+        to a generic code + the raw response text.
+
+    Guarding each ``.get`` with an isinstance check keeps a string- or
+    list-valued ``detail`` from raising ``AttributeError`` (which would
+    escape ``_request``'s narrow try/except and mask the real HTTP status).
+    """
+    if not isinstance(body, dict):
+        return {}
+    err = body.get("error")
+    if isinstance(err, dict):
+        return err
+    detail = body.get("detail")
+    if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+        return detail["error"]
+    return {}
+
+
 class AdminClient:
     """HTTP client for /v1/admin/* admin endpoints."""
 
@@ -82,7 +107,7 @@ class AdminClient:
                 body = r.json()
             except Exception:  # noqa: BLE001
                 body = {"raw": r.text}
-            err = body.get("error") or body.get("detail", {}).get("error") or {}
+            err = _extract_error(body)
             code = err.get("code", "http_error")
             message = err.get("message", r.text)
             raise AdminClientError(r.status_code, code, message, body)
