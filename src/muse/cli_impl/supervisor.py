@@ -817,29 +817,49 @@ def revalidate_servability(
 
 
 def backfill_manifest_memory(manifest: dict, model_id: str) -> dict:
-    """Return a copy of `manifest` sized from the catalog when it declares no
-    `capabilities.memory_gb`.
+    """Return a copy of `manifest` sized (and device-pinned) from the catalog.
 
-    The LoadDirector sizes loads (and drives LRU eviction) from
-    `capabilities.memory_gb`. A probed-only or never-probed model declares
-    none, so without this the director would treat it as 0 GB -- "fits
-    anywhere", never evicting. We fill it from the sizing ladder
-    (`_has_memory_data`: probe measurement, else on-disk weights size). An
-    explicit declared `memory_gb` always wins; the input is never mutated.
+    Two backfills, both drawn from the model's catalog entry:
+
+    1. **memory_gb** -- The LoadDirector sizes loads (and drives LRU eviction)
+       from `capabilities.memory_gb`. A probed-only or never-probed model
+       declares none, so without this the director would treat it as 0 GB
+       ("fits anywhere", never evicting). We fill it from the sizing ladder
+       (`_has_memory_data`: probe measurement, else on-disk weights size). An
+       explicit declared `memory_gb` always wins.
+
+    2. **device** -- An operator `set-device` pin (catalog `device_override`)
+       decides where the worker actually loads, mirroring load_backend's
+       tier-1 precedence. We fold it into `capabilities.device` so the
+       director sizes, admits, and evicts against the pool the worker will
+       load on. Without this a cuda model pinned to cpu makes the director
+       needlessly evict GPU models to make room for a host-RAM load, and the
+       inverse pin over-commits VRAM. The override fires regardless of the
+       memory backfill (a model may declare memory_gb yet still be pinned).
+
+    The input is never mutated; a copy is made lazily only when a backfill
+    actually changes something.
     """
-    caps = manifest.get("capabilities", {}) or {}
-    if caps.get("memory_gb") is not None:
-        return manifest
     entry = _read_catalog().get(model_id)
-    if entry is None:
-        return manifest
-    has_data, gb, _device = _has_memory_data(entry)
-    if not has_data or gb <= 0:
-        return manifest
-    out = dict(manifest)
-    out_caps = dict(caps)
-    out_caps["memory_gb"] = gb
-    out["capabilities"] = out_caps
+    out = manifest
+    caps = manifest.get("capabilities", {}) or {}
+
+    if entry is not None and caps.get("memory_gb") is None:
+        has_data, gb, _device = _has_memory_data(entry)
+        if has_data and gb > 0:
+            out = dict(out)
+            out_caps = dict(caps)
+            out_caps["memory_gb"] = gb
+            out["capabilities"] = out_caps
+
+    override = (entry or {}).get("device_override")
+    if override:
+        if out is manifest:
+            out = dict(out)
+        out_caps = dict(out.get("capabilities", {}) or {})
+        out_caps["device"] = override
+        out["capabilities"] = out_caps
+
     return out
 
 

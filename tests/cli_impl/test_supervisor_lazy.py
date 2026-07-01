@@ -1563,6 +1563,75 @@ class TestBackfillManifestMemory:
 
         assert out["capabilities"].get("memory_gb") is None
 
+    def test_device_override_folded_into_capabilities(self, tmp_catalog):
+        """M6: an operator `set-device` pin (catalog device_override) decides
+        where the worker loads, so the control plane must size against that
+        device. Fold it into capabilities.device so the LoadDirector's
+        pool selection matches load_backend."""
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({
+            "pinned": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "device_override": "cpu",
+                "manifest": {"capabilities": {"device": "cuda"}},
+            },
+        })
+        manifest = {
+            "model_id": "pinned",
+            "capabilities": {"device": "cuda", "memory_gb": 6.0},
+        }
+
+        out = backfill_manifest_memory(manifest, "pinned")
+
+        assert out["capabilities"]["device"] == "cpu"
+        # Input is not mutated.
+        assert manifest["capabilities"]["device"] == "cuda"
+
+    def test_device_override_applies_even_with_declared_memory(self, tmp_catalog):
+        """The override fold must fire even when memory_gb is already
+        declared (that branch returns early for memory but device must
+        still be overridden)."""
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({
+            "pinned2": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "device_override": "cuda",
+                "manifest": {"capabilities": {"device": "cpu"}},
+            },
+        })
+        manifest = {
+            "model_id": "pinned2",
+            "capabilities": {"device": "cpu", "memory_gb": 1.0},
+        }
+
+        out = backfill_manifest_memory(manifest, "pinned2")
+
+        assert out["capabilities"]["device"] == "cuda"
+        assert out["capabilities"]["memory_gb"] == 1.0
+
+    def test_no_device_override_leaves_device_untouched(self, tmp_catalog):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+
+        _seed_catalog({
+            "unpinned": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "manifest": {"capabilities": {"device": "cuda"}},
+            },
+        })
+        manifest = {
+            "model_id": "unpinned",
+            "capabilities": {"device": "cuda", "memory_gb": 6.0},
+        }
+
+        out = backfill_manifest_memory(manifest, "unpinned")
+
+        assert out["capabilities"]["device"] == "cuda"
+
 
 # ---------------------------------------------------------------------------
 # v0.47.3 Fix A: on-disk weights-size fallback. A never-probed model is
