@@ -257,9 +257,9 @@ class TestRunSupervisor:
              patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor._promote_workers") as mock_promote, \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -268,7 +268,7 @@ class TestRunSupervisor:
             mock_first.assert_not_called()
             mock_promote.assert_not_called()
             # Gateway still starts; shutdown still runs.
-            mock_uvicorn.run.assert_called_once()
+            mock_run_uvicorn.assert_called_once()
             mock_shutdown.assert_called_once()
 
     def test_supervisor_tears_down_workers_if_gateway_fails(self, tmp_catalog):
@@ -288,9 +288,9 @@ class TestRunSupervisor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
-            mock_uvicorn.run.side_effect = RuntimeError("uvicorn died")
+            mock_run_uvicorn.side_effect = RuntimeError("uvicorn died")
 
             with pytest.raises(RuntimeError, match="uvicorn died"):
                 run_supervisor(host="0.0.0.0", port=8000, device="cpu")
@@ -577,10 +577,10 @@ class TestRunSupervisorMonitor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread") as mock_thread_cls:
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
             mock_thread = MagicMock()
             mock_thread_cls.return_value = mock_thread
 
@@ -616,11 +616,11 @@ class TestRunSupervisorMonitor:
             return e
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"), \
              patch("muse.cli_impl.supervisor.threading.Event", side_effect=capture_event), \
              patch("muse.cli_impl.supervisor.threading.Thread"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         # The shutdown Event was set
@@ -687,9 +687,9 @@ class TestRunSupervisorRegistersState:
             raise KeyboardInterrupt()
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = capture_state
+            mock_run_uvicorn.side_effect = capture_state
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         # State was non-None during the run
@@ -717,9 +717,9 @@ class TestRunSupervisorRegistersState:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = RuntimeError("uvicorn boom")
+            mock_run_uvicorn.side_effect = RuntimeError("uvicorn boom")
             with pytest.raises(RuntimeError):
                 run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -873,9 +873,9 @@ class TestRunSupervisorLazyBootOrdering:
                    side_effect=first_ready_side) as mock_first, \
              patch("muse.cli_impl.supervisor._monitor_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = gateway_side
+            mock_run_uvicorn.side_effect = gateway_side
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -903,9 +903,9 @@ class TestRunSupervisorLazyBootOrdering:
              patch("muse.cli_impl.supervisor._promote_workers") as mock_promote, \
              patch("muse.cli_impl.supervisor.plan_workers") as mock_plan, \
              patch("muse.cli_impl.supervisor._monitor_workers"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         mock_plan.assert_not_called()
@@ -940,9 +940,9 @@ class TestRunSupervisorLazyBootOrdering:
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
              patch("muse.cli_impl.supervisor.threading.Thread",
                    side_effect=fake_thread_init), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 

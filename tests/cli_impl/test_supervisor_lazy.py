@@ -413,9 +413,9 @@ class TestRunSupervisorLazyBoot:
              patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
              patch("muse.cli_impl.supervisor._promote_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
@@ -452,9 +452,9 @@ class TestRunSupervisorLazyBoot:
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
              patch("muse.cli_impl.supervisor._promote_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = capture_state
+            mock_run_uvicorn.side_effect = capture_state
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         captured = seen_state["value"]
@@ -491,9 +491,9 @@ class TestRunSupervisorLazyBoot:
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
              patch("muse.cli_impl.supervisor._promote_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = capture_state
+            mock_run_uvicorn.side_effect = capture_state
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         captured = seen_state["value"]
@@ -509,23 +509,23 @@ class TestRunSupervisorLazyBoot:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
             # Empty catalog: no workers spawned; gateway starts.
             mock_spawn.assert_not_called()
-            mock_uvicorn.run.assert_called_once()
+            mock_run_uvicorn.assert_called_once()
 
     def test_run_supervisor_clears_state_on_exit(self, tmp_catalog):
         """The teardown path still clears the singleton state."""
         _seed_catalog({})
         from muse.cli_impl.supervisor import run_supervisor
 
-        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+        with patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         # Cleared after exit
@@ -565,9 +565,9 @@ class TestAutoRestartMonitorLazyCompatibility:
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
              patch("muse.cli_impl.supervisor.threading.Thread",
                    side_effect=capture_thread_init), \
-             patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+             patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = KeyboardInterrupt()
+            mock_run_uvicorn.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         # The monitor was started with the live state.workers reference,
@@ -1122,9 +1122,9 @@ class TestIdleSweeperWiredAtBoot:
             )
             raise KeyboardInterrupt()
 
-        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+        with patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = capture_state
+            mock_run_uvicorn.side_effect = capture_state
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         assert seen["sweeper"] is not None, (
@@ -1149,9 +1149,9 @@ class TestIdleSweeperWiredAtBoot:
             captured["thread"] = s.idle_sweeper_thread
             raise KeyboardInterrupt()
 
-        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+        with patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = capture_thread
+            mock_run_uvicorn.side_effect = capture_thread
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         thread = captured["thread"]
@@ -1180,9 +1180,9 @@ class TestIdleSweeperWiredAtBoot:
             seen["interval"] = s.idle_sweeper.interval_seconds
             raise KeyboardInterrupt()
 
-        with patch("muse.cli_impl.supervisor.uvicorn") as mock_uvicorn, \
+        with patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
-            mock_uvicorn.run.side_effect = capture_interval
+            mock_run_uvicorn.side_effect = capture_interval
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
         assert seen["interval"] == 0.1

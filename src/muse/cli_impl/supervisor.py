@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-import uvicorn
+
+from muse.cli_impl.serve_util import run_uvicorn
 
 from muse.cli_impl.idle_sweeper import IdleSweeper
 from muse.core.catalog import _read_catalog, get_manifest
@@ -991,7 +992,12 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
             "starting gateway on %s:%d (lazy load: %d unservable model(s))",
             host, port, len(state.unservable_reasons),
         )
-        uvicorn.run(app, host=host, port=port, log_config=None)
+        # run_uvicorn sets a BOUNDED timeout_graceful_shutdown so the first
+        # Ctrl-C exits within a fixed window even when a connection lingers
+        # (SSE stream / long inference / idle keep-alive). uvicorn.run's
+        # default (None) waits forever, stranding port 8000 and forcing the
+        # operator to kill the process before restarting.
+        run_uvicorn(app, host=host, port=port)
     except KeyboardInterrupt:
         logger.info("shutting down (SIGINT)")
     finally:
