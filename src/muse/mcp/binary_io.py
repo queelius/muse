@@ -53,6 +53,14 @@ def resolve_binary_input(
       - URL inputs are SSRF-protected and size-capped via net_fetch.
       - Path inputs require MUSE_MCP_ALLOWED_PATH_PREFIXES to be set.
     """
+    # Normalize empty-string slots to None so the "exactly one" guard and
+    # the dispatch below agree on what "absent" means. An LLM that leaves a
+    # slot blank sends "" (falsy) rather than omitting it; without this an
+    # empty b64="" would pass the truthiness guard yet be dispatched by the
+    # `is not None` check, silently decoding b"" and dropping a real URL.
+    b64 = b64 or None
+    url = url or None
+    path = path or None
     provided = [k for k, v in (("b64", b64), ("url", url), ("path", path)) if v]
     if len(provided) == 0:
         raise ValueError(

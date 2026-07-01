@@ -81,6 +81,29 @@ class TestResolveBinaryInput:
         with pytest.raises(ValueError, match="malformed data URL"):
             resolve_binary_input(url="data:image/png;base64", field_name="image")
 
+    def test_empty_string_slot_treated_as_absent(self, monkeypatch):
+        """M7: the 'exactly one' guard counts slots by truthiness (`if v`),
+        but dispatch used `is not None`. An LLM that leaves image_b64="" and
+        fills image_url passed the guard yet fell into the empty-b64 branch,
+        so b64decode("")==b"" silently dropped the URL. Guard and dispatch
+        must agree: treat "" as absent."""
+        from unittest.mock import patch as _patch
+
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        with _patch(
+            "muse.mcp.binary_io.fetch_url_bytes", return_value=SAMPLE_BYTES,
+        ):
+            out = resolve_binary_input(
+                b64="", url="http://example.com/img.png", field_name="image",
+            )
+        assert out == SAMPLE_BYTES
+
+    def test_all_empty_strings_raise_missing(self):
+        """Empty strings in every slot must read as 'nothing provided',
+        not 'ambiguous', so the LLM gets the actionable 'missing' hint."""
+        with pytest.raises(ValueError, match="missing image input"):
+            resolve_binary_input(b64="", url="", path="", field_name="image")
+
     def test_http_url_routes_through_net_fetch(self, monkeypatch):
         """URL inputs now route through muse.core.net_fetch.fetch_url_bytes
         (SSRF-protected, size-capped). Patch at that boundary."""
