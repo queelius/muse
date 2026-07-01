@@ -242,9 +242,19 @@ class ImageEmbeddingRuntime:
         inputs = _move_to_device(inputs, self._device)
 
         with torch.inference_mode():
-            outputs = self._model(**inputs)
-
-        embeddings = _extract_embeddings(outputs)
+            # CLIP/SigLIP are composite dual-encoder models: AutoModel returns
+            # the full CLIPModel/SiglipModel whose forward() runs the text tower
+            # and REQUIRES input_ids, so calling it with only pixel_values
+            # raises "You have to specify input_ids". Those models expose the
+            # image-only get_image_features(); use it. DINOv2/ViT have no such
+            # method and stay on the plain forward path. Detecting the method
+            # on the model's CLASS (not the instance) avoids being fooled by
+            # test doubles that auto-create attributes (H7).
+            if getattr(type(self._model), "get_image_features", None) is not None:
+                embeddings = self._model.get_image_features(**inputs)
+            else:
+                outputs = self._model(**inputs)
+                embeddings = _extract_embeddings(outputs)
         # Convert to numpy float32 once; downstream truncation + tolist
         # operate uniformly.
         arr = embeddings.detach().to("cpu").float().numpy().astype(np.float32)

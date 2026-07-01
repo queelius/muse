@@ -147,6 +147,59 @@ def _patched_embed(rt, *args, **kwargs):
         return rt.embed(*args, **kwargs)
 
 
+def test_embed_uses_get_image_features_for_clip_family():
+    """H7: AutoModel returns a full CLIPModel/SiglipModel whose forward() runs
+    the text tower and requires input_ids (raising ValueError with only
+    pixel_values). embed() must call get_image_features() for those families
+    instead of the composite forward, else every request 500s. Modeled after
+    the real CLIPModel: get_image_features is a CLASS method and __call__
+    raises when input_ids is absent."""
+    emb = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
+
+    class FakeCLIPModel:
+        def __init__(self):
+            self.config = SimpleNamespace(hidden_size=3)
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return None
+
+        def __call__(self, **kwargs):
+            raise ValueError("You have to specify input_ids")
+
+        def get_image_features(self, **kwargs):
+            return _np_tensor(emb)
+
+    fake_model = FakeCLIPModel()
+    fake_model_class = MagicMock()
+    fake_model_class.from_pretrained.return_value = fake_model
+    fake_processor = MagicMock()
+    fake_processor.return_value = _make_inputs("cpu")
+    fake_processor_class = MagicMock()
+    fake_processor_class.from_pretrained.return_value = fake_processor
+
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    fake_torch.backends.mps.is_available.return_value = False
+    fake_torch.float32 = "float32"
+    fake_torch.inference_mode.return_value.__enter__ = MagicMock(return_value=None)
+    fake_torch.inference_mode.return_value.__exit__ = MagicMock(return_value=None)
+
+    with patch.object(ie_mod, "AutoModel", fake_model_class), \
+            patch.object(ie_mod, "AutoProcessor", fake_processor_class), \
+            patch.object(ie_mod, "AutoFeatureExtractor", MagicMock()), \
+            patch.object(ie_mod, "torch", fake_torch):
+        rt = ImageEmbeddingRuntime(
+            model_id="clip", hf_repo="org/clip", local_dir=None,
+            device="cpu", dtype="float32",
+        )
+        out = rt.embed([MagicMock()])
+    assert isinstance(out, ImageEmbeddingResult)
+    assert out.embeddings[0] == pytest.approx([0.1, 0.2, 0.3], abs=1e-6)
+
+
 def test_select_device_auto_falls_back_to_cpu_with_no_torch():
     with patch.object(ie_mod, "torch", None):
         assert _select_device("auto") == "cpu"
