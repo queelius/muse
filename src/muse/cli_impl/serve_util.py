@@ -72,4 +72,11 @@ def run_uvicorn(app, *, host: str, port: int) -> None:
     log_config=None)`` that guarantees Ctrl-C exits within
     ``shutdown_grace_seconds()`` even with lingering connections.
     """
-    build_uvicorn_server(app, host=host, port=port).run()
+    try:
+        build_uvicorn_server(app, host=host, port=port).run()
+    except KeyboardInterrupt:
+        # uvicorn re-raises the SIGINT it captured once the graceful
+        # shutdown completes. uvicorn.run() swallows that KeyboardInterrupt
+        # and returns normally; mirror it so this stays a true drop-in and
+        # a clean Ctrl-C never surfaces as an exception to the caller.
+        pass

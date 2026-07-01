@@ -12,7 +12,7 @@ serve_util centralizes uvicorn construction with a BOUNDED graceful
 timeout so the first Ctrl-C always exits within a fixed window.
 """
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -52,3 +52,19 @@ def test_shutdown_grace_seconds_negative_falls_back():
     # letting it reach uvicorn (which would treat <0 unpredictably).
     with patch.dict(os.environ, {"MUSE_SHUTDOWN_GRACE_SECONDS": "-4"}):
         assert serve_util.shutdown_grace_seconds() == pytest.approx(10.0)
+
+
+def test_run_uvicorn_swallows_keyboardinterrupt():
+    # uvicorn re-raises the SIGINT it captured after a graceful shutdown;
+    # uvicorn.run() swallows that KeyboardInterrupt and returns normally.
+    # run_uvicorn claims to be a drop-in replacement, so it must too --
+    # otherwise a caller that migrates off uvicorn.run() would suddenly see
+    # a KeyboardInterrupt propagate out of a clean Ctrl-C shutdown.
+    fake_server = MagicMock()
+    fake_server.run.side_effect = KeyboardInterrupt()
+    with patch.object(
+        serve_util, "build_uvicorn_server", return_value=fake_server,
+    ):
+        # Must NOT raise.
+        serve_util.run_uvicorn(object(), host="127.0.0.1", port=8000)
+    fake_server.run.assert_called_once()
