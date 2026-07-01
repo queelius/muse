@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from muse.cli_impl.gateway import build_gateway
 from muse.cli_impl.supervisor import SupervisorState
@@ -275,6 +276,38 @@ class TestAcquireRelease:
         # The cascading failure must NOT have stolen the release call.
         state.director.release.assert_called_once_with("fake-model")
         state.director.acquire.assert_called_once()
+
+    def test_release_runs_when_request_body_read_raises(self):
+        """L16: director.acquire() bumps the refcount, then
+        _forward_with_release reads the request body. A ClientDisconnect
+        (client vanished mid-body) during that read happens AFTER acquire
+        and BEFORE the stream-open try/except, so without the fix it skips
+        director.release and strands the refcount, wedging eviction.
+
+        A body-bearing GET is the reachable path: GET routes extract the
+        model from the query string, so the body is unread until
+        _forward_with_release -- the read there is the first one and CAN
+        disconnect (a POST's body is already read + cached during model
+        extraction, so its later read never hits the network). The read
+        must release the slot on failure.
+        """
+        state = _make_state_with_director(acquire_port=9001)
+        app = build_gateway(state=state)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        async def _boom(self):
+            raise ClientDisconnect("client went away mid-body")
+
+        with _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway.Request.body", _boom):
+            r = client.get(
+                "/v1/audio/speech",
+                params={"model": "fake-model"},
+            )
+
+        assert r.status_code == 500
+        state.director.acquire.assert_called_once()
+        state.director.release.assert_called_once_with("fake-model")
 
 
 # =============================================================================

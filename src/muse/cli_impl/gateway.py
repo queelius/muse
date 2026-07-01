@@ -576,9 +576,25 @@ async def _forward_with_release(
     window where the model could be evicted mid-response.
 
     Both paths also call director.release on the early-failure branches
-    (stream-open raise, body-aread raise), so refcount is never stranded.
+    (request-body read, stream-open raise, body-aread raise), so refcount
+    is never stranded.
     """
-    body = await request.body()
+    # The body read happens AFTER the caller's director.acquire() bumped
+    # the refcount. A ClientDisconnect (client vanished mid-body) here --
+    # reachable for a body-bearing GET, whose body is unread during model
+    # extraction -- would otherwise skip release and strand the refcount,
+    # wedging eviction. Release the slot first, then re-raise (L16).
+    try:
+        body = await request.body()
+    except Exception:
+        try:
+            director.release(model_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "director.release(%r) raised during body-read cleanup",
+                model_id, exc_info=True,
+            )
+        raise
     excluded = {"host", "content-length", "transfer-encoding", "connection"}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded}
 
