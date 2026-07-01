@@ -90,8 +90,16 @@ def _sniff(info) -> bool:
     has_pipeline_config = any(
         Path(f).name == "model_index.json" for f in siblings
     )
-    has_t2i_tag = "text-to-image" in tags
-    return has_pipeline_config and has_t2i_tag
+    # `pipeline_tag` is HF's canonical single-value task field and is the
+    # authoritative text-to-image signal. Many community SD checkpoints set
+    # it but do NOT mirror "text-to-image" into the loose `tags` bag (which
+    # may only carry "diffusers:StableDiffusionPipeline"). Read the structured
+    # field first, falling back to the tags mirror for repos that only tag.
+    is_text_to_image = (
+        getattr(info, "pipeline_tag", None) == "text-to-image"
+        or "text-to-image" in tags
+    )
+    return has_pipeline_config and is_text_to_image
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

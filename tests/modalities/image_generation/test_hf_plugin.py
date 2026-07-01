@@ -6,10 +6,13 @@ from muse.core.discovery import REQUIRED_HF_PLUGIN_KEYS
 from muse.core.resolvers import ResolvedModel
 
 
-def _fake_info(siblings=None, tags=None):
+def _fake_info(siblings=None, tags=None, pipeline_tag=None):
     info = MagicMock()
     info.siblings = [MagicMock(rfilename=f) for f in (siblings or [])]
     info.tags = tags or []
+    # Set explicitly so getattr doesn't auto-vivify a truthy MagicMock;
+    # HF's canonical text-to-image signal lives here, not always in `tags`.
+    info.pipeline_tag = pipeline_tag
     info.card_data = MagicMock(license=None)
     return info
 
@@ -45,6 +48,36 @@ def test_sniff_false_without_model_index_json():
     info = _fake_info(
         siblings=["model.safetensors"],
         tags=["text-to-image"],
+    )
+    assert HF_PLUGIN["sniff"](info) is False
+
+
+def test_sniff_true_via_pipeline_tag_when_absent_from_tags_list():
+    """Canonical `pipeline_tag` is the authoritative text-to-image signal.
+
+    Many community SD checkpoints (e.g. PublicPrompts/All-In-One-Pixel-Model)
+    set `pipeline_tag="text-to-image"` but do NOT mirror it into the loose
+    `tags` bag (which only carries `diffusers:StableDiffusionPipeline`).
+    The sniff must read the structured field, not just the redundant mirror.
+    """
+    info = _fake_info(
+        siblings=[
+            "model_index.json",
+            "unet/diffusion_pytorch_model.bin",
+            "vae/diffusion_pytorch_model.bin",
+        ],
+        tags=["diffusers", "diffusers:StableDiffusionPipeline", "region:us"],
+        pipeline_tag="text-to-image",
+    )
+    assert HF_PLUGIN["sniff"](info) is True
+
+
+def test_sniff_false_when_pipeline_tag_is_unrelated():
+    """A repo whose pipeline_tag is something else (and no t2i tag) is rejected."""
+    info = _fake_info(
+        siblings=["model_index.json"],
+        tags=["diffusers", "diffusers:StableDiffusionInpaintPipeline"],
+        pipeline_tag="image-to-image",
     )
     assert HF_PLUGIN["sniff"](info) is False
 
