@@ -73,6 +73,30 @@ def _drop_unserviceable(
     return existing, None
 
 
+def _pick_free_port(
+    state: SupervisorState, *, start: int = 9001, end: int = 9999,
+) -> int:
+    """find_free_port that also skips ports already reserved by specs in
+    state.workers (M1).
+
+    find_free_port probes the OS: it returns a port that is unbound *right
+    now*, but a pending spec's worker may not have called bind() yet, so its
+    reserved port still looks free. Two concurrent cold loads of different
+    models would then both pick it; the loser fails to bind and
+    wait_for_ready times out (~120s) despite ~999 free ports. Excluding the
+    ports already held by pending/live specs closes that window. Mirrors
+    supervisor.plan_workers' used-ports loop. MUST be called while holding
+    state.lock so the reserved-port snapshot is consistent with the append
+    that follows.
+    """
+    used = {s.port for s in state.workers if s.port}
+    while True:
+        port = find_free_port(start=start, end=end)
+        if port not in used:
+            return port
+        start = port + 1
+
+
 class OperationError(Exception):
     """Raised by sync operations on user-facing failures.
 
@@ -201,7 +225,7 @@ def enable_model(
                     spec_ref = sibling
                     coalesced_job_id = sibling.job_id
                 else:
-                    new_port = find_free_port(start=9001, end=9999)
+                    new_port = _pick_free_port(state)
                     new_spec = WorkerSpec(
                         models=[model_id],
                         python_path=python_path,
@@ -391,7 +415,7 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
                 plan = "restart_sibling"
                 spec_ref = sibling
             else:
-                new_port = find_free_port(start=9001, end=9999)
+                new_port = _pick_free_port(state)
                 new_spec = WorkerSpec(
                     models=[model_id],
                     python_path=python_path,

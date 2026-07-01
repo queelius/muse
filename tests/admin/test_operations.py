@@ -251,6 +251,47 @@ class TestLoadModelIntoWorkerDeadSpec:
         mock_spawn.assert_called_once()
         assert port == 9200
 
+    def test_cold_load_excludes_ports_held_by_pending_specs(
+        self, tmp_catalog, state,
+    ):
+        """M1: two concurrent cold loads of DIFFERENT models must not both
+        pick the same not-yet-bound port. A pending spec already holds 9001;
+        a new load must skip it even though find_free_port (which only probes
+        the OS) reports 9001 as free, because the pending worker has not
+        bound yet. Otherwise the loser fails to bind and wait_for_ready times
+        out despite ~999 free ports."""
+        from muse.admin.operations import load_model_into_worker
+
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        # A pending spec for a DIFFERENT venv already reserved 9001.
+        pending = WorkerSpec(
+            models=["other-model"], python_path="/venv/other/bin/python",
+            port=9001,
+        )
+        pending.status = "pending"
+        pending.job_id = "job-a"
+        state.workers.append(pending)
+
+        with patch("muse.admin.operations.spawn_worker") as mock_spawn, \
+             patch("muse.admin.operations.wait_for_ready"), \
+             patch(
+                 "muse.admin.operations.find_free_port",
+                 side_effect=[9001, 9002],
+             ):
+            port = load_model_into_worker("kokoro-82m", state=state)
+
+        mock_spawn.assert_called_once()
+        # 9001 is held by the pending spec; the new load must skip it.
+        assert port == 9002
+        new_spec = next(s for s in state.workers if "kokoro-82m" in s.models)
+        assert new_spec.port == 9002
+
     def test_concurrent_enable_coalesces_to_one_spawn(
         self, tmp_catalog, state, store, monkeypatch,
     ):
