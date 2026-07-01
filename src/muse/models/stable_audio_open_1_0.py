@@ -232,6 +232,11 @@ class Model:
             audio = audios[0]
         else:
             audio = audios
+            # Real diffusers StableAudioPipeline returns a bare
+            # (batch, channels, samples) tensor/ndarray on .audios (not a
+            # list); strip the leading batch dim before normalizing (H2).
+            if getattr(audio, "ndim", None) == 3:
+                audio = audio[0]
 
         normalized, channels = _normalize_pipeline_output(audio)
         sample_rate = getattr(self._pipe, "sample_rate", None)

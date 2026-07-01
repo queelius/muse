@@ -198,6 +198,13 @@ class StableAudioRuntime:
             audio = audios[0]
         else:
             audio = audios
+            # The real diffusers StableAudioPipeline (output_type="pt")
+            # returns a bare (batch, channels, samples) tensor/ndarray, not a
+            # list. Strip the leading batch dim so _normalize_pipeline_output
+            # sees (channels, samples); otherwise the 3-D array raises. The
+            # mock-as-list tests never exercised this path (H2).
+            if getattr(audio, "ndim", None) == 3:
+                audio = audio[0]
 
         normalized, channels = _normalize_pipeline_output(audio)
         sample_rate = getattr(

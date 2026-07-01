@@ -162,6 +162,28 @@ def test_generate_returns_audio_generation_result():
     assert out.audio.shape == (44100,)
 
 
+def test_generate_handles_bare_batched_ndarray_output():
+    """Real diffusers StableAudioPipeline returns a bare (batch, channels,
+    samples) ndarray on .audios, not a list. Regression for H2: the bundled
+    default model 500'd on every real generation because only list/tuple
+    outputs had the batch dim stripped."""
+    sa, fake_pipe, _, _ = _patched_setup()
+    n = 44100
+    stereo_batched = np.stack(
+        [
+            np.linspace(0, 1, n, dtype=np.float32),
+            np.linspace(1, 0, n, dtype=np.float32),
+        ],
+        axis=0,
+    )[None, ...]  # (1, 2, 44100)
+    fake_pipe.return_value = MagicMock(audios=stereo_batched)
+    m = sa.Model(device="cpu")
+    out = m.generate("hello", duration=1.0)
+    assert isinstance(out, AudioGenerationResult)
+    assert out.channels == 2
+    assert out.audio.shape == (44100, 2)
+
+
 def test_generate_calls_pipeline_with_audio_end_in_s():
     sa, fake_pipe, _, _ = _patched_setup()
     m = sa.Model(device="cpu")

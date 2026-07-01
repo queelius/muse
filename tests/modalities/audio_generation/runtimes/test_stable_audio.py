@@ -259,6 +259,66 @@ def test_generate_handles_torch_tensor_output(monkeypatch):
     assert out.audio.shape == (4410,)
 
 
+def test_generate_handles_bare_batched_ndarray_output():
+    """Real diffusers StableAudioPipeline returns a BARE (batch, channels,
+    samples) ndarray/tensor on .audios, NOT a list. Regression for H2: the
+    batch dim was stripped only for list/tuple outputs, so a bare 3-D array
+    reached _normalize_pipeline_output and raised ValueError (HTTP 500)."""
+    n = 4410
+    stereo_batched = np.stack(
+        [
+            np.linspace(0, 1, n, dtype=np.float32),
+            np.linspace(1, 0, n, dtype=np.float32),
+        ],
+        axis=0,
+    )[None, ...]  # (1, 2, 4410) -- leading batch dim, matches diffusers
+    rt, fake_pipe, _, _ = _patched_runtime(sample_rate=44100)
+    fake_pipe.return_value.audios = stereo_batched  # bare 3-D, not [stereo]
+    out = rt.generate("hello")
+    assert isinstance(out, AudioGenerationResult)
+    assert out.channels == 2
+    assert out.audio.shape == (4410, 2)
+
+
+def test_generate_handles_bare_batched_torch_tensor_output():
+    """The real .audios is an output_type='pt' torch.Tensor of shape
+    (batch, channels, samples). The runtime must strip the leading batch
+    dim before normalizing, same as for the ndarray case."""
+    n = 4410
+    arr = np.stack(
+        [
+            np.linspace(0, 1, n, dtype=np.float32),
+            np.linspace(1, 0, n, dtype=np.float32),
+        ],
+        axis=0,
+    )[None, ...]  # (1, 2, 4410)
+
+    class FakeTensor:
+        def __init__(self, a):
+            self._a = a
+        @property
+        def ndim(self):
+            return self._a.ndim
+        def __getitem__(self, idx):
+            return FakeTensor(self._a[idx])
+        def detach(self):
+            return self
+        def cpu(self):
+            return self
+        def float(self):
+            return self
+        def numpy(self):
+            return self._a
+
+    rt, fake_pipe, _, fake_torch = _patched_runtime(sample_rate=44100)
+    fake_torch.Tensor = FakeTensor
+    fake_pipe.return_value.audios = FakeTensor(arr)
+    out = rt.generate("hello")
+    assert isinstance(out, AudioGenerationResult)
+    assert out.channels == 2
+    assert out.audio.shape == (4410, 2)
+
+
 def test_select_device_auto_with_no_torch_returns_cpu():
     with patch.object(sa_mod, "torch", None):
         from muse.modalities.audio_generation.runtimes.stable_audio import (
