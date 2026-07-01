@@ -34,6 +34,7 @@ from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.image_generation.image_input import decode_image_file
 from muse.modalities.image_segmentation.codec import encode_segmentation
+from muse.modalities.image_segmentation.protocol import CapabilityError
 
 
 logger = logging.getLogger(__name__)
@@ -227,16 +228,23 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_call)
-        except RuntimeError as e:
-            # Runtime-level capability mismatches surface as RuntimeError;
-            # treat them as 400 invalid_parameter (the gate above should
-            # have caught these but we defend in depth).
+        except (CapabilityError, ValueError) as e:
+            # Client faults: an unsupported mode (CapabilityError, the
+            # runtime's defense-in-depth for a mismatch the gate above
+            # should already have caught) or a malformed prompt/points/boxes
+            # (ValueError). Both are 400 invalid_parameter.
             return error_response(
                 400, "invalid_parameter", str(e),
             )
-        except ValueError as e:
+        except Exception as e:  # noqa: BLE001
+            # Server faults: a bare RuntimeError (e.g. CUDA OOM) or any other
+            # unexpected error is NOT the client's fault. Surface a 500 in
+            # the OpenAI envelope so clients retry rather than treating a
+            # valid request as malformed, and so nothing escapes as a bare
+            # Starlette 500.
+            logger.exception("segmentation inference failed")
             return error_response(
-                400, "invalid_parameter", str(e),
+                500, "internal_error", str(e),
             )
 
         return encode_segmentation(

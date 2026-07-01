@@ -34,7 +34,7 @@ from typing import Any
 
 from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.image_segmentation.protocol import (
-    MaskRecord, SegmentationResult,
+    CapabilityError, MaskRecord, SegmentationResult,
 )
 
 
@@ -125,7 +125,7 @@ def _segment_with(
     dispatch logic lives in one place.
     """
     if mode == "text":
-        raise RuntimeError(
+        raise CapabilityError(
             "text-prompted segmentation is not supported by this model"
         )
     if mode not in ("auto", "points", "boxes"):
@@ -358,19 +358,19 @@ class SAM2Runtime:
         """
         cap = max_masks if max_masks is not None else self.max_masks
         if mode == "text" and not self._supports_text_prompts:
-            raise RuntimeError(
+            raise CapabilityError(
                 f"model {self.model_id!r} does not support text-prompted segmentation"
             )
         if mode == "points" and not self._supports_point_prompts:
-            raise RuntimeError(
+            raise CapabilityError(
                 f"model {self.model_id!r} does not support point-prompted segmentation"
             )
         if mode == "boxes" and not self._supports_box_prompts:
-            raise RuntimeError(
+            raise CapabilityError(
                 f"model {self.model_id!r} does not support box-prompted segmentation"
             )
         if mode == "auto" and not self._supports_automatic:
-            raise RuntimeError(
+            raise CapabilityError(
                 f"model {self.model_id!r} does not support automatic segmentation"
             )
 

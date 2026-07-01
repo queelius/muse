@@ -435,3 +435,63 @@ def test_post_segment_unknown_model_returns_404(client):
     body = r.json()
     assert "error" in body
     assert body["error"]["code"] == "model_not_found"
+
+
+# ---------------- error classification (L11) ----------------
+
+
+class _RaisingSegmenter:
+    """A segmenter whose segment() raises a preset exception."""
+
+    def __init__(self, exc, model_id="raiser-seg"):
+        self.model_id = model_id
+        self._exc = exc
+
+    def segment(self, image, **kwargs):
+        raise self._exc
+
+
+def test_runtime_error_is_500_not_400():
+    """L11: a bare RuntimeError (e.g. CUDA OOM) is a server fault, not a
+    client 'invalid_parameter'. It must be 500, so clients retry rather
+    than treating a valid request as malformed."""
+    model = _RaisingSegmenter(RuntimeError("CUDA out of memory"))
+    client = _build_client(model)
+    r = client.post(
+        "/v1/images/segment",
+        files={"image": ("src.png", _png_bytes(), "image/png")},
+        data={"model": "raiser-seg", "mode": "auto"},
+    )
+    assert r.status_code == 500, r.text
+    body = r.json()
+    assert "error" in body  # OpenAI envelope, not a bare Starlette 500
+    assert body["error"]["code"] != "invalid_parameter"
+
+
+def test_capability_error_is_400():
+    """A typed CapabilityError still maps to 400 invalid_parameter."""
+    from muse.modalities.image_segmentation.protocol import CapabilityError
+
+    model = _RaisingSegmenter(CapabilityError("model does not support text"))
+    client = _build_client(model)
+    r = client.post(
+        "/v1/images/segment",
+        files={"image": ("src.png", _png_bytes(), "image/png")},
+        data={"model": "raiser-seg", "mode": "auto"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "invalid_parameter"
+
+
+def test_unexpected_exception_is_500_envelope():
+    """Any other backend exception surfaces as a 500 OpenAI envelope, not a
+    bare Starlette 500 that escapes the error contract."""
+    model = _RaisingSegmenter(KeyError("boom"))
+    client = _build_client(model)
+    r = client.post(
+        "/v1/images/segment",
+        files={"image": ("src.png", _png_bytes(), "image/png")},
+        data={"model": "raiser-seg", "mode": "auto"},
+    )
+    assert r.status_code == 500, r.text
+    assert "error" in r.json()

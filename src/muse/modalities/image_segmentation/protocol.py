@@ -22,6 +22,16 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
+class CapabilityError(RuntimeError):
+    """A promptable-segmentation mode the loaded model does not support.
+
+    Typed so the route can map it to 400 invalid_parameter WITHOUT also
+    catching every other RuntimeError (e.g. a CUDA OOM, which is a server
+    fault -> 500). Subclasses RuntimeError for backward compatibility with
+    callers that already catch RuntimeError.
+    """
+
+
 @dataclass
 class MaskRecord:
     """One segmentation mask plus provenance.
