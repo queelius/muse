@@ -9,7 +9,7 @@ events.
 Models declaring `modality = "chat/completion"` in their MANIFEST and
 satisfying the ChatModel protocol plug into this modality.
 """
-from muse.modalities.chat_completion.client import ChatClient
+from muse.modalities.chat_completion.client import ChatClient, ChatStreamError
 from muse.modalities.chat_completion.protocol import (
     ChatChoice,
     ChatChunk,
@@ -38,6 +38,7 @@ __all__ = [
     "PROBE_DEFAULTS",
     "build_router",
     "ChatClient",
+    "ChatStreamError",
     "ChatChoice",
     "ChatChunk",
     "ChatMessage",

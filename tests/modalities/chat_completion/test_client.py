@@ -54,6 +54,39 @@ def test_client_streaming_yields_chunks():
         assert out[1]["choices"][0]["delta"]["content"] == "hi"
 
 
+def test_client_streaming_raises_on_sse_error_frame():
+    """L6: a mid-stream `event: error` frame must raise, not be yielded as a
+    normal chunk (callers iterating chunk["choices"] would KeyError)."""
+    from muse.modalities.chat_completion.client import ChatStreamError
+
+    fake_response = MagicMock()
+    fake_response.status_code = 200
+    fake_response.iter_lines.return_value = [
+        "data: " + '{"choices":[{"delta":{"content":"partial"},"index":0}]}',
+        "",
+        "event: error",
+        "data: " + '{"error":{"code":"internal","message":"backend blew up","type":"server_error"}}',
+        "",
+        "data: [DONE]",
+        "",
+    ]
+    fake_response.raise_for_status = MagicMock()
+
+    fake_stream_cm = MagicMock()
+    fake_stream_cm.__enter__ = lambda s: fake_response
+    fake_stream_cm.__exit__ = lambda s, a, b, c: None
+
+    with patch("muse.modalities.chat_completion.client.httpx.stream", return_value=fake_stream_cm):
+        c = ChatClient(base_url="http://x")
+        gen = c.chat_stream(model="fake", messages=[{"role": "user", "content": "hi"}])
+        first = next(gen)  # the partial content chunk arrives normally
+        assert first["choices"][0]["delta"]["content"] == "partial"
+        with pytest.raises(ChatStreamError) as exc:
+            next(gen)
+        assert "backend blew up" in str(exc.value)
+        assert exc.value.error["code"] == "internal"
+
+
 def test_client_uses_muse_server_env_var(monkeypatch):
     monkeypatch.setenv("MUSE_SERVER", "http://example.test:9000")
     c = ChatClient()
