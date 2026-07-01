@@ -322,11 +322,12 @@ class LoadDirector:
                 # for already-loaded models can hot-acquire during the
                 # disable_fn + memory-release-poll window. Eviction
                 # raises OperationError(503) if it can't free enough.
-                _, shortfall_gb, device = decision
+                _, shortfall_gb, device, required_gb = decision
                 self._evict_lru_until_fits(
                     model_id=model_id,
                     shortfall_gb=shortfall_gb,
                     device=device,
+                    required_gb=required_gb,
                 )
                 # Re-enter the decision phase. State may have changed:
                 # another thread may have loaded our model, or evicted
@@ -526,11 +527,13 @@ class LoadDirector:
             an evictor to race in).
           ("wait",): another thread owns the load; caller awaits the Event.
           ("load",): we just claimed ownership; run load phase + commit.
-          ("evict_and_retry", shortfall_gb, device): the model does not
-            fit live free minus headroom. Caller runs eviction OUTSIDE
-            the lock and re-calls _decide. No in-flight slot is claimed
-            on this path so the eviction loop's lock-release-and-reacquire
-            pattern is safe across the boundary.
+          ("evict_and_retry", shortfall_gb, device, required_gb): the
+            model does not fit live free minus headroom. Caller runs
+            eviction OUTSIDE the lock and re-calls _decide. No in-flight
+            slot is claimed on this path so the eviction loop's
+            lock-release-and-reacquire pattern is safe across the boundary.
+            `required_gb` (the model's memory_gb) lets the eviction loop
+            re-check live fit before 503'ing when no candidates remain.
 
         `bump_refcount` is True for acquire (refcount drives in-flight
         request accounting) and False for warmup (load idempotently
@@ -571,7 +574,7 @@ class LoadDirector:
                 # if eviction fails (503), there's nothing to clean up;
                 # if eviction succeeds, the retry will re-decide and
                 # claim the slot then.
-                return ("evict_and_retry", shortfall_gb, device)
+                return ("evict_and_retry", shortfall_gb, device, memory_gb)
 
             # Claim ownership of the load.
             event = threading.Event()
@@ -688,8 +691,18 @@ class LoadDirector:
         model_id: str,
         shortfall_gb: float,
         device: str,
+        required_gb: float = 0.0,
     ) -> None:
         """Evict refcount==0 models in LRU order until shortfall is met.
+
+        `required_gb` is the incoming model's memory_gb. When no evictable
+        candidates remain, we re-check live availability against it before
+        503'ing: concurrent evictions by OTHER acquires (this path claims
+        no in_flight slot, so two acquires for the same evict-needing model
+        both land here) may have freed enough since our shortfall was
+        computed. If the model now fits, return and let acquire() re-decide
+        (-> load) instead of raising a spurious 503 that the gateway would
+        surface verbatim with no retry.
 
         Lock discipline (the critical detail of Task C):
           1. Acquire the lock briefly to snapshot evictable candidates
@@ -736,6 +749,16 @@ class LoadDirector:
                     # case anything stranded one (defensive: the current
                     # _decide path doesn't, but a future path might).
                     self.in_flight_loads.pop(model_id, None)
+                    # Re-check live fit before giving up: a concurrent
+                    # acquire's eviction (or external memory release) may
+                    # have freed enough since our shortfall was computed.
+                    # If the model now fits, return so acquire() re-decides
+                    # (-> load) instead of 503'ing spuriously. Only raise
+                    # when it genuinely still cannot fit an evicted-empty
+                    # device (else acquire would spin re-deciding forever).
+                    _, available_gb = self._available_for_device(device)
+                    if available_gb >= required_gb:
+                        return
                     # Lazy import to avoid a cycle: load_director ->
                     # admin.operations -> supervisor -> load_director
                     # (Task E will wire the supervisor to LoadDirector).

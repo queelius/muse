@@ -702,6 +702,50 @@ class TestColdAcquireEvictsLRU:
         # A eventually completes too.
         assert a_results == [9003]
 
+    def test_evict_rechecks_live_fit_before_503_when_no_candidates(self):
+        """M5: two concurrent evict-needing acquires for the same model both
+        enter _evict_lru_until_fits (neither claims an in_flight slot). The
+        loser finds the single LRU victim already evicted by the winner and
+        hits 'no candidates', but the winner's eviction already freed enough
+        memory. It must re-check live availability and return (letting
+        acquire re-decide -> load), not 503 spuriously.
+
+        Modeled directly: no loaded candidates, but the live pool now fits
+        the model (cpu_free=10, headroom=1 -> available 9 >= required 4)."""
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(cpu_free=10.0),
+            cpu_headroom_gb=1.0,
+        )
+        # Must NOT raise: the model fits against live memory now.
+        director._evict_lru_until_fits(
+            model_id="newcomer",
+            shortfall_gb=4.0,
+            device="cpu",
+            required_gb=4.0,
+        )
+        assert director.in_flight_loads == {}
+
+    def test_evict_still_503s_when_no_candidates_and_still_too_large(self):
+        """The re-check must NOT mask a genuine oversize: no candidates AND
+        the model still does not fit live memory -> 503 (else acquire would
+        spin re-deciding forever)."""
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(cpu_free=2.0),
+            cpu_headroom_gb=1.0,
+        )
+        with pytest.raises(OperationError):
+            director._evict_lru_until_fits(
+                model_id="huge",
+                shortfall_gb=98.0,
+                device="cpu",
+                required_gb=100.0,
+            )
+        assert director.in_flight_loads == {}
+
 
 # ----------------------------------------------------------------------
 # release: refcount decrement, no auto-evict
