@@ -1944,3 +1944,41 @@ def test_known_models_no_curated_match_leaves_manifest_unchanged(tmp_catalog):
 
     # Unchanged
     assert models["orphan"].extra["device"] == "cuda"
+
+
+class TestResetKnownModelsCacheLocking:
+    """L9: _reset_known_models_cache must take _KNOWN_MODELS_LOCK.
+
+    Without the lock, the invalidator's `cache = None` races the
+    lock-guarded rebuild in known_models(); a slow rebuild that read a
+    pre-mutation catalog can write its stale snapshot back AFTER the
+    invalidator ran, resurrecting a cache that hides a just-pulled model.
+    """
+
+    def test_invalidator_blocks_while_lock_held(self):
+        import threading
+
+        from muse.core import catalog as catalog_mod
+
+        # Seed a sentinel cache so we can observe when it gets cleared.
+        catalog_mod._known_models_cache = {"sentinel": object()}  # type: ignore[assignment]
+        started = threading.Event()
+        finished = threading.Event()
+
+        def invalidate():
+            started.set()
+            catalog_mod._reset_known_models_cache()
+            finished.set()
+
+        with catalog_mod._KNOWN_MODELS_LOCK:
+            t = threading.Thread(target=invalidate)
+            t.start()
+            # The thread starts but must block on the lock we hold: the
+            # cache stays the sentinel and finished never fires.
+            assert started.wait(1.0)
+            assert not finished.wait(0.2), "invalidator ran without the lock"
+            assert catalog_mod._known_models_cache is not None
+        # Lock released: the invalidator now completes and clears the cache.
+        assert finished.wait(1.0)
+        t.join(1.0)
+        assert catalog_mod._known_models_cache is None

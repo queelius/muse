@@ -317,9 +317,19 @@ def known_models() -> dict[str, CatalogEntry]:
 
 
 def _reset_known_models_cache() -> None:
-    """Test hook: clear the cache so discovery re-runs on next call."""
+    """Clear the known_models cache so discovery re-runs on next call.
+
+    Takes _KNOWN_MODELS_LOCK (L9): a lock-free `cache = None` races the
+    lock-guarded rebuild in known_models(). If a rebuild that already read
+    a pre-mutation catalog is in flight, its stale-snapshot write can land
+    AFTER this invalidation, resurrecting a cache that hides a just-pulled
+    model (known_models has no mtime self-invalidation). Serializing on the
+    same lock forces the invalidation to order strictly before or after the
+    rebuild, so the next known_models() call always rebuilds fresh.
+    """
     global _known_models_cache
-    _known_models_cache = None
+    with _KNOWN_MODELS_LOCK:
+        _known_models_cache = None
 
 
 def _catalog_dir() -> Path:
