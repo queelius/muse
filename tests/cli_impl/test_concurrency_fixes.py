@@ -649,13 +649,16 @@ class TestM12DisableRestartFailure:
             patch("muse.admin.operations._restart_worker_inplace", side_effect=restart_error),
             patch("muse.admin.operations._shutdown_workers"),  # no-op shutdown
         ):
-            # Also need known_models to return our test-model.
+            # Also need known_models to return our test-model. The cache is
+            # keyed by catalog identity; inject the current key so the
+            # memoized fast path serves the fake entries.
             from muse.core import catalog as cat_mod
             fake_entry = MagicMock()
             fake_entry.extra = {}
             monkeypatch.setattr(
                 cat_mod, "_known_models_cache",
-                {"test-model": fake_entry, "sibling-model": fake_entry},
+                (cat_mod._catalog_cache_key(),
+                 {"test-model": fake_entry, "sibling-model": fake_entry}),
             )
 
             with pytest.raises(RuntimeError, match="simulated restart failure"):
@@ -711,7 +714,7 @@ class TestM12DisableRestartFailure:
         fake_entry.extra = {}
         monkeypatch.setattr(
             cat_mod, "_known_models_cache",
-            {"only-model": fake_entry},
+            (cat_mod._catalog_cache_key(), {"only-model": fake_entry}),
         )
 
         with patch("muse.admin.operations._shutdown_workers") as mock_shutdown:

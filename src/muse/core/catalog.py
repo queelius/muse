@@ -172,7 +172,24 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
     )
 
 
-_known_models_cache: dict[str, CatalogEntry] | None = None
+# Discovery projection cache: the importlib-driven scan of model script
+# dirs. Built once per process (script imports execute module bodies, and
+# bundled/user scripts do not change under a running server); reset via
+# _reset_known_models_cache().
+_discovered_entries_cache: dict[str, CatalogEntry] | None = None
+
+# Merged known-models cache, keyed by the catalog.json identity
+# (path_str, mtime_ns) it was built against. A catalog write from ANY
+# process -- the admin pull endpoint's `muse pull` subprocess, an operator
+# running `muse pull` / `muse models remove` in a shell beside a running
+# supervisor -- bumps the file's mtime, so the next known_models() call
+# rebuilds the merge instead of serving a frozen snapshot. Without this,
+# the supervisor 404'd "unknown model" on enable/route for anything pulled
+# after its cache was built, even though catalog.json and /v1/models both
+# showed the entry. _MISSING_CATALOG_KEY keeps the no-catalog-file state
+# cacheable (fresh install: nothing to merge, stable until a file appears).
+_known_models_cache: tuple[tuple[str, int], dict[str, CatalogEntry]] | None = None
+_MISSING_CATALOG_KEY = ("<no-catalog>", -2)
 
 # H5: guards the check-then-populate sequence in known_models() so that
 # two threads racing on the first call do not both run discover_models()
@@ -255,33 +272,48 @@ def known_models() -> dict[str, CatalogEntry]:
     debug log; the resolver entry can still be removed via
     `muse models remove`.
 
-    Cached on first call; restart the process to pick up new scripts
-    or new resolver pulls.
+    Caching is two-tier. The discovery scan (importlib over script dirs)
+    is cached for the process lifetime: new SCRIPTS still require a
+    restart. The merged result is memoized against catalog.json's
+    (path, mtime_ns), so catalog changes written by ANY process (the
+    admin pull subprocess, an operator's CLI pull/remove beside a running
+    supervisor) are picked up on the next call -- no restart, no manual
+    cache reset. The stat key is taken BEFORE the catalog read: if the
+    file changes between stat and read we cache newer content under an
+    older key, which the next call's key mismatch rebuilds away; the
+    reverse (stale content under a fresh key) cannot happen.
 
     H5: double-checked locking around the cache population. The outer
-    check (cache is not None) is fast and lock-free for the common hot
-    path. The inner check under _KNOWN_MODELS_LOCK is the critical
-    section that prevents two concurrent threads from both seeing None,
-    both calling discover_models() (importlib imports -- double-executing
-    user script module bodies), and both writing the cache.
+    check is fast and lock-free for the common hot path. The inner check
+    under _KNOWN_MODELS_LOCK is the critical section that prevents two
+    concurrent threads from both calling discover_models() (importlib
+    imports -- double-executing user script module bodies) and both
+    writing the cache.
     Lock ordering: _KNOWN_MODELS_LOCK is always acquired BEFORE
     _CATALOG_WRITE_LOCK (never the other way around; see M1 note).
     """
-    global _known_models_cache
-    # Fast path: cache already built.
-    if _known_models_cache is not None:
-        return _known_models_cache
+    global _known_models_cache, _discovered_entries_cache
+    # Fast path: cache built against the current catalog file identity.
+    key = _catalog_cache_key()
+    cached = _known_models_cache
+    if cached is not None and key is not None and cached[0] == key:
+        return cached[1]
     # Slow path: acquire the lock and re-check inside it.
     with _KNOWN_MODELS_LOCK:
-        if _known_models_cache is not None:
-            # Another thread won the race and built the cache while we
-            # waited for the lock.
-            return _known_models_cache
-        discovered = discover_models(_model_dirs())
-        entries = {
-            model_id: _manifest_to_catalog_entry(d)
-            for model_id, d in discovered.items()
-        }
+        # Re-key under the lock: the catalog may have changed while we
+        # waited, and another thread may have already rebuilt for the
+        # current key.
+        key = _catalog_cache_key()
+        cached = _known_models_cache
+        if cached is not None and key is not None and cached[0] == key:
+            return cached[1]
+        if _discovered_entries_cache is None:
+            discovered = discover_models(_model_dirs())
+            _discovered_entries_cache = {
+                model_id: _manifest_to_catalog_entry(d)
+                for model_id, d in discovered.items()
+            }
+        entries = dict(_discovered_entries_cache)
         catalog = _read_catalog()
         for model_id, entry_data in catalog.items():
             manifest = entry_data.get("manifest")
@@ -312,24 +344,45 @@ def known_models() -> dict[str, CatalogEntry]:
                 merged_caps.update(curated.capabilities)
                 manifest["capabilities"] = merged_caps
             entries[model_id] = _persisted_manifest_to_catalog_entry(manifest)
-        _known_models_cache = entries
-    return _known_models_cache
+        if key is not None:
+            _known_models_cache = (key, entries)
+        return entries
+
+
+def _catalog_cache_key() -> tuple[str, int] | None:
+    """Identity of the catalog file the known_models merge was built against.
+
+    (path_str, mtime_ns) for an existing file; a stable sentinel when the
+    file does not exist (fresh install -- cacheable until a file appears);
+    None when the file exists but cannot be stat'ed (never cache: always
+    rebuild rather than risk serving a snapshot we cannot validate).
+    """
+    p = _catalog_path()
+    try:
+        return (str(p), p.stat().st_mtime_ns)
+    except FileNotFoundError:
+        return _MISSING_CATALOG_KEY
+    except OSError:
+        return None
 
 
 def _reset_known_models_cache() -> None:
-    """Clear the known_models cache so discovery re-runs on next call.
+    """Clear both known_models caches so discovery re-runs on next call.
+
+    Catalog-side staleness is handled automatically by the mtime key in
+    known_models(); this reset exists for the DISCOVERY tier (tests that
+    drop new script files into a models dir mid-process) and as a
+    belt-and-braces invalidation after in-process catalog mutations.
 
     Takes _KNOWN_MODELS_LOCK (L9): a lock-free `cache = None` races the
-    lock-guarded rebuild in known_models(). If a rebuild that already read
-    a pre-mutation catalog is in flight, its stale-snapshot write can land
-    AFTER this invalidation, resurrecting a cache that hides a just-pulled
-    model (known_models has no mtime self-invalidation). Serializing on the
-    same lock forces the invalidation to order strictly before or after the
+    lock-guarded rebuild in known_models(). Serializing on the same lock
+    forces the invalidation to order strictly before or after any in-flight
     rebuild, so the next known_models() call always rebuilds fresh.
     """
-    global _known_models_cache
+    global _known_models_cache, _discovered_entries_cache
     with _KNOWN_MODELS_LOCK:
         _known_models_cache = None
+        _discovered_entries_cache = None
 
 
 def _catalog_dir() -> Path:

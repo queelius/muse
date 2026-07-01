@@ -215,8 +215,13 @@ Modality backends implementing modality-specific protocols
   `muse/models/` tree get their canonical Python import name
   (`muse.models.<stem>`); external scripts get a mangled private name
   to avoid sys.modules collisions.
-- `muse.core.catalog.known_models()`: discovery-driven, cached on first
-  call. Projects each script's MANIFEST onto the `CatalogEntry` shape
+- `muse.core.catalog.known_models()`: discovery-driven, two-tier cache.
+  The script-discovery scan (importlib) is cached for the process
+  lifetime (new scripts need a restart); the merged result is memoized
+  against catalog.json's (path, mtime_ns), so catalog writes from ANY
+  process (admin pull subprocess, operator CLI pull/remove beside a
+  running supervisor) are visible on the next call without a restart.
+  Projects each script's MANIFEST onto the `CatalogEntry` shape
   the rest of muse consumes (backend_path is synthesized from the
   Model class's `__module__:__name__`). Merges two sources: discovered
   bundled scripts PLUS catalog.json entries that carry a persisted

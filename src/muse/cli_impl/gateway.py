@@ -505,10 +505,12 @@ async def _route_via_director(
         )
 
     # 2. Resolve manifest. Per-request lookup is cheap: `known_models()`
-    # is process-cached, and `_read_catalog()` is mtime-cached against the
-    # backing file (so unchanged catalog.json reads return immediately
-    # without re-parsing JSON). The mtime invalidation keeps us safe
-    # against catalog edits that landed since boot. KeyError -> 404
+    # memoizes its merge against catalog.json's (path, mtime_ns) and
+    # `_read_catalog()` is mtime-cached the same way, so unchanged
+    # catalogs return immediately. Any catalog write -- including the
+    # admin pull endpoint's `muse pull` subprocess or an operator's CLI
+    # pull beside this supervisor -- bumps the mtime and both re-read, so
+    # models pulled after boot route without a restart. KeyError -> 404
     # model_not_found.
     try:
         manifest = get_manifest(model_id)

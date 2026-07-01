@@ -645,6 +645,93 @@ def test_known_models_merges_resolver_persisted_entries(tmp_catalog):
     assert e.extra["supports_tools"] is True
 
 
+def _bump_catalog_mtime():
+    """Nudge catalog.json's mtime_ns forward deterministically.
+
+    Two writes within one test can land inside the same mtime_ns tick on
+    coarse-grained filesystems; the explicit bump removes that flake."""
+    import os
+    from muse.core.catalog import _catalog_path
+    p = _catalog_path()
+    st = p.stat()
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+
+def test_known_models_self_invalidates_on_catalog_change(tmp_catalog):
+    """A catalog.json write from ANOTHER process must become visible without
+    a manual cache reset.
+
+    Regression: the supervisor's known_models() cache froze at first call.
+    The admin pull endpoint runs `muse pull` as a subprocess (whose own
+    cache resets are invisible here), so `enable` and the gateway route
+    404'd "unknown model" for anything pulled after the cache was built
+    (the all-in-one-pixel-model incident), even though catalog.json and
+    /v1/models both showed the entry.
+    """
+    baseline = known_models()
+    assert "pulled-after-cache" not in baseline
+
+    # Simulate the subprocess: write the file directly, no muse helpers,
+    # no _reset_known_models_cache().
+    _write_persisted_resolver_entry(tmp_catalog, model_id="pulled-after-cache")
+    _bump_catalog_mtime()
+
+    entries = known_models()
+    assert "pulled-after-cache" in entries
+    assert entries["pulled-after-cache"].modality == "chat/completion"
+
+
+def test_known_models_drops_entries_removed_from_catalog(tmp_catalog):
+    """The inverse staleness: an entry deleted from catalog.json (e.g.
+    `muse models remove` in another shell) must disappear from
+    known_models() without a process restart."""
+    from muse.core.catalog import _catalog_path
+
+    _write_persisted_resolver_entry(tmp_catalog, model_id="soon-removed")
+    _reset_known_models_cache()
+    assert "soon-removed" in known_models()
+
+    _catalog_path().write_text("{}")
+    _bump_catalog_mtime()
+
+    assert "soon-removed" not in known_models()
+
+
+def test_known_models_identity_stable_while_catalog_unchanged(tmp_catalog):
+    """Hot path stays memoized: same catalog mtime -> same dict object."""
+    _write_persisted_resolver_entry(tmp_catalog, model_id="stable-entry")
+    _reset_known_models_cache()
+    first = known_models()
+    second = known_models()
+    assert first is second
+
+
+def test_known_models_does_not_rerun_discovery_on_catalog_change(
+    tmp_catalog, monkeypatch,
+):
+    """Catalog-change invalidation must NOT re-run discover_models: script
+    discovery does importlib imports (module bodies execute), so it stays
+    cached for the process lifetime; only the cheap merge re-runs."""
+    import muse.core.catalog as cat
+
+    calls = {"n": 0}
+    real_discover = cat.discover_models
+
+    def counting_discover(dirs):
+        calls["n"] += 1
+        return real_discover(dirs)
+
+    monkeypatch.setattr(cat, "discover_models", counting_discover)
+    _reset_known_models_cache()
+
+    known_models()
+    _write_persisted_resolver_entry(tmp_catalog, model_id="new-after-build")
+    _bump_catalog_mtime()
+
+    assert "new-after-build" in known_models()
+    assert calls["n"] == 1
+
+
 def test_bundled_scripts_win_on_collision_with_resolver_manifest(tmp_catalog):
     """A persisted manifest with the same id as a bundled script is shadowed."""
     _write_persisted_resolver_entry(

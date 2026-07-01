@@ -793,8 +793,12 @@ def pull_model(identifier: str, *, store: JobStore, job: Job) -> None:
 
     `identifier` may be a curated alias, a bundled model id, or a
     resolver URI. The subprocess persists the resulting catalog entry
-    directly (catalog.json is written under MUSE_CATALOG_DIR), so the
-    next `enable` call sees it.
+    directly (catalog.json is written under MUSE_CATALOG_DIR); the next
+    `enable` call sees it because `known_models()` re-merges whenever
+    the catalog file's mtime changes. (It did NOT before that mtime
+    keying existed: this process's known_models cache froze at first
+    call, the subprocess's own cache resets were invisible here, and
+    enable 404'd "unknown model" for anything pulled after the freeze.)
     """
     store.update(job.job_id, state="running")
     cmd = [sys.executable, "-m", "muse.cli", "pull", identifier]
