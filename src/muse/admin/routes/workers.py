@@ -15,20 +15,9 @@ from __future__ import annotations
 import time
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
 
 from muse.cli_impl.supervisor import get_supervisor_state
-
-
-def _err_response(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={"error": {
-            "code": code,
-            "message": message,
-            "type": "invalid_request_error",
-        }},
-    )
+from muse.core.errors import error_response
 
 
 def build_workers_router() -> APIRouter:
@@ -62,12 +51,12 @@ def build_workers_router() -> APIRouter:
         with state.lock:
             spec = next((w for w in state.workers if w.port == port), None)
             if spec is None:
-                return _err_response(
+                return error_response(
                     404, "worker_not_found", f"no worker on port {port}",
                 )
             proc = spec.process
             if proc is None:
-                return _err_response(
+                return error_response(
                     409, "worker_not_running",
                     f"worker on port {port} is not currently running",
                 )
@@ -81,7 +70,7 @@ def build_workers_router() -> APIRouter:
             try:
                 proc.terminate()
             except Exception as e:  # noqa: BLE001
-                return _err_response(
+                return error_response(
                     500, "terminate_failed",
                     f"failed to SIGTERM worker on port {port}: {e}",
                 )

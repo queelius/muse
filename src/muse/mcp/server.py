@@ -246,9 +246,15 @@ class MCPServer:
         """Drive the MCP server over HTTP+SSE via uvicorn."""
         import uvicorn
 
+        from muse.cli_impl.serve_util import shutdown_grace_seconds
+
         app = self.build_http_app(admin_token=admin_token)
+        # Bound graceful shutdown so Ctrl-C releases the port even with a
+        # lingering SSE connection, matching `muse serve` / `muse _worker`.
+        # uvicorn's default (None) waits forever, orphaning the bound port.
         config = uvicorn.Config(
             app, host=host, port=port, log_level="info",
+            timeout_graceful_shutdown=shutdown_grace_seconds(),
         )
         await uvicorn.Server(config).serve()
 

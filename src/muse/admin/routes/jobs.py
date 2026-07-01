@@ -11,20 +11,9 @@ but callers polling its job_id afterward get a 404.
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
 
 from muse.admin.jobs import get_default_store
-
-
-def _err_response(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={"error": {
-            "code": code,
-            "message": message,
-            "type": "invalid_request_error",
-        }},
-    )
+from muse.core.errors import error_response
 
 
 def build_jobs_router() -> APIRouter:
@@ -35,7 +24,7 @@ def build_jobs_router() -> APIRouter:
         store = get_default_store()
         job = store.get(job_id)
         if job is None:
-            return _err_response(
+            return error_response(
                 404, "job_not_found",
                 f"job {job_id!r} unknown or already reaped",
             )

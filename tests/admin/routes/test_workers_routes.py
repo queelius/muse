@@ -100,6 +100,22 @@ class TestRestartWorker:
         assert r.json()["signal"] == "SIGTERM"
         spec.process.terminate.assert_called_once()
 
+    def test_terminate_failure_returns_500_server_error(self, client, headers):
+        """A SIGTERM that raises is a 500 terminate_failed, and its OpenAI
+        type is derived from the status (server_error for 5xx), not the
+        hardcoded invalid_request_error the old local builder emitted."""
+        spec = WorkerSpec(
+            models=["x"], python_path="/p", port=9001,
+        )
+        spec.process = MagicMock()
+        spec.process.terminate.side_effect = OSError("no such process")
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 500
+        body = r.json()
+        assert body["error"]["code"] == "terminate_failed"
+        assert body["error"]["type"] == "server_error"
+
     def test_resets_restart_and_failure_counters(self, client, headers):
         """v0.34.0 finding #12: an operator's explicit restart must
         re-arm the restart budget. Without this, a worker 9-deep into

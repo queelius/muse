@@ -6,6 +6,8 @@ v0.45.6.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -47,6 +49,39 @@ class TestBuildHttpApp:
         app = srv.build_http_app()
         from starlette.applications import Starlette
         assert isinstance(app, Starlette)
+
+
+class TestRunHttpGracefulShutdown:
+    """run_http must build its uvicorn.Config with a BOUNDED
+    timeout_graceful_shutdown so `muse mcp --http` releases its port on
+    Ctrl-C instead of hanging forever on a lingering SSE connection (the
+    same port-binding bug fixed for `muse serve` / `muse _worker`)."""
+
+    def test_config_has_bounded_graceful_shutdown(self, server, monkeypatch):
+        import uvicorn
+
+        from muse.cli_impl.serve_util import shutdown_grace_seconds
+
+        captured = {}
+
+        class _FakeServer:
+            def __init__(self, config):
+                self.config = config
+
+            async def serve(self):
+                return None
+
+        def _spy_config(app, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(uvicorn, "Config", _spy_config)
+        monkeypatch.setattr(uvicorn, "Server", _FakeServer)
+
+        asyncio.run(server.run_http(host="127.0.0.1", port=8099))
+
+        assert captured.get("timeout_graceful_shutdown") == shutdown_grace_seconds()
+        assert captured["timeout_graceful_shutdown"] is not None
 
 
 class TestHttpAuth:

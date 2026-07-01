@@ -37,22 +37,11 @@ from muse.admin.operations import (
 )
 from muse.cli_impl.supervisor import SupervisorState, get_supervisor_state
 from muse.core.catalog import _read_catalog, known_models
-
-
-def _err_response(status: int, code: str, message: str) -> JSONResponse:
-    """OpenAI-shape error envelope."""
-    return JSONResponse(
-        status_code=status,
-        content={"error": {
-            "code": code,
-            "message": message,
-            "type": "invalid_request_error",
-        }},
-    )
+from muse.core.errors import error_response
 
 
 def _operation_error_to_response(e: OperationError) -> JSONResponse:
-    return _err_response(e.status, e.code, e.message)
+    return error_response(e.status, e.code, e.message)
 
 
 def _resolve_state() -> SupervisorState:
@@ -75,7 +64,7 @@ def build_models_router() -> APIRouter:
         # Quick existence check up-front so unknown ids return 404
         # synchronously rather than via job.error.
         if model_id not in known_models():
-            return _err_response(
+            return error_response(
                 404, "model_not_found", f"unknown model {model_id!r}",
             )
         job = launch_async(
@@ -120,7 +109,7 @@ def build_models_router() -> APIRouter:
         state = _resolve_state()
         store = _resolve_store()
         if model_id not in known_models():
-            return _err_response(
+            return error_response(
                 404, "model_not_found", f"unknown model {model_id!r}",
             )
         body = body or {}
@@ -153,7 +142,7 @@ def build_models_router() -> APIRouter:
         body = body or {}
         identifier = body.get("identifier") or model_id
         if not identifier or identifier == "_":
-            return _err_response(
+            return error_response(
                 400,
                 "missing_identifier",
                 "pull requires an `identifier` in the request body or a non-`_` path",
@@ -192,7 +181,7 @@ def build_models_router() -> APIRouter:
         catalog = _read_catalog()
 
         if model_id not in catalog_known and model_id not in catalog:
-            return _err_response(
+            return error_response(
                 404, "model_not_found", f"unknown model {model_id!r}",
             )
 

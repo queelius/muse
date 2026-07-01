@@ -267,6 +267,9 @@ class TestWarmupRoute:
         assert r.status_code == 503
         body = r.json()
         assert body["error"]["code"] == "model_too_large_for_device"
+        # A 5xx OperationError surfaced through the admin route carries the
+        # status-derived type (server_error), not a client-error label.
+        assert body["error"]["type"] == "server_error"
 
     def test_requires_bearer_auth(self, client):
         # No headers: 401 (or 503 if env var unset; the fixture sets it).
