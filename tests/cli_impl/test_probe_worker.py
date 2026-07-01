@@ -165,6 +165,24 @@ def test_probe_worker_resolves_auto_when_no_cap():
     assert _resolve_device("mps", entry) == "mps"
 
 
+def test_probe_worker_device_override_beats_capability_pin():
+    """M9: an operator `set-device` pin (catalog device_override) is tier 1
+    in load_backend's precedence, above the manifest capability pin. The
+    probe must resolve the same device it will actually load on, else it
+    measures the wrong memory pool and records a bogus peak."""
+    from muse.cli_impl.probe_worker import _resolve_device
+    entry = _fake_entry(device_cap="cpu")
+    # Model is cpu-pinned in its manifest, but the operator forced cuda.
+    assert _resolve_device("auto", entry, override="cuda") == "cuda"
+
+
+def test_probe_worker_device_override_beats_request():
+    """The override also beats the --device flag (tier 3)."""
+    from muse.cli_impl.probe_worker import _resolve_device
+    entry = _fake_entry(device_cap=None)
+    assert _resolve_device("cuda", entry, override="cpu") == "cpu"
+
+
 def test_probe_worker_hardcoded_defaults_per_modality():
     """Fallback defaults exist for every bundled modality."""
     from muse.cli_impl.probe_worker import _hardcoded_defaults_for

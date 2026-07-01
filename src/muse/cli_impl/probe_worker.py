@@ -49,10 +49,19 @@ def _process_rss_bytes() -> int:
 
 def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
     """In-venv probe entry. Prints JSON record on stdout's last line."""
-    from muse.core.catalog import known_models, load_backend  # noqa: PLC0415
+    from muse.core.catalog import (  # noqa: PLC0415
+        _read_catalog,
+        known_models,
+        load_backend,
+    )
 
     entry = known_models()[model_id]
-    actual_device = _resolve_device(device, entry)
+    # device_override is a top-level catalog field (operator set-device pin),
+    # not part of the manifest; read it live so the probe resolves the same
+    # device load_backend will, keeping the memory measurement on the right
+    # pool.
+    override = _read_catalog().get(model_id, {}).get("device_override")
+    actual_device = _resolve_device(device, entry, override)
 
     # Pre-load baseline. CUDA peak counter must be reset BEFORE loading
     # so reset_peak_memory_stats and the load both see the same epoch.
@@ -136,16 +145,31 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
     return 0
 
 
-def _resolve_device(requested: str, entry) -> str:
-    """Mirror catalog.load_backend's device resolution.
+def _resolve_device(requested: str, entry, override: str | None = None) -> str:
+    """Mirror catalog.load_backend's device resolution, most authoritative first.
 
-    Capability pin > requested > torch auto-detect > "cpu".
+      1. catalog device_override (operator `muse models set-device` pin)
+      2. manifest capabilities.device pin (!= "auto")
+      3. requested (--device flag)
+      4. torch auto-detect
+      5. "cpu"
+
+    Tier 1 mirrors load_backend exactly: a truthy override (including
+    "auto") clobbers BOTH the capability pin and the requested flag, so an
+    operator who forces a cpu-pinned model onto cuda (or un-pins with
+    "auto") gets probed on the device the model will actually load on. Must
+    stay in lockstep with load_backend or the probe measures the wrong
+    memory pool and records a bogus peak.
     """
-    cap = entry.extra.get("device", "auto")
-    if cap and cap != "auto":
-        return cap
-    if requested and requested != "auto":
-        return requested
+    cap = entry.extra.get("device")
+    if override:
+        chosen = override
+    elif cap and cap != "auto":
+        chosen = cap
+    else:
+        chosen = requested
+    if chosen and chosen != "auto":
+        return chosen
     try:
         import torch  # noqa: PLC0415
         if torch.cuda.is_available():
