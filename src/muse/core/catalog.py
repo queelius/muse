@@ -511,13 +511,32 @@ def pull(identifier: str) -> None:
             _pull_via_resolver(identifier)
         return
 
-    # Bare id: must be a bundled script (resolver-pulled ids that land
-    # in catalog.json also show up in known_models() after persist).
-    # If neither bundled nor curated, produce a helpful error covering
-    # BOTH sources plus a did-you-mean suggestion. The old code only
-    # listed bundled ids, so typing a misspelled curated id returned a
-    # misleading "known:" list that hid the curated options entirely.
+    # Bare id: could be a bundled script OR a resolver-pulled model
+    # (resolver-pulled ids also show up in known_models() via their
+    # persisted manifest). Re-pulling a resolver model by its friendly id
+    # must go back through the resolver: _pull_bundled would overwrite the
+    # entry with a bundled-shaped dict lacking `manifest`/`source`, and the
+    # next known_models() rebuild would then drop the (no-manifest,
+    # no-script) entry so the model vanishes with a spurious 'unknown
+    # model' error (M3). Detect the resolver case by the `source` URI the
+    # resolver persists and route back through _pull_via_resolver, keeping
+    # the same catalog id and re-applying any curated overlay.
     from muse.core.curated import load_curated
+
+    existing = _read_catalog().get(identifier, {}) or {}
+    source_uri = existing.get("source")
+    if source_uri:
+        uri_curated = find_curated_by_uri(source_uri)
+        if uri_curated is not None:
+            _pull_via_resolver(
+                source_uri,
+                model_id_override=identifier,
+                capabilities_overlay=uri_curated.capabilities or None,
+                modality_override=uri_curated.modality,
+            )
+        else:
+            _pull_via_resolver(source_uri, model_id_override=identifier)
+        return
 
     catalog_known = known_models()
     if identifier in catalog_known:

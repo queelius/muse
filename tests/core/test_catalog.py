@@ -894,6 +894,35 @@ def test_pull_bare_id_still_uses_bundled_path(tmp_catalog):
     assert "manifest" not in _read_catalog()["kokoro-82m"]
 
 
+def test_repull_resolver_model_by_bare_id_routes_through_resolver(tmp_catalog):
+    """M3: re-pulling a resolver-pulled model by its friendly bare id must
+    go back through _pull_via_resolver, not _pull_bundled. The bare-id
+    branch used to call _pull_bundled, which overwrote the entry with a
+    dict lacking `manifest`/`source`; the next known_models() rebuild then
+    dropped the (no-manifest, no-script) entry and the model vanished with
+    a spurious 'unknown model' error until re-pulled by full URI."""
+    from muse.core.catalog import pull
+
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="qwen3-8b-gguf-q4-k-m",
+        hf_repo="unsloth/Qwen3-8B-GGUF",
+    )
+    _reset_known_models_cache()
+
+    with patch("muse.core.catalog._pull_via_resolver") as mock_resolver, \
+         patch("muse.core.catalog._pull_bundled") as mock_bundled:
+        pull("qwen3-8b-gguf-q4-k-m")
+
+    mock_bundled.assert_not_called()
+    mock_resolver.assert_called_once()
+    # Routed back through the stored source URI, keyed to the same id.
+    assert mock_resolver.call_args.args[0] == "hf://unsloth/Qwen3-8B-GGUF@variant"
+    assert mock_resolver.call_args.kwargs.get("model_id_override") == (
+        "qwen3-8b-gguf-q4-k-m"
+    )
+
+
 def test_pull_invalidates_known_models_cache_on_resolver_pull(tmp_catalog):
     """After resolver pull, known_models() must reflect the new entry without
     needing a manual cache reset."""
