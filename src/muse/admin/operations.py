@@ -49,20 +49,28 @@ logger = logging.getLogger(__name__)
 _UNSERVICEABLE_STATUSES = ("dead", "unhealthy")
 
 
-def _drop_unserviceable(state: SupervisorState, model_id: str) -> WorkerSpec | None:
-    """Return the live spec listing model_id, or None.
+def _drop_unserviceable(
+    state: SupervisorState, model_id: str,
+) -> tuple[WorkerSpec | None, WorkerSpec | None]:
+    """Resolve the spec listing model_id into (serviceable, dropped).
 
     If the matching spec is dead/unhealthy, remove it from state.workers and
-    return None so the caller respawns instead of claiming a stale port.
-    Must be called while holding state.lock.
+    return it as `dropped` (with `serviceable=None`) so the caller respawns
+    instead of claiming a stale port. A dropped spec may still own a LIVE
+    subprocess (an 'unhealthy' spec is one whose spawn succeeded but whose
+    wait_for_ready timed out, so its worker is alive and holding VRAM); the
+    caller MUST _shutdown_workers([dropped]) OUTSIDE state.lock to reap it,
+    else it orphans and leaks memory. Shutdown is not done here because this
+    runs under state.lock and SIGTERM+grace would block the lock for up to
+    5s. Must be called while holding state.lock.
     """
     existing = next(
         (s for s in state.workers if model_id in s.models), None,
     )
     if existing is not None and existing.status in _UNSERVICEABLE_STATUSES:
         state.workers.remove(existing)
-        return None
-    return existing
+        return None, existing
+    return existing, None
 
 
 class OperationError(Exception):
@@ -151,11 +159,12 @@ def enable_model(
         plan: str | None = None
         spec_ref: WorkerSpec | None = None
         coalesced_job_id: str | None = None
+        dropped: WorkerSpec | None = None
 
         with state.lock:
             set_enabled(model_id, True)
 
-            existing = _drop_unserviceable(state, model_id)
+            existing, dropped = _drop_unserviceable(state, model_id)
             if existing is not None:
                 if existing.status == "running" or existing.job_id is None:
                     # Either truly running, or a legacy / test-built spec
@@ -209,6 +218,14 @@ def enable_model(
         # wait_for_ready, restart-in-place) run here so other admin
         # endpoints don't block. Status flips happen under brief
         # reacquisitions of state.lock.
+        #
+        # Reap a dropped dead/unhealthy worker first (outside the lock): it
+        # may still own a live subprocess holding VRAM, so terminate it
+        # before spawning the replacement (H1 follow-up). No-op when its
+        # process already exited or was never set.
+        if dropped is not None:
+            _shutdown_workers([dropped])
+
         assert spec_ref is not None and plan is not None  # for type checker
 
         if plan == "already_running":
@@ -350,9 +367,10 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
     # Phase 1: plan + claim under a brief lock.
     plan: str | None = None
     spec_ref: WorkerSpec | None = None
+    dropped: WorkerSpec | None = None
 
     with state.lock:
-        existing = _drop_unserviceable(state, model_id)
+        existing, dropped = _drop_unserviceable(state, model_id)
         if existing is not None and (
             existing.status == "running" or existing.job_id is None
         ):
@@ -387,6 +405,12 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
                 spec_ref = new_spec
 
     # Phase 2: execute outside the lock (the slow path).
+    # Reap a dropped dead/unhealthy worker first: it may still own a live
+    # subprocess holding VRAM, so terminate it before spawning the
+    # replacement (H1 follow-up). No-op if its process already exited.
+    if dropped is not None:
+        _shutdown_workers([dropped])
+
     assert spec_ref is not None and plan is not None  # type checker
 
     if plan == "already_running":

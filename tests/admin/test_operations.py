@@ -191,6 +191,36 @@ class TestEnableModel:
         assert job.result["spawned_new"] is True
         assert job.result["worker_port"] == 9200
 
+    def test_enable_terminates_dropped_unhealthy_worker_process(
+        self, tmp_catalog, state, store,
+    ):
+        """H1 follow-up: an 'unhealthy' spec (spawn ok, wait_for_ready timed
+        out) still owns a LIVE subprocess holding VRAM. Dropping it must
+        terminate that process, else it orphans (untracked by monitor +
+        shutdown) and leaks memory."""
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        stale = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        stale.status = "unhealthy"
+        stale.job_id = None
+        stale.process = MagicMock()  # a still-live subprocess
+        state.workers.append(stale)
+        job = store.create("enable", "kokoro-82m")
+        with patch("muse.admin.operations.spawn_worker"), \
+             patch("muse.admin.operations.wait_for_ready"), \
+             patch("muse.admin.operations.find_free_port", return_value=9200), \
+             patch("muse.admin.operations._shutdown_workers") as mock_shutdown:
+            enable_model("kokoro-82m", state=state, store=store, job=job)
+        mock_shutdown.assert_called_once()
+        assert stale in mock_shutdown.call_args.args[0]
+
 
 class TestLoadModelIntoWorkerDeadSpec:
     def test_respawns_dead_worker_instead_of_returning_dead_port(
