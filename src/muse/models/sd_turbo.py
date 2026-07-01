@@ -95,6 +95,10 @@ MANIFEST = {
     ),
     "system_packages": (),
     "capabilities": {
+        # CUDA-safe: loads on GPU when present (~4GB fp16). "auto" (not
+        # omitted) so the control plane sizes it against the VRAM pool,
+        # not host RAM (else GPU OOM). Default image/generation model.
+        "device": "auto",
         "default_size": (512, 512),
         "supports_negative_prompt": True,
         "supports_seeded_generation": True,

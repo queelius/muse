@@ -83,6 +83,10 @@ MANIFEST = {
     ),
     "system_packages": (),
     "capabilities": {
+        # CUDA-safe: loads on GPU when present (16GB fp16). Declaring
+        # "auto" (not omitting) is required so the control plane sizes it
+        # against the VRAM pool, not host RAM (else GPU OOM under pressure).
+        "device": "auto",
         "dimensions": 4096,
         "context_length": 32768,
         # 7B-class Mistral backbone at fp16 is ~14 GB just for weights;

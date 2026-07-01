@@ -59,6 +59,10 @@ MANIFEST = {
     ),
     "system_packages": (),
     "capabilities": {
+        # CUDA-safe: loads on GPU when present (~3GB fp16). "auto" (not
+        # omitted) so the control plane sizes it against the VRAM pool,
+        # not host RAM (else GPU OOM under pressure).
+        "device": "auto",
         "sample_rate": BARK_SAMPLE_RATE,
         "voices": VOICE_PRESETS,
         "voice_cloning": True,
