@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
 # models (v0.47.3); it is mtime-cached so per-request reads are cheap.
 from muse.core.catalog import _read_catalog, get_manifest
+from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
 
 # Module-top (no import cycle: supervisor imports gateway only lazily).
@@ -533,10 +534,7 @@ async def _route_via_director(
     except OperationError as exc:
         return _openai_error(
             exc.status, exc.code, exc.message,
-            error_type=(
-                "server_error" if exc.status >= 500
-                else "invalid_request_error"
-            ),
+            error_type=error_type_for_status(exc.status),
         )
 
     # 4. Forward. The release call is wired into the response shape:

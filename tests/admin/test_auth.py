@@ -83,13 +83,25 @@ class TestVerifyAdminToken:
         assert r.status_code == 403
         assert "ultra-secret-12345" not in r.text
 
-    def test_envelope_has_invalid_request_error_type(self, client, monkeypatch):
-        """All admin errors land in the OpenAI error_type=invalid_request_error envelope."""
+    def test_4xx_envelope_has_invalid_request_error_type(self, client, monkeypatch):
+        """4xx admin errors (missing/bad token) carry invalid_request_error."""
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
         r = client.get("/protected")
         assert r.status_code == 401
         body = r.json()
         assert body["error"]["type"] == "invalid_request_error"
+
+    def test_503_admin_disabled_has_server_error_type(self, client, monkeypatch):
+        """The 503 admin_disabled envelope's type is derived from the status
+        (server_error for 5xx), matching core.errors.error_response -- not
+        hardcoded invalid_request_error. SDK clients branching on error.type
+        must see the same server-side class the core path emits for a 503."""
+        monkeypatch.delenv(ADMIN_TOKEN_ENV, raising=False)
+        r = client.get("/protected")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["error"]["code"] == "admin_disabled"
+        assert body["error"]["type"] == "server_error"
 
     def test_whitespace_only_token_treated_as_disabled(self, client, monkeypatch):
         """A whitespace-only MUSE_ADMIN_TOKEN is an accident, not a secret:

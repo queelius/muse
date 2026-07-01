@@ -90,7 +90,10 @@ class TestGatewayAdminErrorEnvelope:
         assert r.status_code == 503
         body = r.json()
         assert body["error"]["code"] == "admin_disabled"
-        assert body["error"]["type"] == "invalid_request_error"
+        # 503 is a 5xx, so the OpenAI type is server_error (derived from
+        # status via core.errors.error_type_for_status), not the hardcoded
+        # invalid_request_error the admin auth path used to emit.
+        assert body["error"]["type"] == "server_error"
         assert "detail" not in body
 
 

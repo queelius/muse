@@ -8,11 +8,26 @@ from __future__ import annotations
 
 import json
 
-from muse.core.errors import error_response
+import pytest
+
+from muse.core.errors import error_response, error_type_for_status
 
 
 def _body(resp) -> dict:
     return json.loads(bytes(resp.body))
+
+
+class TestErrorTypeForStatus:
+    """The shared status->type mapping reused by error_response, the
+    gateway's OperationError surface, and the admin auth dependency."""
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 599])
+    def test_5xx_is_server_error(self, status):
+        assert error_type_for_status(status) == "server_error"
+
+    @pytest.mark.parametrize("status", [200, 400, 401, 403, 404, 429, 499])
+    def test_sub_500_is_invalid_request_error(self, status):
+        assert error_type_for_status(status) == "invalid_request_error"
 
 
 class TestErrorResponseType:

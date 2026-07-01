@@ -14,6 +14,8 @@ import secrets
 
 from fastapi import Header, HTTPException
 
+from muse.core.errors import error_type_for_status
+
 ADMIN_TOKEN_ENV = "MUSE_ADMIN_TOKEN"
 
 
@@ -21,14 +23,17 @@ def _err(status: int, code: str, message: str) -> HTTPException:
     """Build an OpenAI-shape envelope inside an HTTPException.
 
     The message text never includes the secret token; only static
-    descriptive strings flow through here.
+    descriptive strings flow through here. The error `type` is derived
+    from the status (server_error for the 503 admin_disabled, else
+    invalid_request_error) via the shared core.errors helper, so this path
+    can't drift from core.errors.error_response.
     """
     return HTTPException(
         status_code=status,
         detail={"error": {
             "code": code,
             "message": message,
-            "type": "invalid_request_error",
+            "type": error_type_for_status(status),
         }},
     )
 
