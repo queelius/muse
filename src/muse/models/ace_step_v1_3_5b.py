@@ -34,6 +34,12 @@ MANIFEST = {
         # `ace-step` (hyphen) even though the import name is `acestep`;
         # `acestep @ git+...` fails pip's name-consistency check.
         "ace-step @ git+https://github.com/ace-step/ACE-Step.git",
+        # ACE-Step's save_wav_file calls torchaudio.save, which on modern
+        # torchaudio (>=2.8) delegates encoding to torchcodec. Without it
+        # generation fails at save time with "TorchCodec is required".
+        # Verified on the GPU box (Step B1). torchcodec uses ffmpeg's
+        # libav (declared in system_packages below).
+        "torchcodec",
         # The pipeline writes WAV to disk; the runtime reads it back.
         "soundfile",
         # numpy is pulled by torch but the runtime imports it directly

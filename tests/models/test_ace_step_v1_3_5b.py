@@ -57,6 +57,9 @@ def test_pip_extras_declares_acestep_torch_soundfile():
     # requirement MUST use the hyphenated distribution name.
     assert "ace-step @ git+" in extras
     assert "torch" in extras
+    # torchcodec: ACE-Step's torchaudio.save needs it at generation time
+    # (verified on the GPU box; mocked tests could not catch this).
+    assert "torchcodec" in extras
     assert "soundfile" in extras
     assert "numpy" in extras
 

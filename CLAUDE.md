@@ -137,8 +137,13 @@ is NOT needed (`from acestep.pipeline_ace_step import ACEStepPipeline` is
 a direct package import). Install pins the git source (`ace-step @
 git+https://github.com/ace-step/ACE-Step.git` -- the distribution name
 is `ace-step` with a hyphen even though the import is `acestep`; the
-PyPI `ace-step` is a stale v0.1.0). The `cpu_offload` /
-`overlapped_decode` / `torch_compile`
+PyPI `ace-step` is a stale v0.1.0). `pip_extras` also pins `torchcodec`:
+ACE-Step's `save_wav_file` calls `torchaudio.save`, which on modern
+torchaudio (>=2.8) delegates encoding to torchcodec (backed by ffmpeg's
+libav, already in `system_packages`); without it generation fails at
+save time. Both the dist-name and torchcodec gaps were caught by
+real-API verification on the GPU box (Step B1), not by the fully-mocked
+unit tests. The `cpu_offload` / `overlapped_decode` / `torch_compile`
 low-VRAM knobs are exposed as optional manifest capabilities (default
 off) and forwarded to the pipeline constructor.
 
