@@ -205,6 +205,17 @@ class IdleSweeper:
                 # try again on the next tick.
                 return None
 
+            # L8: re-validate freshness under the lock, not just refcount.
+            # A request that arrived AND completed during the
+            # snapshot->lock window bumps the LIVE entry's last_touched_at
+            # (via release) while leaving refcount back at 0, so the
+            # refcount check above passes. Evicting here would idle-evict a
+            # model that was just used -- one spurious cold reload on the
+            # next request. Check the live entry's timestamp (current), not
+            # the stale snapshot's (candidate).
+            if time.monotonic() - current.last_touched_at < idle_timeout_f:
+                return None
+
             # Capture free_before under the lock to keep the measurement
             # tightly bound to the eviction commitment.
             free_before_gb = self._free_for_device(device)

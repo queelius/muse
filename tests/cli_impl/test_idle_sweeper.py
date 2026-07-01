@@ -594,3 +594,75 @@ class TestFreeForDeviceResolvesAuto:
             catalog_lookup=_catalog_lookup_factory({}),
         )
         assert sweeper._free_for_device("auto") == 512.0
+
+
+# ----------------------------------------------------------------------
+# L8: re-check last_touched_at (not just refcount) under the lock
+# ----------------------------------------------------------------------
+
+class TestReChecksLastTouchedAtUnderLock:
+    def test_skips_candidate_touched_during_snapshot_to_lock_window(self):
+        """L8 (TOCTOU): tick() decides a model is idle from its SNAPSHOT
+        last_touched_at, then _evict_candidate re-checks under the lock. If
+        a request arrived AND completed in that window, release() bumps the
+        live entry's last_touched_at and drops refcount back to 0 -- so the
+        refcount-only re-check passes and the just-used model is evicted,
+        forcing one spurious cold reload. The under-lock re-check must
+        revalidate freshness against the LIVE entry, not just refcount.
+        """
+        disable_fn = MagicMock()
+        director = _director(disable_fn=disable_fn)
+
+        # Live entry: refcount 0 but JUST touched (served a request during
+        # the snapshot->lock window, already released).
+        live = _preload(
+            director,
+            "fake-model",
+            refcount=0,
+            last_touched_at=time.monotonic(),
+        )
+        catalog = {"fake-model": _manifest(idle_timeout_seconds=10.0)}
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+        )
+
+        # Stale snapshot the sweeper filtered on: looked idle (touched 15s
+        # ago) at snapshot time. Drive _evict_candidate directly with it.
+        stale_candidate = LoadEntry(
+            model_id="fake-model",
+            worker_port=live.worker_port,
+            memory_gb=live.memory_gb,
+            refcount=0,
+            last_touched_at=time.monotonic() - 15.0,
+            loaded_at=live.loaded_at,
+        )
+
+        result = sweeper._evict_candidate(stale_candidate, 10.0)
+
+        assert result is None, "freshly-touched model must not be idle-evicted"
+        disable_fn.assert_not_called()
+        with director.lock:
+            assert "fake-model" in director.loaded
+
+    def test_still_evicts_when_live_entry_remains_idle(self):
+        """Guard the fix doesn't over-correct: a candidate whose LIVE entry
+        is still past the idle timeout is evicted normally."""
+        disable_fn = MagicMock()
+        director = _director(disable_fn=disable_fn)
+        live = _preload(
+            director,
+            "fake-model",
+            refcount=0,
+            last_touched_at=time.monotonic() - 30.0,
+        )
+        catalog = {"fake-model": _manifest(idle_timeout_seconds=10.0)}
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+        )
+        result = sweeper._evict_candidate(live, 10.0)
+        assert result == "fake-model"
+        disable_fn.assert_called_once_with("fake-model")
+        with director.lock:
+            assert "fake-model" not in director.loaded
