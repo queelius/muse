@@ -268,9 +268,14 @@ def _prepare_inputs(messages: list[dict], processor: Any) -> tuple[str, list]:
     images: list = []
     template_messages: list[dict] = []
     for msg in messages:
+        # `.get` on role/text so a message or text part that omits the key
+        # degrades to a sensible default instead of KeyError-ing into a 500
+        # (mirrors the graceful handling of the image path). OpenAI requires
+        # role, so a missing one is malformed; "user" is the safe default.
+        role = msg.get("role", "user")
         content = msg.get("content")
         if not isinstance(content, list):
-            template_messages.append({"role": msg["role"], "content": content})
+            template_messages.append({"role": role, "content": content})
             continue
         new_content: list[dict] = []
         for part in content:
@@ -282,7 +287,7 @@ def _prepare_inputs(messages: list[dict], processor: Any) -> tuple[str, list]:
                 images.append(part["image"])
                 new_content.append({"type": "image"})
             elif ptype == "text":
-                new_content.append({"type": "text", "text": part["text"]})
+                new_content.append({"type": "text", "text": part.get("text", "")})
             elif ptype == "image_url":
                 raise ValueError(
                     "image_url part reached runtime; "
@@ -291,7 +296,7 @@ def _prepare_inputs(messages: list[dict], processor: Any) -> tuple[str, list]:
             else:
                 new_content.append(part)
         template_messages.append(
-            {"role": msg["role"], "content": new_content},
+            {"role": role, "content": new_content},
         )
     text = processor.apply_chat_template(
         template_messages, add_generation_prompt=True, tokenize=False,

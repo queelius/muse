@@ -99,6 +99,38 @@ def test_prepare_inputs_string_content_passthrough():
     assert images == []
 
 
+def test_prepare_inputs_text_part_missing_text_key_does_not_crash():
+    """L5: a text part without a 'text' key must not KeyError (500); it
+    degrades to an empty string, mirroring the graceful image path."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    fake_processor = MagicMock()
+    fake_processor.apply_chat_template = MagicMock(return_value="<rendered>")
+
+    text, images = mod._prepare_inputs(
+        [{"role": "user", "content": [{"type": "text"}]}],
+        fake_processor,
+    )
+    assert text == "<rendered>"
+    template_msgs = fake_processor.apply_chat_template.call_args.args[0]
+    assert template_msgs[0]["content"] == [{"type": "text", "text": ""}]
+
+
+def test_prepare_inputs_message_missing_role_does_not_crash():
+    """L5: a message without a 'role' key must not KeyError (500)."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    fake_processor = MagicMock()
+    fake_processor.apply_chat_template = MagicMock(return_value="<rendered>")
+
+    # Both content shapes (string and list) must survive a missing role.
+    mod._prepare_inputs([{"content": "hi"}], fake_processor)
+    text, _ = mod._prepare_inputs(
+        [{"content": [{"type": "text", "text": "hi"}]}], fake_processor,
+    )
+    assert text == "<rendered>"
+    template_msgs = fake_processor.apply_chat_template.call_args.args[0]
+    assert template_msgs[0]["role"] == "user"
+
+
 def test_prepare_inputs_undecoded_image_url_raises():
     """Defensive: route layer must rewrite image_url to image. If it
     doesn't, the runtime raises so the bug surfaces clearly."""
