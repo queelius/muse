@@ -52,7 +52,10 @@ def test_manifest_duration_ceiling_is_240():
 
 def test_pip_extras_declares_acestep_torch_soundfile():
     extras = " ".join(_manifest()["pip_extras"])
-    assert "acestep" in extras and "git+" in extras
+    # Distribution name is `ace-step` (hyphen); import name is `acestep`.
+    # `acestep @ git+...` fails pip's name-consistency check, so the
+    # requirement MUST use the hyphenated distribution name.
+    assert "ace-step @ git+" in extras
     assert "torch" in extras
     assert "soundfile" in extras
     assert "numpy" in extras

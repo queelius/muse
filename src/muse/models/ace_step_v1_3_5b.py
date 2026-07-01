@@ -30,8 +30,10 @@ MANIFEST = {
         "torch>=2.1.0",
         # ACE-Step's pipeline. The PyPI `ace-step` is a stale v0.1.0, so
         # pin the git source; it pulls ACE-Step's own deps (transformers,
-        # diffusers, etc.) transitively.
-        "acestep @ git+https://github.com/ace-step/ACE-Step.git",
+        # diffusers, etc.) transitively. NOTE: the distribution name is
+        # `ace-step` (hyphen) even though the import name is `acestep`;
+        # `acestep @ git+...` fails pip's name-consistency check.
+        "ace-step @ git+https://github.com/ace-step/ACE-Step.git",
         # The pipeline writes WAV to disk; the runtime reads it back.
         "soundfile",
         # numpy is pulled by torch but the runtime imports it directly

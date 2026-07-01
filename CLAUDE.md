@@ -134,9 +134,11 @@ on-disk output defensively (returned path if present, else the
 `save_path`), reads it back via `soundfile`, and deletes the temp dir in
 a `finally` (leak-safe, per the #200 temp-WAV lesson). `trust_remote_code`
 is NOT needed (`from acestep.pipeline_ace_step import ACEStepPipeline` is
-a direct package import). Install pins the git source (`acestep @
-git+https://github.com/ace-step/ACE-Step.git`; the PyPI `ace-step` is a
-stale v0.1.0). The `cpu_offload` / `overlapped_decode` / `torch_compile`
+a direct package import). Install pins the git source (`ace-step @
+git+https://github.com/ace-step/ACE-Step.git` -- the distribution name
+is `ace-step` with a hyphen even though the import is `acestep`; the
+PyPI `ace-step` is a stale v0.1.0). The `cpu_offload` /
+`overlapped_decode` / `torch_compile`
 low-VRAM knobs are exposed as optional manifest capabilities (default
 off) and forwarded to the pipeline constructor.
 
