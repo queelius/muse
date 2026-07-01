@@ -8,7 +8,9 @@ times. `muse models refresh --all` upgrades every venv in one pass.
 
 Behavior:
   - Inspect catalog.json for the target model_id(s).
-  - For each: invoke <venv>/bin/pip install --upgrade -e <muse>[server,<modality-extras>].
+  - For each: invoke <venv>/bin/pip install --upgrade <muse-target>[server,<modality-extras>],
+    where <muse-target> is `-e <source-tree>` from a checkout or the
+    published `museq` distribution from a wheel/PyPI install.
   - Then (unless --no-extras): pip install --upgrade <model's pip_extras...>.
   - Continue past failures; aggregate at the end.
 
@@ -77,31 +79,70 @@ def _infer_extras(modality: str) -> list[str]:
     return list(MODALITY_EXTRAS.get(modality, []))
 
 
-def _muse_repo_root() -> Path:
-    """Locate the muse source tree to install in editable mode.
+# Published distribution name on PyPI. The importable package, CLI, and
+# repo are all `muse`, but the wheel is `museq` (the `muse` name was
+# taken). A PyPI-install refresh upgrades this dist, not an editable path.
+_PYPI_DIST = "museq"
 
-    Walks parents looking for pyproject.toml. Falls back to the current
-    working directory when running from a wheel install (no pyproject
-    in any parent of __file__). Documented in the spec: users on a
-    PyPI install of muse can still refresh; pip will pull muse from
-    PyPI rather than installing editable.
+
+def _is_muse_pyproject(pyproject: Path) -> bool:
+    """True when pyproject.toml declares the museq project (name = "museq").
+
+    A cheap sniff so `_muse_repo_root` only ever claims a directory that
+    is actually the muse source tree, never some unrelated parent project
+    that merely happens to carry a pyproject.toml.
+    """
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return f'name = "{_PYPI_DIST}"' in text or f"name = '{_PYPI_DIST}'" in text
+
+
+def _muse_repo_root() -> Path | None:
+    """Locate the muse source tree for an editable refresh, or None.
+
+    Walks parents of this file for a pyproject.toml that actually
+    declares the museq project. Returns None when running from a
+    wheel/PyPI install (no such pyproject in any parent), so the caller
+    installs the published `museq` distribution from PyPI instead of
+    editable-installing whatever unrelated project happens to sit in the
+    current working directory.
     """
     here = Path(__file__).resolve()
     for parent in here.parents:
-        if (parent / "pyproject.toml").exists():
+        pyproject = parent / "pyproject.toml"
+        if pyproject.exists() and _is_muse_pyproject(pyproject):
             return parent
-    return Path.cwd()
+    return None
 
 
 def _pip_target(extras: list[str]) -> str:
-    """Build the install spec: <muse-repo-path>[server,extra1,extra2,...].
+    """Build the museq install spec: <target>[server,extra1,extra2,...].
 
-    `server` is always present; modality extras append. Bracket-comma
-    syntax matches PEP 508 extras.
+    `<target>` is the local source tree (editable refresh) when muse runs
+    from a checkout, else the published `museq` distribution so pip
+    upgrades from PyPI. `server` is always present; modality extras
+    append. Bracket-comma syntax matches PEP 508 extras.
     """
-    extras_set = ["server", *extras]
-    spec = ",".join(extras_set)
-    return f"{_muse_repo_root()}[{spec}]"
+    spec = ",".join(["server", *extras])
+    root = _muse_repo_root()
+    base = str(root) if root is not None else _PYPI_DIST
+    return f"{base}[{spec}]"
+
+
+def _pip_target_args(extras: list[str]) -> list[str]:
+    """pip target args for refreshing muse inside a per-model venv.
+
+    From a source checkout: ``-e <root>[extras]`` (editable, tracks the
+    working tree). From a wheel/PyPI install: ``museq[extras]`` (no -e;
+    pip resolves museq from PyPI). Returning args rather than a bare
+    string lets the caller splat them without re-deciding editability.
+    """
+    target = _pip_target(extras)
+    if _muse_repo_root() is not None:
+        return ["-e", target]
+    return [target]
 
 
 def refresh_one(
@@ -112,7 +153,8 @@ def refresh_one(
     """Refresh a single model's venv.
 
     Two pip invocations:
-      1. install --upgrade -e <muse>[server,<modality-extras>]
+      1. install --upgrade <muse-target>[server,<modality-extras>]
+         (editable `-e <tree>` from a checkout, else `museq` from PyPI)
       2. install --upgrade <model's pip_extras...>  (skipped if --no-extras
          or pip_extras is empty)
 
@@ -139,9 +181,9 @@ def refresh_one(
     modality = manifest.get("modality") or entry.get("modality") or ""
     pip_extras_list = list(manifest.get("pip_extras") or ())
     muse_extras = _infer_extras(modality)
-    target = _pip_target(muse_extras)
+    target_args = _pip_target_args(muse_extras)
 
-    cmd = [python_path, "-m", "pip", "install", "--upgrade", "-e", target]
+    cmd = [python_path, "-m", "pip", "install", "--upgrade", *target_args]
     logger.info("refresh %s: %s", model_id, " ".join(cmd))
     try:
         proc = subprocess.run(

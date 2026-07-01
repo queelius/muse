@@ -13,6 +13,7 @@ from muse.cli_impl.refresh import (
     _infer_extras,
     _muse_repo_root,
     _pip_target,
+    _pip_target_args,
     _select_targets,
     refresh_one,
     run_refresh,
@@ -73,6 +74,53 @@ class TestPipTarget:
         # The path part precedes the bracket
         path = target.split("[", 1)[0]
         assert (Path(path) / "pyproject.toml").exists()
+
+
+class TestPipTargetArgs:
+    def test_editable_flag_when_source_tree(self):
+        with patch(
+            "muse.cli_impl.refresh._muse_repo_root",
+            return_value=Path("/src/muse"),
+        ):
+            args = _pip_target_args(["audio"])
+        assert args == ["-e", "/src/muse[server,audio]"]
+
+    def test_pypi_dist_when_no_source_tree(self):
+        """M2: on a PyPI install of museq there is no pyproject.toml in any
+        parent of __file__, so `_muse_repo_root()` returns None and refresh
+        must install the published `museq` distribution (no -e, no bogus
+        cwd path that would editable-install whatever project sits in the
+        current directory)."""
+        with patch(
+            "muse.cli_impl.refresh._muse_repo_root", return_value=None,
+        ):
+            args = _pip_target_args(["images", "embeddings"])
+        assert args == ["museq[server,images,embeddings]"]
+        assert "-e" not in args
+
+    def test_refresh_one_installs_museq_from_pypi_when_not_source_tree(
+        self, tmp_catalog, tmp_path,
+    ):
+        """End-to-end: a wheel/PyPI install refresh must shell out to
+        `pip install --upgrade museq[server,audio]` with no -e flag."""
+        py = _make_python_path(tmp_path, "x")
+        _seed_catalog({
+            "x": {
+                "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
+                "python_path": py, "enabled": True,
+            },
+        })
+        manifest = {"modality": "audio/speech", "pip_extras": ()}
+        with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
+             patch("muse.cli_impl.refresh._muse_repo_root", return_value=None), \
+             patch("muse.cli_impl.refresh.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = refresh_one("x")
+        assert result.state == "ok"
+        cmd = mock_run.call_args_list[0].args[0]
+        assert cmd[:5] == [py, "-m", "pip", "install", "--upgrade"]
+        assert cmd[5:] == ["museq[server,audio]"]
+        assert "-e" not in cmd
 
 
 class TestRefreshOne:
