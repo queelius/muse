@@ -251,6 +251,61 @@ class TestFetchUrlBytes:
         assert result == b"payload"
         assert len(send_calls) == 2  # initial + redirect
 
+    def test_connects_to_pinned_ip_not_rehostname(self, monkeypatch):
+        """M4: after validating the host resolves to a public IP, fetch must
+        dial THAT pinned IP rather than re-resolving the hostname, so a
+        DNS-rebind flip (or a multi-A-record host) between the check and the
+        connect cannot reach 127.0.0.1 / 169.254.169.254. The original
+        hostname is preserved in the Host header for virtual hosting."""
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        monkeypatch.setattr(
+            "muse.core.net_fetch.socket.gethostbyname",
+            lambda host: "93.184.216.34",
+        )
+        resp = _make_sync_response(content=b"ok")
+        inner_client = MagicMock()
+        inner_client.build_request = MagicMock(return_value=MagicMock())
+        inner_client.send = MagicMock(return_value=resp)
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__enter__ = MagicMock(return_value=inner_client)
+        mock_client_ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch("muse.core.net_fetch.httpx.Client", return_value=mock_client_ctx):
+            fetch_url_bytes("https://example.com/data.bin", max_bytes=1024)
+
+        call = inner_client.build_request.call_args
+        # ("GET", <url>): the request URL must target the pinned IP.
+        url_arg = call.args[1]
+        assert "93.184.216.34" in url_arg
+        assert "example.com" not in url_arg
+        # Host header carries the original hostname so vhosts still route.
+        headers = call.kwargs.get("headers") or {}
+        assert headers.get("Host") == "example.com"
+
+    def test_pinning_disabled_when_private_fetch_allowed(self, monkeypatch):
+        """MUSE_ALLOW_PRIVATE_FETCH=1 skips SSRF resolution and connects to
+        the hostname as-is (no pinning), preserving the internal-network
+        escape hatch."""
+        monkeypatch.setenv("MUSE_ALLOW_PRIVATE_FETCH", "1")
+        # gethostbyname must NOT be consulted when the guard is disabled.
+        monkeypatch.setattr(
+            "muse.core.net_fetch.socket.gethostbyname",
+            MagicMock(side_effect=AssertionError("should not resolve")),
+        )
+        resp = _make_sync_response(content=b"ok")
+        inner_client = MagicMock()
+        inner_client.build_request = MagicMock(return_value=MagicMock())
+        inner_client.send = MagicMock(return_value=resp)
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__enter__ = MagicMock(return_value=inner_client)
+        mock_client_ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch("muse.core.net_fetch.httpx.Client", return_value=mock_client_ctx):
+            fetch_url_bytes("http://internal.corp/x", max_bytes=1024)
+
+        url_arg = inner_client.build_request.call_args.args[1]
+        assert "internal.corp" in url_arg
+
     def test_raises_after_max_redirects(self, monkeypatch):
         """Redirect loop or excessive hops must raise ValueError."""
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
