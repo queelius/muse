@@ -894,6 +894,41 @@ def test_pull_bare_id_still_uses_bundled_path(tmp_catalog):
     assert "manifest" not in _read_catalog()["kokoro-82m"]
 
 
+class TestMuseServerInstallArgs:
+    """M2 companion: `muse pull` must install the published `museq` from PyPI
+    when muse is not running from a source checkout, mirroring the refresh fix.
+    _muse_repo_root() would otherwise return site-packages and
+    `pip install -e <site-packages>[server]` fails, so a PyPI-installed muse
+    could never pull any model."""
+
+    def test_editable_target_when_source_tree(self):
+        from muse.core.catalog import _muse_server_install_args
+        with patch("muse.core.catalog._muse_repo_root", return_value=Path("/src/muse")):
+            args = _muse_server_install_args()
+        assert args == ["-e", "/src/muse[server]"]
+
+    def test_pypi_target_when_no_source_tree(self):
+        from muse.core.catalog import _muse_server_install_args
+        with patch("muse.core.catalog._muse_repo_root", return_value=None):
+            args = _muse_server_install_args()
+        assert args == ["museq[server]"]
+        assert "-e" not in args
+
+    def test_pull_bundled_installs_museq_from_pypi_when_not_source_tree(
+        self, tmp_catalog,
+    ):
+        from muse.core.catalog import pull
+        with patch("muse.core.catalog._muse_repo_root", return_value=None), \
+             patch("muse.core.catalog.create_venv"), \
+             patch("muse.core.catalog.install_into_venv") as mock_install, \
+             patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
+             patch("muse.core.catalog.check_system_packages", return_value=[]):
+            pull("kokoro-82m")
+        # The muse-self install (first call) must be the published dist, no -e.
+        first_args = mock_install.call_args_list[0].args[1]
+        assert first_args == ["museq[server]"]
+
+
 def test_repull_resolver_model_by_bare_id_routes_through_resolver(tmp_catalog):
     """M3: re-pulling a resolver-pulled model by its friendly bare id must
     go back through _pull_via_resolver, not _pull_bundled. The bare-id

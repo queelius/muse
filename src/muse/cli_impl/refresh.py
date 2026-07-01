@@ -26,7 +26,13 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from muse.core.catalog import _read_catalog, get_manifest, is_enabled
+from muse.core.catalog import (
+    _PYPI_DIST,
+    _is_muse_pyproject,
+    _read_catalog,
+    get_manifest,
+    is_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,24 +85,9 @@ def _infer_extras(modality: str) -> list[str]:
     return list(MODALITY_EXTRAS.get(modality, []))
 
 
-# Published distribution name on PyPI. The importable package, CLI, and
-# repo are all `muse`, but the wheel is `museq` (the `muse` name was
-# taken). A PyPI-install refresh upgrades this dist, not an editable path.
-_PYPI_DIST = "museq"
-
-
-def _is_muse_pyproject(pyproject: Path) -> bool:
-    """True when pyproject.toml declares the museq project (name = "museq").
-
-    A cheap sniff so `_muse_repo_root` only ever claims a directory that
-    is actually the muse source tree, never some unrelated parent project
-    that merely happens to carry a pyproject.toml.
-    """
-    try:
-        text = pyproject.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return f'name = "{_PYPI_DIST}"' in text or f"name = '{_PYPI_DIST}'" in text
+# `_PYPI_DIST` (published wheel name) and `_is_muse_pyproject` (source-tree
+# sniff) are shared with core.catalog, which applies the same wheel-vs-source
+# fork to `muse pull`'s venv creation. Imported rather than duplicated.
 
 
 def _muse_repo_root() -> Path | None:

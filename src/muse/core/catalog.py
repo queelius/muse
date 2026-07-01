@@ -442,14 +442,55 @@ def list_known(modality: str | None = None) -> list[CatalogEntry]:
     return [e for e in entries if e.modality == modality]
 
 
-def _muse_repo_root() -> Path:
-    """Resolve the muse source tree that contains this catalog.py.
+# Published distribution name on PyPI. The importable package, CLI, and
+# repo are all `muse`, but the wheel is `museq`. A wheel/PyPI install
+# installs muse-into-venv from this dist, not from an editable source tree.
+_PYPI_DIST = "museq"
 
-    `__file__` is at `<repo>/src/muse/core/catalog.py`, so `parents[3]`
-    is the repo root with pyproject.toml. Used to install muse itself
-    (editable) into each worker venv.
+
+def _is_muse_pyproject(pyproject: Path) -> bool:
+    """True when pyproject.toml declares the museq project (name = "museq").
+
+    A cheap sniff so `_muse_repo_root` only claims a directory that is
+    actually the muse source tree, never an unrelated parent project.
     """
-    return Path(__file__).resolve().parents[3]
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return f'name = "{_PYPI_DIST}"' in text or f"name = '{_PYPI_DIST}'" in text
+
+
+def _muse_repo_root() -> Path | None:
+    """Resolve the muse source tree that contains this catalog.py, or None.
+
+    Walks parents of this file for a pyproject.toml that actually declares
+    the museq project. Returns None from a wheel/PyPI install (no such
+    pyproject in any parent, e.g. under site-packages), so callers install
+    the published `museq` distribution instead of editable-installing
+    site-packages -- which `pip install -e` rejects ("neither setup.py nor
+    pyproject.toml found"), previously making `muse pull` fail outright on a
+    PyPI install.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        pyproject = parent / "pyproject.toml"
+        if pyproject.exists() and _is_muse_pyproject(pyproject):
+            return parent
+    return None
+
+
+def _muse_server_install_args() -> list[str]:
+    """pip args to install muse[server] itself into a per-model venv.
+
+    From a source checkout: ``-e <root>[server]`` (editable, tracks the
+    working tree). From a wheel/PyPI install: ``museq[server]`` (no -e;
+    pip resolves museq from PyPI). Mirrors cli_impl.refresh._pip_target_args.
+    """
+    root = _muse_repo_root()
+    if root is not None:
+        return ["-e", f"{root}[server]"]
+    return [f"{_PYPI_DIST}[server]"]
 
 
 def pull(identifier: str) -> None:
@@ -576,7 +617,7 @@ def _pull_bundled(model_id: str) -> None:
     if not venv_path.exists():
         create_venv(venv_path)
 
-    install_into_venv(venv_path, ["-e", f"{_muse_repo_root()}[server]"])
+    install_into_venv(venv_path, _muse_server_install_args())
 
     if entry.pip_extras:
         install_into_venv(venv_path, list(entry.pip_extras))
@@ -688,7 +729,7 @@ def _pull_via_resolver(
     if not venv_path.exists():
         create_venv(venv_path)
 
-    install_into_venv(venv_path, ["-e", f"{_muse_repo_root()}[server]"])
+    install_into_venv(venv_path, _muse_server_install_args())
 
     pip_extras = manifest.get("pip_extras") or ()
     if pip_extras:
