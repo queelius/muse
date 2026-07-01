@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from typing import Any
 
 from muse.core.runtime_helpers import dtype_for_name, select_device
@@ -21,6 +22,26 @@ from muse.modalities.image_generation.protocol import ImageResult
 
 
 logger = logging.getLogger(__name__)
+
+
+def _local_has_fp16_variant(src: str) -> bool:
+    """Whether the local snapshot at ``src`` holds ``.fp16.`` variant weights.
+
+    The image_generation HF downloader fetches ONLY the ``.fp16.`` files when
+    a repo ships them (sd-turbo/sdxl-turbo) and ONLY the bare weights
+    otherwise (flux-schnell and other bf16-only repos). The runtime must
+    request ``variant="fp16"`` in the first case (so from_pretrained finds the
+    fp16 files) and ``variant=None`` in the second (else from_pretrained
+    raises because no fp16 files exist). Mirroring the downloader, detect the
+    variant from the files actually on disk. Returns False when ``src`` is a
+    bare repo id (not a local dir), which keeps the safe no-variant path.
+    """
+    p = Path(src)
+    if not p.is_dir():
+        return False
+    return any(".fp16." in f.name for f in p.rglob("*.safetensors")) or any(
+        ".fp16." in f.name for f in p.rglob("*.bin")
+    )
 
 
 # Sentinels patched by tests; populated by _ensure_deps at runtime.
@@ -118,10 +139,15 @@ class DiffusersText2ImageModel:
             "loading diffusers pipeline from %s (model_id=%s, device=%s, dtype=%s)",
             self._src, model_id, self._device, dtype,
         )
+        # Request the fp16 variant only when the local snapshot actually
+        # holds .fp16. weights; otherwise from_pretrained raises for repos
+        # that ship no fp16 files (e.g. flux-schnell). torch_dtype still
+        # governs the compute dtype independently of variant (H6).
+        use_fp16_variant = dtype == "float16" and _local_has_fp16_variant(self._src)
         self._pipe = AutoPipelineForText2Image.from_pretrained(
             self._src,
             torch_dtype=torch_dtype,
-            variant="fp16" if dtype == "float16" else None,
+            variant="fp16" if use_fp16_variant else None,
         )
         if self._device != "cpu":
             self._pipe = self._pipe.to(self._device)

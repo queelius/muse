@@ -250,6 +250,56 @@ def test_default_size_normalized_to_tuple_when_passed_list():
     assert isinstance(m.default_size, tuple)
 
 
+def _variant_kwarg(fake_class):
+    return fake_class.from_pretrained.call_args.kwargs.get("variant")
+
+
+def test_no_fp16_variant_requested_when_snapshot_lacks_fp16_weights(tmp_path):
+    """H6: repos like flux-schnell ship no .fp16. weights, so the downloader
+    fetches only bare weights. Requesting variant='fp16' against that local
+    snapshot makes from_pretrained raise -> worker crashes on cold load. The
+    runtime must request variant=None when no fp16 files are present, even at
+    the default dtype='float16'."""
+    (tmp_path / "unet").mkdir()
+    (tmp_path / "unet" / "diffusion_pytorch_model.safetensors").write_bytes(b"x")
+    fake_class = MagicMock()
+    fake_class.from_pretrained.return_value = _patched_pipe()
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir=str(tmp_path), device="cpu",
+            dtype="float16", model_id="m",
+        )
+    assert _variant_kwarg(fake_class) is None
+
+
+def test_fp16_variant_requested_when_snapshot_has_fp16_weights(tmp_path):
+    """When the snapshot holds .fp16. weights (sd-turbo/sdxl-turbo, where the
+    downloader fetched ONLY the fp16 files), the runtime must request
+    variant='fp16' so from_pretrained finds them."""
+    (tmp_path / "unet").mkdir()
+    (tmp_path / "unet" / "diffusion_pytorch_model.fp16.safetensors").write_bytes(b"x")
+    fake_class = MagicMock()
+    fake_class.from_pretrained.return_value = _patched_pipe()
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        DiffusersText2ImageModel(
+            hf_repo="org/repo", local_dir=str(tmp_path), device="cpu",
+            dtype="float16", model_id="m",
+        )
+    assert _variant_kwarg(fake_class) == "fp16"
+
+
 def test_generate_with_init_image_uses_img2img_pipeline():
     """When init_image is set, runtime calls AutoPipelineForImage2Image."""
     from PIL import Image
