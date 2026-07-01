@@ -171,6 +171,10 @@ def _bytes_to_pil(raw: bytes):
     try:
         img = Image.open(io.BytesIO(raw))
         img.load()  # force decode now so errors surface here, not later
-    except (UnidentifiedImageError, OSError) as e:
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        # DecompressionBombError is a plain Exception (not OSError): a tiny
+        # PNG declaring huge dimensions would otherwise escape as a 500. PIL
+        # still blocks the memory DoS; we only reclassify it as a client
+        # error (ValueError -> 400).
         raise ValueError(f"image decode failed: {e}") from e
     return img

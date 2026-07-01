@@ -135,6 +135,25 @@ async def test_decode_rejects_corrupt_image_bytes():
         await decode_image_input(data_url)
 
 
+def test_bytes_to_pil_rejects_decompression_bomb(monkeypatch):
+    """A decompression bomb must surface as ValueError (-> 400), not the raw
+    Image.DecompressionBombError (which would escape to a 500). PIL still
+    blocks the DoS; we only fix the error class."""
+    from PIL import Image
+
+    from muse.modalities.image_generation import image_input
+
+    # A modest real PNG whose pixel count trips a lowered bomb threshold.
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(buf, format="PNG")
+    raw = buf.getvalue()
+
+    # DecompressionBombError fires when pixels > 2 * MAX_IMAGE_PIXELS.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
+    with pytest.raises(ValueError, match="decode"):
+        image_input._bytes_to_pil(raw)
+
+
 # ---------------- SSRF: blocked on private/loopback/link-local ----------------
 
 
