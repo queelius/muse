@@ -183,6 +183,18 @@ def pull(
         except KeyError as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(2)
+        except Exception as e:  # noqa: BLE001
+            # A gated/private HF repo pulled without auth raises a deep
+            # huggingface_hub error whose uncaught traceback is ~200 lines
+            # of noise. Translate the recognized access failures into a
+            # one-line actionable message; re-raise anything else so real
+            # bugs still surface with a full traceback.
+            from muse.cli_impl.pull_errors import friendly_pull_error
+            msg = friendly_pull_error(identifier, e)
+            if msg is None:
+                raise
+            typer.echo(msg, err=True)
+            raise typer.Exit(1)
         typer.echo(f"pulled {identifier}")
 
         if no_probe:
