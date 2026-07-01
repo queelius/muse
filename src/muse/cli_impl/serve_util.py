@@ -20,6 +20,7 @@ second Ctrl-C remains an immediate force-quit, unchanged.
 """
 from __future__ import annotations
 
+import math
 import os
 
 import uvicorn
@@ -46,7 +47,12 @@ def shutdown_grace_seconds() -> float:
         value = float(raw)
     except ValueError:
         return _DEFAULT_GRACE_SECONDS
-    return value if value >= 0 else _DEFAULT_GRACE_SECONDS
+    # Reject non-finite (inf/nan) as well as negative: `inf` parses and is
+    # `>= 0`, but timeout_graceful_shutdown=inf is precisely the
+    # hang-forever behavior this module exists to prevent.
+    if not math.isfinite(value) or value < 0:
+        return _DEFAULT_GRACE_SECONDS
+    return value
 
 
 def build_uvicorn_server(app, *, host: str, port: int) -> uvicorn.Server:

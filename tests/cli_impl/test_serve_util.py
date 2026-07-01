@@ -54,6 +54,16 @@ def test_shutdown_grace_seconds_negative_falls_back():
         assert serve_util.shutdown_grace_seconds() == pytest.approx(10.0)
 
 
+@pytest.mark.parametrize("raw", ["inf", "infinity", "Infinity", "-inf"])
+def test_shutdown_grace_seconds_non_finite_falls_back(raw):
+    # inf parses via float() and passes `>= 0`, but timeout_graceful_shutdown
+    # =inf is exactly the hang-forever behavior this module exists to
+    # prevent. Reject anything non-finite so the env var can never
+    # re-introduce it.
+    with patch.dict(os.environ, {"MUSE_SHUTDOWN_GRACE_SECONDS": raw}):
+        assert serve_util.shutdown_grace_seconds() == pytest.approx(10.0)
+
+
 def test_run_uvicorn_swallows_keyboardinterrupt():
     # uvicorn re-raises the SIGINT it captured after a graceful shutdown;
     # uvicorn.run() swallows that KeyboardInterrupt and returns normally.
