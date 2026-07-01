@@ -12,8 +12,7 @@ import logging
 import os
 from pathlib import Path
 
-import uvicorn
-
+from muse.cli_impl.serve_util import run_uvicorn
 from muse.core.catalog import get_manifest, is_pulled, known_models, load_backend
 from muse.core.discovery import discover_modalities
 from muse.core.registry import ModalityRegistry
@@ -114,5 +113,8 @@ def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
         routers[tag] = build_router(registry)
 
     app = create_app(registry=registry, routers=routers)
-    uvicorn.run(app, host=host, port=port, log_config=None)
+    # run_uvicorn sets a bounded timeout_graceful_shutdown so a standalone
+    # `muse _worker` process (or one whose supervisor SIGTERMs it) exits
+    # promptly on Ctrl-C instead of hanging on an in-flight connection.
+    run_uvicorn(app, host=host, port=port)
     return 0

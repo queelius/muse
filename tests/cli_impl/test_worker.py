@@ -27,10 +27,10 @@ def _collect_route_paths(app) -> set:
     return paths
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.load_backend")
 @patch("muse.cli_impl.worker.is_pulled", return_value=True)
-def test_worker_loads_requested_models_and_runs_uvicorn(mock_pulled, mock_load, mock_uvicorn):
+def test_worker_loads_requested_models_and_runs_uvicorn(mock_pulled, mock_load, mock_run_uvicorn):
     fake_backend = MagicMock(model_id="soprano-80m", sample_rate=32000)
     mock_load.return_value = fake_backend
 
@@ -39,17 +39,17 @@ def test_worker_loads_requested_models_and_runs_uvicorn(mock_pulled, mock_load, 
     # load_backend was called for the model
     mock_load.assert_called_once_with("soprano-80m", device="cpu")
     # uvicorn was told to serve on the requested port
-    mock_uvicorn.run.assert_called_once()
-    kwargs = mock_uvicorn.run.call_args.kwargs
+    mock_run_uvicorn.assert_called_once()
+    kwargs = mock_run_uvicorn.call_args.kwargs
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 9999
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.is_pulled", return_value=True)
 @patch("muse.cli_impl.worker.load_backend")
 def test_worker_exits_nonzero_when_assigned_model_fails_to_load(
-    mock_load, mock_pulled, mock_uvicorn, caplog,
+    mock_load, mock_pulled, mock_run_uvicorn, caplog,
 ):
     """A worker that cannot load an assigned model must fail loud.
 
@@ -65,15 +65,15 @@ def test_worker_exits_nonzero_when_assigned_model_fails_to_load(
     rc = run_worker(host="127.0.0.1", port=9999, models=["sd-turbo"], device="cpu")
 
     assert rc != 0, "worker must exit non-zero when an assigned model fails to load"
-    mock_uvicorn.run.assert_not_called()
+    mock_run_uvicorn.assert_not_called()
     assert "sd-turbo" in caplog.text
     assert "diffusers not installed" in caplog.text
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.is_pulled", return_value=False)
 def test_worker_exits_nonzero_when_assigned_model_not_pulled(
-    mock_pulled, mock_uvicorn, caplog,
+    mock_pulled, mock_run_uvicorn, caplog,
 ):
     """An assigned model that isn't pulled (yet) is a configuration bug."""
     import logging
@@ -82,12 +82,12 @@ def test_worker_exits_nonzero_when_assigned_model_not_pulled(
     rc = run_worker(host="127.0.0.1", port=9999, models=["soprano-80m"], device="cpu")
 
     assert rc != 0
-    mock_uvicorn.run.assert_not_called()
+    mock_run_uvicorn.assert_not_called()
     assert "soprano-80m" in caplog.text
 
 
-@patch("muse.cli_impl.worker.uvicorn")
-def test_worker_exits_nonzero_when_model_id_unknown(mock_uvicorn, caplog):
+@patch("muse.cli_impl.worker.run_uvicorn")
+def test_worker_exits_nonzero_when_model_id_unknown(mock_run_uvicorn, caplog):
     """An unknown model-id (not in known_models()) must fail loud.
 
     v0.11.x bundled scripts removed in v0.12.0 manifest in catalogs
@@ -100,15 +100,15 @@ def test_worker_exits_nonzero_when_model_id_unknown(mock_uvicorn, caplog):
     rc = run_worker(host="127.0.0.1", port=9999, models=["bogus-model-xyz"], device="cpu")
 
     assert rc != 0
-    mock_uvicorn.run.assert_not_called()
+    mock_run_uvicorn.assert_not_called()
     assert "ignoring unknown models" in caplog.text
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.is_pulled", return_value=True)
 @patch("muse.cli_impl.worker.load_backend")
 def test_worker_exits_nonzero_when_some_models_load_and_others_fail(
-    mock_load, mock_pulled, mock_uvicorn,
+    mock_load, mock_pulled, mock_run_uvicorn,
 ):
     """Partial success is still a failure. If the worker was asked to
     host N models, it must host all N. Failing 1 of 2 exits non-zero."""
@@ -122,11 +122,11 @@ def test_worker_exits_nonzero_when_some_models_load_and_others_fail(
     )
 
     assert rc != 0
-    mock_uvicorn.run.assert_not_called()
+    mock_run_uvicorn.assert_not_called()
 
 
-@patch("muse.cli_impl.worker.uvicorn")
-def test_worker_mounts_all_bundled_modality_routers(mock_uvicorn):
+@patch("muse.cli_impl.worker.run_uvicorn")
+def test_worker_mounts_all_bundled_modality_routers(mock_run_uvicorn):
     """Regression guard: all bundled modality routers mounted regardless of registry content.
 
     Empty-registry requests must get the OpenAI 404 envelope, not FastAPI's
@@ -138,8 +138,8 @@ def test_worker_mounts_all_bundled_modality_routers(mock_uvicorn):
     """
     run_worker(host="127.0.0.1", port=9999, models=[], device="cpu")
 
-    mock_uvicorn.run.assert_called_once()
-    app = mock_uvicorn.run.call_args.args[0]
+    mock_run_uvicorn.assert_called_once()
+    app = mock_run_uvicorn.call_args.args[0]
     route_paths = _collect_route_paths(app)
     assert "/v1/audio/speech" in route_paths
     assert "/v1/images/generations" in route_paths
@@ -147,9 +147,9 @@ def test_worker_mounts_all_bundled_modality_routers(mock_uvicorn):
     assert "/v1/chat/completions" in route_paths
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.discover_modalities")
-def test_worker_mounts_routers_from_discovery(mock_discover, mock_uvicorn):
+def test_worker_mounts_routers_from_discovery(mock_discover, mock_run_uvicorn):
     """Worker delegates router selection to discover_modalities, not hardcoded imports."""
     from fastapi import APIRouter
 
@@ -168,15 +168,15 @@ def test_worker_mounts_routers_from_discovery(mock_discover, mock_uvicorn):
     mock_discover.assert_called_once()
     # The router from the discovered build function was mounted
     sentinel_build.assert_called_once()
-    app = mock_uvicorn.run.call_args.args[0]
+    app = mock_run_uvicorn.call_args.args[0]
     route_paths = _collect_route_paths(app)
     assert "/v1/sentinel/ping" in route_paths
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.discover_modalities")
 def test_worker_includes_env_modalities_dir_when_set(
-    mock_discover, mock_uvicorn, monkeypatch, tmp_path,
+    mock_discover, mock_run_uvicorn, monkeypatch, tmp_path,
 ):
     """$MUSE_MODALITIES_DIR is appended to the modality scan dirs."""
     mock_discover.return_value = {}
@@ -192,10 +192,10 @@ def test_worker_includes_env_modalities_dir_when_set(
     assert dirs_arg[1] == tmp_path
 
 
-@patch("muse.cli_impl.worker.uvicorn")
+@patch("muse.cli_impl.worker.run_uvicorn")
 @patch("muse.cli_impl.worker.discover_modalities")
 def test_worker_modality_dirs_are_just_bundled_when_env_unset(
-    mock_discover, mock_uvicorn, monkeypatch,
+    mock_discover, mock_run_uvicorn, monkeypatch,
 ):
     """Without $MUSE_MODALITIES_DIR, only the bundled dir is scanned."""
     mock_discover.return_value = {}
