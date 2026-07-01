@@ -403,7 +403,12 @@ def _model_memory_display(extra: dict, catalog_entry: dict | None):
         measurement_keys = ("cpu",)
     else:
         device_label = "GPU"
-        measurement_keys = ("cuda", "auto")
+        # Probe persists under the CONCRETE device it ran on: "cuda" on
+        # NVIDIA, "mps" on Apple Silicon. "auto" is never a written bucket
+        # (it resolves to a concrete device before the measurement is
+        # stored), so including it here found nothing and Mac measurements
+        # showed "-".
+        measurement_keys = ("cuda", "mps")
 
     measurements = (catalog_entry or {}).get("measurements") or {}
     for key in measurement_keys:

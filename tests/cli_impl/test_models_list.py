@@ -140,6 +140,26 @@ def test_memory_display_no_data():
     assert s == "-"
 
 
+def test_memory_display_reads_mps_bucket():
+    # On Apple Silicon the probe persists its peak under the "mps" bucket.
+    # A GPU-side model (device auto/mps) must surface that measurement, not
+    # fall through to "-".
+    extra = {"device": "auto"}
+    catalog = {"measurements": {"mps": {"peak_bytes": 1024**3 * 2}}}
+    s, gb, device = _model_memory_display(extra, catalog)
+    assert gb == 2.0
+    assert device == "GPU"
+    assert s == "2.0 GB GPU"
+
+
+def test_memory_display_mps_device_pin_reads_mps_bucket():
+    extra = {"device": "mps"}
+    catalog = {"measurements": {"mps": {"peak_bytes": 1024**3 * 4}}}
+    s, gb, device = _model_memory_display(extra, catalog)
+    assert gb == 4.0
+    assert device == "GPU"
+
+
 # JSON output -------------------------------------------------------------
 
 
