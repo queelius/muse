@@ -6,7 +6,7 @@ rejected with 503 (closed-by-default). With it, the bearer must match.
 from __future__ import annotations
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from muse.admin.auth import ADMIN_TOKEN_ENV, verify_admin_token
@@ -108,6 +108,29 @@ class TestVerifyAdminToken:
         assert r.status_code == 200
         assert r.json() == {"ok": True}
 
+    def test_non_ascii_bearer_returns_403_not_500(self, monkeypatch):
+        """A non-ASCII bearer must be rejected (403), not crash the server.
+
+        HTTP headers arrive latin-1-decoded, so a raw non-ASCII byte in the
+        Authorization header reaches the dependency as a non-ASCII str.
+        `secrets.compare_digest` raises TypeError on non-ASCII str args; that
+        would surface as a 500. We call the dependency directly because the
+        httpx test client refuses to send non-ASCII header bytes (the real
+        ASGI layer does not).
+        """
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
+        with pytest.raises(HTTPException) as exc:
+            verify_admin_token(authorization="Bearer café")
+        assert exc.value.status_code == 403
+        assert exc.value.detail["error"]["code"] == "invalid_token"
+
+    def test_non_ascii_env_token_does_not_crash(self, monkeypatch):
+        """A non-ASCII configured token must also not crash the compare."""
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "sécret")
+        with pytest.raises(HTTPException) as exc:
+            verify_admin_token(authorization="Bearer wrong")
+        assert exc.value.status_code == 403
+
     def test_token_uses_constant_time_compare(self, client, monkeypatch):
         """Token comparison MUST go through secrets.compare_digest, not `!=`.
 
@@ -130,5 +153,6 @@ class TestVerifyAdminToken:
         r = client.get("/protected", headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 403
         assert calls, "secrets.compare_digest was not called"
-        # The two arguments should be presented bearer + expected env value.
-        assert calls[0] == ("wrong", "secret-correct")
+        # The two arguments should be presented bearer + expected env value,
+        # UTF-8-encoded to bytes so non-ASCII tokens compare without raising.
+        assert calls[0] == (b"wrong", b"secret-correct")

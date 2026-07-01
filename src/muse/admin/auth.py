@@ -65,6 +65,9 @@ def verify_admin_token(authorization: str | None = Header(default=None)) -> None
         )
     presented = authorization[len("Bearer "):]
     # Constant-time compare prevents recovering the token byte-by-byte
-    # via response-time variance.
-    if not secrets.compare_digest(presented, expected):
+    # via response-time variance. Both operands are UTF-8-encoded to bytes:
+    # secrets.compare_digest raises TypeError on non-ASCII str args, so a
+    # bearer carrying non-ASCII bytes (headers arrive latin-1-decoded) would
+    # otherwise 500 instead of cleanly 403'ing as a bad token.
+    if not secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
         raise _err(403, "invalid_token", "Bad admin token")
