@@ -84,12 +84,22 @@ def _infer_defaults(repo_id: str) -> dict[str, Any]:
     }
 
 
+def _is_lora_adapter(siblings: list[str], tags: list[str]) -> bool:
+    """Adapter-only repo shape: top-level safetensors weights plus an
+    explicit LoRA signal in the tags. Callers have already established
+    the repo is text-to-image and has NO model_index.json."""
+    has_weights = any(
+        f.endswith(".safetensors") and "/" not in f for f in siblings
+    )
+    has_lora_tag = "lora" in tags or any(
+        t.startswith("base_model:adapter:") for t in tags
+    )
+    return has_weights and has_lora_tag
+
+
 def _sniff(info) -> bool:
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
-    has_pipeline_config = any(
-        Path(f).name == "model_index.json" for f in siblings
-    )
     # `pipeline_tag` is HF's canonical single-value task field and is the
     # authoritative text-to-image signal. Many community SD checkpoints set
     # it but do NOT mirror "text-to-image" into the loose `tags` bag (which
@@ -99,7 +109,17 @@ def _sniff(info) -> bool:
         getattr(info, "pipeline_tag", None) == "text-to-image"
         or "text-to-image" in tags
     )
-    return has_pipeline_config and is_text_to_image
+    if not is_text_to_image:
+        return False
+    has_pipeline_config = any(
+        Path(f).name == "model_index.json" for f in siblings
+    )
+    if has_pipeline_config:
+        return True
+    # Second accepted shape: a LoRA adapter repo (weights only, no
+    # pipeline config). Resolved via _resolve_lora and served by pairing
+    # with a base pipeline at load time.
+    return _is_lora_adapter(siblings, tags)
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

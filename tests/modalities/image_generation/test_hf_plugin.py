@@ -202,3 +202,39 @@ def test_resolve_download_uses_bare_pattern_when_no_fp16_variant():
     # No fp16-only patterns when the repo doesn't have variants
     assert "*/*.fp16.safetensors" not in patterns
     assert "model_index.json" in patterns
+
+
+def test_sniff_true_on_lora_adapter_repo():
+    """Real shape of nerijs/pixel-art-xl (verified 2026-07-02): no
+    model_index.json, one top-level safetensors, lora + base_model tags."""
+    info = _fake_info(
+        siblings=[".gitattributes", "README.md", "pixel-art-xl.safetensors"],
+        tags=[
+            "diffusers", "text-to-image", "stable-diffusion", "lora",
+            "base_model:stabilityai/stable-diffusion-xl-base-1.0",
+            "base_model:adapter:stabilityai/stable-diffusion-xl-base-1.0",
+        ],
+        pipeline_tag="text-to-image",
+    )
+    assert HF_PLUGIN["sniff"](info) is True
+
+
+def test_sniff_false_on_safetensors_without_lora_signal():
+    """A bare safetensors artifact repo (no lora tag, no adapter tag) is
+    NOT claimed, even when tagged text-to-image."""
+    info = _fake_info(
+        siblings=["model.safetensors"],
+        tags=["text-to-image", "diffusers"],
+        pipeline_tag="text-to-image",
+    )
+    assert HF_PLUGIN["sniff"](info) is False
+
+
+def test_sniff_false_on_lora_repo_without_text_to_image_signal():
+    """A LoRA for some non-t2i pipeline is not ours."""
+    info = _fake_info(
+        siblings=["adapter.safetensors"],
+        tags=["lora", "base_model:adapter:some/llm"],
+        pipeline_tag="text-generation",
+    )
+    assert HF_PLUGIN["sniff"](info) is False
