@@ -153,6 +153,25 @@ class DecisionLogEntry:
     evicted: list[str] = field(default_factory=list)
 
 
+@dataclass
+class InFlightLoad:
+    """A cold load that has been claimed but whose worker has not yet
+    allocated its memory.
+
+    Carries `memory_gb` + `pool` so that concurrent `_decide` calls can
+    RESERVE the pending load against the live free-memory reading before the
+    worker actually consumes VRAM. The live probe does not reflect an
+    in-flight load until its worker allocates (seconds later), so without
+    this reservation two concurrent cold loads for different models would
+    both pass the fit check against the same free reading and over-commit the
+    device. The single-event-loop request path masked this by serializing
+    every acquire; running acquire off-loop (asyncio.to_thread) exposes it.
+    """
+    event: threading.Event
+    memory_gb: float
+    pool: str  # "cuda" or "cpu": the memory pool this load reserves against
+
+
 class LoadDirector:
     """Coordinates lazy loads + LRU eviction for the supervisor.
 
@@ -172,10 +191,13 @@ class LoadDirector:
     Concurrency:
       - `lock` is an RLock so the same thread can re-enter (e.g. status
         snapshot from inside an admin route that already holds it).
-      - `in_flight_loads` maps model_id to threading.Event. The Event is
-        created under the lock at decision time; waiters drop the lock,
-        await it, then re-enter the decision phase. The winner sets the
-        Event in the commit phase (or on exception in the cleanup path).
+      - `in_flight_loads` maps model_id to an InFlightLoad record (Event +
+        reserved memory_gb + pool). The record is created under the lock at
+        decision time; waiters drop the lock, await its Event, then re-enter
+        the decision phase. The winner sets the Event in the commit phase (or
+        on exception in the cleanup path). The reserved memory is debited
+        from available memory by every concurrent `_decide` so that
+        off-loop (multi-thread) acquires cannot over-admit the device.
       - `recent_decisions` is a deque(maxlen=20) appended to under the
         lock; admin reads it via list() while holding the lock for a
         consistent snapshot.
@@ -202,9 +224,17 @@ class LoadDirector:
         self.cpu_headroom_gb = cpu_headroom_gb
 
         self.loaded: dict[str, LoadEntry] = {}
-        self.in_flight_loads: dict[str, threading.Event] = {}
+        self.in_flight_loads: dict[str, InFlightLoad] = {}
         self.recent_decisions: collections.deque = collections.deque(maxlen=20)
         self.lock = threading.RLock()
+        # Monotonic counter bumped under the lock on every memory-mutating
+        # event: a cold load claimed (_decide) OR an eviction victim popped
+        # (_evict_lru_until_fits). _load_and_commit snapshots it around a
+        # load's free_before .. free_after window to detect whether ANOTHER
+        # load or an eviction happened during that window (either pollutes the
+        # global free-memory delta the observed-peak writeback infers a peak
+        # from).
+        self._inflight_epoch = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -565,10 +595,28 @@ class LoadDirector:
             # we don't strand an Event.
             memory_gb = float(manifest.get("capabilities", {}).get("memory_gb", 0.0) or 0.0)
             device = declared_device(manifest.get("capabilities"))
+            pool = self._resolve_pool_device(device)
 
             _, available_gb = self._available_for_device(device)
-            if memory_gb > available_gb:
-                shortfall_gb = memory_gb - available_gb
+            # Debit same-pool loads that are claimed but not yet resident.
+            # The live probe won't reflect them until their worker allocates
+            # VRAM (seconds later), so without this a concurrent _decide for a
+            # different model would size against the same free reading and
+            # over-admit -> OOM. See InFlightLoad.
+            #
+            # This is deliberately CONSERVATIVE: while an in-flight load's
+            # worker is mid-allocation the live probe has ALREADY dropped by
+            # what it consumed so far, yet we still subtract its full declared
+            # memory_gb -- a transient double-count that can make a concurrent
+            # load that genuinely fits take the evict_and_retry path (a
+            # possible spurious evict or 503) until the first load commits and
+            # frees its reservation. That is the SAFE direction (never
+            # over-admits / OOMs). A precise fix needs per-load allocation
+            # accounting against a shared global probe (which is itself
+            # ambiguous with multiple concurrent loads); deferred as follow-up.
+            effective_available_gb = available_gb - self._reserved_for_pool(pool)
+            if memory_gb > effective_available_gb:
+                shortfall_gb = memory_gb - effective_available_gb
                 # Defer eviction to acquire(), which runs it outside the
                 # lock so concurrent hot-acquires keep working during
                 # the (potentially multi-second) disable_fn + poll
@@ -578,9 +626,13 @@ class LoadDirector:
                 # claim the slot then.
                 return ("evict_and_retry", shortfall_gb, device, memory_gb)
 
-            # Claim ownership of the load.
-            event = threading.Event()
-            self.in_flight_loads[model_id] = event
+            # Claim ownership of the load, reserving its memory + pool so
+            # concurrent decisions see it, and bump the epoch so overlapping
+            # loads can detect each other for the observed-peak gate.
+            self.in_flight_loads[model_id] = InFlightLoad(
+                event=threading.Event(), memory_gb=memory_gb, pool=pool,
+            )
+            self._inflight_epoch += 1
             return ("load",)
 
     def _get_in_flight_event(self, model_id: str) -> threading.Event | None:
@@ -591,7 +643,20 @@ class LoadDirector:
         we return None and the caller falls through to re-decide.
         """
         with self.lock:
-            return self.in_flight_loads.get(model_id)
+            rec = self.in_flight_loads.get(model_id)
+            return rec.event if rec is not None else None
+
+    def _reserved_for_pool(self, pool: str, *, exclude: str | None = None) -> float:
+        """Sum of memory_gb for claimed-but-not-yet-resident loads drawing on
+        `pool`. Callers hold self.lock. `exclude` drops one model_id (its own
+        slot) from the sum. Debited from available memory in the fit check so
+        concurrent off-loop acquires cannot over-commit the device.
+        """
+        return sum(
+            rec.memory_gb
+            for mid, rec in self.in_flight_loads.items()
+            if rec.pool == pool and mid != exclude
+        )
 
     def _load_and_commit(
         self, model_id: str, *, manifest: dict, initial_refcount: int = 1,
@@ -614,7 +679,16 @@ class LoadDirector:
         memory_gb = float(manifest.get("capabilities", {}).get("memory_gb", 0.0) or 0.0)
         device = declared_device(manifest.get("capabilities"))
 
-        free_before_gb = self._free_for_device(device)
+        with self.lock:
+            free_before_gb = self._free_for_device(device)
+            # Snapshot in-flight state to detect whether ANOTHER load overlaps
+            # our free_before .. free_after window. Our own slot is already in
+            # in_flight_loads (claimed in _decide), so len==1 means we are the
+            # only load right now. epoch catches a load that is claimed AND
+            # released entirely within our window (len would read 1 at both
+            # endpoints yet the delta is still polluted).
+            solo_at_start = len(self.in_flight_loads) == 1
+            epoch_before = self._inflight_epoch
         try:
             worker_port = self.enable_fn(model_id)
         except BaseException as e:
@@ -663,24 +737,36 @@ class LoadDirector:
                 evicted=[],
             ))
 
-            event = self.in_flight_loads.pop(model_id, None)
+            # Read the overlap snapshot BEFORE popping our own slot: len==1
+            # here means we are still the only in-flight load.
+            solo_at_end = len(self.in_flight_loads) == 1
+            epoch_after = self._inflight_epoch
+            rec = self.in_flight_loads.pop(model_id, None)
 
-        # event.set() outside the lock is fine; threading.Event is its
+        # Our load is "solo" (no overlapping load polluting the free-memory
+        # delta) iff we were the only in-flight load at BOTH endpoints and no
+        # other load was claimed during our window.
+        solo_load = solo_at_start and solo_at_end and (epoch_after == epoch_before)
+
+        # rec.event.set() outside the lock is fine; threading.Event is its
         # own synchronization. Doing it inside the lock would block any
         # awakened waiter on its first re-entry into _decide.
-        if event is not None:
-            event.set()
+        if rec is not None:
+            rec.event.set()
 
-        # Task D: schedule the observed-peak writeback. Compute the delta
-        # in bytes; observed_peak swallows non-positive values internally.
-        # Spawn happens AFTER waiters wake up so the writeback IO can't
-        # delay them.
-        observed_bytes = int((free_before_gb - free_after_gb) * 1024**3)
-        self.observed_peak(
-            model_id,
-            observed_peak_bytes=observed_bytes,
-            device=device,
-        )
+        # Task D: schedule the observed-peak writeback ONLY for a solo load.
+        # With overlapping loads the free_before..free_after delta reflects
+        # BOTH models, and the writeback (monotonic-upward only) would
+        # permanently inflate this model's recorded peak. Skipping just loses
+        # one self-heal opportunity, exactly when it cannot be measured
+        # cleanly. observed_peak swallows non-positive values internally.
+        if solo_load:
+            observed_bytes = int((free_before_gb - free_after_gb) * 1024**3)
+            self.observed_peak(
+                model_id,
+                observed_peak_bytes=observed_bytes,
+                device=device,
+            )
 
         return worker_port
 
@@ -694,9 +780,9 @@ class LoadDirector:
         the new singleton winner.
         """
         with self.lock:
-            event = self.in_flight_loads.pop(model_id, None)
-        if event is not None:
-            event.set()
+            rec = self.in_flight_loads.pop(model_id, None)
+        if rec is not None:
+            rec.event.set()
 
     # ------------------------------------------------------------------
     # Eviction (Task C)
@@ -773,8 +859,17 @@ class LoadDirector:
                     # (-> load) instead of 503'ing spuriously. Only raise
                     # when it genuinely still cannot fit an evicted-empty
                     # device (else acquire would spin re-deciding forever).
+                    # Net out other same-pool in-flight reservations: without
+                    # this, a concurrent pending load (which the live probe
+                    # doesn't see yet) would let this path conclude "fits",
+                    # acquire re-decides -> evict_and_retry -> no candidates ->
+                    # "fits" ... an infinite spin. With it, the model that
+                    # can't fit gets the clean 503.
                     _, available_gb = self._available_for_device(device)
-                    if available_gb >= required_gb:
+                    reserved_gb = self._reserved_for_pool(
+                        self._resolve_pool_device(device), exclude=model_id,
+                    )
+                    if (available_gb - reserved_gb) >= required_gb:
                         return
                     # Lazy import to avoid a cycle: load_director ->
                     # admin.operations -> supervisor -> load_director
@@ -802,6 +897,12 @@ class LoadDirector:
                 # state is already consistent (no zombie LoadEntry
                 # claiming a worker port that isn't running).
                 self.loaded.pop(victim_id, None)
+                # Bump the epoch: an eviction frees VRAM, which pollutes any
+                # concurrent load's free_before..free_after delta just like a
+                # concurrent load does. Counting it here lets _load_and_commit's
+                # solo gate skip that load's observed-peak writeback instead of
+                # recording an under-estimate.
+                self._inflight_epoch += 1
 
                 free_before_gb = self._free_for_device(device)
 

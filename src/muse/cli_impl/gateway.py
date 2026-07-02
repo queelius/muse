@@ -527,17 +527,44 @@ async def _route_via_director(
     # 0 GB and never evicts to make room for it.
     manifest = backfill_manifest_memory(manifest, model_id)
 
-    # 3. Acquire. The director may load (cold), evict (LRU), or
-    # short-circuit (already loaded). It returns the worker port hosting
-    # the model. OperationError carries an explicit (status, code,
-    # message) to surface back to the client.
+    # 3. Acquire, OFF the event loop. director.acquire may block for tens of
+    # seconds on a cold load (worker spawn + health poll). Running it
+    # synchronously here would freeze the single gateway event loop and stall
+    # EVERY concurrent request, including ones for already-hot models
+    # (measured: a 37s cold load stalled 6 hot requests for ~35s each).
+    # asyncio.to_thread dispatches it to a worker thread; the director's
+    # RLock + in-flight memory reservation make concurrent off-loop acquires
+    # safe (they cannot over-admit the device). asyncio.shield keeps the
+    # acquire running if THIS request is cancelled (client disconnect /
+    # timeout) so a load that already bumped refcount is released rather than
+    # leaked -- a leaked refcount would pin the model non-evictable forever.
+    acquire_future = asyncio.ensure_future(
+        asyncio.to_thread(state.director.acquire, model_id, manifest=manifest)
+    )
     try:
-        worker_port = state.director.acquire(model_id, manifest=manifest)
+        worker_port = await asyncio.shield(acquire_future)
     except OperationError as exc:
         return _openai_error(
             exc.status, exc.code, exc.message,
             error_type=error_type_for_status(exc.status),
         )
+    except asyncio.CancelledError:
+        # This request was cancelled while the acquire ran in its detached
+        # thread. shield() let the acquire keep running; if it SUCCEEDS it
+        # bumped refcount, so release once it settles (a threading load
+        # cannot be interrupted). A failed acquire never bumped refcount, so
+        # only release on a clean result.
+        def _release_if_acquired(fut: "asyncio.Future") -> None:
+            if not fut.cancelled() and fut.exception() is None:
+                try:
+                    state.director.release(model_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "release after cancelled acquire failed for %r",
+                        model_id, exc_info=True,
+                    )
+        acquire_future.add_done_callback(_release_if_acquired)
+        raise
 
     # 4. Forward. The release call is wired into the response shape:
     # for buffered responses, fire in a finally clause once the body is
@@ -586,7 +613,12 @@ async def _forward_with_release(
     # wedging eviction. Release the slot first, then re-raise (L16).
     try:
         body = await request.body()
-    except Exception:
+    except BaseException:
+        # BaseException, not just Exception: a CancelledError here (client
+        # disconnect / request cancellation mid body-read) is a BaseException,
+        # so `except Exception` would skip the release and strand the refcount
+        # -- pinning the model non-evictable. We re-raise, so cancellation
+        # still propagates.
         try:
             director.release(model_id)
         except Exception:  # noqa: BLE001
@@ -608,7 +640,11 @@ async def _forward_with_release(
     )
     try:
         response = await stream_ctx.__aenter__()
-    except Exception:
+    except BaseException:
+        # BaseException, not just Exception: a CancelledError here (the client
+        # disconnected while we were opening the worker connection) must
+        # release the refcount too, or the hot model is pinned non-evictable
+        # forever. We re-raise below, so cancellation still propagates.
         # __aenter__ raised: release the refcount FIRST, then aclose
         # the AsyncClient. Order matters for cascading failure: if we
         # awaited aclose() first and IT raised, control would exit via

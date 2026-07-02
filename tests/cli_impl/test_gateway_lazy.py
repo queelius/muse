@@ -18,6 +18,7 @@ These tests cover that contract and verify the SSE release-timing.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1035,3 +1036,143 @@ class TestLegacyStaticRoutesStillWork:
             )
 
         assert r.status_code == 200
+
+
+# =============================================================================
+# v0.50.x: acquire runs OFF the event loop (asyncio.to_thread) so a cold load
+# no longer blocks the single gateway loop, plus cancellation-safe release.
+# =============================================================================
+
+
+class TestAcquireOffEventLoop:
+    def test_acquire_runs_off_the_event_loop(self):
+        """director.acquire must run on a worker thread, not the event-loop
+        thread. Proven by comparing the thread that runs acquire against the
+        thread that runs the forward (which stays on the loop). A synchronous
+        acquire would run on the SAME thread as the forward.
+        """
+        threads: dict[str, int] = {}
+        state = _make_state_with_director()
+
+        def record_acquire(model_id, *, manifest):
+            threads["acquire"] = threading.get_ident()
+            return 9099
+
+        state.director.acquire.side_effect = record_acquire
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        def _capture_stream(method, url, **kwargs):
+            threads["forward"] = threading.get_ident()
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {"content-type": "application/json"}
+            resp.aread = AsyncMock(return_value=b'{"ok": true}')
+            ctx = MagicMock()
+            ctx.__aenter__ = AsyncMock(return_value=resp)
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            return ctx
+
+        with _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            mc = MagicMock()
+            mc.__aenter__ = AsyncMock(return_value=mc)
+            mc.__aexit__ = AsyncMock(return_value=None)
+            mc.aclose = AsyncMock()
+            mc.stream = MagicMock(side_effect=_capture_stream)
+            mock_cls.return_value = mc
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 200
+        assert "acquire" in threads and "forward" in threads
+        assert threads["acquire"] != threads["forward"]
+
+    async def test_cancelled_request_during_acquire_releases_refcount(self):
+        """If the request is cancelled (client disconnect / timeout) while the
+        off-loop acquire is still running, and the acquire then SUCCEEDS (it
+        bumped refcount), release must fire so the model is not pinned
+        non-evictable forever. The forward must never be reached.
+        """
+        from muse.cli_impl.gateway import _route_via_director
+
+        started = threading.Event()
+        gate = threading.Event()
+        forward_called: list[bool] = []
+        state = _make_state_with_director()
+
+        def slow_acquire(model_id, *, manifest):
+            started.set()
+            gate.wait(timeout=2)  # stay in-flight until the test releases us
+            return 9099
+
+        state.director.acquire.side_effect = slow_acquire
+
+        async def fake_forward(*args, **kwargs):
+            forward_called.append(True)
+            return MagicMock()
+
+        with _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway._forward_with_release", new=fake_forward):
+            task = asyncio.create_task(
+                _route_via_director(
+                    MagicMock(), "v1/audio/speech", "fake-model", state, 1.0,
+                )
+            )
+            await asyncio.to_thread(started.wait, 2)  # acquire is now running off-loop
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            gate.set()  # let the detached acquire finish -> callback releases
+            for _ in range(300):
+                if state.director.release.called:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert not forward_called  # forward never reached (cancelled first)
+        state.director.release.assert_called_once_with("fake-model")
+
+    async def test_forward_release_fires_on_cancellation_during_stream_open(self):
+        """A CancelledError while opening the worker connection (client
+        disconnect) must still release the refcount. CancelledError is a
+        BaseException, so an `except Exception` cleanup would leak it and pin
+        the model non-evictable.
+        """
+        from muse.cli_impl.gateway import _forward_with_release
+
+        director = MagicMock()
+        req = MagicMock()
+        req.body = AsyncMock(return_value=b"")
+        req.headers = {}
+        req.method = "POST"
+        req.query_params = {}
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            mc = MagicMock()
+            mc.aclose = AsyncMock()
+            ctx = MagicMock()
+            ctx.__aenter__ = AsyncMock(side_effect=asyncio.CancelledError())
+            mc.stream = MagicMock(return_value=ctx)
+            mock_cls.return_value = mc
+            with pytest.raises(asyncio.CancelledError):
+                await _forward_with_release(
+                    req, "http://127.0.0.1:9099/x", 1.0,
+                    director=director, model_id="m",
+                )
+        director.release.assert_called_once_with("m")
+
+    async def test_forward_release_fires_on_cancellation_during_body_read(self):
+        """A CancelledError during the request body read must release too."""
+        from muse.cli_impl.gateway import _forward_with_release
+
+        director = MagicMock()
+        req = MagicMock()
+        req.body = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await _forward_with_release(
+                req, "http://127.0.0.1:9099/x", 1.0,
+                director=director, model_id="m",
+            )
+        director.release.assert_called_once_with("m")

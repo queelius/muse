@@ -463,6 +463,41 @@ the *same* cold model collapse to one load via an `asyncio.Future` /
 for *different* cold models proceed in parallel because the load phase
 runs outside the lock.
 
+**Acquire runs OFF the event loop (v0.50.3+).** The gateway dispatches
+`director.acquire` via `await asyncio.to_thread(...)` under
+`asyncio.shield` (`gateway.py:_route_via_director`), NOT as a blocking
+synchronous call. A cold load takes tens of seconds (worker spawn +
+health poll); calling it synchronously froze the single gateway event
+loop and stalled EVERY concurrent request, including ones for
+already-hot models (measured: a 37s cold load stalled 6 hot requests
+~35s each -- see `examples/concurrent/RESULTS.md`). Moving it off-loop
+makes request-path acquires genuinely concurrent, which required three
+companion safety fixes the serialized path had masked:
+1. **In-flight memory reservation.** `in_flight_loads` now maps to an
+   `InFlightLoad(event, memory_gb, pool)` record, and `_decide` debits
+   the sum of same-pool in-flight loads (`_reserved_for_pool`) from
+   available memory before the fit check (the eviction no-candidates
+   re-check nets the same reservations). Without this, two concurrent
+   cold loads for different models would both pass the fit check against
+   the same live free-VRAM reading and over-commit -> OOM. The
+   reservation is deliberately conservative (it may over-reserve while a
+   worker is mid-allocation, trading a possible spurious evict/503 for
+   guaranteed no-OOM; precise per-load allocation accounting is a
+   deferred follow-up).
+2. **Cancellation-safe release.** If a request is cancelled (client
+   disconnect / timeout) while its off-loop acquire is still running,
+   `shield` keeps the acquire alive and a done-callback releases the
+   refcount if the acquire later succeeds -- else a bumped refcount leaks
+   and pins the model non-evictable forever. `_forward_with_release`'s
+   cleanup was likewise widened to `except BaseException` so a cancel on
+   the forward leg also releases.
+3. **Overlap-gated observed-peak writeback.** `_load_and_commit` only
+   writes the self-heal peak when the load was "solo" (the sole in-flight
+   load at both endpoints of its free_before..free_after window AND no
+   concurrent load/eviction bumped `_inflight_epoch`); an overlapping
+   load or eviction pollutes the global free-memory delta the writeback
+   infers a peak from.
+
 Memory accounting is live, not declared. `muse.core.memory_probe`
 wraps `pynvml.nvmlDeviceGetMemoryInfo` (GPU) and
 `psutil.virtual_memory().available` (CPU). `nvidia-ml-py` is a soft

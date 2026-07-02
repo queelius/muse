@@ -220,7 +220,11 @@ class TestH4EventWaitTimeout:
         in the loaded set (we insert it manually to simulate a belated
         success) or attempt to become the new winner.
         """
-        from muse.cli_impl.load_director import LoadDirector, _INFLIGHT_WAIT_TIMEOUT_SECONDS
+        from muse.cli_impl.load_director import (
+            InFlightLoad,
+            LoadDirector,
+            _INFLIGHT_WAIT_TIMEOUT_SECONDS,
+        )
 
         # Patch the constant so the test uses 0.1s instead of 180s.
         import muse.cli_impl.load_director as ld_mod
@@ -262,7 +266,9 @@ class TestH4EventWaitTimeout:
             def stash_thread():
                 with director.lock:
                     evt = threading.Event()
-                    director.in_flight_loads["test-model"] = evt
+                    director.in_flight_loads["test-model"] = InFlightLoad(
+                        event=evt, memory_gb=0.1, pool="cpu",
+                    )
                 stash_ready.set()
                 # Hold the event un-set for 5 seconds (longer than the
                 # 0.1s timeout we patched in). The waiter must unblock.
