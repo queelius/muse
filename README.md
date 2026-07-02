@@ -229,6 +229,8 @@ from muse.modalities.chat_completion import ChatClient
 # MUSE_SERVER env var sets the base URL for remote use; default http://localhost:8000
 wav_bytes = SpeechClient().infer("Hello world")
 pngs = GenerationsClient().generate("a cat on mars, cinematic", n=1)
+# LoRA adapters: muse pull hf://nerijs/pixel-art-xl (or curated pixel-art-xl),
+# optional --base <muse-id-or-hf-repo>, per-request lora_scale via extra_body.
 vectors = EmbeddingsClient().embed(["alpha", "beta"])   # list[list[float]]
 chat = ChatClient().chat(
     model="qwen3-8b-gguf-q4-k-m",
