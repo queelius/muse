@@ -10,6 +10,8 @@ Follows OpenAI's /v1/images/generations contract:
     `strength` (0.0 to 1.0). When `image` is set, the runtime routes through
     AutoPipelineForImage2Image. Requires the selected model to advertise
     `capabilities.supports_img2img: True` in its manifest.
+  - LoRA extension: `lora_scale` (0.0 to 2.0). Requires the selected model
+    to advertise `capabilities.lora_adapter: True` in its manifest.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ class GenerationRequest(BaseModel):
     seed: int | None = None
     image: str | None = None
     strength: float | None = Field(default=None, ge=0.0, le=1.0)
+    lora_scale: float | None = Field(default=None, ge=0.0, le=2.0)
 
     @field_validator("size")
     @classmethod
@@ -69,6 +72,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # Resolve the effective model id (the registry default when req.model is None)
         # so capability-gate errors and decode-failure errors name a real model.
         effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+
+        # lora_scale only applies to LoRA adapter models; reject early
+        # for others (mirrors the supports_img2img capability gate).
+        if req.lora_scale is not None:
+            manifest = registry.manifest(MODALITY, effective_id) or {}
+            if not manifest.get("capabilities", {}).get("lora_adapter"):
+                return error_response(
+                    400,
+                    "lora_not_supported",
+                    f"model {effective_id!r} is not a LoRA adapter model; "
+                    f"lora_scale only applies to LoRA models",
+                )
 
         # img2img gating: if `image` is supplied, the selected model must
         # declare `supports_img2img: True` in its manifest, and the input
@@ -103,6 +118,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "guidance": req.guidance,
                 "init_image": init_image,
                 "strength": req.strength,
+                "lora_scale": req.lora_scale,
             }
             if req.seed is not None:
                 kwargs["seed"] = req.seed + seed_offset

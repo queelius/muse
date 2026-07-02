@@ -183,6 +183,32 @@ def client_without_edits_capability():
     return TestClient(app)
 
 
+@pytest.fixture
+def lora_model():
+    """Recording model registered with capabilities.lora_adapter: True."""
+    return RecordingImageModel(model_id="fake-lora-model")
+
+
+@pytest.fixture
+def client_with_lora_model(lora_model):
+    """Client whose registered model declares capabilities.lora_adapter: True."""
+    reg = ModalityRegistry()
+    reg.register(
+        "image/generation",
+        lora_model,
+        manifest={
+            "model_id": lora_model.model_id,
+            "modality": "image/generation",
+            "capabilities": {"lora_adapter": True},
+        },
+    )
+    app = create_app(
+        registry=reg,
+        routers={"image/generation": build_router(reg)},
+    )
+    return TestClient(app)
+
+
 def _png_bytes(width=32, height=32, color=(0, 128, 255)):
     """Helper: minimal PNG bytes via PIL."""
     import io
@@ -670,3 +696,41 @@ def test_post_variations_response_format_url_returns_data_url(
     entry = r.json()["data"][0]
     assert entry["url"].startswith("data:image/png;base64,")
     assert "revised_prompt" not in entry
+
+
+# ---------------- lora_scale (capability gate) ----------------
+
+
+def test_lora_scale_on_non_lora_model_returns_400(client_with_uncapable_model):
+    """lora_scale against a model without capabilities.lora_adapter is a
+    capability mismatch, mirroring the img2img gate."""
+    r = client_with_uncapable_model.post("/v1/images/generations", json={
+        "prompt": "a cat",
+        "model": "fake-t2i-only",
+        "lora_scale": 0.8,
+    })
+    assert r.status_code == 400
+    body = r.json()
+    assert "error" in body
+    assert body["error"]["code"] == "lora_not_supported"
+
+
+def test_lora_scale_forwarded_to_lora_model(client_with_lora_model, lora_model):
+    """A model whose manifest declares lora_adapter receives the value."""
+    r = client_with_lora_model.post("/v1/images/generations", json={
+        "prompt": "pixel art, a knight",
+        "model": "fake-lora-model",
+        "lora_scale": 0.7,
+    })
+    assert r.status_code == 200, r.text
+    assert len(lora_model.calls) == 1
+    assert lora_model.calls[0]["lora_scale"] == 0.7
+
+
+def test_lora_scale_out_of_range_is_422(client_with_lora_model):
+    r = client_with_lora_model.post("/v1/images/generations", json={
+        "prompt": "a cat",
+        "model": "fake-lora-model",
+        "lora_scale": 3.5,
+    })
+    assert r.status_code == 422
