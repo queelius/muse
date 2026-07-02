@@ -2130,3 +2130,95 @@ class TestLoraPullValidation:
         from muse.core.catalog import _validate_lora_capabilities
 
         _validate_lora_capabilities(self._lora_manifest({}))  # no raise
+
+
+class TestPullBaseOverrideDispatch:
+    """End-to-end dispatch coverage for `pull(identifier, base_override=...)`.
+
+    Mocks `_pull_via_resolver` itself (rather than the deeper venv/download
+    machinery) so each test can assert exactly what `pull()` decided to
+    forward, across all three `://`-URI sub-branches plus the named-curated
+    alias branch.
+    """
+
+    def _capture(self, monkeypatch):
+        import muse.core.catalog as cat
+        calls = {}
+
+        def fake_pvr(uri, **kwargs):
+            calls["uri"] = uri
+            calls.update(kwargs)
+
+        monkeypatch.setattr(cat, "_pull_via_resolver", fake_pvr)
+        return calls
+
+    def test_uri_branch_threads_base_override(self, tmp_catalog, monkeypatch):
+        from muse.core.catalog import pull
+
+        calls = self._capture(monkeypatch)
+        pull("hf://org/some-lora", base_override="sdxl-turbo")
+        assert calls["capabilities_overlay"] == {"base_model": "sdxl-turbo"}
+
+    def test_uri_branch_without_override_passes_none(self, tmp_catalog, monkeypatch):
+        from muse.core.catalog import pull
+
+        calls = self._capture(monkeypatch)
+        pull("hf://org/some-lora")
+        assert calls["capabilities_overlay"] is None
+
+    def test_curated_alias_branch_merges_base_override_over_capabilities(
+        self, tmp_catalog, monkeypatch,
+    ):
+        import muse.core.catalog as cat
+        from muse.core.catalog import pull
+        from muse.core.curated import CuratedEntry
+
+        fake_curated = CuratedEntry(
+            id="some-lora-alias",
+            bundled=False,
+            uri="hf://org/some-lora",
+            modality="image/generation",
+            size_gb=0.2,
+            description="a lora",
+            tags=(),
+            capabilities={"trust_remote_code": True},
+        )
+        monkeypatch.setattr(cat, "find_curated", lambda ident: fake_curated)
+
+        calls = self._capture(monkeypatch)
+        pull("some-lora-alias", base_override="sdxl-turbo")
+
+        assert calls["capabilities_overlay"]["base_model"] == "sdxl-turbo"
+        # Pre-existing curated capability keys survive the merge.
+        assert calls["capabilities_overlay"]["trust_remote_code"] is True
+        assert calls["model_id_override"] == "some-lora-alias"
+
+    def test_uri_matching_curated_by_uri_threads_base_override(
+        self, tmp_catalog, monkeypatch,
+    ):
+        """Finding 1 regression: `--base` must not be dropped when the raw
+        URI happens to match a curated entry by URI (as opposed to the user
+        typing the curated alias id).
+        """
+        import muse.core.catalog as cat
+        from muse.core.catalog import pull
+        from muse.core.curated import CuratedEntry
+
+        fake_uri_curated = CuratedEntry(
+            id="some-lora-alias",
+            bundled=False,
+            uri="hf://org/some-lora",
+            modality="image/generation",
+            size_gb=0.2,
+            description="a lora",
+            tags=(),
+            capabilities={"trust_remote_code": True},
+        )
+        monkeypatch.setattr(cat, "find_curated", lambda ident: None)
+        monkeypatch.setattr(cat, "find_curated_by_uri", lambda uri: fake_uri_curated)
+
+        calls = self._capture(monkeypatch)
+        pull("hf://org/some-lora", base_override="sdxl-turbo")
+
+        assert calls["capabilities_overlay"]["base_model"] == "sdxl-turbo"
+        assert calls["capabilities_overlay"]["trust_remote_code"] is True

@@ -605,6 +605,12 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
     install museq[server] (editable) + pip_extras, fetch weights, and
     record the venv's Python path so `muse serve` can spawn workers
     with the right interpreter.
+
+    `base_override` applies to LoRA adapter pulls (both resolver-URI and
+    curated-by-URI/curated-alias branches): it is merged into the
+    capabilities overlay as `base_model`, winning over any base already
+    declared by the adapter repo or a curated entry. It is warned-and-
+    ignored for bundled bare-id pulls, which have no LoRA base to set.
     """
     curated = find_curated(identifier)
     if curated is not None:
@@ -640,10 +646,13 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
         # is also preserved so the catalog key stays friendly.
         uri_curated = find_curated_by_uri(identifier)
         if uri_curated is not None:
+            overlay = dict(uri_curated.capabilities or {})
+            if base_override:
+                overlay["base_model"] = base_override
             _pull_via_resolver(
                 identifier,
                 model_id_override=uri_curated.id,
-                capabilities_overlay=uri_curated.capabilities or None,
+                capabilities_overlay=overlay or None,
                 modality_override=uri_curated.modality,
             )
         else:
