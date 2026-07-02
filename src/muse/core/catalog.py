@@ -556,7 +556,39 @@ def _muse_server_install_args() -> list[str]:
     return [f"{_PYPI_DIST}[server]"]
 
 
-def pull(identifier: str) -> None:
+def _validate_lora_capabilities(manifest: dict) -> None:
+    """Reject unservable LoRA manifests at pull time, post-overlay.
+
+    A lora_adapter entry without a base_model can never load; a
+    muse-id base that is not pulled would fail at first request with a
+    from_pretrained error. Both fail here, BEFORE the expensive venv
+    creation and download, with the fix in the message. Runs after the
+    curated/--base capabilities overlay merge so a --base override can
+    satisfy a tagless adapter repo.
+    """
+    from muse.core.resolvers import ResolverError
+
+    caps = manifest.get("capabilities") or {}
+    if not caps.get("lora_adapter"):
+        return
+    model_id = manifest.get("model_id", "<unknown>")
+    base = caps.get("base_model")
+    if not base:
+        raise ResolverError(
+            f"LoRA adapter {model_id!r} declares no base model and none was "
+            f"given; re-run with: muse pull <identifier> --base "
+            f"<muse-id-or-hf-repo>"
+        )
+    if "/" not in base:
+        entry = _read_catalog().get(base)
+        if not entry or not entry.get("local_dir"):
+            raise ResolverError(
+                f"LoRA base {base!r} is not pulled; run `muse pull {base}` "
+                f"first, then retry"
+            )
+
+
+def pull(identifier: str, *, base_override: str | None = None) -> None:
     """Pull a model. Dispatch by identifier shape, with curated alias resolution.
 
     Resolution order:
@@ -583,10 +615,13 @@ def pull(identifier: str) -> None:
             # Also forward the curated capabilities overlay so any
             # runtime-specific settings (trust_remote_code, chat_format,
             # context_length) land in the persisted manifest.
+            overlay = dict(curated.capabilities or {})
+            if base_override:
+                overlay["base_model"] = base_override
             _pull_via_resolver(
                 curated.uri,
                 model_id_override=curated.id,
-                capabilities_overlay=curated.capabilities or None,
+                capabilities_overlay=overlay or None,
                 modality_override=curated.modality,
             )
             return
@@ -612,8 +647,19 @@ def pull(identifier: str) -> None:
                 modality_override=uri_curated.modality,
             )
         else:
-            _pull_via_resolver(identifier)
+            _pull_via_resolver(
+                identifier,
+                capabilities_overlay=(
+                    {"base_model": base_override} if base_override else None
+                ),
+            )
         return
+
+    if base_override:
+        logger.warning(
+            "--base only applies to resolver-pulled LoRA adapters; "
+            "ignored for %s", identifier,
+        )
 
     # Bare id: could be a bundled script OR a resolver-pulled model
     # (resolver-pulled ids also show up in known_models() via their
@@ -785,6 +831,8 @@ def _pull_via_resolver(
     if model_id_override:
         manifest["model_id"] = model_id_override
     model_id = manifest["model_id"]
+
+    _validate_lora_capabilities(manifest)
 
     venvs_root = _catalog_dir() / "venvs"
     venv_path = venvs_root / model_id

@@ -142,6 +142,17 @@ def pull(
             ),
         ),
     ] = False,
+    base: Annotated[
+        str | None,
+        typer.Option(
+            "--base",
+            help=(
+                "(LoRA pulls) pair the adapter with this base model: a "
+                "pulled muse id (e.g. sdxl-turbo) or an HF repo "
+                "(org/name). Overrides the base the repo declares."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Download weights + install deps for a model.
 
@@ -179,7 +190,7 @@ def pull(
 
     with install_output_mode(verbose=verbose):
         try:
-            _pull(identifier)
+            _pull(identifier, base_override=base)
         except KeyError as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(2)

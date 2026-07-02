@@ -104,7 +104,7 @@ class TestPullCommandWiring:
         exc = _make(GatedRepoError, "Access to model X is restricted", status=401)
         exc.repo_id = "black-forest-labs/FLUX.1-schnell"
 
-        def _boom(identifier):
+        def _boom(identifier, *, base_override=None):
             raise exc
 
         monkeypatch.setattr(catalog, "pull", _boom)
@@ -122,7 +122,7 @@ class TestPullCommandWiring:
         import muse.core.catalog as catalog
         from muse.cli import app
 
-        def _boom(identifier):
+        def _boom(identifier, *, base_override=None):
             raise RuntimeError("some genuinely unexpected bug")
 
         monkeypatch.setattr(catalog, "pull", _boom)
@@ -133,3 +133,16 @@ class TestPullCommandWiring:
         assert result.exit_code != 0
         assert result.exception is not None
         assert isinstance(result.exception, RuntimeError)
+
+
+class TestResolverErrors:
+    def test_resolver_error_renders_message_without_traceback(self):
+        from muse.core.resolvers import ResolverError
+
+        exc = ResolverError(
+            "LoRA adapter 'x' declares no base model; re-run with --base"
+        )
+        msg = friendly_pull_error("x", exc)
+        assert msg is not None
+        assert "--base" in msg
+        assert "Traceback" not in msg

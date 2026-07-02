@@ -2069,3 +2069,64 @@ class TestResetKnownModelsCacheLocking:
         assert finished.wait(1.0)
         t.join(1.0)
         assert catalog_mod._known_models_cache is None
+
+
+class TestLoraPullValidation:
+    def _lora_manifest(self, caps):
+        return {
+            "model_id": "some-lora",
+            "modality": "image/generation",
+            "hf_repo": "org/some-lora",
+            "backend_path": "muse.modalities.image_generation.runtimes.diffusers:DiffusersText2ImageModel",
+            "capabilities": caps,
+        }
+
+    def test_lora_without_base_model_raises_actionable(self, tmp_catalog):
+        import pytest
+        from muse.core.catalog import _validate_lora_capabilities
+        from muse.core.resolvers import ResolverError
+
+        with pytest.raises(ResolverError, match="--base"):
+            _validate_lora_capabilities(
+                self._lora_manifest({"lora_adapter": True})
+            )
+
+    def test_lora_with_unpulled_muse_base_raises_actionable(self, tmp_catalog):
+        import pytest
+        from muse.core.catalog import _validate_lora_capabilities
+        from muse.core.resolvers import ResolverError
+
+        with pytest.raises(ResolverError, match="muse pull sdxl-turbo"):
+            _validate_lora_capabilities(self._lora_manifest(
+                {"lora_adapter": True, "base_model": "sdxl-turbo"}
+            ))
+
+    def test_lora_with_pulled_muse_base_passes(self, tmp_catalog):
+        import json
+        from muse.core.catalog import (
+            _catalog_path, _reset_read_catalog_cache,
+            _validate_lora_capabilities,
+        )
+
+        p = _catalog_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "sdxl-turbo": {"local_dir": "/w/sdxl-turbo", "enabled": True},
+        }))
+        _reset_read_catalog_cache()
+        _validate_lora_capabilities(self._lora_manifest(
+            {"lora_adapter": True, "base_model": "sdxl-turbo"}
+        ))  # no raise
+
+    def test_lora_with_hf_repo_base_passes_without_catalog(self, tmp_catalog):
+        from muse.core.catalog import _validate_lora_capabilities
+
+        _validate_lora_capabilities(self._lora_manifest({
+            "lora_adapter": True,
+            "base_model": "stabilityai/stable-diffusion-xl-base-1.0",
+        }))  # no raise: HF-repo bases download at load time
+
+    def test_non_lora_manifest_is_ignored(self, tmp_catalog):
+        from muse.core.catalog import _validate_lora_capabilities
+
+        _validate_lora_capabilities(self._lora_manifest({}))  # no raise

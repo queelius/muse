@@ -20,6 +20,15 @@ def friendly_pull_error(identifier: str, exc: BaseException) -> str | None:
     so the caller re-raises and the real traceback is preserved.
     """
     try:
+        from muse.core.resolvers import ResolverError
+    except Exception:  # noqa: BLE001
+        ResolverError = None  # type: ignore[assignment]
+    if ResolverError is not None and isinstance(exc, ResolverError):
+        # Muse's own resolver errors are written to be actionable
+        # one-liners; show them without the traceback.
+        return f"error: {exc}"
+
+    try:
         from huggingface_hub.errors import (
             GatedRepoError,
             HfHubHTTPError,
