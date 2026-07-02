@@ -869,3 +869,135 @@ def test_vary_honors_user_strength_override():
         m.vary(init_image=init_img, strength=0.6)
 
     assert fake_i2i_pipe.call_args.kwargs["strength"] == 0.6
+
+
+def _lora_model(fake_class, tmp_path, monkeypatch, **extra):
+    """Construct a LoRA-configured runtime with mocked diffusers + a
+    resolve_model_source that maps the muse id to a fake dir."""
+    monkeypatch.setattr(
+        "muse.modalities.image_generation.runtimes.diffusers.resolve_model_source",
+        lambda ref: "/weights/sdxl-turbo" if ref == "sdxl-turbo" else ref,
+    )
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch",
+        MagicMock(),
+    ):
+        return DiffusersText2ImageModel(
+            hf_repo="nerijs/pixel-art-xl",
+            local_dir=str(tmp_path),
+            device="cpu",
+            dtype="float32",
+            model_id="pixel-art-xl",
+            lora_adapter=True,
+            base_model="sdxl-turbo",
+            **extra,
+        )
+
+
+class TestLoraLoading:
+    def test_pipeline_loads_from_base_not_adapter(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        fake_class.from_pretrained.return_value = _patched_pipe()
+        _lora_model(fake_class, tmp_path, monkeypatch)
+        assert fake_class.from_pretrained.call_args.args[0] == "/weights/sdxl-turbo"
+
+    def test_load_lora_weights_called_with_adapter_dir(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        _lora_model(fake_class, tmp_path, monkeypatch)
+        pipe.load_lora_weights.assert_called_once_with(str(tmp_path))
+
+    def test_fuse_lora_never_called(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        _lora_model(fake_class, tmp_path, monkeypatch)
+        pipe.fuse_lora.assert_not_called()
+
+    def test_hf_repo_base_passes_through_verbatim(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        fake_class.from_pretrained.return_value = _patched_pipe()
+        monkeypatch.setattr(
+            "muse.modalities.image_generation.runtimes.diffusers.resolve_model_source",
+            lambda ref: ref,
+        )
+        with patch(
+            "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+            fake_class,
+        ), patch(
+            "muse.modalities.image_generation.runtimes.diffusers.torch",
+            MagicMock(),
+        ):
+            DiffusersText2ImageModel(
+                hf_repo="nerijs/pixel-art-xl",
+                local_dir=str(tmp_path),
+                device="cpu",
+                dtype="float32",
+                model_id="pixel-art-xl",
+                lora_adapter=True,
+                base_model="stabilityai/stable-diffusion-xl-base-1.0",
+            )
+        assert fake_class.from_pretrained.call_args.args[0] == (
+            "stabilityai/stable-diffusion-xl-base-1.0"
+        )
+
+    def test_lora_without_base_model_raises_actionable(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        fake_class.from_pretrained.return_value = _patched_pipe()
+        with patch(
+            "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+            fake_class,
+        ), patch(
+            "muse.modalities.image_generation.runtimes.diffusers.torch",
+            MagicMock(),
+        ):
+            with pytest.raises(RuntimeError, match="base_model"):
+                DiffusersText2ImageModel(
+                    hf_repo="nerijs/pixel-art-xl",
+                    local_dir=str(tmp_path),
+                    device="cpu",
+                    dtype="float32",
+                    model_id="pixel-art-xl",
+                    lora_adapter=True,
+                )
+
+
+class TestLoraScale:
+    def test_request_scale_passes_cross_attention_kwargs(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        m = _lora_model(fake_class, tmp_path, monkeypatch)
+        m.generate("pixel art, a knight", lora_scale=0.7)
+        kwargs = pipe.call_args.kwargs
+        assert kwargs["cross_attention_kwargs"] == {"scale": 0.7}
+
+    def test_default_scale_used_when_request_omits(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        m = _lora_model(fake_class, tmp_path, monkeypatch, lora_scale=0.5)
+        m.generate("pixel art, a knight")
+        assert pipe.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.5}
+
+    def test_non_lora_model_sends_no_cross_attention_kwargs(self):
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        with patch(
+            "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+            fake_class,
+        ), patch(
+            "muse.modalities.image_generation.runtimes.diffusers.torch",
+            MagicMock(),
+        ):
+            m = DiffusersText2ImageModel(
+                hf_repo="org/repo", local_dir=None, device="cpu",
+                dtype="float32", model_id="m",
+            )
+        m.generate("a cat")
+        assert "cross_attention_kwargs" not in pipe.call_args.kwargs

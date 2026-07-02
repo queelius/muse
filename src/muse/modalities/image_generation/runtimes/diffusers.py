@@ -17,7 +17,11 @@ import math
 from pathlib import Path
 from typing import Any
 
-from muse.core.runtime_helpers import dtype_for_name, select_device
+from muse.core.runtime_helpers import (
+    dtype_for_name,
+    resolve_model_source,
+    select_device,
+)
 from muse.modalities.image_generation.protocol import ImageResult
 
 
@@ -95,6 +99,12 @@ class DiffusersText2ImageModel:
       - default_size: (width, height) when request omits size
       - default_steps: num_inference_steps default
       - default_guidance: guidance_scale default
+      - lora_adapter: True when hf_repo/local_dir hold a LoRA adapter,
+        not a full pipeline; the base pipeline loads from base_model
+      - base_model: muse catalog id or HF repo id of the base pipeline
+        this adapter layers onto (required when lora_adapter is True)
+      - lora_scale: default cross-attention scale for the adapter,
+        overridable per-request via generate(..., lora_scale=...)
     """
 
     def __init__(
@@ -108,6 +118,9 @@ class DiffusersText2ImageModel:
         default_size: tuple[int, int] = (512, 512),
         default_steps: int = 1,
         default_guidance: float = 0.0,
+        lora_adapter: bool = False,
+        base_model: str | None = None,
+        lora_scale: float = 1.0,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -124,10 +137,27 @@ class DiffusersText2ImageModel:
         self._default_guidance = default_guidance
         self._device = _select_device(device)
         # Stash for lazy img2img / inpaint pipeline loads (same checkpoint + dtype).
+        # For LoRA entries self._src is the ADAPTER source; the pipeline
+        # itself loads from the resolved BASE below.
         self._src = local_dir or hf_repo
         self._dtype = dtype
         self._i2i_pipe = None
         self._inp_pipe = None
+        self._lora_adapter = bool(lora_adapter)
+        self._default_lora_scale = float(lora_scale)
+
+        if self._lora_adapter:
+            if not base_model:
+                raise RuntimeError(
+                    f"{model_id}: lora_adapter is set but base_model is "
+                    f"missing; re-pull with `muse pull <id> --base "
+                    f"<muse-id-or-hf-repo>`"
+                )
+            # muse catalog id -> that entry's snapshot dir; HF repo id
+            # passes through for from_pretrained to fetch (HF cache).
+            load_src = resolve_model_source(base_model)
+        else:
+            load_src = self._src
 
         # Access torch through this module so tests' patches survive.
         import muse.modalities.image_generation.runtimes.diffusers as _mod
@@ -137,18 +167,25 @@ class DiffusersText2ImageModel:
 
         logger.info(
             "loading diffusers pipeline from %s (model_id=%s, device=%s, dtype=%s)",
-            self._src, model_id, self._device, dtype,
+            load_src, model_id, self._device, dtype,
         )
         # Request the fp16 variant only when the local snapshot actually
         # holds .fp16. weights; otherwise from_pretrained raises for repos
         # that ship no fp16 files (e.g. flux-schnell). torch_dtype still
         # governs the compute dtype independently of variant (H6).
-        use_fp16_variant = dtype == "float16" and _local_has_fp16_variant(self._src)
+        use_fp16_variant = dtype == "float16" and _local_has_fp16_variant(load_src)
         self._pipe = AutoPipelineForText2Image.from_pretrained(
-            self._src,
+            load_src,
             torch_dtype=torch_dtype,
             variant="fp16" if use_fp16_variant else None,
         )
+        if self._lora_adapter:
+            # Unfused: fuse_lora would bake the adapter into the base
+            # weights and make per-request lora_scale impossible.
+            logger.info(
+                "loading LoRA adapter %s onto base %s", self._src, base_model,
+            )
+            self._pipe.load_lora_weights(self._src)
         if self._device != "cpu":
             self._pipe = self._pipe.to(self._device)
 
@@ -164,6 +201,7 @@ class DiffusersText2ImageModel:
         seed: int | None = None,
         init_image: Any = None,
         strength: float | None = None,
+        lora_scale: float | None = None,
         **_: Any,
     ) -> ImageResult:
         if init_image is not None:
@@ -199,6 +237,12 @@ class DiffusersText2ImageModel:
             call_kwargs["negative_prompt"] = negative_prompt
         if gen is not None:
             call_kwargs["generator"] = gen
+        if self._lora_adapter:
+            s_lora = (
+                lora_scale if lora_scale is not None
+                else self._default_lora_scale
+            )
+            call_kwargs["cross_attention_kwargs"] = {"scale": s_lora}
 
         out = self._pipe(**call_kwargs)
         img = out.images[0]
@@ -286,6 +330,10 @@ class DiffusersText2ImageModel:
             call_kwargs["negative_prompt"] = negative_prompt
         if gen is not None:
             call_kwargs["generator"] = gen
+        if self._lora_adapter:
+            call_kwargs["cross_attention_kwargs"] = {
+                "scale": self._default_lora_scale,
+            }
 
         out = self._i2i_pipe(**call_kwargs)
         img = out.images[0]
@@ -393,6 +441,10 @@ class DiffusersText2ImageModel:
             call_kwargs["height"] = height
         if gen is not None:
             call_kwargs["generator"] = gen
+        if self._lora_adapter:
+            call_kwargs["cross_attention_kwargs"] = {
+                "scale": self._default_lora_scale,
+            }
 
         out = self._inp_pipe(**call_kwargs)
         img = out.images[0]
