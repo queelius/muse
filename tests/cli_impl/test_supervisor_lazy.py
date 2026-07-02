@@ -1749,6 +1749,46 @@ class TestWeightsSizeFallback:
 
         assert _weights_size_gb({"local_dir": str(tmp_path / "nope")}) == 0.0
 
+    def test_gguf_sizes_only_the_declared_variant(self, tmp_path):
+        """A GGUF snapshot dir often holds several quant variants of one
+        model, but only the declared `gguf_file` actually loads. Sizing
+        must count that single file, not the sum of every variant, which
+        would 503 a servable model as "exceeds device capacity" (a 4B q4
+        whose repo ships six quants sums to ~15 GB instead of ~2.6 GB).
+        """
+        from muse.cli_impl.supervisor import _weights_size_gb
+
+        d = tmp_path / "snapshot"
+        d.mkdir()
+        (d / "Model-Q4_K_M.gguf").write_bytes(b"\0" * 2_600_000)  # active
+        (d / "Model-Q8_0.gguf").write_bytes(b"\0" * 5_000_000)    # other quants
+        (d / "Model-F16.gguf").write_bytes(b"\0" * 8_000_000)
+        (d / "README.md").write_text("x")
+
+        gb = _weights_size_gb({
+            "local_dir": str(d),
+            "manifest": {"capabilities": {"gguf_file": "Model-Q4_K_M.gguf"}},
+        })
+        # Only the 2.6 MB active variant, not the ~15.6 MB tree sum.
+        assert gb == pytest.approx(2_600_000 / 1024 ** 3, rel=1e-6)
+
+    def test_gguf_missing_declared_file_falls_back_to_tree(self, tmp_path):
+        """A declared `gguf_file` that is absent on disk (stale path) must
+        fall back to the tree walk rather than returning 0.0 and stamping
+        the model unservable.
+        """
+        from muse.cli_impl.supervisor import _weights_size_gb
+
+        d = tmp_path / "snapshot"
+        d.mkdir()
+        (d / "actual.gguf").write_bytes(b"\0" * 1_000_000)
+
+        gb = _weights_size_gb({
+            "local_dir": str(d),
+            "manifest": {"capabilities": {"gguf_file": "not-here.gguf"}},
+        })
+        assert gb == pytest.approx(1_000_000 / 1024 ** 3, rel=1e-3)
+
     def test_has_memory_data_falls_back_to_weights(self, tmp_path):
         """No declared memory_gb and no measurements, but weights on disk:
         has_data is True and gb reflects the on-disk size.

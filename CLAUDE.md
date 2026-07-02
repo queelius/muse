@@ -486,7 +486,17 @@ A model's load size comes from a three-tier sizing ladder (in
    that was never probed is therefore sized from its weights and loads
    on demand rather than 503'ing with "no memory estimate." This is the
    common case -- every `muse pull` leaves weights on disk -- so the old
-   "run `muse models probe` first" wall is gone.
+   "run `muse models probe` first" wall is gone. *GGUF exception
+   (v0.50.2):* a GGUF snapshot dir routinely holds several quant variants
+   of one model (q3/q4/q5/q8/f16), but only the declared
+   `capabilities.gguf_file` actually loads. Summing the whole tree would
+   OVERestimate wildly (a 4B q4 whose repo ships six quants sums to ~15 GB
+   vs its ~2.6 GB weight) and 503 a servable model as "exceeds device
+   capacity", so when a specific `gguf_file` is declared the sizer counts
+   that one file, falling back to the tree walk only if it is absent on
+   disk. This bug stayed hidden until v0.50.1 routed undeclared-device
+   models to the cuda pool, where the inflated estimate first exceeded the
+   card.
 3. Nothing sizable (no annotation, no probe, no weights on disk): the
    model is flagged `unservable_reason` and 503s before any worker
    spawn.

@@ -537,10 +537,28 @@ def _weights_size_gb(catalog_entry: dict) -> float:
     LoadDirector's observed-peak writeback self-heals the estimate upward
     after the first real load, and the auto-restart monitor recovers a
     worker that an initial under-estimate happens to OOM.
+
+    GGUF exception: a GGUF snapshot dir routinely holds several quant
+    variants of one model (q3/q4/q5/q8/f16), but only the declared
+    `capabilities.gguf_file` actually loads. Summing the whole tree would
+    OVERestimate wildly (a 4B q4 whose repo ships six quants sums to ~15 GB
+    vs its ~2.6 GB weight), and overestimation is the dangerous direction:
+    it 503s a servable model as "exceeds device capacity". So when a
+    specific `gguf_file` is declared, size from that one file, falling back
+    to the tree walk only when it is absent on disk (stale path).
     """
     local_dir = catalog_entry.get("local_dir")
     if not local_dir:
         return 0.0
+    capabilities = (catalog_entry.get("manifest") or {}).get("capabilities") or {}
+    gguf_file = capabilities.get("gguf_file")
+    if gguf_file:
+        try:
+            return os.path.getsize(os.path.join(local_dir, gguf_file)) / (1024 ** 3)
+        except OSError:
+            # Declared file missing/unreadable: fall through to the tree walk
+            # rather than returning 0.0 and stamping the model unservable.
+            pass
     total = 0
     try:
         for root, _dirs, files in os.walk(local_dir):
