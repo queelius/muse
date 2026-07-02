@@ -15,6 +15,7 @@ Public surface:
 - ``dtype_for_name(name, torch_module) -> torch.dtype``
 - ``set_inference_mode(model) -> None``
 - ``LoadTimer(label, logger)`` (context manager)
+- ``resolve_model_source(ref: str) -> str``
 """
 from __future__ import annotations
 
@@ -130,3 +131,27 @@ class LoadTimer:
         self.duration = time.monotonic() - self._start
         if exc_type is None:
             self.logger.info("loaded %s in %.2fs", self.label, self.duration)
+
+
+def resolve_model_source(ref: str) -> str:
+    """Map a muse catalog id to its local weights dir; pass others through.
+
+    LoRA runtimes receive ``capabilities.base_model`` that is either a
+    pulled muse model id (e.g. ``sdxl-turbo``, resolved here to the
+    snapshot dir recorded at pull time) or an HF repo id (returned
+    verbatim; ``from_pretrained`` downloads it into the HF cache at
+    first load, the AnimateDiff precedent). Unknown ids and entries
+    without a ``local_dir`` also pass through verbatim so the caller's
+    ``from_pretrained`` raises its own (informative) error.
+
+    Imports the catalog lazily: runtime modules must stay importable
+    without dragging the catalog machinery in at module import time.
+    """
+    from muse.core.catalog import _read_catalog
+
+    entry = _read_catalog().get(ref)
+    if entry:
+        local_dir = entry.get("local_dir")
+        if local_dir:
+            return str(local_dir)
+    return ref

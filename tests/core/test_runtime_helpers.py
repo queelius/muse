@@ -204,3 +204,48 @@ def test_load_timer_sets_duration() -> None:
         for _ in range(1000):
             pass
     assert timer.duration >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_source
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModelSource:
+    """resolve_model_source maps a muse catalog id to its local weights dir
+    and passes anything else through verbatim (HF repo ids, unknown ids)."""
+
+    def _write_catalog(self, tmp_path, entries):
+        import json
+        (tmp_path / "catalog.json").write_text(json.dumps(entries))
+
+    def test_pulled_id_resolves_to_local_dir(self, tmp_path, monkeypatch):
+        from muse.core.catalog import _reset_read_catalog_cache
+        from muse.core.runtime_helpers import resolve_model_source
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        self._write_catalog(tmp_path, {
+            "sdxl-turbo": {"local_dir": "/weights/sdxl-turbo", "enabled": True},
+        })
+        _reset_read_catalog_cache()
+        assert resolve_model_source("sdxl-turbo") == "/weights/sdxl-turbo"
+
+    def test_unknown_ref_passes_through(self, tmp_path, monkeypatch):
+        from muse.core.catalog import _reset_read_catalog_cache
+        from muse.core.runtime_helpers import resolve_model_source
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        self._write_catalog(tmp_path, {})
+        _reset_read_catalog_cache()
+        assert resolve_model_source(
+            "stabilityai/stable-diffusion-xl-base-1.0"
+        ) == "stabilityai/stable-diffusion-xl-base-1.0"
+
+    def test_entry_without_local_dir_passes_through(self, tmp_path, monkeypatch):
+        from muse.core.catalog import _reset_read_catalog_cache
+        from muse.core.runtime_helpers import resolve_model_source
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        self._write_catalog(tmp_path, {"half-entry": {"enabled": True}})
+        _reset_read_catalog_cache()
+        assert resolve_model_source("half-entry") == "half-entry"
