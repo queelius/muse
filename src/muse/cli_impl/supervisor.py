@@ -841,13 +841,32 @@ def backfill_manifest_memory(manifest: dict, model_id: str) -> dict:
     The input is never mutated; a copy is made lazily only when a backfill
     actually changes something.
     """
-    entry = _read_catalog().get(model_id)
+    catalog = _read_catalog()
+    entry = catalog.get(model_id)
     out = manifest
     caps = manifest.get("capabilities", {}) or {}
 
     if entry is not None and caps.get("memory_gb") is None:
-        has_data, gb, _device = _has_memory_data(entry)
-        if has_data and gb > 0:
+        gb: float | None = None
+        # A LoRA entry's own dir holds only the adapter (tens of MB), so
+        # the weights-on-disk fallback would grossly undersize the load.
+        # When it has no probe measurement of its own, size it from its
+        # muse-id base entry instead. A probed LoRA entry measured the
+        # real base+adapter peak; prefer that.
+        if caps.get("lora_adapter") and not (entry.get("measurements") or {}):
+            base = caps.get("base_model")
+            base_entry = (
+                catalog.get(base) if base and "/" not in base else None
+            )
+            if base_entry is not None:
+                has_b, gb_b, _d = _has_memory_data(base_entry)
+                if has_b and gb_b > 0:
+                    gb = gb_b
+        if gb is None:
+            has_data, gb_own, _device = _has_memory_data(entry)
+            if has_data and gb_own > 0:
+                gb = gb_own
+        if gb is not None:
             out = dict(out)
             out_caps = dict(caps)
             out_caps["memory_gb"] = gb

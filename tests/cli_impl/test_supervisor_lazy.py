@@ -1634,6 +1634,86 @@ class TestBackfillManifestMemory:
 
 
 # ---------------------------------------------------------------------------
+# Task 7 (LoRA adapter support): backfill_manifest_memory chases the base
+# entry for unprobed LoRA models. A LoRA entry's own local_dir holds only
+# the (tens-of-MB) adapter, so the weights-on-disk fallback would grossly
+# undersize the real base+adapter load. When a lora_adapter entry has no
+# probe measurement of its own, size it from its muse-id base entry
+# instead. A probed LoRA entry keeps its own measured peak.
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillLoraChase:
+    def _write(self, tmp_path, entries):
+        import json
+        (tmp_path / "catalog.json").write_text(json.dumps(entries))
+
+    def _lora_manifest(self, base="sdxl-turbo"):
+        return {
+            "model_id": "pixel-art-xl",
+            "modality": "image/generation",
+            "capabilities": {"lora_adapter": True, "base_model": base},
+        }
+
+    def test_unprobed_lora_sizes_from_base_measurement(self, tmp_path, monkeypatch):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+        from muse.core.catalog import _reset_read_catalog_cache
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        self._write(tmp_path, {
+            "pixel-art-xl": {"local_dir": str(tmp_path), "enabled": True},
+            "sdxl-turbo": {
+                "local_dir": "/w/sdxl-turbo", "enabled": True,
+                "measurements": {"cuda": {"peak_bytes": 8_000_000_000}},
+            },
+        })
+        _reset_read_catalog_cache()
+        out = backfill_manifest_memory(self._lora_manifest(), "pixel-art-xl")
+        assert out["capabilities"]["memory_gb"] == pytest.approx(8.0, rel=0.1)
+
+    def test_probed_lora_uses_own_measurement_not_base(self, tmp_path, monkeypatch):
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+        from muse.core.catalog import _reset_read_catalog_cache
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        self._write(tmp_path, {
+            "pixel-art-xl": {
+                "local_dir": str(tmp_path), "enabled": True,
+                "measurements": {"cuda": {"peak_bytes": 9_000_000_000}},
+            },
+            "sdxl-turbo": {
+                "local_dir": "/w/sdxl-turbo", "enabled": True,
+                "measurements": {"cuda": {"peak_bytes": 8_000_000_000}},
+            },
+        })
+        _reset_read_catalog_cache()
+        out = backfill_manifest_memory(self._lora_manifest(), "pixel-art-xl")
+        assert out["capabilities"]["memory_gb"] == pytest.approx(9.0, rel=0.1)
+
+    def test_hf_repo_base_lora_keeps_existing_behavior(self, tmp_path, monkeypatch):
+        """HF-repo base (contains /): no catalog entry to chase; the
+        entry's own ladder result is used (resolve-time estimate covers
+        the honest number in practice)."""
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+        from muse.core.catalog import _reset_read_catalog_cache
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        self._write(tmp_path, {
+            "pixel-art-xl": {"local_dir": str(tmp_path), "enabled": True},
+        })
+        _reset_read_catalog_cache()
+        out = backfill_manifest_memory(
+            self._lora_manifest(base="stabilityai/stable-diffusion-xl-base-1.0"),
+            "pixel-art-xl",
+        )
+        # No base entry, no own measurement, empty local_dir: nothing
+        # sensible to backfill; capabilities stay untouched (or an
+        # empty-dir weights-fallback yields a negligible number).
+        gb = out["capabilities"].get("memory_gb")
+        assert gb is None or gb < 0.01
+
+
+# ---------------------------------------------------------------------------
 # v0.47.3 Fix A: on-disk weights-size fallback. A never-probed model is
 # still sizable from its downloaded weights (catalog local_dir), so it
 # loads on demand (evicting as needed) instead of 503 model_unservable.
