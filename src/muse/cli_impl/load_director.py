@@ -93,6 +93,8 @@ _WRITEBACK_LOCK = _CATALOG_WRITE_LOCK
 # introducing a tight spin loop.
 _INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
 
+from muse.core.memory_probe import declared_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -562,7 +564,7 @@ class LoadDirector:
             # we claim the in-flight slot, so that if the answer is "no"
             # we don't strand an Event.
             memory_gb = float(manifest.get("capabilities", {}).get("memory_gb", 0.0) or 0.0)
-            device = str(manifest.get("capabilities", {}).get("device", "cpu")).lower()
+            device = declared_device(manifest.get("capabilities"))
 
             _, available_gb = self._available_for_device(device)
             if memory_gb > available_gb:
@@ -610,15 +612,30 @@ class LoadDirector:
         IO latency or filesystem failures.
         """
         memory_gb = float(manifest.get("capabilities", {}).get("memory_gb", 0.0) or 0.0)
-        device = str(manifest.get("capabilities", {}).get("device", "cpu")).lower()
+        device = declared_device(manifest.get("capabilities"))
 
         free_before_gb = self._free_for_device(device)
         try:
             worker_port = self.enable_fn(model_id)
-        except BaseException:
+        except BaseException as e:
             # Cleanup: pop the Event, set it so waiters wake (they will
-            # find no LoadEntry and become the new winner), and re-raise.
+            # find no LoadEntry and become the new winner), then surface.
             self._abort(model_id)
+            # Translate unexpected load failures (worker spawn OOM, venv
+            # missing, health-poll timeout) into OperationError(503) so
+            # the gateway and admin callers return an OpenAI-shaped
+            # envelope instead of letting a raw exception escape as a
+            # bare 500. OperationError passes through unwrapped (it
+            # already carries status/code/message); BaseException
+            # non-Exceptions (KeyboardInterrupt, SystemExit) propagate
+            # untouched.
+            from muse.admin.operations import OperationError
+            if isinstance(e, Exception) and not isinstance(e, OperationError):
+                raise OperationError(
+                    "model_load_failed",
+                    f"worker for {model_id!r} failed to load: {e}",
+                    status=503,
+                ) from e
             raise
 
         free_after_gb = self._free_for_device(device)

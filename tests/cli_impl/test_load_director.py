@@ -999,8 +999,12 @@ class TestEnableFnException:
             memory_probe=_make_probe(),
         )
 
-        with pytest.raises(RuntimeError, match="worker spawn died"):
+        # v0.50.1: unexpected load failures surface as OperationError(503)
+        # (envelope-able) with the original exception chained as __cause__.
+        with pytest.raises(OperationError, match="worker spawn died") as ei:
             director.acquire("fake-model", manifest=_manifest())
+        assert ei.value.status == 503
+        assert ei.value.__cause__ is boom
 
         # in_flight_loads must be empty so the next acquire isn't
         # blocked indefinitely waiting on a dead Event.
@@ -1063,9 +1067,12 @@ class TestEnableFnException:
         t2.join(timeout=10.0)
 
         # One thread (the winner) raised. The other thread saw an empty
-        # entry on wakeup, re-decided, and successfully loaded.
+        # entry on wakeup, re-decided, and successfully loaded. v0.50.1:
+        # the failure arrives wrapped as OperationError(503) with the
+        # RuntimeError chained as its cause.
         assert len(errors) == 1
-        assert isinstance(errors[0], RuntimeError)
+        assert isinstance(errors[0], OperationError)
+        assert isinstance(errors[0].__cause__, RuntimeError)
         assert results == [9001]
         # enable_fn was called twice: once for the failed attempt, once
         # for the retry by the woken waiter.
@@ -1737,3 +1744,102 @@ class TestAutoDevicePoolSelection:
         snapshot = director.status()
         assert "newcomer" in snapshot
         assert "victim" not in snapshot
+
+
+# ----------------------------------------------------------------------
+# v0.50.1: absent capabilities.device must pool as "auto", not "cpu"
+# ----------------------------------------------------------------------
+
+class TestAbsentDeviceDefaultsToAutoPool:
+    """A manifest WITHOUT capabilities.device (every resolver-pulled model:
+    the HF plugins never set the key) must be sized against the pool that
+    "auto" resolves to on this host, because the worker it spawns runs
+    with `--device auto` and loads the GPU when one exists.
+
+    Regression: defaulting the absent key to "cpu" sized GPU loads against
+    host RAM, so an 8 GB model always "fit" a 64 GB-RAM box, the director
+    never evicted the resident model, and the spawned worker OOM'd on the
+    real GPU (live incident on the 12 GB box, v0.50.0)."""
+
+    def _manifest_without_device(self, memory_gb: float = 8.0) -> dict:
+        return {
+            "model_id": "sdxl-turbo",
+            "modality": "image/generation",
+            "capabilities": {"memory_gb": memory_gb},
+        }
+
+    def test_decide_routes_to_eviction_when_vram_short(self):
+        # GPU visible (gpu_free_gb is not None) but nearly full; host RAM
+        # huge. The old cpu default saw 64 GB free and returned "load".
+        probe = _make_probe(gpu_free=0.5, cpu_free=64.0)
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+        decision = director._decide(
+            "sdxl-turbo", manifest=self._manifest_without_device(),
+        )
+        assert decision[0] == "evict_and_retry"
+
+    def test_decide_loads_when_vram_roomy(self):
+        probe = _make_probe(gpu_free=20.0, cpu_free=64.0)
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+        decision = director._decide(
+            "sdxl-turbo", manifest=self._manifest_without_device(),
+        )
+        assert decision[0] == "load"
+
+    def test_absent_device_on_cpu_only_host_pools_against_ram(self):
+        # No GPU visible: auto degrades to the cpu pool, exactly like the
+        # worker's own select_device("auto") would.
+        probe = _make_probe(gpu_free=None, cpu_free=64.0)
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9001),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+        )
+        decision = director._decide(
+            "sdxl-turbo", manifest=self._manifest_without_device(),
+        )
+        assert decision[0] == "load"
+
+
+# ----------------------------------------------------------------------
+# v0.50.1: worker spawn failure surfaces as OperationError(503), not a
+# raw exception that escapes the gateway as a bare 500
+# ----------------------------------------------------------------------
+
+class TestLoadFailureSurfacesAsOperationError:
+    def test_spawn_failure_raises_operation_error_503(self):
+        enable_fn = MagicMock(
+            side_effect=RuntimeError("worker failed to become healthy"),
+        )
+        director = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+        with pytest.raises(OperationError) as ei:
+            director.acquire("fake-model", manifest=_manifest())
+        assert ei.value.status == 503
+        assert ei.value.code == "model_load_failed"
+        assert "worker failed to become healthy" in ei.value.message
+        # Cleanup ran: no stale LoadEntry, no stranded in-flight slot.
+        assert director.status() == {}
+        assert director.in_flight_loads == {}
+
+    def test_operation_error_from_load_passes_through_unwrapped(self):
+        original = OperationError("model_disabled", "disabled by operator", status=503)
+        director = LoadDirector(
+            enable_fn=MagicMock(side_effect=original),
+            disable_fn=MagicMock(),
+            memory_probe=_make_probe(),
+        )
+        with pytest.raises(OperationError) as ei:
+            director.acquire("fake-model", manifest=_manifest())
+        assert ei.value is original

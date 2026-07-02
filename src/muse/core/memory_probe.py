@@ -109,3 +109,21 @@ def cpu_free_gb() -> float:
     """
     import psutil
     return float(psutil.virtual_memory().available) / _BYTES_PER_GB
+
+
+def declared_device(capabilities: dict | None) -> str:
+    """The device a manifest's capabilities declare, defaulting to "auto".
+
+    Shared by every control-plane site that sizes or pools a model
+    (LoadDirector admission and commit, IdleSweeper eviction, supervisor
+    servability). Absent or empty means the model follows the worker's
+    own default (`muse _worker --device auto`), which binds to the GPU
+    when one exists, so the control plane must size it against the pool
+    "auto" resolves to on this host, NOT against host RAM.
+
+    Regression note (v0.50.1): these sites each defaulted the absent key
+    to "cpu". Resolver-pulled manifests never carry a `device` key, so
+    the director sized their GPU loads against host RAM, admission always
+    "fit", eviction never ran, and workers OOM'd at spawn on a full GPU.
+    """
+    return str((capabilities or {}).get("device") or "auto").lower()

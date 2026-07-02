@@ -34,6 +34,8 @@ from muse.cli_impl.idle_sweeper import IdleSweeper
 from muse.core.catalog import _read_catalog, get_manifest
 from muse.core.venv import find_free_port
 
+from muse.core.memory_probe import declared_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -563,7 +565,8 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
       3. on-disk weights size summed from the entry's `local_dir`.
 
     `device` is read from `manifest.capabilities.device` and lowercased.
-    Falls back to "cpu" when absent (the catalog default).
+    Falls back to "auto" when absent, matching the worker's own default
+    (see muse.core.memory_probe.declared_device).
 
     `has_data` is True when ANY source is present; False only when the
     model declares nothing, was never probed, AND has no weights on disk.
@@ -574,7 +577,7 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
     """
     manifest = catalog_entry.get("manifest", {}) or {}
     capabilities = manifest.get("capabilities", {}) or {}
-    device = str(capabilities.get("device", "cpu")).lower() or "cpu"
+    device = declared_device(capabilities)
     declared = capabilities.get("memory_gb")
 
     measurements = catalog_entry.get("measurements", {}) or {}

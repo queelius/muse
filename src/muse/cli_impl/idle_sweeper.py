@@ -44,6 +44,8 @@ from muse.cli_impl.load_director import DecisionLogEntry
 if TYPE_CHECKING:
     from muse.cli_impl.load_director import LoadDirector, LoadEntry
 
+from muse.core.memory_probe import declared_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -175,12 +177,10 @@ class IdleSweeper:
         self, candidate: "LoadEntry", idle_timeout_f: float,
     ) -> str | None:
         """Re-check, pop, disable_fn, log. Returns model_id if evicted."""
-        device = "cpu"
+        device = declared_device(None)
         try:
             manifest = self.catalog_lookup(candidate.model_id)
-            device = str(
-                manifest.get("capabilities", {}).get("device", "cpu")
-            ).lower()
+            device = declared_device(manifest.get("capabilities"))
         except KeyError:
             # Removed between snapshot and now: skip silently.
             return None
