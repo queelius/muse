@@ -9,12 +9,16 @@ Loaded via single-file import; no relative imports.
 """
 from __future__ import annotations
 
+import logging
+
 from pathlib import Path
 from typing import Any, Iterable
 
 from huggingface_hub import HfApi, snapshot_download
 
-from muse.core.resolvers import ResolvedModel, SearchResult
+from muse.core.resolvers import ResolvedModel, ResolverError, SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 _RUNTIME_PATH = (
@@ -97,6 +101,134 @@ def _is_lora_adapter(siblings: list[str], tags: list[str]) -> bool:
     return has_weights and has_lora_tag
 
 
+_LORA_PIP_EXTRAS = _PIP_EXTRAS + ("peft",)
+
+# base_model:<qualifier>:<repo> forms that do NOT name a usable base.
+_NON_BASE_QUALIFIERS = (
+    "base_model:finetune:", "base_model:quantized:", "base_model:merge:",
+)
+
+
+def _lora_base_from_tags(tags: list[str]) -> str | None:
+    """Extract the base repo from HF's base_model tag convention.
+
+    `base_model:adapter:<repo>` is the explicit adapter-relationship tag;
+    prefer it. Fall back to a plain `base_model:<repo>` tag that is not a
+    qualified non-base form. Returns None when nothing matches (the
+    post-overlay validation in catalog.pull handles that case).
+    """
+    for t in tags:
+        if t.startswith("base_model:adapter:"):
+            return t[len("base_model:adapter:"):]
+    for t in tags:
+        if (
+            t.startswith("base_model:")
+            and not t.startswith("base_model:adapter:")
+            and not t.startswith(_NON_BASE_QUALIFIERS)
+        ):
+            return t[len("base_model:"):]
+    return None
+
+
+def _estimate_repo_weights_gb(repo_id: str) -> float | None:
+    """Sum an HF repo's weight-file sizes (GB) for a memory estimate.
+
+    Used to size a LoRA entry from its BASE repo, because the adapter's
+    own on-disk footprint (tens of MB) would grossly undersize the load.
+    Mirrors the fp16-preference of the downloader: when fp16 variants
+    exist, only they are fetched, so only they should be summed.
+    Returns None on any failure; the post-pull probe measures the real
+    peak and self-heals sizing regardless.
+    """
+    if "/" not in repo_id:
+        return None  # muse catalog id: sizing derives from that entry
+    try:
+        api = HfApi()
+        info = api.model_info(repo_id, files_metadata=True)
+        files = [
+            (s.rfilename, s.size or 0)
+            for s in getattr(info, "siblings", [])
+            if s.rfilename.endswith((".safetensors", ".bin"))
+        ]
+        if not files:
+            return None
+        fp16 = [(n, sz) for n, sz in files if ".fp16." in n]
+        total = sum(sz for _, sz in (fp16 or files))
+        return total / 1e9 if total else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("base weight-size estimate failed for %s: %s", repo_id, e)
+        return None
+
+
+def _resolve_lora(repo_id: str, info) -> ResolvedModel:
+    """Synthesize a manifest for an adapter-only repo.
+
+    The manifest reuses the standard diffusers runtime; the runtime's
+    lora_adapter branch loads the BASE pipeline and layers the adapter
+    on top (unfused). base_model may be absent here (tagless repo with
+    a --base override coming via the curated/CLI capabilities overlay);
+    catalog.pull validates the merged result.
+    """
+    siblings = [s.rfilename for s in getattr(info, "siblings", [])]
+    tags = getattr(info, "tags", None) or []
+
+    weights = [
+        f for f in siblings if f.endswith(".safetensors") and "/" not in f
+    ]
+    if len(weights) != 1:
+        raise ResolverError(
+            f"LoRA repo {repo_id!r} has {len(weights)} top-level .safetensors "
+            f"files ({sorted(weights)}); muse supports exactly one adapter "
+            f"weight file per entry"
+        )
+
+    base = _lora_base_from_tags(tags)
+    capabilities: dict[str, Any] = {
+        # Generation defaults follow the BASE the adapter was declared
+        # against (turbo bases get 1-step/no-guidance automatically).
+        **_infer_defaults(base if base else repo_id),
+        "lora_adapter": True,
+        "lora_scale": 1.0,
+        "supports_negative_prompt": True,
+        "supports_seeded_generation": True,
+        "supports_img2img": True,
+        "supports_inpainting": True,
+        "supports_variations": True,
+    }
+    if base:
+        capabilities["base_model"] = base
+        est = _estimate_repo_weights_gb(base)
+        if est:
+            # Adapter + runtime overhead margin on top of base weights.
+            capabilities["memory_gb"] = round(est + 0.3, 1)
+
+    manifest = {
+        "model_id": _model_id(repo_id),
+        "modality": "image/generation",
+        "hf_repo": repo_id,
+        "description": f"Diffusers LoRA adapter: {repo_id}",
+        "license": _repo_license(info),
+        "pip_extras": list(_LORA_PIP_EXTRAS),
+        "system_packages": [],
+        "capabilities": capabilities,
+    }
+
+    def _download(cache_root: Path) -> Path:
+        # Adapter repos are flat: weights + configs at the top level,
+        # tens of MB total. No subfolder pipeline tree to filter.
+        return Path(snapshot_download(
+            repo_id=repo_id,
+            cache_dir=str(cache_root) if cache_root else None,
+            allow_patterns=["*.safetensors", "*.json", "*.txt"],
+        ))
+
+    return ResolvedModel(
+        manifest=manifest,
+        backend_path=_RUNTIME_PATH,
+        download=_download,
+    )
+
+
 def _sniff(info) -> bool:
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
@@ -123,6 +255,14 @@ def _sniff(info) -> bool:
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
+    siblings = [s.rfilename for s in getattr(info, "siblings", [])]
+    tags = getattr(info, "tags", None) or []
+    has_pipeline_config = any(
+        Path(f).name == "model_index.json" for f in siblings
+    )
+    if not has_pipeline_config and _is_lora_adapter(siblings, tags):
+        return _resolve_lora(repo_id, info)
+
     defaults = _infer_defaults(repo_id)
     capabilities = {
         **defaults,

@@ -238,3 +238,116 @@ def test_sniff_false_on_lora_repo_without_text_to_image_signal():
         pipeline_tag="text-generation",
     )
     assert HF_PLUGIN["sniff"](info) is False
+
+
+def _lora_info(siblings=None, tags=None):
+    return _fake_info(
+        siblings=siblings or ["README.md", "pixel-art-xl.safetensors"],
+        tags=tags or [
+            "diffusers", "text-to-image", "lora",
+            "base_model:stabilityai/stable-diffusion-xl-base-1.0",
+            "base_model:adapter:stabilityai/stable-diffusion-xl-base-1.0",
+        ],
+        pipeline_tag="text-to-image",
+    )
+
+
+def test_resolve_lora_extracts_base_from_adapter_tag():
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        result = HF_PLUGIN["resolve"]("nerijs/pixel-art-xl", None, _lora_info())
+    caps = result.manifest["capabilities"]
+    assert caps["lora_adapter"] is True
+    assert caps["base_model"] == "stabilityai/stable-diffusion-xl-base-1.0"
+    assert caps["lora_scale"] == 1.0
+    assert result.manifest["model_id"] == "pixel-art-xl"
+    assert result.manifest["modality"] == "image/generation"
+    assert "peft" in result.manifest["pip_extras"]
+
+
+def test_resolve_lora_falls_back_to_plain_base_model_tag():
+    from unittest.mock import patch
+    info = _lora_info(tags=[
+        "text-to-image", "lora",
+        "base_model:runwayml/stable-diffusion-v1-5",
+    ])
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        result = HF_PLUGIN["resolve"]("org/some-lora", None, info)
+    assert result.manifest["capabilities"]["base_model"] == (
+        "runwayml/stable-diffusion-v1-5"
+    )
+
+
+def test_resolve_lora_without_base_tag_omits_base_model():
+    """No base tag: resolve succeeds WITHOUT base_model; the post-overlay
+    validation in catalog.pull rejects it unless --base supplied it."""
+    from unittest.mock import patch
+    info = _lora_info(tags=["text-to-image", "lora"])
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        result = HF_PLUGIN["resolve"]("org/tagless-lora", None, info)
+    caps = result.manifest["capabilities"]
+    assert caps["lora_adapter"] is True
+    assert "base_model" not in caps
+
+
+def test_resolve_lora_defaults_derive_from_base_id():
+    """An SDXL base yields the sdxl defaults (25 steps, 1024), proving
+    _infer_defaults ran against the BASE, not the adapter repo name."""
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        result = HF_PLUGIN["resolve"]("nerijs/pixel-art-xl", None, _lora_info())
+    caps = result.manifest["capabilities"]
+    assert caps["default_steps"] == 25
+    assert caps["default_size"] == [1024, 1024]
+
+
+def test_resolve_lora_multiple_safetensors_fails_actionably():
+    import pytest
+    from muse.core.resolvers import ResolverError
+    info = _lora_info(
+        siblings=["a.safetensors", "b.safetensors", "README.md"],
+    )
+    with pytest.raises(ResolverError, match="a.safetensors"):
+        HF_PLUGIN["resolve"]("org/multi-lora", None, info)
+
+
+def test_resolve_lora_memory_estimate_from_base_weights():
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=6.9,
+    ) as est:
+        result = HF_PLUGIN["resolve"]("nerijs/pixel-art-xl", None, _lora_info())
+    est.assert_called_once_with("stabilityai/stable-diffusion-xl-base-1.0")
+    assert result.manifest["capabilities"]["memory_gb"] == 7.2  # 6.9 + 0.3
+
+
+def test_resolve_lora_download_patterns():
+    from pathlib import Path
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ), patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as snap:
+        result = HF_PLUGIN["resolve"]("nerijs/pixel-art-xl", None, _lora_info())
+        result.download(Path("/tmp/cache"))
+    patterns = snap.call_args.kwargs["allow_patterns"]
+    assert "*.safetensors" in patterns
+    assert "*.json" in patterns
+    # No subfolder pipeline patterns for an adapter-only repo.
+    assert "*/*.safetensors" not in patterns
