@@ -160,14 +160,21 @@ def _estimate_repo_weights_gb(repo_id: str) -> float | None:
         return None
 
 
-def _resolve_lora(repo_id: str, info) -> ResolvedModel:
+def _resolve_lora(
+    repo_id: str, info, *, base_override: str | None = None,
+) -> ResolvedModel:
     """Synthesize a manifest for an adapter-only repo.
 
     The manifest reuses the standard diffusers runtime; the runtime's
     lora_adapter branch loads the BASE pipeline and layers the adapter
     on top (unfused). base_model may be absent here (tagless repo with
-    a --base override coming via the curated/CLI capabilities overlay);
-    catalog.pull validates the merged result.
+    no --base override); catalog.pull validates the merged result.
+
+    `base_override` (the operator's `--base` pin, fix I2) wins over the
+    tag-declared base when set. Generation defaults (steps/guidance/size)
+    and the memory estimate then derive from this EFFECTIVE base, so a
+    `--base sdxl-turbo` pairing re-derives turbo defaults instead of
+    keeping whatever the adapter's own tags declared.
     """
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
@@ -182,10 +189,11 @@ def _resolve_lora(repo_id: str, info) -> ResolvedModel:
             f"weight file per entry"
         )
 
-    base = _lora_base_from_tags(tags)
+    base = base_override or _lora_base_from_tags(tags)
     capabilities: dict[str, Any] = {
-        # Generation defaults follow the BASE the adapter was declared
-        # against (turbo bases get 1-step/no-guidance automatically).
+        # Generation defaults follow the EFFECTIVE base (override wins
+        # over tag-declared); turbo bases get 1-step/no-guidance
+        # automatically, whether declared by the repo or by --base.
         **_infer_defaults(base if base else repo_id),
         "lora_adapter": True,
         "lora_scale": 1.0,
@@ -254,14 +262,22 @@ def _sniff(info) -> bool:
     return _is_lora_adapter(siblings, tags)
 
 
-def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
+def _resolve(
+    repo_id: str,
+    variant: str | None,
+    info,
+    *,
+    base_override: str | None = None,
+) -> ResolvedModel:
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]
     tags = getattr(info, "tags", None) or []
     has_pipeline_config = any(
         Path(f).name == "model_index.json" for f in siblings
     )
     if not has_pipeline_config and _is_lora_adapter(siblings, tags):
-        return _resolve_lora(repo_id, info)
+        return _resolve_lora(repo_id, info, base_override=base_override)
+    # Non-LoRA t2i repos have no base to override; base_override is a
+    # silent no-op below (falls through to the standard pipeline path).
 
     defaults = _infer_defaults(repo_id)
     capabilities = {

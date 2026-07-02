@@ -347,6 +347,79 @@ def test_resolve_via_modality_picks_named_plugin_not_priority_winner():
     embedding_plugin["resolve"].assert_not_called()
 
 
+def test_resolve_forwards_base_override_when_plugin_resolve_accepts_it():
+    """I2: HFResolver.resolve forwards base_override to a plugin's
+    resolve callable ONLY when that callable's signature accepts it
+    (inspect-guarded), so the other 15+ modality plugins with a plain
+    3-arg resolve(repo_id, variant, info) keep working untouched."""
+    from muse.core.resolvers_hf import HFResolver
+
+    def _lora_resolve(repo_id, variant, info, base_override=None):
+        return MagicMock(name="lora-resolved", base_override=base_override)
+
+    lora_plugin = {
+        "modality": "image/generation",
+        "sniff": MagicMock(return_value=True),
+        "resolve": _lora_resolve,
+    }
+    resolver = HFResolver(plugins=[lora_plugin])
+    info = SimpleNamespace(siblings=[], tags=[], id="nerijs/pixel-art-xl")
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        out = resolver.resolve(
+            "hf://nerijs/pixel-art-xl", base_override="sdxl-turbo",
+        )
+    assert out.base_override == "sdxl-turbo"
+
+
+def test_resolve_does_not_forward_base_override_to_plain_plugin_resolve():
+    """A plugin with a plain resolve(repo_id, variant, info) signature
+    must not receive base_override (that would raise TypeError). Uses a
+    real function (not a bare MagicMock) so inspect.signature sees a
+    genuine 3-parameter signature, matching the real modality plugins'
+    resolve callables.
+    """
+    from muse.core.resolvers_hf import HFResolver
+
+    calls = []
+
+    def plain_resolve(repo_id, variant, info):
+        calls.append((repo_id, variant, info))
+        return "plain-resolved"
+
+    plain_plugin = {
+        "modality": "audio/speech",
+        "sniff": MagicMock(return_value=True),
+        "resolve": plain_resolve,
+    }
+    resolver = HFResolver(plugins=[plain_plugin])
+    info = SimpleNamespace(siblings=[], tags=[], id="org/repo")
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        out = resolver.resolve("hf://org/repo", base_override="sdxl-turbo")
+    assert out == "plain-resolved"
+    assert calls == [("org/repo", None, info)]
+
+
+def test_resolve_via_modality_forwards_base_override_when_accepted():
+    from muse.core.resolvers_hf import HFResolver
+
+    def _lora_resolve(repo_id, variant, info, base_override=None):
+        return MagicMock(name="lora-resolved-via-modality", base_override=base_override)
+
+    lora_plugin = {
+        "modality": "image/generation",
+        "sniff": MagicMock(return_value=False),
+        "resolve": _lora_resolve,
+    }
+    resolver = HFResolver(plugins=[lora_plugin])
+    info = SimpleNamespace(siblings=[], tags=[], id="nerijs/pixel-art-xl")
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        out = resolver.resolve_via_modality(
+            "hf://nerijs/pixel-art-xl", "image/generation",
+            base_override="flux-schnell",
+        )
+    assert out.base_override == "flux-schnell"
+
+
 def test_resolve_via_modality_raises_when_no_plugin_for_modality():
     from muse.core.resolvers_hf import HFResolver
 

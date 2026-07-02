@@ -18,6 +18,7 @@ The resolver output feeds directly into the existing pull path:
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -128,7 +129,34 @@ def get_resolver(uri: str) -> Resolver:
         )
 
 
-def resolve(uri: str, *, modality: str | None = None) -> ResolvedModel:
+def _accepts_kwarg(method: Callable, name: str) -> bool:
+    """Whether `method`'s signature declares a parameter named `name`
+    (positional-or-keyword, keyword-only, or **kwargs catch-all).
+
+    Used to forward optional cross-cutting kwargs (like `base_override`)
+    only to resolvers/plugins that opted in, so the many resolvers with
+    a plain `resolve(uri)` (or plugin `resolve(repo_id, variant, info)`)
+    signature keep working untouched rather than raising TypeError on
+    an unexpected keyword argument.
+    """
+    try:
+        sig = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == name:
+            return True
+    return False
+
+
+def resolve(
+    uri: str,
+    *,
+    modality: str | None = None,
+    base_override: str | None = None,
+) -> ResolvedModel:
     """Resolve a URI through the matching resolver.
 
     When `modality` is None (default), uses priority-based sniff
@@ -142,12 +170,24 @@ def resolve(uri: str, *, modality: str | None = None) -> ResolvedModel:
     sentence-transformers but should resolve via text/rerank, not
     embedding/text).
 
+    `base_override` is the operator's `--base` pin for a LoRA adapter
+    pull (fix I2). It is forwarded to the resolver's `resolve` /
+    `resolve_via_modality` method ONLY when that method's signature
+    accepts a `base_override` keyword (checked via
+    `inspect.signature`); other resolvers are called exactly as before.
+    This lets a `--base` override re-derive resolve-time generation
+    defaults (e.g. turbo step/guidance counts) for the LoRA plugin
+    without touching any of the other resolvers.
+
     Raises ResolverError if no resolver matches the scheme, or if
     `modality` is set and no plugin claims that modality.
     """
     resolver = get_resolver(uri)
     if modality is None:
-        return resolver.resolve(uri)
+        method = resolver.resolve
+        if base_override is not None and _accepts_kwarg(method, "base_override"):
+            return method(uri, base_override=base_override)
+        return method(uri)
     method = getattr(resolver, "resolve_via_modality", None)
     if not callable(method):
         # Resolver doesn't support modality override; warn and fall
@@ -157,7 +197,12 @@ def resolve(uri: str, *, modality: str | None = None) -> ResolvedModel:
             "resolver for %r does not support modality override; "
             "falling back to sniff dispatch", uri,
         )
-        return resolver.resolve(uri)
+        plain = resolver.resolve
+        if base_override is not None and _accepts_kwarg(plain, "base_override"):
+            return plain(uri, base_override=base_override)
+        return plain(uri)
+    if base_override is not None and _accepts_kwarg(method, "base_override"):
+        return method(uri, modality, base_override=base_override)
     return method(uri, modality)
 
 

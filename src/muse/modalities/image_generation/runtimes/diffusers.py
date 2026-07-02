@@ -103,8 +103,12 @@ class DiffusersText2ImageModel:
         not a full pipeline; the base pipeline loads from base_model
       - base_model: muse catalog id or HF repo id of the base pipeline
         this adapter layers onto (required when lora_adapter is True)
-      - lora_scale: default cross-attention scale for the adapter,
-        overridable per-request via generate(..., lora_scale=...)
+      - lora_scale: default cross-attention scale for the adapter.
+        Overridable per-request on /v1/images/generations, both the
+        text-to-image and img2img paths (generate(..., lora_scale=...)
+        with or without init_image); edits (inpaint) and variations
+        (vary) have no per-request scale channel and always use this
+        configured default.
     """
 
     def __init__(
@@ -156,6 +160,19 @@ class DiffusersText2ImageModel:
             # muse catalog id -> that entry's snapshot dir; HF repo id
             # passes through for from_pretrained to fetch (HF cache).
             load_src = resolve_model_source(base_model)
+            if "/" not in base_model and load_src == base_model:
+                # base_model looks like a muse catalog id (no "/"), but
+                # resolve_model_source could not map it to a local_dir
+                # (the base was removed after pull, or never pulled) and
+                # echoed it back verbatim. Fail loud with the actionable
+                # fix instead of letting from_pretrained raise a cryptic
+                # HF RepositoryNotFoundError for a bare id it can't
+                # resolve as an HF repo either.
+                raise RuntimeError(
+                    f"{model_id}: LoRA base {base_model!r} is not pulled "
+                    f"(it may have been removed); run `muse pull "
+                    f"{base_model}` and retry"
+                )
         else:
             load_src = self._src
 
@@ -213,6 +230,7 @@ class DiffusersText2ImageModel:
                 steps=steps,
                 guidance=guidance,
                 seed=seed,
+                lora_scale=lora_scale,
             )
         w = width or self.default_size[0]
         h = height or self.default_size[1]
@@ -269,6 +287,7 @@ class DiffusersText2ImageModel:
         steps: int | None,
         guidance: float | None,
         seed: int | None,
+        lora_scale: float | None = None,
     ) -> ImageResult:
         # Lazy-load the img2img pipeline, cached on the instance.
         if self._i2i_pipe is None:
@@ -331,9 +350,11 @@ class DiffusersText2ImageModel:
         if gen is not None:
             call_kwargs["generator"] = gen
         if self._lora_adapter:
-            call_kwargs["cross_attention_kwargs"] = {
-                "scale": self._default_lora_scale,
-            }
+            s_lora = (
+                lora_scale if lora_scale is not None
+                else self._default_lora_scale
+            )
+            call_kwargs["cross_attention_kwargs"] = {"scale": s_lora}
 
         out = self._i2i_pipe(**call_kwargs)
         img = out.images[0]

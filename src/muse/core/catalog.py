@@ -343,6 +343,15 @@ def known_models() -> dict[str, CatalogEntry]:
                 merged_caps = dict(manifest.get("capabilities") or {})
                 merged_caps.update(curated.capabilities)
                 manifest["capabilities"] = merged_caps
+            # Operator --base pin (device_override precedent): a top-level
+            # catalog field, applied AFTER the curated overlay so it wins
+            # over both the tag-declared base and a curated base_model.
+            base_override = entry_data.get("base_override")
+            if base_override:
+                manifest = dict(manifest)
+                merged_caps = dict(manifest.get("capabilities") or {})
+                merged_caps["base_model"] = base_override
+                manifest["capabilities"] = merged_caps
             entries[model_id] = _persisted_manifest_to_catalog_entry(manifest)
         if key is not None:
             _known_models_cache = (key, entries)
@@ -606,11 +615,13 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
     record the venv's Python path so `muse serve` can spawn workers
     with the right interpreter.
 
-    `base_override` applies to LoRA adapter pulls (both resolver-URI and
-    curated-by-URI/curated-alias branches): it is merged into the
-    capabilities overlay as `base_model`, winning over any base already
-    declared by the adapter repo or a curated entry. It is warned-and-
-    ignored for bundled bare-id pulls, which have no LoRA base to set.
+    `base_override` applies to LoRA adapter pulls: resolver-URI,
+    curated-by-URI/curated-alias, AND resolver-sourced bare-id re-pulls.
+    It is threaded to `_pull_via_resolver` as its own `base_override`
+    kwarg (a top-level catalog field, mirroring `device_override`), NOT
+    merged into the capabilities overlay: see `_pull_via_resolver` for
+    why that durability matters. It is warned-and-ignored only for true
+    bundled-script pulls, which have no LoRA base to set.
     """
     curated = find_curated(identifier)
     if curated is not None:
@@ -622,13 +633,12 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
             # runtime-specific settings (trust_remote_code, chat_format,
             # context_length) land in the persisted manifest.
             overlay = dict(curated.capabilities or {})
-            if base_override:
-                overlay["base_model"] = base_override
             _pull_via_resolver(
                 curated.uri,
                 model_id_override=curated.id,
                 capabilities_overlay=overlay or None,
                 modality_override=curated.modality,
+                base_override=base_override,
             )
             return
         # Bundled curated entry: id equals an existing bundled script's
@@ -647,28 +657,16 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
         uri_curated = find_curated_by_uri(identifier)
         if uri_curated is not None:
             overlay = dict(uri_curated.capabilities or {})
-            if base_override:
-                overlay["base_model"] = base_override
             _pull_via_resolver(
                 identifier,
                 model_id_override=uri_curated.id,
                 capabilities_overlay=overlay or None,
                 modality_override=uri_curated.modality,
+                base_override=base_override,
             )
         else:
-            _pull_via_resolver(
-                identifier,
-                capabilities_overlay=(
-                    {"base_model": base_override} if base_override else None
-                ),
-            )
+            _pull_via_resolver(identifier, base_override=base_override)
         return
-
-    if base_override:
-        logger.warning(
-            "--base only applies to resolver-pulled LoRA adapters; "
-            "ignored for %s", identifier,
-        )
 
     # Bare id: could be a bundled script OR a resolver-pulled model
     # (resolver-pulled ids also show up in known_models() via their
@@ -685,6 +683,9 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
     existing = _read_catalog().get(identifier, {}) or {}
     source_uri = existing.get("source")
     if source_uri:
+        # Resolver-sourced: thread base_override through instead of
+        # warn-and-ignore. The warning below is reserved for pulls with
+        # no resolver source at all (true bundled scripts).
         uri_curated = find_curated_by_uri(source_uri)
         if uri_curated is not None:
             _pull_via_resolver(
@@ -692,10 +693,21 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
                 model_id_override=identifier,
                 capabilities_overlay=uri_curated.capabilities or None,
                 modality_override=uri_curated.modality,
+                base_override=base_override,
             )
         else:
-            _pull_via_resolver(source_uri, model_id_override=identifier)
+            _pull_via_resolver(
+                source_uri,
+                model_id_override=identifier,
+                base_override=base_override,
+            )
         return
+
+    if base_override:
+        logger.warning(
+            "--base only applies to resolver-pulled LoRA adapters; "
+            "ignored for %s", identifier,
+        )
 
     catalog_known = known_models()
     if identifier in catalog_known:
@@ -788,6 +800,7 @@ def _pull_via_resolver(
     model_id_override: str | None = None,
     capabilities_overlay: dict | None = None,
     modality_override: str | None = None,
+    base_override: str | None = None,
 ) -> None:
     """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
 
@@ -818,6 +831,22 @@ def _pull_via_resolver(
     overlay wins on key collision). The merged block ends up in the
     persisted manifest and flows into the runtime constructor via
     `load_backend`.
+
+    `base_override` is the operator's `--base` pin for a LoRA adapter
+    pull. Modeled on `device_override`: it is stored as a TOP-LEVEL
+    `base_override` field on the catalog entry (not merged into
+    `capabilities_overlay`), so it survives `known_models()`'s later
+    curated-overlay re-application and `get_manifest()` reads, both of
+    which apply it AFTER curated capabilities so the operator wins over
+    both the tag-declared base and a curated `base_model`. It is also
+    forwarded into `resolve()` so a turbo `--base` pairing re-derives
+    generation defaults (steps/guidance) at resolve time (fix I2), and
+    written into the manifest's `capabilities.base_model` here so
+    `_validate_lora_capabilities` and the persisted manifest agree with
+    the top-level field. When omitted (a plain re-pull), any
+    `base_override` already recorded on the PRIOR catalog entry for this
+    model_id is carried over so re-pulling never silently reverts a
+    previously-set operator pin.
     """
     from muse.core.resolvers import resolve
 
@@ -825,7 +854,7 @@ def _pull_via_resolver(
     # resolver dispatches via resolve_via_modality (bypassing sniff)
     # so curated yaml's modality declaration beats the priority-based
     # plugin pick. See resolvers.resolve docstring.
-    resolved = resolve(uri, modality=modality_override)
+    resolved = resolve(uri, modality=modality_override, base_override=base_override)
     manifest = dict(resolved.manifest)
     # Resolver may put backend_path in the manifest itself, or only on
     # the ResolvedModel. Persist it consistently so load_backend can
@@ -840,6 +869,18 @@ def _pull_via_resolver(
     if model_id_override:
         manifest["model_id"] = model_id_override
     model_id = manifest["model_id"]
+
+    # Preserve a prior operator --base pin across a re-pull that omits
+    # --base, so re-pulling never silently reverts operator intent.
+    effective_base_override = base_override
+    if not effective_base_override:
+        prior_entry = _read_catalog().get(model_id, {}) or {}
+        effective_base_override = prior_entry.get("base_override")
+
+    if effective_base_override:
+        merged_caps = dict(manifest.get("capabilities") or {})
+        merged_caps["base_model"] = effective_base_override
+        manifest["capabilities"] = merged_caps
 
     _validate_lora_capabilities(manifest)
 
@@ -875,7 +916,7 @@ def _pull_via_resolver(
     # above, outside any lock. Only the catalog file RMW is protected here.
     with _CATALOG_WRITE_LOCK:
         catalog = _read_catalog()
-        catalog[model_id] = {
+        entry = {
             "pulled_at": datetime.now(timezone.utc).isoformat(),
             "hf_repo": manifest["hf_repo"],
             "local_dir": str(local_dir),
@@ -885,6 +926,9 @@ def _pull_via_resolver(
             "source": uri,
             "manifest": manifest,
         }
+        if effective_base_override:
+            entry["base_override"] = effective_base_override
+        catalog[model_id] = entry
         _write_catalog(catalog)
     _reset_known_models_cache()
 
@@ -1134,9 +1178,16 @@ def get_manifest(model_id: str) -> dict:
     if model_id not in catalog_known:
         raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
     catalog = _read_catalog()
-    persisted = catalog.get(model_id, {}).get("manifest")
+    entry_data = catalog.get(model_id, {})
+    persisted = entry_data.get("manifest")
     if persisted:
-        return dict(persisted)
+        manifest = dict(persisted)
+        base_override = entry_data.get("base_override")
+        if base_override:
+            merged_caps = dict(manifest.get("capabilities") or {})
+            merged_caps["base_model"] = base_override
+            manifest["capabilities"] = merged_caps
+        return manifest
     entry = catalog_known[model_id]
     module_path, _ = entry.backend_path.split(":", 1)
     module = _import_backend_module(module_path)

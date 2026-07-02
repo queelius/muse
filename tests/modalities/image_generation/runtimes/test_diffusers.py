@@ -965,6 +965,43 @@ class TestLoraLoading:
                     lora_adapter=True,
                 )
 
+    def test_unpulled_muse_id_base_raises_actionable_muse_pull_hint(
+        self, tmp_path, monkeypatch,
+    ):
+        """I1: when base_model is a muse-id (no '/') that resolve_model_source
+        cannot map to a local_dir (base removed after pull, or never
+        pulled), the runtime must raise a clear `muse pull <base>` hint
+        instead of letting from_pretrained raise a cryptic HF
+        RepositoryNotFoundError for a bare id it can't resolve."""
+        fake_class = MagicMock()
+        fake_class.from_pretrained.return_value = _patched_pipe()
+        # Identity: resolve_model_source didn't find a local_dir for the
+        # muse id, so it just echoed the id back verbatim (the documented
+        # unknown-id passthrough behavior).
+        monkeypatch.setattr(
+            "muse.modalities.image_generation.runtimes.diffusers.resolve_model_source",
+            lambda ref: ref,
+        )
+        with patch(
+            "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+            fake_class,
+        ), patch(
+            "muse.modalities.image_generation.runtimes.diffusers.torch",
+            MagicMock(),
+        ):
+            with pytest.raises(RuntimeError, match=r"muse pull sdxl-turbo"):
+                DiffusersText2ImageModel(
+                    hf_repo="nerijs/pixel-art-xl",
+                    local_dir=str(tmp_path),
+                    device="cpu",
+                    dtype="float32",
+                    model_id="pixel-art-xl",
+                    lora_adapter=True,
+                    base_model="sdxl-turbo",
+                )
+        # from_pretrained must never be reached with the bare unresolved id.
+        fake_class.from_pretrained.assert_not_called()
+
 
 class TestLoraScale:
     def test_request_scale_passes_cross_attention_kwargs(self, tmp_path, monkeypatch):
@@ -1001,3 +1038,73 @@ class TestLoraScale:
             )
         m.generate("a cat")
         assert "cross_attention_kwargs" not in pipe.call_args.kwargs
+
+
+class TestLoraScaleImg2Img:
+    """I3: per-request lora_scale must reach the img2img path too, not
+    just t2i. Before the fix, generate(..., lora_scale=...) dropped the
+    request value when init_image was set (delegating to
+    _generate_img2img without it; the configured default was injected
+    instead)."""
+
+    def _lora_model_with_i2i(self, tmp_path, monkeypatch, fake_i2i_pipe, **extra):
+        fake_t2i_class = MagicMock()
+        fake_t2i_class.from_pretrained.return_value = _patched_pipe()
+        fake_i2i_class = MagicMock()
+        fake_i2i_class.from_pipe.return_value = fake_i2i_pipe
+        monkeypatch.setattr(
+            "muse.modalities.image_generation.runtimes.diffusers.resolve_model_source",
+            lambda ref: "/weights/sdxl-turbo" if ref == "sdxl-turbo" else ref,
+        )
+        # monkeypatch (not `with patch(...)`) so the substitution stays
+        # active for the test's later m.generate(...) call, not just
+        # during construction.
+        monkeypatch.setattr(
+            "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+            fake_t2i_class,
+        )
+        monkeypatch.setattr(
+            "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForImage2Image",
+            fake_i2i_class,
+        )
+        monkeypatch.setattr(
+            "muse.modalities.image_generation.runtimes.diffusers.torch",
+            MagicMock(),
+        )
+        m = DiffusersText2ImageModel(
+            hf_repo="nerijs/pixel-art-xl",
+            local_dir=str(tmp_path),
+            device="cpu",
+            dtype="float32",
+            model_id="pixel-art-xl",
+            lora_adapter=True,
+            base_model="sdxl-turbo",
+            **extra,
+        )
+        return m
+
+    def test_request_lora_scale_forwarded_on_img2img(self, tmp_path, monkeypatch):
+        from PIL import Image
+
+        fake_i2i_pipe = _patched_pipe()
+        m = self._lora_model_with_i2i(tmp_path, monkeypatch, fake_i2i_pipe)
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("pixel art, a knight", init_image=init_img, lora_scale=0.4)
+        assert fake_i2i_pipe.call_args.kwargs["cross_attention_kwargs"] == {
+            "scale": 0.4,
+        }
+
+    def test_default_lora_scale_used_on_img2img_when_request_omits(
+        self, tmp_path, monkeypatch,
+    ):
+        from PIL import Image
+
+        fake_i2i_pipe = _patched_pipe()
+        m = self._lora_model_with_i2i(
+            tmp_path, monkeypatch, fake_i2i_pipe, lora_scale=0.5,
+        )
+        init_img = Image.new("RGB", (64, 64))
+        m.generate("pixel art, a knight", init_image=init_img)
+        assert fake_i2i_pipe.call_args.kwargs["cross_attention_kwargs"] == {
+            "scale": 0.5,
+        }

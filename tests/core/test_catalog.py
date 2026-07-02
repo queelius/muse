@@ -2153,20 +2153,26 @@ class TestPullBaseOverrideDispatch:
         return calls
 
     def test_uri_branch_threads_base_override(self, tmp_catalog, monkeypatch):
+        """base_override is a dedicated kwarg to _pull_via_resolver (C1),
+        NOT merged into capabilities_overlay: the durable operator pin
+        lives as a top-level catalog field, not a manifest capability
+        that a later curated overlay could clobber."""
         from muse.core.catalog import pull
 
         calls = self._capture(monkeypatch)
         pull("hf://org/some-lora", base_override="sdxl-turbo")
-        assert calls["capabilities_overlay"] == {"base_model": "sdxl-turbo"}
+        assert calls["base_override"] == "sdxl-turbo"
+        assert calls.get("capabilities_overlay") is None
 
     def test_uri_branch_without_override_passes_none(self, tmp_catalog, monkeypatch):
         from muse.core.catalog import pull
 
         calls = self._capture(monkeypatch)
         pull("hf://org/some-lora")
-        assert calls["capabilities_overlay"] is None
+        assert calls.get("base_override") is None
+        assert calls.get("capabilities_overlay") is None
 
-    def test_curated_alias_branch_merges_base_override_over_capabilities(
+    def test_curated_alias_branch_threads_base_override_kwarg(
         self, tmp_catalog, monkeypatch,
     ):
         import muse.core.catalog as cat
@@ -2188,9 +2194,11 @@ class TestPullBaseOverrideDispatch:
         calls = self._capture(monkeypatch)
         pull("some-lora-alias", base_override="sdxl-turbo")
 
-        assert calls["capabilities_overlay"]["base_model"] == "sdxl-turbo"
-        # Pre-existing curated capability keys survive the merge.
+        assert calls["base_override"] == "sdxl-turbo"
+        # Pre-existing curated capability keys still flow through the
+        # (unrelated) capabilities_overlay.
         assert calls["capabilities_overlay"]["trust_remote_code"] is True
+        assert "base_model" not in calls["capabilities_overlay"]
         assert calls["model_id_override"] == "some-lora-alias"
 
     def test_uri_matching_curated_by_uri_threads_base_override(
@@ -2220,5 +2228,181 @@ class TestPullBaseOverrideDispatch:
         calls = self._capture(monkeypatch)
         pull("hf://org/some-lora", base_override="sdxl-turbo")
 
-        assert calls["capabilities_overlay"]["base_model"] == "sdxl-turbo"
+        assert calls["base_override"] == "sdxl-turbo"
         assert calls["capabilities_overlay"]["trust_remote_code"] is True
+
+    def test_bare_id_resolver_sourced_threads_base_override(
+        self, tmp_catalog, monkeypatch,
+    ):
+        """A resolver-sourced bare id (re-pull-by-friendly-id path) must
+        thread --base through to _pull_via_resolver, not warn-and-ignore.
+        The warning is reserved for true bundled-script pulls, which have
+        no LoRA base to set."""
+        import muse.core.catalog as cat
+        from muse.core.catalog import pull
+
+        _write_persisted_resolver_entry(
+            tmp_catalog,
+            model_id="pixel-art-xl",
+            modality="image/generation",
+            hf_repo="nerijs/pixel-art-xl",
+            capabilities={"lora_adapter": True},
+        )
+        _reset_known_models_cache()
+        monkeypatch.setattr(cat, "find_curated_by_uri", lambda uri: None)
+
+        calls = self._capture(monkeypatch)
+        pull("pixel-art-xl", base_override="sdxl-turbo")
+
+        assert calls["base_override"] == "sdxl-turbo"
+        assert calls["model_id_override"] == "pixel-art-xl"
+
+    def test_bundled_bare_id_with_base_override_warns_and_ignores(
+        self, tmp_catalog, monkeypatch, caplog,
+    ):
+        """A true bundled-script pull (no curated alias, no resolver
+        source) has no LoRA base to set; --base is warned-and-ignored,
+        unchanged from before."""
+        import logging
+        from muse.core.catalog import pull, known_models
+        from muse.core.curated import find_curated
+
+        caplog.set_level(logging.WARNING)
+        # Pick a bundled id with no curated alias, so dispatch falls all
+        # the way through to the bare-id / no-source-uri warning branch
+        # rather than short-circuiting via the curated-bundled path.
+        bundled_id = next(
+            mid for mid in known_models() if find_curated(mid) is None
+        )
+        with patch("muse.core.catalog._pull_bundled") as mock_bundled:
+            pull(bundled_id, base_override="sdxl-turbo")
+        mock_bundled.assert_called_once_with(bundled_id)
+        assert "--base only applies" in caplog.text
+
+
+class TestBaseOverrideDurability:
+    """C1/I4: an operator --base pin is a top-level catalog field (mirrors
+    device_override), so it survives curated-overlay re-application in
+    known_models() and get_manifest(), and survives re-pulls that omit
+    --base."""
+
+    def test_known_models_applies_base_override_over_curated_base_model(
+        self, tmp_catalog, monkeypatch,
+    ):
+        import muse.core.catalog as cat
+        from muse.core.catalog import known_models, _catalog_path
+        from muse.core.curated import CuratedEntry
+        import json
+
+        _write_persisted_resolver_entry(
+            tmp_catalog,
+            model_id="pixel-art-xl",
+            modality="image/generation",
+            hf_repo="nerijs/pixel-art-xl",
+            capabilities={"lora_adapter": True, "base_model": "sdxl-turbo"},
+        )
+        # Mark the entry with a durable operator override that conflicts
+        # with what curated.yaml declares below.
+        p = _catalog_path()
+        data = json.loads(p.read_text())
+        data["pixel-art-xl"]["base_override"] = "flux-schnell"
+        p.write_text(json.dumps(data))
+        _reset_known_models_cache()
+
+        fake_curated = CuratedEntry(
+            id="pixel-art-xl",
+            bundled=False,
+            uri="hf://nerijs/pixel-art-xl",
+            modality="image/generation",
+            size_gb=0.05,
+            description="pixel art lora",
+            tags=(),
+            capabilities={"base_model": "sdxl-turbo"},
+        )
+        monkeypatch.setattr(cat, "find_curated", lambda ident: fake_curated)
+
+        entries = known_models()
+        assert entries["pixel-art-xl"].extra["base_model"] == "flux-schnell"
+
+    def test_get_manifest_applies_base_override(self, tmp_catalog):
+        from muse.core.catalog import get_manifest, _catalog_path
+        import json
+
+        _write_persisted_resolver_entry(
+            tmp_catalog,
+            model_id="pixel-art-xl",
+            modality="image/generation",
+            hf_repo="nerijs/pixel-art-xl",
+            capabilities={"lora_adapter": True, "base_model": "sdxl-turbo"},
+        )
+        p = _catalog_path()
+        data = json.loads(p.read_text())
+        data["pixel-art-xl"]["base_override"] = "flux-schnell"
+        p.write_text(json.dumps(data))
+        _reset_read_catalog_cache()
+        _reset_known_models_cache()
+
+        manifest = get_manifest("pixel-art-xl")
+        assert manifest["capabilities"]["base_model"] == "flux-schnell"
+
+    def test_repull_without_base_preserves_prior_base_override(
+        self, tmp_catalog, monkeypatch,
+    ):
+        """Re-pulling (no --base) must NOT revert a previously-set operator
+        override back to the tag-declared / curated base."""
+        import json
+        from muse.core.catalog import _pull_via_resolver, _catalog_path
+        from muse.core.resolvers import ResolvedModel
+
+        _write_persisted_resolver_entry(
+            tmp_catalog,
+            model_id="pixel-art-xl",
+            modality="image/generation",
+            hf_repo="nerijs/pixel-art-xl",
+            capabilities={"lora_adapter": True, "base_model": "sdxl-turbo"},
+        )
+        p = _catalog_path()
+        data = json.loads(p.read_text())
+        data["pixel-art-xl"]["base_override"] = "sdxl-turbo-pinned"
+        # The override target must itself be "pulled" for
+        # _validate_lora_capabilities to accept the preserved override.
+        data["sdxl-turbo-pinned"] = {"local_dir": "/w/sdxl-turbo-pinned", "enabled": True}
+        p.write_text(json.dumps(data))
+        _reset_read_catalog_cache()
+        _reset_known_models_cache()
+
+        def fake_resolve(uri, *, modality=None, base_override=None):
+            return ResolvedModel(
+                manifest={
+                    "model_id": "pixel-art-xl",
+                    "modality": "image/generation",
+                    "hf_repo": "nerijs/pixel-art-xl",
+                    "backend_path": (
+                        "muse.modalities.image_generation.runtimes.diffusers"
+                        ":DiffusersText2ImageModel"
+                    ),
+                    "capabilities": {
+                        "lora_adapter": True,
+                        "base_model": "sdxl-turbo",
+                    },
+                },
+                backend_path=(
+                    "muse.modalities.image_generation.runtimes.diffusers"
+                    ":DiffusersText2ImageModel"
+                ),
+                download=lambda cache: cache / "w",
+            )
+
+        monkeypatch.setattr("muse.core.resolvers.resolve", fake_resolve)
+        with patch("muse.core.catalog.create_venv"), \
+             patch("muse.core.catalog.install_into_venv"), \
+             patch("muse.core.catalog.check_system_packages", return_value=[]):
+            _pull_via_resolver(
+                "hf://nerijs/pixel-art-xl",
+                model_id_override="pixel-art-xl",
+            )
+
+        catalog = _read_catalog()
+        entry = catalog["pixel-art-xl"]
+        assert entry.get("base_override") == "sdxl-turbo-pinned"
+        assert entry["manifest"]["capabilities"]["base_model"] == "sdxl-turbo-pinned"

@@ -25,6 +25,7 @@ from muse.core.resolvers import (
     ResolvedModel,
     ResolverError,
     SearchResult,
+    _accepts_kwarg,
     parse_uri,
     register_resolver,
 )
@@ -96,7 +97,7 @@ class HFResolver(Resolver):
             f"({type(last_exc).__name__}: {last_exc})"
         ) from last_exc
 
-    def resolve(self, uri: str) -> ResolvedModel:
+    def resolve(self, uri: str, *, base_override: str | None = None) -> ResolvedModel:
         scheme, repo_id, variant = parse_uri(uri)
         if scheme != "hf":
             raise ResolverError(f"HFResolver cannot resolve scheme {scheme!r}")
@@ -104,7 +105,9 @@ class HFResolver(Resolver):
         info = self._repo_info(repo_id)
         for plugin in self._plugins:
             if plugin["sniff"](info):
-                return plugin["resolve"](repo_id, variant, info)
+                return self._call_plugin_resolve(
+                    plugin, repo_id, variant, info, base_override,
+                )
 
         tags = getattr(info, "tags", None) or []
         siblings = [s.rfilename for s in getattr(info, "siblings", [])][:5]
@@ -113,7 +116,9 @@ class HFResolver(Resolver):
             f"siblings={siblings}..."
         )
 
-    def resolve_via_modality(self, uri: str, modality: str) -> ResolvedModel:
+    def resolve_via_modality(
+        self, uri: str, modality: str, *, base_override: str | None = None,
+    ) -> ResolvedModel:
         """Resolve a URI through the plugin for the named modality,
         bypassing priority-based sniff dispatch.
 
@@ -122,6 +127,11 @@ class HFResolver(Resolver):
         Reranker repos (BAAI/bge-reranker-base) are sentence-transformers
         models so the embedding/text plugin's sniff returns True; the
         text/rerank plugin needs to win when the curated entry says so.
+
+        `base_override` is forwarded to the chosen plugin's `resolve`
+        callable only when that callable's signature accepts it (I2);
+        the many plugins with a plain `resolve(repo_id, variant, info)`
+        signature are called exactly as before.
 
         Returns the chosen plugin's resolved model. Raises ResolverError
         when no plugin claims the named modality.
@@ -133,13 +143,25 @@ class HFResolver(Resolver):
         for plugin in self._plugins:
             if plugin["modality"] == modality:
                 info = self._repo_info(repo_id)
-                return plugin["resolve"](repo_id, variant, info)
+                return self._call_plugin_resolve(
+                    plugin, repo_id, variant, info, base_override,
+                )
 
         supported = sorted({p["modality"] for p in self._plugins})
         raise ResolverError(
             f"no HF plugin for modality {modality!r}; "
             f"registered: {supported}"
         )
+
+    @staticmethod
+    def _call_plugin_resolve(plugin, repo_id, variant, info, base_override):
+        """Call a plugin's resolve callable, forwarding base_override
+        only when its signature accepts the kwarg (I2 inspect guard).
+        """
+        resolve_fn = plugin["resolve"]
+        if base_override is not None and _accepts_kwarg(resolve_fn, "base_override"):
+            return resolve_fn(repo_id, variant, info, base_override=base_override)
+        return resolve_fn(repo_id, variant, info)
 
     def search(self, query: str, **filters) -> Iterable[SearchResult]:
         modality = filters.get("modality")

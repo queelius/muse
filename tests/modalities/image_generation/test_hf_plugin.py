@@ -334,6 +334,56 @@ def test_resolve_lora_memory_estimate_from_base_weights():
     assert result.manifest["capabilities"]["memory_gb"] == 7.2  # 6.9 + 0.3
 
 
+def test_resolve_lora_base_override_wins_over_tag_declared_base():
+    """I2: --base wins over the tag-declared base AND re-derives
+    generation defaults from the OVERRIDE base, not the tag base. The
+    fixture's tags declare an SDXL base (25 steps / 1024); overriding
+    to sdxl-turbo must flip capabilities.base_model AND the derived
+    defaults to turbo values (1 step / 0.0 guidance)."""
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        result = HF_PLUGIN["resolve"](
+            "nerijs/pixel-art-xl", None, _lora_info(),
+            base_override="sdxl-turbo",
+        )
+    caps = result.manifest["capabilities"]
+    assert caps["base_model"] == "sdxl-turbo"
+    assert caps["default_steps"] == 1
+    assert caps["default_guidance"] == 0.0
+
+
+def test_resolve_lora_base_override_satisfies_tagless_repo():
+    """A tagless adapter repo (no base_model tag) resolves successfully
+    when --base is supplied, instead of omitting base_model."""
+    from unittest.mock import patch
+    info = _lora_info(tags=["text-to-image", "lora"])
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        result = HF_PLUGIN["resolve"](
+            "org/tagless-lora", None, info, base_override="flux-schnell",
+        )
+    caps = result.manifest["capabilities"]
+    assert caps["base_model"] == "flux-schnell"
+
+
+def test_resolve_non_lora_ignores_base_override():
+    """A non-LoRA t2i repo has no base to override; base_override is a
+    silent no-op for it."""
+    info = _fake_info(
+        siblings=["model_index.json", "unet/diffusion_pytorch_model.safetensors"],
+        tags=["text-to-image", "diffusers"],
+    )
+    result = HF_PLUGIN["resolve"](
+        "some/regular-t2i", None, info, base_override="sdxl-turbo",
+    )
+    assert "base_model" not in result.manifest["capabilities"]
+
+
 def test_resolve_lora_download_patterns():
     from pathlib import Path
     from unittest.mock import patch
