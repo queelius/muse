@@ -181,3 +181,41 @@ def test_encode_frames_b64_handles_float_numpy_input():
     arrays = [np.full((8, 8, 3), 0.5, dtype=np.float32) for _ in range(2)]
     out = encode_frames_b64(arrays)
     assert len(out) == 2
+
+
+# --- frame_dimensions: (width, height) for PIL / numpy / torch frames ---
+# Regression for the "'int' object is not subscriptable" crash: the old
+# generate() paths did getattr(frame, "size", (w, h))[0], but a numpy
+# frame's .size is an int (element count), which crashed. Diffusers video
+# pipelines return numpy frames by default, so wan/cog inference hit this
+# the first time either model successfully loaded.
+
+def test_frame_dimensions_pil_returns_w_h():
+    from PIL import Image
+    from muse.modalities.video_generation.codec import frame_dimensions
+    img = Image.new("RGB", (64, 48))  # PIL size is (width, height)
+    assert frame_dimensions(img) == (64, 48)
+
+
+def test_frame_dimensions_numpy_hwc_returns_w_h():
+    import numpy as np
+    from muse.modalities.video_generation.codec import frame_dimensions
+    arr = np.zeros((48, 64, 3), dtype=np.uint8)  # HWC: H=48, W=64
+    assert frame_dimensions(arr) == (64, 48)
+
+
+def test_frame_dimensions_numpy_size_int_trap_regression():
+    import numpy as np
+    from muse.modalities.video_generation.codec import frame_dimensions
+    arr = np.zeros((10, 20, 3), dtype=np.uint8)
+    # the trap the old code fell into: numpy .size is an int, not (w, h)
+    assert isinstance(arr.size, int)
+    # frame_dimensions must ignore .size and read the array shape instead
+    assert frame_dimensions(arr) == (20, 10)
+
+
+def test_frame_dimensions_float_frame_normalizes():
+    import numpy as np
+    from muse.modalities.video_generation.codec import frame_dimensions
+    arr = np.zeros((32, 40, 3), dtype=np.float32)  # float in [0, 1]
+    assert frame_dimensions(arr) == (40, 32)

@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 from muse.core.runtime_helpers import dtype_for_name, select_device
+from muse.modalities.video_generation.codec import frame_dimensions
 from muse.modalities.video_generation.protocol import VideoResult
 from muse.modalities.video_generation.runtimes._offload import place_pipeline
 
@@ -220,8 +221,7 @@ class Model:
         first = frames_list[0]
         actual_frames = len(frames_list)
         actual_duration = round(actual_frames / max(out_fps, 1), 3)
-        first_size = getattr(first, "size", (w, h))
-        first_w, first_h = int(first_size[0]), int(first_size[1])
+        first_w, first_h = frame_dimensions(first)
         return VideoResult(
             frames=list(frames_list),
             fps=out_fps,

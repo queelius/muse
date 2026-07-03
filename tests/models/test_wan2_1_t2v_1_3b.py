@@ -47,8 +47,11 @@ def test_manifest_capabilities_advertise_defaults():
 
 def _patched_pipe(n_frames=25):
     fake_pipe = MagicMock()
-    fake_frame = MagicMock()
-    fake_frame.size = (832, 480)
+    import numpy as np
+    # Real numpy HWC frame -- what diffusers video pipelines return by
+    # default. (A numpy array's .size is an int, which is exactly what broke
+    # the old getattr(frame, "size")[0] code.)
+    fake_frame = np.zeros((480, 832, 3), dtype=np.uint8)  # H=480, W=832
     fake_pipe.return_value.frames = [[fake_frame] * n_frames]
     # Mirror real diffusers pipelines: .to(device) returns self.
     fake_pipe.to.return_value = fake_pipe

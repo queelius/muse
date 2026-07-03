@@ -55,6 +55,22 @@ def _to_pil(frame: Any):
     return Image.fromarray(arr)
 
 
+def frame_dimensions(frame: Any) -> tuple[int, int]:
+    """Return (width, height) of a video frame, matching what the encoders
+    produce.
+
+    Normalizes through `_to_pil`, so the dimensions can never disagree with
+    the encoded output. This deliberately avoids the `getattr(frame, "size")`
+    trap: a PIL.Image's `.size` is a `(w, h)` tuple, but a numpy array's
+    `.size` is an int (element count) and a torch tensor's `.size` is a
+    method -- reading `.size` and subscripting it works for PIL and raises
+    `'int' object is not subscriptable` for the numpy frames the diffusers
+    video pipelines return by default.
+    """
+    width, height = _to_pil(frame).size
+    return int(width), int(height)
+
+
 def encode_mp4(frames: list[Any], fps: int) -> bytes:
     """Encode frames as h264 MP4 via imageio.
 
