@@ -95,6 +95,16 @@ def test_search_raises_when_multiple_and_no_backend():
         list(search("q"))
 
 
+def test_search_raises_helpful_message_when_no_resolvers_registered():
+    """An empty registry (zero resolvers registered) must not claim
+    "multiple resolvers registered []" -- that message is misleading
+    when there are actually zero. Reserve the disambiguation message
+    for len > 1."""
+    # _clean_registry autouse fixture guarantees an empty registry here.
+    with pytest.raises(ResolverError, match="no resolvers registered"):
+        list(search("q"))
+
+
 def test_parse_uri_splits_scheme_ref_and_variant():
     scheme, ref, variant = parse_uri("hf://Qwen/Qwen3-8B-GGUF@q4_k_m")
     assert scheme == "hf"

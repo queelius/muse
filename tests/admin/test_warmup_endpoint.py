@@ -14,6 +14,7 @@ else.
 """
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -165,6 +166,60 @@ class TestWarmupOperation:
 
         assert exc_info.value.status == 503
         assert "director" in exc_info.value.message.lower()
+
+
+class TestWarmupBackfillsMemory:
+    """Regression: warmup_model must backfill capabilities.memory_gb from
+    the catalog sizing ladder (probe measurement, else on-disk weights)
+    before invoking director.warmup, exactly like the gateway request
+    path does via backfill_manifest_memory. Without this, a never-probed
+    model reads memory_gb as fallback 0.0, always "fits", reserves 0
+    memory against concurrent loads, and can over-admit -> OOM.
+    """
+
+    def test_warmup_sizes_never_probed_model_from_weights_on_disk(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        from muse.core.catalog import _catalog_path, _reset_known_models_cache
+
+        weights_dir = tmp_path / "weights" / "fake-model"
+        weights_dir.mkdir(parents=True)
+        (weights_dir / "model.bin").write_bytes(b"x" * (50 * 1024 * 1024))
+
+        catalog_path = _catalog_path()
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(json.dumps({
+            "fake-model": {
+                "python_path": "/v/bin/python",
+                "enabled": True,
+                "local_dir": str(weights_dir),
+                "manifest": {
+                    "model_id": "fake-model",
+                    "modality": "audio/speech",
+                    "hf_repo": "org/fake-model",
+                    "backend_path": "muse.fake:FakeModel",
+                    "capabilities": {"device": "cpu"},
+                },
+            },
+        }))
+        _reset_known_models_cache()
+
+        director = MagicMock()
+        director.warmup.return_value = 9001
+        state = SupervisorState(workers=[], device="cpu")
+        state.director = director
+
+        result = warmup_model("fake-model", state=state)
+
+        assert result == {"model_id": "fake-model", "worker_port": 9001}
+        _, kwargs = director.warmup.call_args
+        manifest_arg = kwargs.get("manifest")
+        assert manifest_arg is not None, "director.warmup must be called with manifest="
+        memory_gb = (manifest_arg.get("capabilities") or {}).get("memory_gb")
+        assert memory_gb is not None and memory_gb > 0, (
+            f"expected memory_gb backfilled > 0 from weights on disk, got {memory_gb!r}"
+        )
 
 
 # ----------------------------------------------------------------------

@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from muse.core.errors import error_response, error_type_for_status
+from muse.core.errors import ModelNotFoundError, error_response, error_type_for_status
 
 
 def _body(resp) -> dict:
@@ -54,3 +54,22 @@ class TestErrorResponseType:
         err = _body(resp)["error"]
         assert err["code"] == "internal_error"
         assert err["message"] == "the message"
+
+
+class TestModelNotFoundErrorUsesSharedHelper:
+    """ModelNotFoundError must derive its `type` from the single-source
+    error_type_for_status helper rather than hardcoding the string, so a
+    future change to the status->type mapping can't silently drift
+    between the two."""
+
+    def test_404_type_matches_helper(self):
+        exc = ModelNotFoundError("ghost", "audio/speech")
+        assert exc.detail["error"]["type"] == error_type_for_status(404)
+
+    def test_uses_shared_helper_not_a_hardcoded_literal(self, monkeypatch):
+        import muse.core.errors as errors_mod
+        monkeypatch.setattr(
+            errors_mod, "error_type_for_status", lambda status: "sentinel_type",
+        )
+        exc = errors_mod.ModelNotFoundError("ghost", "audio/speech")
+        assert exc.detail["error"]["type"] == "sentinel_type"

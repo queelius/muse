@@ -96,6 +96,20 @@ def _hf_quiet_if_needed():
 logger = logging.getLogger(__name__)
 
 
+class CatalogError(RuntimeError):
+    """Raised when catalog.json is corrupt and no cached good copy exists.
+
+    A corrupt/truncated catalog.json must never be treated as an empty-
+    but-valid catalog: every consumer (get_manifest, known_models,
+    /v1/models, is_pulled) would then silently behave as "no models
+    installed" -- 404-ing requests and emptying listings -- with no
+    signal that the catalog file itself needs attention. When a prior
+    good read is cached, `_read_catalog` serves that instead of raising;
+    this error is reserved for the case where there is nothing good to
+    fall back to.
+    """
+
+
 @dataclass(frozen=True)
 class CatalogEntry:
     """Stable catalog shape derived from a model script's MANIFEST."""
@@ -426,6 +440,13 @@ def _read_catalog() -> dict:
 
     Hot path. Returns a fresh dict each call (deep copy of the cached
     parse) so callers can mutate without polluting the cache.
+
+    A corrupt (invalid-JSON) catalog file does NOT silently degrade to
+    an empty dict, which would look like a valid "no models" catalog to
+    every caller. Instead: if a last-known-good parse is cached for this
+    same path, serve that (stale-but-real data, logged as a warning);
+    if there is no cache to fall back to, raise CatalogError so the
+    caller surfaces the problem instead of masking it.
     """
     global _read_catalog_cache
     p = _catalog_path()
@@ -456,8 +477,17 @@ def _read_catalog() -> dict:
     try:
         data = json.loads(p.read_text())
     except json.JSONDecodeError:
-        logger.warning("catalog at %s corrupt; resetting", p)
-        return {}
+        if cached is not None and cached[0] == path_str:
+            logger.warning(
+                "catalog at %s corrupt; serving last-known-good cached parse", p,
+            )
+            return _deep_copy_catalog(cached[2])
+        logger.error("catalog at %s corrupt; no cached copy to fall back to", p)
+        raise CatalogError(
+            f"catalog at {p} is corrupt (invalid JSON) and no last-known-"
+            f"good cached copy is available; inspect or restore the file "
+            f"before continuing"
+        )
     # Backfill enabled=True for pre-enable-flag entries (migration path).
     # Non-destructive: only affects the in-memory dict on read.
     for entry in data.values():
@@ -1095,7 +1125,7 @@ def load_backend(model_id: str, **kwargs) -> Any:
     if not is_pulled(model_id):
         raise RuntimeError(f"model {model_id!r} not pulled; run `muse pull {model_id}`")
     entry = catalog_known[model_id]
-    module_path, class_name = entry.backend_path.split(":")
+    module_path, class_name = entry.backend_path.split(":", 1)
     module = _import_backend_module(module_path)
     cls = getattr(module, class_name)
     catalog = _read_catalog()

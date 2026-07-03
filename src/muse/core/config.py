@@ -346,6 +346,13 @@ def set_value(key: str, raw: str, *, path: pathlib.Path | None = None) -> Any:
     Raises KeyError for an unknown key and ConfigError for an un-coercible
     raw value; in both cases nothing is written. Preserves other keys
     already present in the target file. Returns the coerced value written.
+
+    When `path` is omitted (or explicitly equals the resolved active
+    `config_path()`), the process-wide Config singleton is reset so a
+    subsequent `config.get()` call in THIS process sees the new value
+    instead of a stale cached parse. A write to some other explicit path
+    (the common test pattern) does not touch the singleton, since that
+    path isn't the one `get_config()` reads from anyway.
     """
     setting = SETTINGS_BY_KEY[key]           # KeyError on unknown
     value = coerce(setting, raw)             # strict: raises ConfigError
@@ -359,6 +366,8 @@ def set_value(key: str, raw: str, *, path: pathlib.Path | None = None) -> Any:
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=True))
     tmp.replace(target)                      # atomic write-then-rename
+    if path is None or path == config_path():
+        reset_config()
     return value
 
 
@@ -370,6 +379,13 @@ def unset_value(key: str, *, path: pathlib.Path | None = None) -> bool:
     other keys and prunes a group that becomes empty. This is the counterpart
     to `set_value`: there is no override value that means "use the lower
     -precedence default", so reverting a key requires removing it.
+
+    Mirrors `set_value`'s singleton-reset guard: when the write actually
+    happens against the resolved active `config_path()` (path omitted or
+    explicitly equal to it), the process-wide Config singleton is reset
+    so a subsequent `config.get()` in this process reflects the removal.
+    A no-op (key/file absent) or a write to some other explicit path
+    never touches the singleton.
     """
     SETTINGS_BY_KEY[key]                     # KeyError on unknown key
     target = path if path is not None else config_path()
@@ -387,4 +403,6 @@ def unset_value(key: str, *, path: pathlib.Path | None = None) -> bool:
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=True))
     tmp.replace(target)                      # atomic write-then-rename
+    if path is None or path == config_path():
+        reset_config()
     return True

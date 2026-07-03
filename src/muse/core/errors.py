@@ -42,6 +42,6 @@ class ModelNotFoundError(HTTPException):
             detail={"error": {
                 "code": "model_not_found",
                 "message": f"Model {model_id!r} is not available for modality {modality!r}",
-                "type": "invalid_request_error",
+                "type": error_type_for_status(404),
             }},
         )

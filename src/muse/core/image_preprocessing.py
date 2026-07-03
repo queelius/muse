@@ -14,10 +14,14 @@ wrong (e.g. TexTeller: 1-channel grayscale at 448x448).
 
 Dispatch order:
   1. If overrides is non-empty: skip AutoImageProcessor; build
-     DerivedImageProcessor(**overrides) directly. Operator-trust path.
+     DerivedImageProcessor(**overrides) directly. Operator-trust path
+     (mean/std may be omitted here; DerivedImageProcessor's own 0.5/0.5
+     default applies since the operator explicitly signed off).
   2. AutoImageProcessor.from_pretrained(src). Return on success.
   3. On AutoImageProcessor failure: read encoder hints from config.json.
-     If hints found, build DerivedImageProcessor(**hints).
+     Build DerivedImageProcessor(**hints) ONLY when hints include
+     explicit image_mean AND image_std (ground-truth stats, not a
+     guess). num_channels/image_size alone are not sufficient signal.
   4. Else: raise ImageProcessorError pointing at the override hatch.
 
 Tier 3 (ViT defaults) was dropped in v0.42.1 because it produced
@@ -217,7 +221,13 @@ def build_image_processor(
         )
 
     hints = read_encoder_hints(src)
-    if hints:
+    # Only trust hints-derived normalization when the config actually
+    # supplies image_mean/image_std. Falling back to a silent 0.5/0.5
+    # guess here would reintroduce the exact silently-wrong-normalization
+    # failure mode that the old ViT-defaults tier was removed for in
+    # v0.42.1 -- just via a different tier. num_channels/image_size alone
+    # are not enough signal to trust; require the actual stats.
+    if hints and hints.get("image_mean") is not None and hints.get("image_std") is not None:
         logger.info(
             "Loaded %s with DerivedImageProcessor "
             "(num_channels=%s image_size=%s; derived from config.json)",

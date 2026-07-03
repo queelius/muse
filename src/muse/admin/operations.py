@@ -23,6 +23,7 @@ from muse.cli_impl.supervisor import (
     SupervisorState,
     WorkerSpec,
     _shutdown_workers,
+    backfill_manifest_memory,
     spawn_worker,
     wait_for_ready,
 )
@@ -741,6 +742,13 @@ def warmup_model(model_id: str, *, state: SupervisorState) -> dict:
         )
 
     manifest = get_manifest(model_id)
+    # Backfill capabilities.memory_gb (and any device_override) from the
+    # catalog sizing ladder, exactly like the gateway request path does
+    # before calling director.acquire. Without this, a never-probed
+    # model reads memory_gb as the fallback 0.0, so the director thinks
+    # it "fits" for free, reserves 0 memory against concurrent loads,
+    # and can over-admit -> OOM.
+    manifest = backfill_manifest_memory(manifest, model_id)
     worker_port = state.director.warmup(model_id, manifest=manifest)
     return {"model_id": model_id, "worker_port": worker_port}
 

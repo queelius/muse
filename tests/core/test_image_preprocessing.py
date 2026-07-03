@@ -164,11 +164,16 @@ def test_build_image_processor_auto_succeeds_when_no_overrides(tmp_path, monkeyp
 
 
 def test_build_image_processor_falls_back_to_encoder_hints(tmp_path, monkeypatch):
-    """Tier 3: AutoImageProcessor raises; encoder hints in config.json
-    drive DerivedImageProcessor."""
+    """Tier 3: AutoImageProcessor raises; encoder hints in config.json --
+    INCLUDING explicit image_mean/image_std -- drive DerivedImageProcessor.
+    Hints that provide ground-truth normalization stats are trustworthy;
+    hints that don't (see test below) must not be silently guessed."""
     from muse.core import image_preprocessing as mod
     (tmp_path / "config.json").write_text(json.dumps({
-        "encoder": {"num_channels": 1, "image_size": 448},
+        "encoder": {
+            "num_channels": 1, "image_size": 448,
+            "image_mean": [0.5], "image_std": [0.5],
+        },
     }))
 
     def _failing(src):
@@ -181,6 +186,29 @@ def test_build_image_processor_falls_back_to_encoder_hints(tmp_path, monkeypatch
     assert isinstance(proc, mod.DerivedImageProcessor)
     assert proc.num_channels == 1
     assert proc.height == 448
+
+
+def test_build_image_processor_hints_without_mean_std_raise(tmp_path, monkeypatch):
+    """Tier 3 must NOT silently default missing image_mean/image_std to
+    0.5: that reintroduces the exact silently-wrong-normalization bug
+    the old ViT-defaults tier was removed for in v0.42.1. When
+    config.json exposes only num_channels/image_size (no mean/std), the
+    ladder must fall through to the override-hatch error instead of
+    guessing normalization stats."""
+    from muse.core import image_preprocessing as mod
+    (tmp_path / "config.json").write_text(json.dumps({
+        "encoder": {"num_channels": 1, "image_size": 448},
+    }))
+
+    def _failing(src):
+        raise RuntimeError("AutoImageProcessor failed")
+    monkeypatch.setattr(mod, "_load_auto_image_processor", _failing)
+
+    with pytest.raises(mod.ImageProcessorError) as exc_info:
+        mod.build_image_processor(
+            str(tmp_path), overrides=None, model_id="partial-hints",
+        )
+    assert "image_processor_overrides" in str(exc_info.value)
 
 
 def test_build_image_processor_all_tiers_exhausted_raises(tmp_path, monkeypatch):

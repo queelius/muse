@@ -103,3 +103,79 @@ def test_unset_value_unknown_key_raises(tmp_path):
     from muse.core import config as cfg
     with pytest.raises(KeyError):
         cfg.unset_value("no.such.key", path=tmp_path / "config.yaml")
+
+
+# --- singleton reset: writes to the ACTIVE config path must invalidate
+# the process-wide Config singleton so a later config.get() in the SAME
+# process sees the new value instead of a stale cached parse. Writes to
+# an explicit non-active test path (all the tests above) must NOT reset
+# the singleton.
+
+
+@pytest.fixture
+def _reset_singleton():
+    from muse.core import config as cfg
+    cfg.reset_config()
+    yield
+    cfg.reset_config()
+
+
+def test_set_value_default_path_resets_singleton_for_get(
+    tmp_path, monkeypatch, _reset_singleton,
+):
+    from muse.core import config as cfg
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    monkeypatch.delenv("MUSE_CONFIG", raising=False)
+    monkeypatch.delenv("MUSE_GPU_HEADROOM_GB", raising=False)
+
+    # Prime the singleton with the default value before any write.
+    assert cfg.get("server.gpu_headroom_gb") == 1.0
+
+    cfg.set_value("server.gpu_headroom_gb", "3.5")  # default (active) path
+
+    assert cfg.get("server.gpu_headroom_gb") == 3.5, (
+        "set_value on the active config path must reset the module "
+        "singleton so a same-process get() sees the new value"
+    )
+
+
+def test_unset_value_default_path_resets_singleton_for_get(
+    tmp_path, monkeypatch, _reset_singleton,
+):
+    from muse.core import config as cfg
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    monkeypatch.delenv("MUSE_CONFIG", raising=False)
+    monkeypatch.delenv("MUSE_GPU_HEADROOM_GB", raising=False)
+
+    cfg.set_value("server.gpu_headroom_gb", "3.5")  # active path, resets singleton
+    assert cfg.get("server.gpu_headroom_gb") == 3.5
+
+    cfg.unset_value("server.gpu_headroom_gb")  # active path
+
+    assert cfg.get("server.gpu_headroom_gb") == 1.0, (
+        "unset_value on the active config path must reset the module "
+        "singleton so a same-process get() reverts to the default"
+    )
+
+
+def test_set_value_explicit_test_path_does_not_reset_singleton(
+    tmp_path, monkeypatch, _reset_singleton,
+):
+    """Writing to an explicit, non-active path (the common test pattern
+    used throughout this file) must NOT clobber the process singleton --
+    only writes to the resolved active config_path() do."""
+    from muse.core import config as cfg
+    monkeypatch.delenv("MUSE_CATALOG_DIR", raising=False)
+    monkeypatch.delenv("MUSE_CONFIG", raising=False)
+    monkeypatch.delenv("MUSE_GPU_HEADROOM_GB", raising=False)
+
+    # Prime the singleton before touching an unrelated explicit path.
+    assert cfg.get("server.gpu_headroom_gb") == 1.0
+
+    other_path = tmp_path / "unrelated.yaml"
+    cfg.set_value("server.gpu_headroom_gb", "9.0", path=other_path)
+
+    assert cfg.get("server.gpu_headroom_gb") == 1.0, (
+        "a write to an explicit non-active path must not reset the "
+        "process singleton"
+    )

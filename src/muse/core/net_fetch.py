@@ -87,14 +87,13 @@ def resolve_public_ip(url: str) -> str | None:
         raise ValueError(
             f"host {host!r} resolved to non-IP {ip_str!r}: {e}"
         ) from e
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
+    # `not ip.is_global` subsumes private/loopback/link-local/reserved/
+    # unspecified (and additionally catches ranges the old explicit
+    # disjunction missed, e.g. 100.64.0.0/10 CGNAT / shared address
+    # space per RFC 6598). `is_global` alone does NOT cover multicast
+    # (many multicast ranges report is_global=True), so that check is
+    # kept explicit to avoid regressing the existing multicast block.
+    if not ip.is_global or ip.is_multicast:
         raise ValueError(
             f"refusing to fetch URL whose host {host!r} resolves to "
             f"non-public IP {ip!s}; set MUSE_ALLOW_PRIVATE_FETCH=1 to override"
@@ -186,37 +185,49 @@ def fetch_url_bytes(
             else:
                 request = client.build_request("GET", current_url)
             response = client.send(request, stream=True)
+            # `stream=True` opens the connection without reading the body;
+            # it must be closed on every exit path. The success path below
+            # fully drains `response.iter_bytes()`, which httpx closes
+            # automatically on exhaustion -- but the redirect branch never
+            # touches the body, and every raise below aborts the stream
+            # mid-read, so neither gets the automatic close. The try/finally
+            # covers all of them (including `continue`, which still runs
+            # the finally block) with one `response.close()`; closing an
+            # already-closed response is a safe no-op.
+            try:
+                if response.is_redirect:
+                    hops += 1
+                    if hops > max_redirects:
+                        raise ValueError(
+                            f"too many redirects fetching {url!r} "
+                            f"(limit {max_redirects})"
+                        )
+                    location = response.headers.get("location", "")
+                    if not location:
+                        raise ValueError(
+                            f"redirect response from {current_url!r} has no Location header"
+                        )
+                    # Resolve relative redirects against the current URL. The
+                    # next loop iteration resolves + validates + pins the
+                    # target, so an open-redirect / DNS-rebind to a private
+                    # IP is caught there.
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    current_url = next_url
+                    continue  # follow the hop
 
-            if response.is_redirect:
-                hops += 1
-                if hops > max_redirects:
-                    raise ValueError(
-                        f"too many redirects fetching {url!r} "
-                        f"(limit {max_redirects})"
-                    )
-                location = response.headers.get("location", "")
-                if not location:
-                    raise ValueError(
-                        f"redirect response from {current_url!r} has no Location header"
-                    )
-                # Resolve relative redirects against the current URL. The next
-                # loop iteration resolves + validates + pins the target, so an
-                # open-redirect / DNS-rebind to a private IP is caught there.
-                next_url = urllib.parse.urljoin(current_url, location)
-                current_url = next_url
-                continue  # follow the hop
-
-            # Non-redirect response: stream the body with a size cap.
-            response.raise_for_status()
-            buf = bytearray()
-            for chunk in response.iter_bytes():
-                buf += chunk
-                if len(buf) > max_bytes:
-                    raise ValueError(
-                        f"response body exceeds max ({len(buf)} > {max_bytes} bytes) "
-                        f"while fetching {url!r}"
-                    )
-            return bytes(buf)
+                # Non-redirect response: stream the body with a size cap.
+                response.raise_for_status()
+                buf = bytearray()
+                for chunk in response.iter_bytes():
+                    buf += chunk
+                    if len(buf) > max_bytes:
+                        raise ValueError(
+                            f"response body exceeds max ({len(buf)} > {max_bytes} bytes) "
+                            f"while fetching {url!r}"
+                        )
+                return bytes(buf)
+            finally:
+                response.close()
 
 
 # ---------------------------------------------------------------------------

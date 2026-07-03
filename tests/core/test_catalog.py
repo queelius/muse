@@ -415,6 +415,26 @@ def test_load_backend_raises_keyerror_on_unknown_model(tmp_catalog):
         load_backend("bogus-model-xyz")
 
 
+def test_load_backend_handles_backend_path_with_extra_colon(tmp_catalog):
+    """load_backend must split backend_path the same way get_manifest does
+    (split(":", 1)): an unbounded split(":") raises "too many values to
+    unpack" for any backend_path containing a second colon."""
+    _write_persisted_resolver_entry(
+        tmp_catalog,
+        model_id="weird-model",
+        backend_path="muse.fake.module:Weird:Extra",
+    )
+
+    fake_class = MagicMock()
+    fake_module = MagicMock()
+    setattr(fake_module, "Weird:Extra", fake_class)
+
+    with patch("muse.core.catalog._import_backend_module", return_value=fake_module):
+        load_backend("weird-model", device="cpu")
+
+    fake_class.assert_called_once()
+
+
 def test_write_catalog_is_atomic_no_tmp_leftover(tmp_catalog):
     with patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
@@ -875,6 +895,51 @@ def test_read_catalog_cache_invalidates_on_mtime_change(tmp_catalog):
 
     second = _read_catalog()
     assert "beta" in second, "_read_catalog cache failed to invalidate after _write_catalog"
+
+
+# --- _read_catalog corrupt-file guard ---------------------------------------
+#
+# A corrupt/truncated catalog.json must NOT silently look like an empty-but-
+# valid catalog: every consumer (get_manifest, known_models, /v1/models,
+# is_pulled) would then behave as "no models," 404-ing or emptying results
+# without any signal that the catalog itself is broken.
+
+
+def test_read_catalog_corrupt_with_no_prior_cache_raises(tmp_catalog):
+    """No last-known-good cache exists yet (first read ever): corruption
+    must raise a distinct error, not return {}."""
+    from muse.core.catalog import CatalogError, _catalog_path, _read_catalog
+
+    _catalog_path().parent.mkdir(parents=True, exist_ok=True)
+    _catalog_path().write_text("{not valid json")
+
+    with pytest.raises(CatalogError):
+        _read_catalog()
+
+
+def test_read_catalog_corrupt_falls_back_to_last_known_good(tmp_catalog):
+    """A cache from a prior good read exists: corruption on a later read
+    must serve the cached data, not an empty dict."""
+    from muse.core.catalog import (
+        _catalog_path,
+        _read_catalog,
+        _reset_read_catalog_cache,
+        _write_catalog,
+    )
+
+    _write_catalog({"alpha": {"hf_repo": "x/y", "enabled": True}})
+    _reset_read_catalog_cache()
+    good = _read_catalog()
+    assert "alpha" in good
+
+    # Corrupt the file in place (same path, different mtime/content).
+    _catalog_path().write_text("{not valid json")
+
+    result = _read_catalog()
+    assert "alpha" in result, (
+        "corrupt catalog must fall back to the last-known-good cached "
+        "parse, not silently degrade to an empty model set"
+    )
 
 
 def test_get_manifest_does_not_re_read_catalog_each_call(tmp_catalog):

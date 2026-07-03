@@ -95,6 +95,21 @@ class TestValidatePublicHost:
             with pytest.raises(ValueError, match="MUSE_ALLOW_PRIVATE_FETCH"):
                 validate_public_host("https://internal.corp/x")
 
+    def test_rejects_cgnat_100_64(self, monkeypatch):
+        """100.64.0.0/10 (Carrier-Grade NAT / shared address space, RFC
+        6598) is not `is_private`/`is_loopback`/etc but IS non-global.
+        The old explicit disjunction let it through; the guard must
+        reject it like any other non-public range."""
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        with _patch_dns("100.64.0.1"):
+            with pytest.raises(ValueError, match="non-public"):
+                validate_public_host("http://cgnat.example/path")
+
+    def test_allows_cgnat_when_allow_private_fetch_set(self, monkeypatch):
+        """The MUSE_ALLOW_PRIVATE_FETCH opt-out still applies to CGNAT."""
+        monkeypatch.setenv("MUSE_ALLOW_PRIVATE_FETCH", "1")
+        validate_public_host("http://100.64.0.1/path")  # must not raise
+
 
 # ---------------------------------------------------------------------------
 # fetch_url_bytes  (sync variant)
@@ -305,6 +320,96 @@ class TestFetchUrlBytes:
 
         url_arg = inner_client.build_request.call_args.args[1]
         assert "internal.corp" in url_arg
+
+    def test_redirect_response_is_closed_before_following(self, monkeypatch):
+        """A streamed redirect response must be closed before the next
+        hop is dialed, else the underlying connection leaks on every
+        redirect (only the final, fully-consumed response was closed
+        before this fix)."""
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        monkeypatch.setattr(
+            "muse.core.net_fetch.socket.gethostbyname",
+            lambda host: "93.184.216.34",
+        )
+
+        redirect_resp = _make_redirect_response(
+            "https://cdn.example.com/data.bin", status_code=302,
+        )
+        final_resp = _make_sync_response(content=b"payload")
+
+        send_calls = []
+
+        def fake_send(request, **kwargs):
+            send_calls.append(request)
+            if len(send_calls) == 1:
+                return redirect_resp
+            return final_resp
+
+        inner_client = MagicMock()
+        inner_client.send = fake_send
+        inner_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__enter__ = MagicMock(return_value=inner_client)
+        mock_client_ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch("muse.core.net_fetch.httpx.Client", return_value=mock_client_ctx):
+            fetch_url_bytes("https://example.com/data", max_bytes=1024)
+
+        redirect_resp.close.assert_called_once()
+
+    def test_response_closed_when_too_many_redirects(self, monkeypatch):
+        """The error path (redirect loop) must close the response before
+        raising, not just leave the streamed connection dangling."""
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        monkeypatch.setattr(
+            "muse.core.net_fetch.socket.gethostbyname",
+            lambda host: "93.184.216.34",
+        )
+
+        redirect_resp = _make_redirect_response(
+            "https://example.com/loop", status_code=302,
+        )
+
+        inner_client = MagicMock()
+        inner_client.send = MagicMock(return_value=redirect_resp)
+        inner_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__enter__ = MagicMock(return_value=inner_client)
+        mock_client_ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch("muse.core.net_fetch.httpx.Client", return_value=mock_client_ctx):
+            with pytest.raises(ValueError, match="redirect"):
+                fetch_url_bytes(
+                    "https://example.com/loop", max_bytes=1024, max_redirects=1,
+                )
+
+        assert redirect_resp.close.called
+
+    def test_response_closed_when_size_exceeded(self, monkeypatch):
+        """The size-cap error path must close the streamed response
+        before raising, since iter_bytes was aborted mid-stream (not
+        exhausted, so httpx's own auto-close on exhaustion never fires)."""
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        monkeypatch.setattr(
+            "muse.core.net_fetch.socket.gethostbyname",
+            lambda host: "93.184.216.34",
+        )
+        big_chunk_1 = b"A" * 500
+        big_chunk_2 = b"B" * 700
+        resp = _make_sync_response(iter_chunks=[big_chunk_1, big_chunk_2])
+
+        inner_client = MagicMock()
+        inner_client.send = MagicMock(return_value=resp)
+        inner_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__enter__ = MagicMock(return_value=inner_client)
+        mock_client_ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch("muse.core.net_fetch.httpx.Client", return_value=mock_client_ctx):
+            with pytest.raises(ValueError, match="exceeds"):
+                fetch_url_bytes("https://example.com/huge.bin", max_bytes=999)
+
+        resp.close.assert_called_once()
 
     def test_raises_after_max_redirects(self, monkeypatch):
         """Redirect loop or excessive hops must raise ValueError."""

@@ -413,15 +413,24 @@ def test_constructor_split_path_uses_derived_when_auto_image_processor_fails(tmp
     self._image_processor via build_image_processor's fallback ladder.
 
     Regression watchdog: the fallback path from the core module
-    (build_image_processor tier 3) must still fire through the runtime."""
+    (build_image_processor tier 3) must still fire through the runtime.
+
+    Encoder hints must include explicit image_mean/image_std: tier 3
+    only trusts hints that carry ground-truth normalization stats
+    (v0.5x fix), so num_channels/image_size alone are not enough to
+    drive DerivedImageProcessor."""
     import muse.modalities.image_ocr.runtimes.hf_vision2seq as mod
     import json
     import torch as real_torch
     import muse.core.image_preprocessing as ip_mod
 
-    # Drop a config.json with grayscale encoder hints into the snapshot dir.
+    # Drop a config.json with grayscale encoder hints (including explicit
+    # normalization stats) into the snapshot dir.
     (tmp_path / "config.json").write_text(json.dumps({
-        "encoder": {"num_channels": 1, "image_size": 448},
+        "encoder": {
+            "num_channels": 1, "image_size": 448,
+            "image_mean": [0.5], "image_std": [0.5],
+        },
     }))
 
     mod.torch = real_torch

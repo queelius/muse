@@ -215,6 +215,10 @@ def search(query: str, *, backend: str | None = None, **filters: Any) -> Iterabl
     to pick.
     """
     if backend is None:
+        if len(_RESOLVERS) == 0:
+            raise ResolverError(
+                "no resolvers registered; register a resolver before calling search()"
+            )
         if len(_RESOLVERS) == 1:
             backend = next(iter(_RESOLVERS))
         else:
