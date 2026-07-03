@@ -474,6 +474,33 @@ def test_image_route_backend_exception_no_temp_file_left():
     assert inputs_seen, "backend.image_to_3d was never called"
 
 
+def test_model_3d_cap_zero_env_falls_back(monkeypatch):
+    """MUSE_3D_INPUT_MAX_BYTES=0 must not turn into "reject everything".
+
+    config.get() parses "0" to the literal int 0 (a valid int, not an
+    error), so the accessor must guard non-positive values itself and
+    fall back to the registry default, mirroring image_input.py's
+    _default_max_bytes."""
+    from muse.core import config
+    monkeypatch.setenv("MUSE_3D_INPUT_MAX_BYTES", "0")
+    config.reset_config()
+    from muse.modalities.model_3d_generation.routes import _max_bytes
+    assert _max_bytes() == config.SETTINGS_BY_KEY["limits.model_3d_input_max_bytes"].default
+    config.reset_config()
+
+
+def test_model_3d_cap_empty_env_falls_back(monkeypatch):
+    """MUSE_3D_INPUT_MAX_BYTES="" coerces to None (opt_int); the
+    accessor must also fall back to the registry default rather than
+    returning None or crashing on the len(raw) > cap comparison."""
+    from muse.core import config
+    monkeypatch.setenv("MUSE_3D_INPUT_MAX_BYTES", "")
+    config.reset_config()
+    from muse.modalities.model_3d_generation.routes import _max_bytes
+    assert _max_bytes() == config.SETTINGS_BY_KEY["limits.model_3d_input_max_bytes"].default
+    config.reset_config()
+
+
 def test_image_route_backend_exception_returns_500():
     from PIL import Image as PILImage
     import io as _io

@@ -62,7 +62,16 @@ _MODE_HUMAN = {
 
 
 def _max_input_side() -> int:
-    return config.get("limits.segmentation_max_input_side")
+    """Read the per-request input-side cap via muse.core.config (env:
+    MUSE_SEGMENTATION_MAX_INPUT_SIDE) per call, so operators can change
+    the cap without a server restart. A resolved value that is
+    non-positive (parseable but nonsensical as a side cap) falls back
+    to the registry default, mirroring image_generation/image_input.py's
+    _default_max_bytes guard."""
+    n = config.get("limits.segmentation_max_input_side")
+    if n is None or n <= 0:
+        return config.SETTINGS_BY_KEY["limits.segmentation_max_input_side"].default
+    return n
 
 
 def _parse_points_json(raw: str) -> list[list[int]] | None:

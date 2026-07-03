@@ -294,3 +294,17 @@ def test_post_upscale_seed_offset_increments_for_n_over_one(client, model):
     assert r.status_code == 200
     seeds = [c["seed"] for c in model.calls]
     assert seeds == [100, 101, 102]
+
+
+def test_upscale_side_zero_env_falls_back(monkeypatch):
+    """MUSE_UPSCALE_MAX_INPUT_SIDE=0 must not turn into "reject
+    everything". config.get() parses "0" to the literal int 0 (a valid
+    int, not an error), so the accessor must guard non-positive values
+    itself and fall back to the registry default, mirroring
+    image_input.py's _default_max_bytes."""
+    from muse.core import config
+    monkeypatch.setenv("MUSE_UPSCALE_MAX_INPUT_SIDE", "0")
+    config.reset_config()
+    from muse.modalities.image_upscale.routes import _max_input_side
+    assert _max_input_side() == config.SETTINGS_BY_KEY["limits.upscale_max_input_side"].default
+    config.reset_config()

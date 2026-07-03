@@ -35,9 +35,15 @@ def _max_input_side() -> int:
     """Read the per-request input-side cap via muse.core.config.
 
     Default 1024. Tunable via MUSE_UPSCALE_MAX_INPUT_SIDE so users with
-    more VRAM can lift the cap without a code change.
+    more VRAM can lift the cap without a code change. A resolved value
+    that is non-positive (parseable but nonsensical as a side cap)
+    falls back to the registry default, mirroring
+    image_generation/image_input.py's _default_max_bytes guard.
     """
-    return config.get("limits.upscale_max_input_side")
+    n = config.get("limits.upscale_max_input_side")
+    if n is None or n <= 0:
+        return config.SETTINGS_BY_KEY["limits.upscale_max_input_side"].default
+    return n
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

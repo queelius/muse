@@ -495,3 +495,17 @@ def test_unexpected_exception_is_500_envelope():
     )
     assert r.status_code == 500, r.text
     assert "error" in r.json()
+
+
+def test_segmentation_side_zero_env_falls_back(monkeypatch):
+    """MUSE_SEGMENTATION_MAX_INPUT_SIDE=0 must not turn into "reject
+    everything". config.get() parses "0" to the literal int 0 (a valid
+    int, not an error), so the accessor must guard non-positive values
+    itself and fall back to the registry default, mirroring
+    image_input.py's _default_max_bytes."""
+    from muse.core import config
+    monkeypatch.setenv("MUSE_SEGMENTATION_MAX_INPUT_SIDE", "0")
+    config.reset_config()
+    from muse.modalities.image_segmentation.routes import _max_input_side
+    assert _max_input_side() == config.SETTINGS_BY_KEY["limits.segmentation_max_input_side"].default
+    config.reset_config()

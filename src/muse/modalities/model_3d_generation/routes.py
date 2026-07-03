@@ -52,8 +52,15 @@ def _max_bytes() -> int:
     MUSE_3D_INPUT_MAX_BYTES) per call, so operators can change the cap
     without a server restart. Garbled values fall back to the registry
     default (20MB) with a logged warning. Matches the v0.34.0
-    MUSE_IMAGE_INPUT_MAX_BYTES + MUSE_AUDIO_CLS_MAX_BYTES pattern."""
-    return config.get("limits.model_3d_input_max_bytes")
+    MUSE_IMAGE_INPUT_MAX_BYTES + MUSE_AUDIO_CLS_MAX_BYTES pattern. A
+    resolved value that is None (empty env) or non-positive (parseable
+    but nonsensical as a byte cap) also falls back to the registry
+    default, mirroring image_generation/image_input.py's
+    _default_max_bytes guard."""
+    n = config.get("limits.model_3d_input_max_bytes")
+    if n is None or n <= 0:
+        return config.SETTINGS_BY_KEY["limits.model_3d_input_max_bytes"].default
+    return n
 
 
 class _Generation3DRequest(BaseModel):

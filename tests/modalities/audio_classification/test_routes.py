@@ -109,6 +109,33 @@ def test_oversized_audio_returns_400(monkeypatch):
     assert "exceeds" in r.json()["error"]["message"]
 
 
+def test_audio_cls_cap_zero_env_falls_back(monkeypatch):
+    """MUSE_AUDIO_CLS_MAX_BYTES=0 must not turn into "reject everything".
+
+    config.get() parses "0" to the literal int 0 (a valid int, not an
+    error), so the accessor must guard non-positive values itself and
+    fall back to the registry default, mirroring image_input.py's
+    _default_max_bytes."""
+    from muse.core import config
+    monkeypatch.setenv("MUSE_AUDIO_CLS_MAX_BYTES", "0")
+    config.reset_config()
+    from muse.modalities.audio_classification.routes import _max_bytes
+    assert _max_bytes() == config.SETTINGS_BY_KEY["limits.audio_cls_max_bytes"].default
+    config.reset_config()
+
+
+def test_audio_cls_cap_empty_env_falls_back(monkeypatch):
+    """MUSE_AUDIO_CLS_MAX_BYTES="" coerces to None (opt_int); the
+    accessor must also fall back to the registry default rather than
+    returning None or crashing on the len(raw) > cap comparison."""
+    from muse.core import config
+    monkeypatch.setenv("MUSE_AUDIO_CLS_MAX_BYTES", "")
+    config.reset_config()
+    from muse.modalities.audio_classification.routes import _max_bytes
+    assert _max_bytes() == config.SETTINGS_BY_KEY["limits.audio_cls_max_bytes"].default
+    config.reset_config()
+
+
 def test_runtime_exception_returns_500():
     backend = MagicMock()
     backend.model_id = "broken"
