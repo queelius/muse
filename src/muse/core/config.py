@@ -9,10 +9,11 @@ only establishes the registry, the coercion function, and the two
 bootstrap path helpers that the config file itself needs before it can
 be loaded.
 
-Import-light by design: stdlib + pathlib only. No yaml, no torch, no
-fastapi, no transformers. `muse --help` and `muse pull` must work
-without any ML deps installed, and this module is imported early enough
-that it must not pull in anything heavy.
+Import-light by design: stdlib + pathlib + yaml only (yaml is a core
+muse dependency). No torch, no fastapi, no transformers. `muse --help`
+and `muse pull` must work without any ML deps installed, and this
+module is imported early enough that it must not pull in anything
+heavy.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ import os
 import pathlib
 from dataclasses import dataclass
 from typing import Any
+
+import yaml
 
 logger = logging.getLogger("muse.config")
 
@@ -183,3 +186,114 @@ def config_path() -> pathlib.Path:
     if raw:
         return pathlib.Path(raw).expanduser()
     return _catalog_dir() / "config.yaml"
+
+
+_GROUPS = {s.group for s in SETTINGS}
+
+_MISSING = object()
+
+
+class Config:
+    """Layered config resolver: override > env (live) > file (cached) > default.
+
+    The env var is re-read live on every `get` call so tests (and operators)
+    that change the environment after construction see the new value. The
+    yaml file is parsed once and cached on first access.
+    """
+
+    def __init__(self, *, path: pathlib.Path | None = None,
+                 overrides: dict[str, Any] | None = None):
+        self._path = path if path is not None else config_path()
+        self._overrides = dict(overrides or {})
+        self._file: dict | None = None  # lazy
+
+    def file_values(self) -> dict:
+        if self._file is None:
+            self._file = self._load_file()
+        return self._file
+
+    def _load_file(self) -> dict:
+        try:
+            text = self._path.read_text()
+        except (FileNotFoundError, NotADirectoryError):
+            return {}
+        try:
+            data = yaml.safe_load(text) or {}
+        except yaml.YAMLError as e:
+            logger.warning("could not parse config file %s: %s", self._path, e)
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("config file %s is not a mapping; ignoring", self._path)
+            return {}
+        cleaned: dict = {}
+        for group, leaves in data.items():
+            if group not in _GROUPS or not isinstance(leaves, dict):
+                logger.warning("unknown config section %r in %s; ignoring", group, self._path)
+                continue
+            for leaf, val in leaves.items():
+                if f"{group}.{leaf}" not in SETTINGS_BY_KEY:
+                    logger.warning("unknown config key %r in %s; ignoring",
+                                   f"{group}.{leaf}", self._path)
+                    continue
+                cleaned.setdefault(group, {})[leaf] = val
+        return cleaned
+
+    def _file_raw(self, setting: Setting):
+        group, leaf = setting.key.split(".", 1)
+        return self.file_values().get(group, {}).get(leaf, _MISSING)
+
+    def get(self, key: str, override: Any | None = None) -> Any:
+        setting = SETTINGS_BY_KEY[key]  # KeyError on unknown key (programmer error)
+        if override is not None:
+            return override
+        if key in self._overrides:
+            return self._overrides[key]
+        env_raw = os.environ.get(setting.env)
+        if env_raw is not None:
+            return self._coerce_lenient(setting, env_raw, "env")
+        file_raw = self._file_raw(setting)
+        if file_raw is not _MISSING:
+            # file values come from yaml already typed; still route through
+            # coerce via str() so a yaml "true"/"5" and a python bool/int both work
+            return self._coerce_lenient(setting, str(file_raw), "file")
+        return setting.default
+
+    def _coerce_lenient(self, setting: Setting, raw: str, origin: str) -> Any:
+        try:
+            return coerce(setting, raw)
+        except ConfigError as e:
+            logger.warning("%s; using default %r", e, setting.default)
+            return setting.default
+
+    def source(self, key: str) -> str:
+        setting = SETTINGS_BY_KEY[key]
+        if key in self._overrides:
+            return "override"
+        if os.environ.get(setting.env) is not None:
+            return "env"
+        if self._file_raw(setting) is not _MISSING:
+            return "file"
+        return "default"
+
+
+_CONFIG: Config | None = None
+
+
+def get_config() -> Config:
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = Config()
+    return _CONFIG
+
+
+def reset_config() -> None:
+    global _CONFIG
+    _CONFIG = None
+
+
+def get(key: str, override: Any | None = None) -> Any:
+    return get_config().get(key, override=override)
+
+
+def source(key: str) -> str:
+    return get_config().source(key)
