@@ -136,7 +136,7 @@ A snapshot of the defaults:
 | `limits.summarize_max_text_chars` | `MUSE_SUMMARIZE_MAX_TEXT_CHARS` | 100000 |
 | `limits.video_max_frames_b64` | `MUSE_VIDEO_MAX_FRAMES_B64` | 240 |
 
-The four `limits.*` byte/side caps that had a positivity guard
+The five `limits.*` byte/side caps that have a positivity guard
 (`image_input`, `audio_cls`, `model_3d_input`, `segmentation`, `upscale`) treat
 a non-positive value (`<= 0`, or empty for the opt-int byte caps) as "use the
 default", so setting one to 0 falls back rather than rejecting every request.
