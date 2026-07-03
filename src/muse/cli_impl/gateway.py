@@ -527,44 +527,23 @@ async def _route_via_director(
     # 0 GB and never evicts to make room for it.
     manifest = backfill_manifest_memory(manifest, model_id)
 
-    # 3. Acquire, OFF the event loop. director.acquire may block for tens of
-    # seconds on a cold load (worker spawn + health poll). Running it
-    # synchronously here would freeze the single gateway event loop and stall
-    # EVERY concurrent request, including ones for already-hot models
-    # (measured: a 37s cold load stalled 6 hot requests for ~35s each).
-    # asyncio.to_thread dispatches it to a worker thread; the director's
-    # RLock + in-flight memory reservation make concurrent off-loop acquires
-    # safe (they cannot over-admit the device). asyncio.shield keeps the
-    # acquire running if THIS request is cancelled (client disconnect /
-    # timeout) so a load that already bumped refcount is released rather than
-    # leaked -- a leaked refcount would pin the model non-evictable forever.
-    acquire_future = asyncio.ensure_future(
-        asyncio.to_thread(state.director.acquire, model_id, manifest=manifest)
-    )
+    # 3. Acquire, OFF the event loop and COALESCED per model. director.acquire
+    # may block for tens of seconds on a cold load; running it synchronously
+    # would freeze the single gateway event loop (fixed v0.50.3). But a burst
+    # of concurrent requests for the SAME cold model each dispatching their own
+    # to_thread(acquire) parks N-1 threads in the director's singleton-collapse
+    # event.wait, exhausting the ThreadPoolExecutor and stalling unrelated hot
+    # traffic (#319, measured 11.5s). _acquire_coalesced elects ONE loader per
+    # cold model; other same-model requests await a shared asyncio Future on the
+    # loop (no thread each). The load still runs off-loop and cancellation stays
+    # leak-safe.
     try:
-        worker_port = await asyncio.shield(acquire_future)
+        worker_port = await _acquire_coalesced(state, model_id, manifest)
     except OperationError as exc:
         return _openai_error(
             exc.status, exc.code, exc.message,
             error_type=error_type_for_status(exc.status),
         )
-    except asyncio.CancelledError:
-        # This request was cancelled while the acquire ran in its detached
-        # thread. shield() let the acquire keep running; if it SUCCEEDS it
-        # bumped refcount, so release once it settles (a threading load
-        # cannot be interrupted). A failed acquire never bumped refcount, so
-        # only release on a clean result.
-        def _release_if_acquired(fut: "asyncio.Future") -> None:
-            if not fut.cancelled() and fut.exception() is None:
-                try:
-                    state.director.release(model_id)
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "release after cancelled acquire failed for %r",
-                        model_id, exc_info=True,
-                    )
-        acquire_future.add_done_callback(_release_if_acquired)
-        raise
 
     # 4. Forward. The release call is wired into the response shape:
     # for buffered responses, fire in a finally clause once the body is
@@ -576,6 +555,108 @@ async def _route_via_director(
         request, target_url, timeout,
         director=state.director, model_id=model_id,
     )
+
+
+async def _acquire_off_loop(state, model_id, manifest, *, on_settle=None) -> int:
+    """Run director.acquire OFF the event loop, cancellation-safe.
+
+    Shared by the coalescing loader and by each waiter's own re-acquire.
+    Returns the worker port; propagates OperationError on a director failure.
+    `on_settle`, if given, is attached as a done-callback to the acquire
+    future so the loader can settle its coalescing gate ALWAYS -- even if the
+    loader coroutine is cancelled, shield keeps the acquire (and thus the
+    callback) alive, so waiters never hang.
+    """
+    director = state.director
+    acquire_future = asyncio.ensure_future(
+        asyncio.to_thread(director.acquire, model_id, manifest=manifest)
+    )
+    if on_settle is not None:
+        acquire_future.add_done_callback(on_settle)
+    try:
+        return await asyncio.shield(acquire_future)
+    except asyncio.CancelledError:
+        # Cancelled (client disconnect / timeout) while the load ran in its
+        # detached thread. shield kept it running; if it SUCCEEDS it bumped
+        # refcount, so release once it settles or the model is pinned forever.
+        def _release_if_acquired(fut: "asyncio.Future") -> None:
+            if not fut.cancelled() and fut.exception() is None:
+                try:
+                    director.release(model_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "release after cancelled acquire failed for %r",
+                        model_id, exc_info=True,
+                    )
+        acquire_future.add_done_callback(_release_if_acquired)
+        raise
+
+
+async def _acquire_coalesced(state, model_id, manifest) -> int:
+    """Coalesce concurrent cold acquires of the SAME model (#319).
+
+    The loader election is await-free (a dict get + set on the one event-loop
+    thread), so a plain dict needs no lock and there is no two-loader TOCTOU.
+    At most ONE thread parks per model-load; same-model waiters park on the
+    loop (await a shared Future), not in the ThreadPoolExecutor.
+    """
+    gates = state.cold_load_gates
+    gate = gates.get(model_id)
+    if gate is None:
+        # LOADER: create + store the gate BEFORE any await (atomic election),
+        # then run the one off-loop load. _settle owns the gate lifecycle.
+        loop = asyncio.get_running_loop()
+        gate = loop.create_future()
+        gates[model_id] = gate
+
+        def _settle(acq_fut: "asyncio.Future") -> None:
+            # Runs on the loop thread when the load settles. Compare-and-remove
+            # (only this Future's owner deletes its entry, so a re-elected
+            # loader's gate is never clobbered). NEVER set_exception -- a pure
+            # ("ok"|"fail", info) signal avoids "exception never retrieved"
+            # noise when there are zero waiters.
+            if gates.get(model_id) is gate:
+                del gates[model_id]
+            if gate.done():
+                return
+            if acq_fut.cancelled():
+                gate.set_result(("fail", None))
+            elif acq_fut.exception() is not None:
+                exc = acq_fut.exception()
+                info = (
+                    (exc.status, exc.code, exc.message)
+                    if isinstance(exc, OperationError) else None
+                )
+                gate.set_result(("fail", info))
+            else:
+                gate.set_result(("ok", None))
+
+        return await _acquire_off_loop(state, model_id, manifest, on_settle=_settle)
+
+    # WAITER: await the shared gate WITHOUT a thread. shield so cancelling THIS
+    # waiter cannot cancel the shared gate and poison the whole group.
+    await asyncio.shield(gate)
+    status, info = gate.result()
+    if status == "fail":
+        # Propagate the loader's failure; do NOT re-acquire. A retry herd would
+        # re-park N-1 threads -- the exact #319 pathology. A mapped failure
+        # carries the loader's own (status, code, message); a rare UNMAPPED one
+        # (director.acquire raised a non-OperationError, e.g. a pynvml hiccup in
+        # _decide) becomes a generic 503 so waiters still fail-fast without
+        # re-dispatching a thundering herd of cold acquires.
+        if info is not None:
+            s, code, msg = info
+            raise OperationError(code, msg, status=s)
+        raise OperationError(
+            "model_load_failed",
+            f"load of {model_id!r} failed",
+            status=503,
+        )
+    # "ok": take our OWN refcount via a full acquire. This re-decides
+    # hot-or-cold -- the model may have been evicted between the loader's
+    # commit and now; the director's own singleton collapse handles a genuine
+    # reload. The hot case is a sub-ms refcount bump.
+    return await _acquire_off_loop(state, model_id, manifest)
 
 
 async def _forward_with_release(

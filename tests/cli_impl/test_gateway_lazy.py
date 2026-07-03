@@ -1176,3 +1176,164 @@ class TestAcquireOffEventLoop:
                 director=director, model_id="m",
             )
         director.release.assert_called_once_with("m")
+
+
+# =============================================================================
+# #319: same-model cold-load coalescing. At most ONE thread parks per model-
+# load; concurrent same-model requests await a shared asyncio gate on the loop.
+# =============================================================================
+
+
+class TestColdLoadCoalescing:
+    async def test_same_model_burst_elects_one_loader(self):
+        """N concurrent requests for one cold model -> only the LOADER
+        dispatches director.acquire while the load is in flight; the other
+        N-1 await the gate on the loop (no thread each). After the load
+        settles, each waiter takes its own refcount via a hot re-acquire."""
+        from muse.cli_impl.gateway import _acquire_coalesced
+
+        started = threading.Event()
+        release = threading.Event()
+        state = _make_state_with_director()
+
+        def blocking_acquire(model_id, *, manifest):
+            started.set()
+            release.wait(timeout=5)  # the loader's load "in flight"
+            return 9001
+
+        state.director.acquire.side_effect = blocking_acquire
+        N = 8
+        tasks = [asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+                 for _ in range(N)]
+        await asyncio.to_thread(started.wait, 5)   # loader is now loading
+        await asyncio.sleep(0.1)                     # let all waiters park on the gate
+
+        assert state.director.acquire.call_count == 1   # ONLY the loader dispatched
+
+        release.set()
+        ports = await asyncio.gather(*tasks)
+        assert ports == [9001] * N
+        assert state.director.acquire.call_count == N   # loader + N-1 hot re-acquires
+        assert state.cold_load_gates == {}              # gate cleaned up
+
+    async def test_loader_failure_propagates_to_waiters_without_retry_herd(self):
+        """When the loader's load fails, waiters get the SAME 503 and do NOT
+        re-acquire (a retry herd would re-park N-1 threads)."""
+        from muse.cli_impl.gateway import _acquire_coalesced
+        from muse.admin.operations import OperationError
+
+        started = threading.Event()
+        release = threading.Event()
+        state = _make_state_with_director()
+
+        def failing_acquire(model_id, *, manifest):
+            started.set()
+            release.wait(timeout=5)
+            raise OperationError("model_too_large_for_device", "nope", status=503)
+
+        state.director.acquire.side_effect = failing_acquire
+        tasks = [asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+                 for _ in range(5)]
+        await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(0.1)
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert all(isinstance(r, OperationError) and r.status == 503 for r in results)
+        assert state.director.acquire.call_count == 1   # loader only; no retry herd
+        assert state.cold_load_gates == {}
+
+    async def test_cancelling_one_waiter_does_not_poison_the_group(self):
+        """Cancelling one waiter (via shield) must not cancel the shared gate;
+        the loader and other waiters still complete."""
+        from muse.cli_impl.gateway import _acquire_coalesced
+
+        started = threading.Event()
+        release = threading.Event()
+        state = _make_state_with_director()
+
+        def blocking_acquire(model_id, *, manifest):
+            started.set()
+            release.wait(timeout=5)
+            return 9001
+
+        state.director.acquire.side_effect = blocking_acquire
+        loader = asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+        await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(0.05)
+        w1 = asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+        w2 = asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+        await asyncio.sleep(0.05)  # let waiters park on the gate
+        w1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await w1
+        release.set()
+
+        assert await loader == 9001
+        assert await w2 == 9001
+
+    async def test_cancelling_the_loader_still_completes_waiters(self):
+        """THE subtle one: the gate is settled from a done-callback, not the
+        loader body, so a loader cancelled mid-load (client disconnect) does
+        NOT hang its waiters. Waiters still resolve, and the loader's orphaned
+        refcount is released exactly once."""
+        from muse.cli_impl.gateway import _acquire_coalesced
+
+        started = threading.Event()
+        release = threading.Event()
+        state = _make_state_with_director()
+
+        def blocking_acquire(model_id, *, manifest):
+            started.set()
+            release.wait(timeout=5)
+            return 9001
+
+        state.director.acquire.side_effect = blocking_acquire
+        loader = asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+        await asyncio.to_thread(started.wait, 5)   # loader mid-load
+        await asyncio.sleep(0.05)
+        w1 = asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+        w2 = asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+        await asyncio.sleep(0.05)                     # waiters park on the gate
+
+        loader.cancel()                               # cancel the LOADER
+        with pytest.raises(asyncio.CancelledError):
+            await loader
+        release.set()                                 # shielded acquire finishes
+
+        assert await w1 == 9001                       # waiters NOT hung
+        assert await w2 == 9001
+        for _ in range(200):                          # loader's orphan refcount released once
+            if state.director.release.called:
+                break
+            await asyncio.sleep(0.01)
+        state.director.release.assert_called_once_with("M")
+        assert state.cold_load_gates == {}
+
+    async def test_mapless_loader_failure_does_not_herd(self):
+        """A non-OperationError from the loader's acquire must fail waiters
+        fast (generic 503) WITHOUT them re-dispatching a cold-acquire herd."""
+        from muse.cli_impl.gateway import _acquire_coalesced
+        from muse.admin.operations import OperationError
+
+        started = threading.Event()
+        release = threading.Event()
+        state = _make_state_with_director()
+
+        def raising_acquire(model_id, *, manifest):
+            started.set()
+            release.wait(timeout=5)
+            raise RuntimeError("pynvml hiccup")  # NOT an OperationError
+
+        state.director.acquire.side_effect = raising_acquire
+        tasks = [asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+                 for _ in range(5)]
+        await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(0.1)
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # loader propagates the raw RuntimeError; waiters get a generic 503.
+        assert sum(isinstance(r, OperationError) and r.status == 503 for r in results) == 4
+        assert any(isinstance(r, RuntimeError) for r in results)
+        assert state.director.acquire.call_count == 1   # NO retry herd

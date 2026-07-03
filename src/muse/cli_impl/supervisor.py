@@ -123,6 +123,13 @@ class SupervisorState:
     stop_event: threading.Event = field(default_factory=threading.Event)
     idle_sweeper: "IdleSweeper | None" = None
     idle_sweeper_thread: "threading.Thread | None" = None
+    # #319 same-model cold-load coalescing (v0.51.0). model_id -> asyncio.Future
+    # gate. The FIRST request for a cold model becomes the loader (dispatches
+    # one off-loop director.acquire); concurrent requests for the SAME model
+    # await the gate on the event loop (no thread), so only one thread parks
+    # per model-load instead of N-1. Touched ONLY from the gateway's single
+    # event loop, so a plain dict is safe (the loader election is await-free).
+    cold_load_gates: dict = field(default_factory=dict)
 
 
 # Module-level singleton; admin routes reach this through

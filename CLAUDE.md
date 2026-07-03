@@ -498,6 +498,27 @@ companion safety fixes the serialized path had masked:
    load or eviction pollutes the global free-memory delta the writeback
    infers a peak from.
 
+**Same-model cold-load coalescing (v0.51.0+).** Off-loop acquire fixed
+loop-blocking but left a second hazard: a burst of concurrent requests
+for the SAME cold model each dispatched their own `to_thread(acquire)`,
+and the N-1 that lost the director's singleton-collapse race parked in
+`event.wait` INSIDE ThreadPoolExecutor threads, exhausting the default
+`min(32, cpu+4)` pool and stalling unrelated hot traffic (measured 11.5s
+on the GPU box; loop stayed responsive, `/health` fine). `gateway.py`
+`_acquire_coalesced` elects ONE loader per cold model via a per-model
+`asyncio.Future` gate in `SupervisorState.cold_load_gates` (a plain dict:
+the loader election is await-free, hence atomic on the single loop thread
+-- no lock, no two-loader TOCTOU). The loader runs one off-loop acquire;
+same-model waiters `await asyncio.shield(gate)` ON THE LOOP (no thread
+each). The gate is settled from a done-callback on the acquire future
+(NOT the loader body), so a loader cancelled mid-load still resolves its
+waiters; waiters `shield` so one cancellation can't poison the group;
+waiters PROPAGATE the loader's failure (no retry herd) and on success take
+their own refcount via a full re-acquire that re-decides hot-or-cold. The
+director is unchanged (its own threading collapse still serves admin
+warmup / other callers). Coalescing is same-model only; cross-model
+over-admission is still handled by the in-flight reservation above.
+
 Memory accounting is live, not declared. `muse.core.memory_probe`
 wraps `pynvml.nvmlDeviceGetMemoryInfo` (GPU) and
 `psutil.virtual_memory().available` (CPU). `nvidia-ml-py` is a soft
