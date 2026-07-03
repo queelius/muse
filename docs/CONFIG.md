@@ -45,6 +45,7 @@ validates the value against the registry and refuses to write a bad one.
 | `muse config path` | Print the resolved config-file path. |
 | `muse config get <key>` | Print one effective value. |
 | `muse config set <key> <value>` | Validate and atomically write one value into the file (preserves other keys). |
+| `muse config unset <key>` | Remove one setting from the file so it falls back to env/default (prunes an empty group). The counterpart to `set`: there is no override value meaning "use the default", so reverting a key means removing it. |
 
 Examples:
 

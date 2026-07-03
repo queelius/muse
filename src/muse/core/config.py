@@ -357,3 +357,31 @@ def set_value(key: str, raw: str, *, path: pathlib.Path | None = None) -> Any:
     tmp.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=True))
     tmp.replace(target)                      # atomic write-then-rename
     return value
+
+
+def unset_value(key: str, *, path: pathlib.Path | None = None) -> bool:
+    """Remove one dotted key from a yaml file so it falls back to env/default.
+
+    Raises KeyError for a key not in the registry. Returns True if the key
+    was present and removed, False if it was absent (a no-op). Preserves
+    other keys and prunes a group that becomes empty. This is the counterpart
+    to `set_value`: there is no override value that means "use the lower
+    -precedence default", so reverting a key requires removing it.
+    """
+    SETTINGS_BY_KEY[key]                     # KeyError on unknown key
+    target = path if path is not None else config_path()
+    if not target.exists():
+        return False
+    data = yaml.safe_load(target.read_text()) or {}
+    if not isinstance(data, dict):
+        return False
+    group, leaf = key.split(".", 1)
+    if group not in data or not isinstance(data[group], dict) or leaf not in data[group]:
+        return False
+    del data[group][leaf]
+    if not data[group]:                      # prune a now-empty group
+        del data[group]
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=True))
+    tmp.replace(target)                      # atomic write-then-rename
+    return True

@@ -765,6 +765,9 @@ STRICT path (validates and refuses a bad value).
 - `muse config get <key>` -- print one effective value.
 - `muse config set <key> <value>` -- validate and write one value into the
   file (atomic, preserves other keys).
+- `muse config unset <key>` -- remove one setting from the file so it falls
+  back to env/default (the counterpart to `set`; no override value means
+  "use the default", so reverting a key requires removing it).
 
 Scope boundary: `config.yaml` is for SERVER / global settings only.
 Per-model state (enable/disable, `device_override` from

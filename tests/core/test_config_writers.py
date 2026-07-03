@@ -56,3 +56,50 @@ def test_template_is_valid_yaml_and_roundtrips():
     # bootstrap keys are commented out -> NOT present as active keys
     assert "catalog_dir" not in data.get("paths", {})
     assert "config_file" not in data.get("paths", {})
+
+
+# --- unset_value: remove a key so it falls back to env/default ---
+
+def test_unset_value_removes_key_preserves_others(tmp_path):
+    import yaml
+    from muse.core import config as cfg
+    p = tmp_path / "config.yaml"
+    cfg.set_value("limits.rerank_max_documents", "42", path=p)
+    cfg.set_value("server.gpu_headroom_gb", "2.5", path=p)
+    assert cfg.unset_value("limits.rerank_max_documents", path=p) is True
+    data = yaml.safe_load(p.read_text())
+    assert "rerank_max_documents" not in data.get("limits", {})
+    assert data["server"]["gpu_headroom_gb"] == 2.5
+
+
+def test_unset_value_prunes_empty_group(tmp_path):
+    import yaml
+    from muse.core import config as cfg
+    p = tmp_path / "config.yaml"
+    cfg.set_value("limits.rerank_max_documents", "42", path=p)
+    cfg.unset_value("limits.rerank_max_documents", path=p)
+    data = yaml.safe_load(p.read_text()) or {}
+    assert "limits" not in data
+
+
+def test_unset_value_absent_key_is_noop(tmp_path):
+    import yaml
+    from muse.core import config as cfg
+    p = tmp_path / "config.yaml"
+    cfg.set_value("server.gpu_headroom_gb", "2.5", path=p)
+    assert cfg.unset_value("limits.rerank_max_documents", path=p) is False
+    assert yaml.safe_load(p.read_text())["server"]["gpu_headroom_gb"] == 2.5
+
+
+def test_unset_value_no_file_is_noop(tmp_path):
+    from muse.core import config as cfg
+    p = tmp_path / "config.yaml"
+    assert cfg.unset_value("server.gpu_headroom_gb", path=p) is False
+    assert not p.exists()
+
+
+def test_unset_value_unknown_key_raises(tmp_path):
+    import pytest
+    from muse.core import config as cfg
+    with pytest.raises(KeyError):
+        cfg.unset_value("no.such.key", path=tmp_path / "config.yaml")

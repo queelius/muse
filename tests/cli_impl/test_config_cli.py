@@ -154,3 +154,22 @@ def test_config_show_and_get_agree_on_token_redaction(monkeypatch, tmp_path):
     assert r_get.exit_code == 0
     assert r_get.stdout.strip() == "set"
     assert "another-secret-xyz" not in r_get.stdout
+
+
+def test_config_unset(monkeypatch, tmp_path):
+    import yaml
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    cfg.reset_config()
+    runner.invoke(app, ["config", "set", "server.gpu_headroom_gb", "2.5"])
+    r = runner.invoke(app, ["config", "unset", "server.gpu_headroom_gb"])
+    assert r.exit_code == 0
+    cfg.reset_config()
+    data = yaml.safe_load((tmp_path / "config.yaml").read_text()) or {}
+    assert "gpu_headroom_gb" not in data.get("server", {})
+
+
+def test_config_unset_unknown_key_nonzero(monkeypatch, tmp_path):
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    cfg.reset_config()
+    r = runner.invoke(app, ["config", "unset", "no.such.key"])
+    assert r.exit_code != 0

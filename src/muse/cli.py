@@ -827,6 +827,15 @@ def config_set(
     raise typer.Exit(run_set(key, value) or 0)
 
 
+@config_app.command("unset")
+def config_unset(
+    key: Annotated[str, typer.Argument(help="dotted setting key to remove from config.yaml")],
+) -> None:
+    """Remove one setting from config.yaml so it falls back to env/default."""
+    from muse.cli_impl.config_cmd import run_unset
+    raise typer.Exit(run_unset(key) or 0)
+
+
 # Helpers (preserved verbatim from the argparse era) -----------------------
 
 

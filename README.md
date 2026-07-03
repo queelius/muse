@@ -370,7 +370,7 @@ combined with live measurements as `min(declared, live)`.
 | `muse models disable <model-id>` | mark a pulled model inactive in the catalog (refuses to lazy-load) |
 | `muse models warmup <model-id>` | pre-load a model into a worker without serving traffic; first real request is hot |
 | `muse models refresh <id> \| --all \| --enabled` | re-install museq[server,extras] into per-model venv(s) (after `pip install -U museq`) |
-| `muse config generate \| show \| path \| get \| set` | manage `~/.muse/config.yaml` (see Configuration below) |
+| `muse config generate \| show \| path \| get \| set \| unset` | manage `~/.muse/config.yaml` (see Configuration below) |
 | `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (29 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.

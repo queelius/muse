@@ -72,6 +72,20 @@ def run_set(key: str, value: str) -> int:
     return 0
 
 
+def run_unset(key: str) -> int:
+    cfg.reset_config()
+    try:
+        removed = cfg.unset_value(key)
+    except KeyError:
+        typer.echo(f"error: unknown config key {key!r}", err=True)
+        return 2
+    if removed:
+        typer.echo(f"unset {key} (now uses env/default)")
+    else:
+        typer.echo(f"{key} was not set (no change)")
+    return 0
+
+
 def run_show(as_json: bool) -> int:
     cfg.reset_config()
     rows = _build_rows()
