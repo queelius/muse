@@ -83,22 +83,32 @@ def run_show(as_json: bool) -> int:
     return 0
 
 
-def _display_value(key: str, value) -> str:
-    """String form of a setting's value, redacting admin.token."""
+def _redacted_value(key: str, value):
+    """The ONE place that decides admin.token redaction.
+
+    admin.token must never leak its raw value through any `muse config`
+    surface (`show` table, `show --json`, or `get`). Both `_display_value`
+    (get/set) and `_build_rows` (show) funnel through this helper so
+    there is exactly one redaction site to audit; a second, independent
+    copy is how a drift/regression could leak the real token.
+    """
     if key == _REDACTED_KEY:
         return "set" if value else "unset"
-    return str(value)
+    return value
+
+
+def _display_value(key: str, value) -> str:
+    """String form of a setting's value, redacting admin.token."""
+    return str(_redacted_value(key, value))
 
 
 def _build_rows() -> list[dict]:
     rows: list[dict] = []
     for setting in cfg.SETTINGS:
         value = cfg.get(setting.key)
-        if setting.key == _REDACTED_KEY:
-            value = "set" if value else "unset"
         rows.append({
             "key": setting.key,
-            "value": value,
+            "value": _redacted_value(setting.key, value),
             "source": cfg.source(setting.key),
             "env": setting.env,
         })

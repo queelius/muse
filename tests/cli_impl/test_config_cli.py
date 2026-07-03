@@ -115,3 +115,42 @@ def test_config_show_admin_token_set_unset(monkeypatch, tmp_path):
     rows2 = json.loads(r2.stdout)
     row2 = next(x for x in rows2 if x["key"] == "admin.token")
     assert row2["value"] == "set"
+
+
+def test_config_get_admin_token_redacted(monkeypatch, tmp_path):
+    """`config get admin.token` must never echo the real token value."""
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "super-secret-abc")
+    cfg.reset_config()
+    r = runner.invoke(app, ["config", "get", "admin.token"])
+    assert r.exit_code == 0
+    assert "super-secret-abc" not in r.stdout
+    assert r.stdout.strip() == "set"
+
+    monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+    cfg.reset_config()
+    r2 = runner.invoke(app, ["config", "get", "admin.token"])
+    assert r2.exit_code == 0
+    assert r2.stdout.strip() == "unset"
+
+
+def test_config_show_and_get_agree_on_token_redaction(monkeypatch, tmp_path):
+    """`config show --json` and `config get` must render identical
+    redaction for admin.token, proving the two surfaces share one
+    redaction source instead of two copies that could drift."""
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "another-secret-xyz")
+    cfg.reset_config()
+
+    r_show = runner.invoke(app, ["config", "show", "--json"])
+    assert r_show.exit_code == 0
+    rows = json.loads(r_show.stdout)
+    row = next(x for x in rows if x["key"] == "admin.token")
+    assert row["value"] == "set"
+    assert "another-secret-xyz" not in r_show.stdout
+
+    cfg.reset_config()
+    r_get = runner.invoke(app, ["config", "get", "admin.token"])
+    assert r_get.exit_code == 0
+    assert r_get.stdout.strip() == "set"
+    assert "another-secret-xyz" not in r_get.stdout
