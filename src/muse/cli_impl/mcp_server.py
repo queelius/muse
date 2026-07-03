@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
+
+from muse.core import config
 
 log = logging.getLogger("muse.mcp.cli")
 
@@ -52,7 +53,7 @@ def run_mcp_server(
         )
 
     if filter_kind == "admin" and not (
-        admin_token or os.environ.get("MUSE_ADMIN_TOKEN")
+        admin_token or config.get("admin.token")
     ):
         print(
             "warning: --filter admin without MUSE_ADMIN_TOKEN; "

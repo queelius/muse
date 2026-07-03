@@ -24,13 +24,14 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 from muse.cli_impl.serve_util import run_uvicorn
 
 from muse.cli_impl.idle_sweeper import IdleSweeper
+from muse.core import config
 from muse.core.catalog import _read_catalog, get_manifest
 from muse.core.venv import find_free_port
 
@@ -911,6 +912,40 @@ def backfill_manifest_memory(manifest: dict, model_id: str) -> dict:
     return out
 
 
+def build_load_director(
+    *,
+    enable_fn: Callable[[str], int],
+    disable_fn: Callable[[str], None],
+    memory_probe: Any,
+) -> "Any":
+    """Construct a LoadDirector with config-derived budgets/headroom.
+
+    This is the v0.5x doc-drift fix: `MUSE_GPU_BUDGET_GB`,
+    `MUSE_CPU_BUDGET_GB`, `MUSE_GPU_HEADROOM_GB`, `MUSE_CPU_HEADROOM_GB`
+    were documented as active env knobs but `LoadDirector.__init__`
+    only ever saw its own hardcoded defaults (None, None, 1.0, 2.0)
+    because nothing passed them in. Extracted as a standalone factory
+    (rather than inlined at the one call site) so the config wiring is
+    independently unit-testable without spinning up a full
+    SupervisorState.
+
+    Defaults match today's hardcoded LoadDirector.__init__ values, so a
+    deployment that sets nothing sees identical behavior; the knobs
+    simply start working for operators who do set them.
+    """
+    from muse.cli_impl.load_director import LoadDirector
+
+    return LoadDirector(
+        enable_fn=enable_fn,
+        disable_fn=disable_fn,
+        memory_probe=memory_probe,
+        gpu_budget_gb=config.get("server.gpu_budget_gb"),
+        cpu_budget_gb=config.get("server.cpu_budget_gb"),
+        gpu_headroom_gb=config.get("server.gpu_headroom_gb"),
+        cpu_headroom_gb=config.get("server.cpu_headroom_gb"),
+    )
+
+
 def _build_load_director(state: SupervisorState) -> "Any":
     """Construct a LoadDirector wired to the supervisor's enable/disable.
 
@@ -931,7 +966,6 @@ def _build_load_director(state: SupervisorState) -> "Any":
         load_model_into_worker,
         unload_model_from_worker,
     )
-    from muse.cli_impl.load_director import LoadDirector
 
     def enable_fn(model_id: str) -> int:
         return load_model_into_worker(model_id, state=state)
@@ -939,7 +973,7 @@ def _build_load_director(state: SupervisorState) -> "Any":
     def disable_fn(model_id: str) -> None:
         unload_model_from_worker(model_id, state=state)
 
-    return LoadDirector(
+    return build_load_director(
         enable_fn=enable_fn,
         disable_fn=disable_fn,
         memory_probe=_MemoryProbeAdapter(),
@@ -1011,25 +1045,18 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     # background thread that shares stop_event with the monitor; the
     # sweeper reads loaded-set entries via the director's public surface
     # and unloads anything past its `capabilities.idle_timeout_seconds`.
-    sweep_interval = float(
-        os.environ.get("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", "30")
-    )
+    sweep_interval = config.get("server.idle_sweep_interval_seconds")
     # Global default idle timeout, applied to models that declare no
-    # per-model capabilities.idle_timeout_seconds. Unset (or <= 0, or
-    # unparseable) means OFF: models without a per-model timeout are never
-    # idle-evicted (only memory pressure releases them), preserving the
-    # original behavior. Parsed defensively so a bad value can't crash boot.
-    default_idle_timeout: float | None = None
-    _raw_default_idle = os.environ.get("MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS")
-    if _raw_default_idle is not None:
-        try:
-            _v = float(_raw_default_idle)
-            default_idle_timeout = _v if _v > 0 else None
-        except ValueError:
-            logger.warning(
-                "invalid MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS=%r; ignoring (no global idle timeout)",
-                _raw_default_idle,
-            )
+    # per-model capabilities.idle_timeout_seconds. The registry default
+    # is 600.0s (v0.5x); an operator who wants the old "never idle-evict"
+    # behavior sets MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS=0 (or negative)
+    # explicitly -- the "<=0 disables" guard below still applies. A bad
+    # / unparseable env value can no longer crash boot: the registry
+    # itself warns and falls back to its default (see Config.get).
+    _raw_default_idle = config.get("server.idle_timeout_seconds")
+    default_idle_timeout: float | None = (
+        _raw_default_idle if _raw_default_idle is not None and _raw_default_idle > 0 else None
+    )
     sweeper = IdleSweeper(
         director=state.director,
         catalog_lookup=get_manifest,

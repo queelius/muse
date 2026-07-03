@@ -107,15 +107,37 @@ def _root(
 # Top-level subcommands ------------------------------------------------------
 
 
+def _resolve_serve_device(cli_device: "Device | None") -> str:
+    """Resolve the effective `muse serve` device.
+
+    Precedence: explicit `--device` flag > `server.device` config
+    (MUSE_DEVICE env / config.yaml) > registry default ("auto").
+    `cli_device` is None when the flag was not passed, which is what
+    lets the config/env value take over; an explicit flag always wins
+    since it is passed as `override`.
+    """
+    from muse.core import config
+    override = cli_device.value if cli_device is not None else None
+    return config.get("server.device", override=override)
+
+
 @app.command("serve")
 def serve(
     host: Annotated[str, typer.Option(help="bind address")] = "0.0.0.0",
     port: Annotated[int, typer.Option(help="bind port")] = 8000,
-    device: Annotated[Device, typer.Option()] = Device.auto,
+    device: Annotated[
+        Optional[Device],
+        typer.Option(
+            help="default device for models (auto|cpu|cuda|mps); "
+            "default: $MUSE_DEVICE or config server.device, else auto",
+        ),
+    ] = None,
 ) -> None:
     """Start the HTTP gateway (spawns one worker per venv)."""
     from muse.cli_impl.serve import run_serve
-    raise typer.Exit(run_serve(host=host, port=port, device=device.value) or 0)
+    raise typer.Exit(
+        run_serve(host=host, port=port, device=_resolve_serve_device(device)) or 0
+    )
 
 
 @app.command("pull")
@@ -309,8 +331,9 @@ def mcp(
     """Run an MCP server bridging muse to LLM clients (Claude Desktop, Cursor)."""
     import os as _os
     from muse.cli_impl.mcp_server import run_mcp_server
+    from muse.core import config
     server_url = server or _os.environ.get("MUSE_SERVER", "http://localhost:8000")
-    admin_token = admin_token or _os.environ.get("MUSE_ADMIN_TOKEN")
+    admin_token = admin_token or config.get("admin.token")
     raise typer.Exit(run_mcp_server(
         http=http, port=port, server_url=server_url,
         admin_token=admin_token, filter_kind=filter_kind.value,
@@ -625,8 +648,8 @@ def models_warmup(
     command exits non-zero with a clear error rather than silently
     succeeding.
     """
-    import os
-    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+    from muse.core import config
+    if not config.get("admin.token"):
         typer.echo(
             "error: warmup requires a running `muse serve` with MUSE_ADMIN_TOKEN set",
             err=True,
@@ -831,8 +854,8 @@ def _probe_online_worker_status(model_id: str) -> dict | None:
 
 def _probe_admin_worker_status(model_id: str) -> dict | None:
     """Admin-API worker status, or None without a token / on any failure."""
-    import os
-    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+    from muse.core import config
+    if not config.get("admin.token"):
         return None
     try:
         from muse.admin.client import AdminClient, AdminClientError
@@ -865,8 +888,8 @@ def _public_loaded_status(model_id: str) -> dict | None:
 
 def _try_admin_action(action: str, model_id: str) -> bool:
     """Try the admin-API path for enable/disable; return True iff used."""
-    import os
-    if not os.environ.get("MUSE_ADMIN_TOKEN"):
+    from muse.core import config
+    if not config.get("admin.token"):
         return False
     try:
         from muse.admin.client import AdminClient, AdminClientError

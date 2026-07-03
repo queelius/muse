@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from muse.admin.client import AdminClient
+from muse.core import config
 
 
 class MuseClient:
@@ -42,7 +43,7 @@ class MuseClient:
             or os.environ.get("MUSE_SERVER")
             or "http://localhost:8000"
         ).rstrip("/")
-        self.admin_token = admin_token or os.environ.get("MUSE_ADMIN_TOKEN")
+        self.admin_token = admin_token or config.get("admin.token")
         self.timeout = timeout
         self.admin = AdminClient(
             base_url=self.server_url,

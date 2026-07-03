@@ -23,6 +23,8 @@ from typing import Any
 
 import httpx
 
+from muse.core import config
+
 
 class AdminClientError(Exception):
     """Raised when an admin call returns a non-2xx response.
@@ -78,7 +80,7 @@ class AdminClient:
             or os.environ.get("MUSE_SERVER")
             or "http://localhost:8000"
         ).rstrip("/")
-        self.token = token or os.environ.get("MUSE_ADMIN_TOKEN")
+        self.token = token or config.get("admin.token")
         self._timeout = timeout
 
     def _headers(self) -> dict:

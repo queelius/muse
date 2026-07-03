@@ -33,11 +33,12 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
-import os
 import socket
 import urllib.parse
 
 import httpx
+
+from muse.core import config
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def resolve_public_ip(url: str) -> str | None:
         ValueError: missing hostname, DNS failure, or a non-public IP; the
         message names MUSE_ALLOW_PRIVATE_FETCH so operators can opt out.
     """
-    if os.environ.get("MUSE_ALLOW_PRIVATE_FETCH") == "1":
+    if config.get("fetch.allow_private"):
         return None
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or ""

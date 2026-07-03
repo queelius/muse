@@ -32,6 +32,7 @@ import base64
 import os
 from typing import Any
 
+from muse.core import config
 from muse.core.net_fetch import fetch_url_bytes
 from muse.modalities.image_generation.image_input import _default_max_bytes
 
@@ -114,7 +115,7 @@ def _resolve_path(path: str, *, field_name: str) -> bytes:
         comparing).
       - The file does not exist.
     """
-    raw_prefixes = os.environ.get("MUSE_MCP_ALLOWED_PATH_PREFIXES", "").strip()
+    raw_prefixes = config.get("fetch.mcp_allowed_path_prefixes").strip()
     if not raw_prefixes:
         raise ValueError(
             f"{field_name}_path input is disabled: set "

@@ -180,7 +180,6 @@ class MCPServer:
         prominent WARNING log so operators know the endpoint is open.
         """
         import contextlib
-        import os as _os
         import secrets as _secrets
 
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -188,7 +187,9 @@ class MCPServer:
         from starlette.responses import Response
         from starlette.routing import Mount
 
-        token = admin_token or _os.environ.get("MUSE_ADMIN_TOKEN") or ""
+        from muse.core import config
+
+        token = admin_token or config.get("admin.token") or ""
 
         manager = StreamableHTTPSessionManager(app=self._server, stateless=True)
 

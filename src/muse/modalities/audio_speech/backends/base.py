@@ -1,17 +1,18 @@
 import logging
-import os
 import time
 from pathlib import Path
 
 import torch
 from transformers import LogitsProcessorList, RepetitionPenaltyLogitsProcessor, TemperatureLogitsWarper, TopPLogitsWarper
 
+from muse.core import config
+
 logger = logging.getLogger(__name__)
 
 
 def _muse_home() -> Path:
     """Return the muse config directory, creating it if needed."""
-    home = Path(os.environ.get("MUSE_HOME", "~/.muse")).expanduser()
+    home = Path(config.get("paths.home")).expanduser()
     home.mkdir(parents=True, exist_ok=True)
     return home
 

@@ -9,10 +9,10 @@ Can also be run standalone for debugging. Not advertised in top-level help.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from muse.cli_impl.serve_util import run_uvicorn
+from muse.core import config
 from muse.core.catalog import get_manifest, is_pulled, known_models, load_backend
 from muse.core.discovery import discover_modalities
 from muse.core.registry import ModalityRegistry
@@ -34,7 +34,7 @@ def _env_modalities_dir() -> Path | None:
     modality contracts, not a normal extension surface. Most users
     should extend via model scripts instead (see $MUSE_MODELS_DIR).
     """
-    env = os.environ.get("MUSE_MODALITIES_DIR")
+    env = config.get("paths.modalities_dir")
     return Path(env) if env else None
 
 

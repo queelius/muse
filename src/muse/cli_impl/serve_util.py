@@ -21,9 +21,10 @@ second Ctrl-C remains an immediate force-quit, unchanged.
 from __future__ import annotations
 
 import math
-import os
 
 import uvicorn
+
+from muse.core import config
 
 # Default seconds uvicorn waits for in-flight requests to drain on
 # shutdown before cancelling them and exiting. Finite (never None), so
@@ -40,12 +41,8 @@ def shutdown_grace_seconds() -> float:
     value, so a fat-fingered env var can never re-introduce the
     hang-forever behavior.
     """
-    raw = os.environ.get("MUSE_SHUTDOWN_GRACE_SECONDS")
-    if raw is None:
-        return _DEFAULT_GRACE_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
+    value = config.get("server.shutdown_grace_seconds")
+    if value is None:
         return _DEFAULT_GRACE_SECONDS
     # Reject non-finite (inf/nan) as well as negative: `inf` parses and is
     # `>= 0`, but timeout_graceful_shutdown=inf is precisely the

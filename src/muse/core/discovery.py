@@ -20,12 +20,12 @@ from __future__ import annotations
 import ast
 import importlib.util
 import logging
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from muse.core import config
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def modality_tags() -> list[str]:
     First-found-wins on collision (matches `discover_modalities` semantics).
     """
     bundled = Path(__file__).resolve().parents[1] / "modalities"
-    env = os.environ.get("MUSE_MODALITIES_DIR")
+    env = config.get("paths.modalities_dir")
     dirs = [bundled] + ([Path(env)] if env else [])
 
     seen: set[str] = set()
@@ -388,5 +388,5 @@ def _default_hf_plugin_dirs() -> list[Path]:
     discovery surfaces walk the same roots in the same precedence.
     """
     bundled = Path(__file__).resolve().parents[1] / "modalities"
-    env = os.environ.get("MUSE_MODALITIES_DIR")
+    env = config.get("paths.modalities_dir")
     return [bundled] + ([Path(env)] if env else [])

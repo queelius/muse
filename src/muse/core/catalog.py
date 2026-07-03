@@ -31,6 +31,7 @@ from typing import Any
 
 from huggingface_hub import snapshot_download
 
+from muse.core import config
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.install import check_system_packages, install_pip_extras
@@ -126,7 +127,7 @@ def _user_models_dir() -> Path:
 
 def _env_models_dir() -> Path | None:
     """Optional extra models dir from the `$MUSE_MODELS_DIR` env var."""
-    env = os.environ.get("MUSE_MODELS_DIR")
+    env = config.get("paths.models_dir")
     return Path(env) if env else None
 
 
@@ -395,10 +396,14 @@ def _reset_known_models_cache() -> None:
 
 
 def _catalog_dir() -> Path:
-    env = os.environ.get("MUSE_CATALOG_DIR")
-    if env:
-        return Path(env)
-    return Path.home() / ".muse"
+    """Resolve the catalog directory identically to `config.py`'s own
+    bootstrap resolution (env+default only), so catalog.json always
+    co-locates with config.yaml. Delegates to `config._catalog_dir()`
+    rather than `config.get("paths.catalog_dir")`: catalog_dir is
+    bootstrap state, and a config.yaml value must never be able to
+    redirect catalog.json away from where config.yaml itself lives.
+    """
+    return config._catalog_dir()
 
 
 def _catalog_path() -> Path:
