@@ -13,15 +13,12 @@ inputs.
 from __future__ import annotations
 
 import base64
-import os
 from typing import Any, Iterable, Union
 
 import requests
 
+from muse.core import config
 from muse.modalities.image_embedding.codec import base64_to_embedding
-
-
-_DEFAULT_SERVER = "http://localhost:8000"
 
 
 def _bytes_to_data_url(raw: bytes, *, mime: str = "image/png") -> str:
@@ -48,11 +45,7 @@ class ImageEmbeddingsClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = (
-            server_url
-            or os.environ.get("MUSE_SERVER")
-            or _DEFAULT_SERVER
-        )
+        url = server_url or config.get("client.server_url")
         self.server_url = url.rstrip("/")
         self.timeout = timeout
 

@@ -9,11 +9,11 @@ etc.) can POST directly or use the openai-python SDK against muse.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Union
 
 import requests
 
+from muse.core import config
 from muse.modalities.embedding_text.codec import base64_to_embedding
 
 
@@ -21,9 +21,7 @@ class EmbeddingsClient:
     """Thin HTTP client against muse's /v1/embeddings endpoint."""
 
     def __init__(self, server_url: str | None = None, timeout: float = 300.0) -> None:
-        server_url = server_url or os.environ.get(
-            "MUSE_SERVER", "http://localhost:8000",
-        )
+        server_url = server_url or config.get("client.server_url")
         self.server_url = server_url.rstrip("/")
         self.timeout = timeout
 

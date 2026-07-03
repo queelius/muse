@@ -7,17 +7,16 @@ list[bytes] (one PNG per frame).
 from __future__ import annotations
 
 import base64
-import os
 from typing import Any
 
 import requests
 
+from muse.core import config
+
 
 class AnimationsClient:
     def __init__(self, server_url: str | None = None, timeout: float = 300.0) -> None:
-        server_url = server_url or os.environ.get(
-            "MUSE_SERVER", "http://localhost:8000",
-        )
+        server_url = server_url or config.get("client.server_url")
         self.server_url = server_url.rstrip("/")
         self.timeout = timeout
 

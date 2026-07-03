@@ -42,6 +42,30 @@ def test_muse_server_env_fallback(monkeypatch):
     assert c.server_url == "http://custom:9999"
 
 
+def test_server_url_from_config(monkeypatch):
+    """MUSE_SERVER flows through muse.core.config, not a direct env read."""
+    from muse.core import config as cfg
+
+    monkeypatch.setenv("MUSE_SERVER", "http://box:9000")
+    cfg.reset_config()
+    try:
+        assert EmbeddingsClient().server_url.rstrip("/") == "http://box:9000"
+    finally:
+        cfg.reset_config()
+
+
+def test_explicit_arg_wins_over_config(monkeypatch):
+    from muse.core import config as cfg
+
+    monkeypatch.setenv("MUSE_SERVER", "http://from-env:1234")
+    cfg.reset_config()
+    try:
+        c = EmbeddingsClient(server_url="http://explicit:1/")
+        assert c.server_url == "http://explicit:1"
+    finally:
+        cfg.reset_config()
+
+
 def test_embed_single_string_returns_list_of_vectors():
     fake_body = _make_response([[0.1, 0.2, 0.3]])
     with patch("muse.modalities.embedding_text.client.requests.post") as mock_post:

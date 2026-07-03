@@ -11,15 +11,12 @@ per-entry indices.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Union
 
 import requests
 
+from muse.core import config
 from muse.modalities.audio_embedding.codec import base64_to_embedding
-
-
-_DEFAULT_SERVER = "http://localhost:8000"
 
 
 class AudioEmbeddingsClient:
@@ -40,11 +37,7 @@ class AudioEmbeddingsClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = (
-            server_url
-            or os.environ.get("MUSE_SERVER")
-            or _DEFAULT_SERVER
-        )
+        url = server_url or config.get("client.server_url")
         self.server_url = url.rstrip("/")
         self.timeout = timeout
 

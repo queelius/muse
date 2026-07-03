@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 import requests
+
+from muse.core import config
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class SpeechClient:
     """
 
     def __init__(self, server_url: str | None = None, model: str | None = None):
-        url = server_url or os.environ.get("MUSE_SERVER", "http://localhost:8000")
+        url = server_url or config.get("client.server_url")
         self.server_url = url.rstrip("/")
         self.model = model
 

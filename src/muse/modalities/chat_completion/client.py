@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Iterator
 
 import httpx
+
+from muse.core import config
 
 
 logger = logging.getLogger(__name__)
@@ -37,11 +38,7 @@ class ChatClient:
     """
 
     def __init__(self, base_url: str | None = None, timeout: float = 300.0) -> None:
-        self.base_url = (
-            base_url
-            or os.environ.get("MUSE_SERVER")
-            or "http://localhost:8000"
-        ).rstrip("/")
+        self.base_url = (base_url or config.get("client.server_url")).rstrip("/")
         self.timeout = timeout
 
     def chat(self, *, model: str | None = None, messages: list[dict], **kwargs) -> dict:

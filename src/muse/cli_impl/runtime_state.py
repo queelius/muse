@@ -10,7 +10,8 @@ share one implementation and one failure policy.
 from __future__ import annotations
 
 import logging
-import os
+
+from muse.core import config
 
 # Per-request HTTP loggers emit an INFO line ("HTTP Request: GET ...")
 # that would interleave with `muse models list` / `info` output. Raise
@@ -31,7 +32,7 @@ def _quiet_http_logs() -> None:
 
 
 def _base_url() -> str:
-    return (os.environ.get("MUSE_SERVER") or "http://localhost:8000").rstrip("/")
+    return config.get("client.server_url").rstrip("/")
 
 
 def fetch_public_models(timeout: float = 2.0) -> list[dict] | None:

@@ -15,7 +15,6 @@ imports muse's per-modality client modules lazily on demand.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
@@ -38,11 +37,7 @@ class MuseClient:
         admin_token: str | None = None,
         timeout: float = 600.0,
     ) -> None:
-        self.server_url = (
-            server_url
-            or os.environ.get("MUSE_SERVER")
-            or "http://localhost:8000"
-        ).rstrip("/")
+        self.server_url = (server_url or config.get("client.server_url")).rstrip("/")
         self.admin_token = admin_token or config.get("admin.token")
         self.timeout = timeout
         self.admin = AdminClient(

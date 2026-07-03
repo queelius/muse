@@ -7,13 +7,14 @@ upscale() returns raw PNG bytes.
 from __future__ import annotations
 
 import base64
-import os
 
 import requests
 
+from muse.core import config
+
 
 def _resolve_base_url(base_url: str | None) -> str:
-    base = base_url or os.environ.get("MUSE_SERVER", "http://localhost:8000")
+    base = base_url or config.get("client.server_url")
     return base.rstrip("/")
 
 

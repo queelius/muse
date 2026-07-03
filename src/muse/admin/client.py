@@ -17,7 +17,6 @@ The `wait` helper polls `/jobs/{id}` until the job lands in done/failed.
 """
 from __future__ import annotations
 
-import os
 import time
 from typing import Any
 
@@ -75,11 +74,7 @@ class AdminClient:
         token: str | None = None,
         timeout: float = 30.0,
     ):
-        self.base_url = (
-            base_url
-            or os.environ.get("MUSE_SERVER")
-            or "http://localhost:8000"
-        ).rstrip("/")
+        self.base_url = (base_url or config.get("client.server_url")).rstrip("/")
         self.token = token or config.get("admin.token")
         self._timeout = timeout
 

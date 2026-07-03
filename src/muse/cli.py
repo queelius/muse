@@ -329,10 +329,9 @@ def mcp(
     ] = McpFilter.all,
 ) -> None:
     """Run an MCP server bridging muse to LLM clients (Claude Desktop, Cursor)."""
-    import os as _os
     from muse.cli_impl.mcp_server import run_mcp_server
     from muse.core import config
-    server_url = server or _os.environ.get("MUSE_SERVER", "http://localhost:8000")
+    server_url = server or config.get("client.server_url")
     admin_token = admin_token or config.get("admin.token")
     raise typer.Exit(run_mcp_server(
         http=http, port=port, server_url=server_url,

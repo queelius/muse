@@ -6,14 +6,12 @@ env fallback, requests under the hood, raise_for_status before parsing.
 from __future__ import annotations
 
 import io
-import os
 from pathlib import Path
 from typing import Any
 
 import requests
 
-
-_DEFAULT_SERVER = "http://localhost:8000"
+from muse.core import config
 
 
 class OcrClient:
@@ -25,11 +23,7 @@ class OcrClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = (
-            server_url
-            or os.environ.get("MUSE_SERVER")
-            or _DEFAULT_SERVER
-        )
+        url = server_url or config.get("client.server_url")
         self.server_url = url.rstrip("/")
         self._timeout = timeout
 

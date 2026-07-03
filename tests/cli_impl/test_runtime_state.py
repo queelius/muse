@@ -37,6 +37,20 @@ def _fake_httpx_client(*, captured_urls, resp=None, raise_exc=None):
     return _FakeClient
 
 
+def test_base_url_from_config(monkeypatch):
+    """_base_url() resolves MUSE_SERVER through muse.core.config, rstrip applied."""
+    from muse.core import config as cfg
+
+    monkeypatch.setenv("MUSE_SERVER", "http://box:9000/")
+    cfg.reset_config()
+    try:
+        from muse.cli_impl import runtime_state as rs
+
+        assert rs._base_url() == "http://box:9000"
+    finally:
+        cfg.reset_config()
+
+
 def test_fetch_public_models_returns_data_list(monkeypatch):
     from muse.cli_impl import runtime_state as rs
 
