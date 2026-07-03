@@ -11,6 +11,7 @@ as a child process. HTTP+SSE mode is for remote / web embedders.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -116,7 +117,14 @@ class MCPServer:
                     ),
                 }])
             try:
-                blocks = handler(client, args)
+                # Handlers are synchronous and make blocking httpx calls
+                # (up to 600s for generation). In HTTP+SSE mode there is a
+                # single event loop; running the handler inline would stall
+                # every concurrent tool call and SSE frame for the duration
+                # of one slow generation. Dispatch off-loop so the loop
+                # stays responsive. MuseClient is stateless per call, so
+                # this is thread-safe.
+                blocks = await asyncio.to_thread(handler, client, args)
             except Exception as e:  # noqa: BLE001
                 log.exception("tool %s failed", name)
                 blocks = [{

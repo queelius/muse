@@ -38,6 +38,89 @@ def _parse_text(block):
     return json.loads(block["text"])
 
 
+def _field_pattern(model, field_name: str) -> str:
+    """Pull the `pattern=` constraint off a pydantic v2 FieldInfo.
+
+    Pydantic v2 stores `Field(pattern=...)` in `.metadata`, not as a
+    direct attribute.
+    """
+    field_info = model.model_fields[field_name]
+    for m in field_info.metadata:
+        pattern = getattr(m, "pattern", None)
+        if pattern is not None:
+            return pattern
+    raise AssertionError(f"{field_name} on {model} has no pattern constraint")
+
+
+def _pattern_alternatives(pattern: str) -> set[str]:
+    """Parse a `^(a|b|c)$`-shaped pydantic Field pattern into {a, b, c}."""
+    assert pattern.startswith("^(") and pattern.endswith(")$"), pattern
+    return set(pattern[2:-2].split("|"))
+
+
+class TestResponseFormatEnumsMatchRoutes:
+    """The MCP tool schemas' response_format enums must match what the
+    underlying HTTP routes actually accept (derived from the routes'
+    pydantic Field patterns, not a hand-copied list), else the LLM
+    client is told a format is valid when the route 422s it (or vice
+    versa: a format the route accepts is hidden from the client)."""
+
+    def test_speak_enum_matches_speech_route(self, server):
+        from muse.modalities.audio_speech.routes import SpeechRequest
+
+        expected = _pattern_alternatives(
+            _field_pattern(SpeechRequest, "response_format")
+        )
+        t = next(t for t in server.tools if t.name == "muse_speak")
+        advertised = set(
+            t.inputSchema["properties"]["response_format"]["enum"]
+        )
+        assert advertised == expected
+
+    def test_generate_music_enum_matches_generation_route(self, server):
+        from muse.modalities.audio_generation.routes import (
+            AudioGenerationRequest,
+        )
+
+        expected = _pattern_alternatives(
+            _field_pattern(AudioGenerationRequest, "response_format")
+        )
+        t = next(t for t in server.tools if t.name == "muse_generate_music")
+        advertised = set(
+            t.inputSchema["properties"]["response_format"]["enum"]
+        )
+        assert advertised == expected
+
+    def test_generate_sfx_enum_matches_generation_route(self, server):
+        from muse.modalities.audio_generation.routes import (
+            AudioGenerationRequest,
+        )
+
+        expected = _pattern_alternatives(
+            _field_pattern(AudioGenerationRequest, "response_format")
+        )
+        t = next(t for t in server.tools if t.name == "muse_generate_sfx")
+        advertised = set(
+            t.inputSchema["properties"]["response_format"]["enum"]
+        )
+        assert advertised == expected
+
+    def test_all_advertised_audio_formats_have_a_mime_mapping(self, server):
+        # Every enum value advertised for an audio-output tool must be
+        # covered by _AUDIO_MIME, else it silently falls back to
+        # application/octet-stream instead of a real audio type.
+        from muse.mcp.tools.inference_audio import _AUDIO_MIME
+
+        for tool_name in ("muse_speak", "muse_generate_music", "muse_generate_sfx"):
+            t = next(t for t in server.tools if t.name == tool_name)
+            enum = t.inputSchema["properties"]["response_format"]["enum"]
+            for fmt in enum:
+                assert fmt in _AUDIO_MIME, (
+                    f"{tool_name} advertises response_format={fmt!r} "
+                    f"with no entry in _AUDIO_MIME"
+                )
+
+
 class TestRegistry:
     def test_audio_tools_present(self, server):
         names = {t.name for t in server.tools}

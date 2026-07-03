@@ -37,6 +37,26 @@ from muse.core.net_fetch import fetch_url_bytes
 from muse.modalities.image_generation.image_input import _default_max_bytes
 
 
+def _enforce_size_cap(data: bytes, *, field_name: str, slot: str) -> bytes:
+    """Reject a decoded blob larger than the shared image-input byte cap.
+
+    The http(s) URL branch already enforces this cap via
+    ``fetch_url_bytes`` (streamed, so oversized bodies never fully
+    buffer). The b64 and data: URL branches decode eagerly with
+    ``base64.b64decode`` first, so the cap has to be applied to the
+    decoded length after the fact -- still a bounded amount of memory
+    per request, but bounded is the point.
+    """
+    cap = _default_max_bytes()
+    if len(data) > cap:
+        raise ValueError(
+            f"{field_name}_{slot} decodes to {len(data)} bytes, which "
+            f"exceeds the max of {cap} bytes "
+            f"(set MUSE_IMAGE_INPUT_MAX_BYTES to raise it)"
+        )
+    return data
+
+
 def resolve_binary_input(
     *,
     b64: str | None = None,
@@ -82,15 +102,17 @@ def resolve_binary_input(
                 raise ValueError(f"malformed data URL in {field_name}_b64")
             b64 = b64[comma + 1:]
         try:
-            return base64.b64decode(b64)
+            decoded = base64.b64decode(b64)
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"malformed base64 in {field_name}_b64: {e}") from e
+        return _enforce_size_cap(decoded, field_name=field_name, slot="b64")
     if url is not None:
         if url.startswith("data:"):
             comma = url.find(",")
             if comma == -1:
                 raise ValueError(f"malformed data URL in {field_name}_url")
-            return base64.b64decode(url[comma + 1:])
+            decoded = base64.b64decode(url[comma + 1:])
+            return _enforce_size_cap(decoded, field_name=field_name, slot="url")
         if url.startswith(("http://", "https://")):
             # Route through the hardened primitive: SSRF guard, per-hop
             # redirect re-validation, and streaming size cap.

@@ -74,7 +74,9 @@ def run_mcp_server(
                 f"({len(server.tools)} tools, filter={filter_kind})",
                 file=sys.stderr,
             )
-            asyncio.run(server.run_http(host="127.0.0.1", port=port))
+            asyncio.run(
+                server.run_http(host="127.0.0.1", port=port, admin_token=admin_token)
+            )
         else:
             # Stdio mode: avoid printing to stdout (it's the wire).
             print(

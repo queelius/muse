@@ -151,7 +151,7 @@ INFERENCE_TOOLS.extend([
                     "voice": {"type": "string"},
                     "response_format": {
                         "type": "string",
-                        "enum": ["wav", "opus", "mp3"],
+                        "enum": ["wav", "opus"],
                         "default": "wav",
                     },
                     "speed": {"type": "number"},
@@ -209,7 +209,7 @@ INFERENCE_TOOLS.extend([
                     "seed": {"type": "integer"},
                     "response_format": {
                         "type": "string",
-                        "enum": ["wav", "ogg", "mp3"],
+                        "enum": ["wav", "mp3", "opus", "flac"],
                         "default": "wav",
                     },
                     "steps": {"type": "integer"},
@@ -238,7 +238,7 @@ INFERENCE_TOOLS.extend([
                     "seed": {"type": "integer"},
                     "response_format": {
                         "type": "string",
-                        "enum": ["wav", "ogg", "mp3"],
+                        "enum": ["wav", "mp3", "opus", "flac"],
                         "default": "wav",
                     },
                     "steps": {"type": "integer"},

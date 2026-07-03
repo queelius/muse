@@ -145,6 +145,46 @@ class TestUrlSecurity:
 
 
 # ---------------------------------------------------------------------------
+# Size cap on the b64 / data: URL branches (the URL-fetch cap already
+# applied via net_fetch; this closes the gap for the two branches that
+# base64.b64decode with no ceiling).
+# ---------------------------------------------------------------------------
+
+
+class TestB64AndDataUrlSizeCap:
+    def test_b64_input_over_cap_rejected(self, monkeypatch):
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "100")
+        big = base64.b64encode(b"A" * 200).decode("ascii")
+        with pytest.raises(ValueError, match="exceeds"):
+            resolve_binary_input(b64=big, field_name="audio")
+
+    def test_b64_input_under_cap_allowed(self, monkeypatch):
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "1000")
+        small = base64.b64encode(b"A" * 50).decode("ascii")
+        result = resolve_binary_input(b64=small, field_name="audio")
+        assert result == b"A" * 50
+
+    def test_b64_slot_with_data_prefix_over_cap_rejected(self, monkeypatch):
+        # Same b64 slot, but the LLM included a leading data: prefix.
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "100")
+        big = "data:audio/wav;base64," + base64.b64encode(b"A" * 200).decode("ascii")
+        with pytest.raises(ValueError, match="exceeds"):
+            resolve_binary_input(b64=big, field_name="audio")
+
+    def test_data_url_over_cap_rejected(self, monkeypatch):
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "100")
+        big = "data:audio/wav;base64," + base64.b64encode(b"A" * 200).decode("ascii")
+        with pytest.raises(ValueError, match="exceeds"):
+            resolve_binary_input(url=big, field_name="audio")
+
+    def test_data_url_under_cap_allowed(self, monkeypatch):
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "1000")
+        small = "data:audio/wav;base64," + base64.b64encode(b"A" * 50).decode("ascii")
+        result = resolve_binary_input(url=small, field_name="audio")
+        assert result == b"A" * 50
+
+
+# ---------------------------------------------------------------------------
 # C2: path allowlist
 # ---------------------------------------------------------------------------
 

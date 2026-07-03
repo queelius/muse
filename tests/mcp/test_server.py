@@ -7,6 +7,9 @@ have populated their lists.
 """
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from muse.mcp.client import MuseClient
@@ -104,6 +107,81 @@ class TestCallHandler:
         assert len(out) == 1
         assert out[0]["type"] == "text"
         assert "unknown tool" in out[0]["text"]
+
+
+class TestCallToolOffLoop:
+    """The wired ``_call_tool`` handler must dispatch synchronous, blocking
+    handlers off the event loop (asyncio.to_thread), not inline. Inline
+    dispatch would stall every concurrent tool call + SSE frame in
+    HTTP+SSE mode for the duration of one slow handler (same class of bug
+    the gateway fixed via off-loop acquire dispatch)."""
+
+    @staticmethod
+    async def _drive_call_tool(server, name, args):
+        from mcp import types
+
+        handler = server._server.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name=name, arguments=args),
+        )
+        return await handler(req)
+
+    def test_call_tool_does_not_block_event_loop(self, monkeypatch):
+        from muse.mcp.tools import INFERENCE_TOOLS
+
+        def _slow_handler(client, args):  # noqa: ARG001
+            time.sleep(0.3)
+            return [{"type": "text", "text": "done"}]
+
+        entry = next(t for t in INFERENCE_TOOLS if t.tool.name == "muse_speak")
+        monkeypatch.setattr(entry, "handler", _slow_handler)
+
+        client = MuseClient(server_url="http://test")
+        server = MCPServer(client=client, filter_kind="inference")
+
+        async def scenario():
+            ticks = 0
+
+            async def ticker():
+                nonlocal ticks
+                while True:
+                    await asyncio.sleep(0.02)
+                    ticks += 1
+
+            ticker_task = asyncio.create_task(ticker())
+            await self._drive_call_tool(server, "muse_speak", {"input": "hi"})
+            ticker_task.cancel()
+            return ticks
+
+        ticks = asyncio.run(scenario())
+        assert ticks >= 5, (
+            f"event loop only ticked {ticks} times while a 0.3s blocking "
+            "tool handler ran; _call_tool must dispatch off-loop via "
+            "asyncio.to_thread so it does not stall concurrent requests"
+        )
+
+    def test_result_still_returned_correctly(self, monkeypatch):
+        """Off-loop dispatch must not change the return value shape."""
+        from muse.mcp.tools import INFERENCE_TOOLS
+
+        def _slow_handler(client, args):  # noqa: ARG001
+            time.sleep(0.05)
+            return [{"type": "text", "text": "hello-from-thread"}]
+
+        entry = next(t for t in INFERENCE_TOOLS if t.tool.name == "muse_speak")
+        monkeypatch.setattr(entry, "handler", _slow_handler)
+
+        client = MuseClient(server_url="http://test")
+        server = MCPServer(client=client, filter_kind="inference")
+
+        result = asyncio.run(
+            self._drive_call_tool(server, "muse_speak", {"input": "hi"})
+        )
+        out = result.root if hasattr(result, "root") else result
+        blocks = out.content
+        assert len(blocks) == 1
+        assert blocks[0].text == "hello-from-thread"
 
 
 class TestRunHttp:
