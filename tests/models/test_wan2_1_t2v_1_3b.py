@@ -19,7 +19,7 @@ def test_manifest_required_fields():
     from muse.models.wan2_1_t2v_1_3b import MANIFEST
     assert MANIFEST["model_id"] == "wan2-1-t2v-1-3b"
     assert MANIFEST["modality"] == "video/generation"
-    assert MANIFEST["hf_repo"] == "Wan-AI/Wan2.1-T2V-1.3B"
+    assert MANIFEST["hf_repo"] == "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
     assert MANIFEST["license"] == "Apache 2.0"
 
 
