@@ -95,3 +95,22 @@ def test_singleton_and_reset(monkeypatch):
     assert a is b
     cfg.reset_config()
     assert cfg.get_config() is not a
+
+
+def test_yaml_null_opt_setting_is_none(tmp_path):
+    c = _cfg(tmp_path, "server:\n  idle_timeout_seconds: null\n")
+    assert c.get("server.idle_timeout_seconds") is None
+    assert c.source("server.idle_timeout_seconds") == "file"
+
+
+def test_yaml_null_non_opt_setting_warns_and_defaults(tmp_path, caplog):
+    c = _cfg(tmp_path, "server:\n  gpu_headroom_gb: null\n")
+    with caplog.at_level("WARNING"):
+        assert c.get("server.gpu_headroom_gb") == 1.0  # default
+    assert any("gpu_headroom_gb" in r.message for r in caplog.records)
+
+
+def test_config_path_is_directory_degrades_to_empty(tmp_path):
+    c = cfg.Config(path=tmp_path)
+    assert c.file_values() == {}
+    assert c.get("limits.rerank_max_documents") == 1000

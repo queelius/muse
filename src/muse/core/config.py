@@ -215,7 +215,7 @@ class Config:
     def _load_file(self) -> dict:
         try:
             text = self._path.read_text()
-        except (FileNotFoundError, NotADirectoryError):
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
             return {}
         try:
             data = yaml.safe_load(text) or {}
@@ -253,6 +253,16 @@ class Config:
             return self._coerce_lenient(setting, env_raw, "env")
         file_raw = self._file_raw(setting)
         if file_raw is not _MISSING:
+            if file_raw is None:
+                # yaml null: str(None) would be the literal "None", which
+                # coerce would fail to parse as int/float. Handle natively.
+                if setting.type.startswith("opt_"):
+                    return None
+                logger.warning(
+                    "%s / %s cannot be null; using default %r",
+                    setting.env, setting.key, setting.default,
+                )
+                return setting.default
             # file values come from yaml already typed; still route through
             # coerce via str() so a yaml "true"/"5" and a python bool/int both work
             return self._coerce_lenient(setting, str(file_raw), "file")
