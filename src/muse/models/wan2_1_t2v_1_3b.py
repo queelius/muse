@@ -95,7 +95,7 @@ MANIFEST = {
         "default_steps": 30,
         "default_guidance": 5.0,
         "supports_image_to_video": False,
-        "memory_gb": 3.0,
+        "memory_gb": 5.0,
         "cpu_offload": "sequential",
         "vae_tiling": True,
     },

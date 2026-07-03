@@ -40,7 +40,7 @@ def test_manifest_capabilities_advertise_defaults():
     assert tuple(caps["default_size"]) == (832, 480)
     assert caps["default_steps"] == 30
     assert caps["supports_image_to_video"] is False
-    assert caps["memory_gb"] == 3.0
+    assert caps["memory_gb"] == 5.0
     assert caps["cpu_offload"] == "sequential"
     assert caps["vae_tiling"] is True
 
