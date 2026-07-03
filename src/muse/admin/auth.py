@@ -1,19 +1,21 @@
 """Bearer-token verification for admin endpoints.
 
-The token is read from the MUSE_ADMIN_TOKEN environment variable. With
-no token configured, every admin request is rejected with 503; this is
-the closed-by-default policy. With a token configured, the request must
-carry an Authorization: Bearer <token> header matching the env var.
+The token is read via muse.core.config's admin.token setting, which
+resolves the MUSE_ADMIN_TOKEN environment variable first and falls back
+to admin.token in config.yaml. With no token configured (either source),
+every admin request is rejected with 503; this is the closed-by-default
+policy. With a token configured, the request must carry an
+Authorization: Bearer <token> header matching it.
 
 The token is never echoed in error messages or logs.
 """
 from __future__ import annotations
 
-import os
 import secrets
 
 from fastapi import Header, HTTPException
 
+from muse.core import config
 from muse.core.errors import error_type_for_status
 
 ADMIN_TOKEN_ENV = "MUSE_ADMIN_TOKEN"
@@ -48,7 +50,7 @@ def verify_admin_token(authorization: str | None = Header(default=None)) -> None
       - header bearer wrong              -> 403 invalid_token
       - header bearer matches            -> return None (route runs)
     """
-    expected = os.environ.get(ADMIN_TOKEN_ENV)
+    expected = config.get("admin.token")
     # Strip the operator-supplied token: a whitespace-only value is treated
     # as "unset" (closed-by-default), and this defends against the common
     # `MUSE_ADMIN_TOKEN=$(cat tokenfile)` footgun, where a trailing newline
@@ -60,7 +62,8 @@ def verify_admin_token(authorization: str | None = Header(default=None)) -> None
         raise _err(
             503,
             "admin_disabled",
-            f"Admin endpoints require the {ADMIN_TOKEN_ENV} env var to be set",
+            "Admin endpoints require an admin token "
+            "(MUSE_ADMIN_TOKEN env or admin.token in config)",
         )
     if not authorization or not authorization.startswith("Bearer "):
         raise _err(

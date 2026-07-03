@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from muse.admin.auth import ADMIN_TOKEN_ENV, verify_admin_token
 from muse.admin.errors import install_admin_error_handler
+from muse.core import config
 
 
 @pytest.fixture
@@ -168,3 +169,58 @@ class TestVerifyAdminToken:
         # The two arguments should be presented bearer + expected env value,
         # UTF-8-encoded to bytes so non-ASCII tokens compare without raising.
         assert calls[0] == (b"wrong", b"secret-correct")
+
+    def test_admin_token_from_config_file_unlocks(self, tmp_path, monkeypatch):
+        """A token set only via admin.token in config.yaml (no env var) must
+        unlock the server-side gate too. Before this fix, verify_admin_token
+        read os.environ directly and a config-file-only token silently left
+        the server closed while CLI/MCP clients (which go through
+        muse.core.config) believed admin was configured."""
+        monkeypatch.delenv(ADMIN_TOKEN_ENV, raising=False)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("admin:\n  token: sekret\n")
+        monkeypatch.setenv("MUSE_CONFIG", str(config_file))
+        config.reset_config()
+        try:
+            assert verify_admin_token(authorization="Bearer sekret") is None
+            with pytest.raises(HTTPException) as exc:
+                verify_admin_token(authorization="Bearer wrong")
+            assert exc.value.status_code == 403
+
+            # A config file present but with no usable token still 503s:
+            # closed-by-default applies to the file source too, not just env.
+            blank_file = tmp_path / "blank.yaml"
+            blank_file.write_text("admin:\n  token:\n")
+            monkeypatch.setenv("MUSE_CONFIG", str(blank_file))
+            config.reset_config()
+            with pytest.raises(HTTPException) as exc:
+                verify_admin_token(authorization="Bearer anything")
+            assert exc.value.status_code == 503
+            assert exc.value.detail["error"]["code"] == "admin_disabled"
+        finally:
+            config.reset_config()
+
+    def test_admin_token_env_still_works(self, monkeypatch):
+        """The env var path (MUSE_ADMIN_TOKEN) must keep working after the
+        gate switched to reading through muse.core.config: config.get()
+        checks the live env var before the config file."""
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "envtok")
+        config.reset_config()
+        try:
+            assert verify_admin_token(authorization="Bearer envtok") is None
+        finally:
+            config.reset_config()
+
+    def test_admin_disabled_when_neither_set(self, tmp_path, monkeypatch):
+        """With neither the env var nor a config file token set, admin stays
+        closed-by-default (503), regardless of the Authorization header."""
+        monkeypatch.delenv(ADMIN_TOKEN_ENV, raising=False)
+        monkeypatch.setenv("MUSE_CONFIG", str(tmp_path / "does-not-exist.yaml"))
+        config.reset_config()
+        try:
+            with pytest.raises(HTTPException) as exc:
+                verify_admin_token(authorization="Bearer anything")
+            assert exc.value.status_code == 503
+            assert exc.value.detail["error"]["code"] == "admin_disabled"
+        finally:
+            config.reset_config()
