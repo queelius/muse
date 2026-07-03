@@ -81,6 +81,14 @@ models_app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(models_app, name="models")
+config_app = typer.Typer(
+    name="config",
+    help="inspect and edit muse's config.yaml",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+app.add_typer(config_app, name="config")
 
 
 @app.callback()
@@ -736,6 +744,65 @@ def models_refresh(
         model_id=model_id, all_=all_, enabled_only=enabled_only,
         no_extras=no_extras, as_json=as_json,
     ) or 0)
+
+
+# `muse config <verb>` -------------------------------------------------------
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the resolved config.yaml path."""
+    from muse.cli_impl.config_cmd import run_path
+    raise typer.Exit(run_path() or 0)
+
+
+@config_app.command("generate")
+def config_generate(
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="overwrite an existing config.yaml"),
+    ] = False,
+) -> None:
+    """Write a fully-commented config.yaml template to the config path."""
+    from muse.cli_impl.config_cmd import run_generate
+    raise typer.Exit(run_generate(force) or 0)
+
+
+@config_app.command("show")
+def config_show(
+    as_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="machine-readable JSON instead of the human table",
+        ),
+    ] = False,
+) -> None:
+    """Show every setting's resolved value + source (env/file/default).
+
+    `admin.token` is always redacted to `set`/`unset`.
+    """
+    from muse.cli_impl.config_cmd import run_show
+    raise typer.Exit(run_show(as_json) or 0)
+
+
+@config_app.command("get")
+def config_get(
+    key: Annotated[str, typer.Argument(help="dotted setting key, e.g. limits.rerank_max_documents")],
+) -> None:
+    """Print one setting's resolved value."""
+    from muse.cli_impl.config_cmd import run_get
+    raise typer.Exit(run_get(key) or 0)
+
+
+@config_app.command("set")
+def config_set(
+    key: Annotated[str, typer.Argument(help="dotted setting key, e.g. server.gpu_headroom_gb")],
+    value: Annotated[str, typer.Argument(help="raw value; coerced per the setting's type")],
+) -> None:
+    """Write one setting into config.yaml (strict type validation)."""
+    from muse.cli_impl.config_cmd import run_set
+    raise typer.Exit(run_set(key, value) or 0)
 
 
 # Helpers (preserved verbatim from the argparse era) -----------------------
