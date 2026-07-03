@@ -666,3 +666,72 @@ class TestReChecksLastTouchedAtUnderLock:
         disable_fn.assert_called_once_with("fake-model")
         with director.lock:
             assert "fake-model" not in director.loaded
+
+
+# ----------------------------------------------------------------------
+# Global default idle-timeout (MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS): applied
+# to models that do NOT declare their own capabilities.idle_timeout_seconds.
+# ----------------------------------------------------------------------
+
+class TestGlobalDefaultIdleTimeout:
+    def test_global_default_applies_when_model_declares_none(self):
+        """A model with no per-model idle_timeout is idle-evicted using the
+        injected global default."""
+        disable_fn = MagicMock()
+        director = _director(disable_fn=disable_fn)
+        _preload(director, "fake-model", last_touched_at=time.monotonic() - 15.0)
+        catalog = {"fake-model": _manifest(idle_timeout_seconds=None)}
+
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+            default_idle_timeout_seconds=10.0,
+        )
+        assert sweeper.tick() == ["fake-model"]
+        disable_fn.assert_called_once_with("fake-model")
+
+    def test_per_model_timeout_overrides_global_default(self):
+        """A model's own idle_timeout_seconds takes precedence over the
+        global default. Here per-model=100s, global=1s, idle 15s -> NOT
+        evicted (per-model 100 > 15), proving the per-model value wins."""
+        disable_fn = MagicMock()
+        director = _director(disable_fn=disable_fn)
+        _preload(director, "fake-model", last_touched_at=time.monotonic() - 15.0)
+        catalog = {"fake-model": _manifest(idle_timeout_seconds=100.0)}
+
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+            default_idle_timeout_seconds=1.0,
+        )
+        assert sweeper.tick() == []
+        disable_fn.assert_not_called()
+
+    def test_no_default_and_no_per_model_never_evicts(self):
+        """Current behavior preserved: no per-model timeout and no global
+        default -> the model is never idle-evicted."""
+        disable_fn = MagicMock()
+        director = _director(disable_fn=disable_fn)
+        _preload(director, "fake-model", last_touched_at=time.monotonic() - 999.0)
+        catalog = {"fake-model": _manifest(idle_timeout_seconds=None)}
+
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+            default_idle_timeout_seconds=None,
+        )
+        assert sweeper.tick() == []
+        disable_fn.assert_not_called()
+
+    def test_nonpositive_global_default_is_off(self):
+        """A global default of 0 (or negative) is treated as 'off', matching
+        the per-model <=0 defensive skip."""
+        director = _director()
+        _preload(director, "fake-model", last_touched_at=time.monotonic() - 999.0)
+        catalog = {"fake-model": _manifest(idle_timeout_seconds=None)}
+        sweeper = IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+            default_idle_timeout_seconds=0.0,
+        )
+        assert sweeper.tick() == []

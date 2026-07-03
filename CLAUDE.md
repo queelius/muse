@@ -680,9 +680,21 @@ background sweeper thread runs every `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`
 the timeout AND whose refcount is 0. This frees memory without
 waiting for traffic-driven LRU.
 
-Default behavior preserved: models without `idle_timeout_seconds`
-(or with the field set to null/0) are NEVER idle-evicted; only
-memory pressure can release them.
+A GLOBAL default idle timeout (`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`,
+v0.51.0+) applies to any model that declares no per-model
+`idle_timeout_seconds`. Precedence: per-model
+`capabilities.idle_timeout_seconds` wins; otherwise the global default;
+otherwise never idle-evict. The env is parsed defensively in the
+supervisor (unset, non-numeric, or <= 0 all mean OFF), so a bad value
+cannot crash boot. This is the knob for "reclaim any idle model after N
+minutes" on a shared single-GPU box, where bundled models (which declare
+no per-model timeout) would otherwise sit resident until memory pressure.
+
+Default behavior preserved: with no per-model timeout AND no global
+default, a model is NEVER idle-evicted; only memory pressure can release
+it. Turning the global default on is a deliberate operator choice (a
+silent unload trades a later cold-reload for freed VRAM), so it defaults
+to off.
 
 The sweeper reuses the on-demand eviction's disable_fn primitive,
 so the orphan-worker-on-disable-failure remediation (re-insert
@@ -690,7 +702,8 @@ LoadEntry) applies uniformly. Idle eviction is logged in
 `recent_decisions` with reason="idle_timeout:Ns".
 
 Configuration:
-- Per-model: `capabilities.idle_timeout_seconds: <number>` in manifest. Null/absent = never idle-evict.
+- Per-model: `capabilities.idle_timeout_seconds: <number>` in manifest. Null/absent = fall back to the global default.
+- Global default: `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS` env (default unset = off). Applied to models without a per-model timeout.
 - Sweep interval: `MUSE_IDLE_SWEEP_INTERVAL_SECONDS` env (default 30).
 
 ## Admin REST API

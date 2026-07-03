@@ -65,6 +65,13 @@ class IdleSweeper:
         catches and silently continues.
       - interval_seconds: float. How often the thread loop ticks.
         Default 30.0 (matches `MUSE_IDLE_SWEEP_INTERVAL_SECONDS=30`).
+      - default_idle_timeout_seconds: float | None. A GLOBAL default idle
+        timeout applied to any model that does not declare its own
+        `capabilities.idle_timeout_seconds`. None (the default) preserves
+        the original behavior: models without a per-model timeout are never
+        idle-evicted (only memory pressure releases them). The supervisor
+        sets this from `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`. A per-model
+        `idle_timeout_seconds` always takes precedence over this default.
       - stop_event: threading.Event | None. Optional external event so
         the supervisor can share `state.stop_event`. If None, the
         sweeper creates its own and `stop()` flips it.
@@ -76,11 +83,13 @@ class IdleSweeper:
         director: "LoadDirector",
         catalog_lookup: Callable[[str], dict],
         interval_seconds: float = 30.0,
+        default_idle_timeout_seconds: float | None = None,
         stop_event: threading.Event | None = None,
     ):
         self.director = director
         self.catalog_lookup = catalog_lookup
         self.interval_seconds = interval_seconds
+        self.default_idle_timeout_seconds = default_idle_timeout_seconds
         self._stop_event = stop_event if stop_event is not None else threading.Event()
 
     # ------------------------------------------------------------------
@@ -123,6 +132,11 @@ class IdleSweeper:
             idle_timeout = (
                 manifest.get("capabilities", {}).get("idle_timeout_seconds")
             )
+            if idle_timeout is None:
+                # No per-model timeout: fall back to the global default
+                # (MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS). Still None means the
+                # operator opted out globally -> never idle-evict this model.
+                idle_timeout = self.default_idle_timeout_seconds
             if idle_timeout is None:
                 continue
             try:

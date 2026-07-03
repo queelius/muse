@@ -1007,18 +1007,36 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     sweep_interval = float(
         os.environ.get("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", "30")
     )
+    # Global default idle timeout, applied to models that declare no
+    # per-model capabilities.idle_timeout_seconds. Unset (or <= 0, or
+    # unparseable) means OFF: models without a per-model timeout are never
+    # idle-evicted (only memory pressure releases them), preserving the
+    # original behavior. Parsed defensively so a bad value can't crash boot.
+    default_idle_timeout: float | None = None
+    _raw_default_idle = os.environ.get("MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS")
+    if _raw_default_idle is not None:
+        try:
+            _v = float(_raw_default_idle)
+            default_idle_timeout = _v if _v > 0 else None
+        except ValueError:
+            logger.warning(
+                "invalid MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS=%r; ignoring (no global idle timeout)",
+                _raw_default_idle,
+            )
     sweeper = IdleSweeper(
         director=state.director,
         catalog_lookup=get_manifest,
         interval_seconds=sweep_interval,
+        default_idle_timeout_seconds=default_idle_timeout,
         stop_event=stop_event,
     )
     sweeper_thread = sweeper.start()
     state.idle_sweeper = sweeper
     state.idle_sweeper_thread = sweeper_thread
     logger.info(
-        "idle sweeper running (interval=%.1fs)",
+        "idle sweeper running (interval=%.1fs, default_idle_timeout=%s)",
         sweep_interval,
+        f"{default_idle_timeout:.0f}s" if default_idle_timeout else "off",
     )
 
     try:
