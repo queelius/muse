@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # manifests or a catalog snapshot without touching state on disk.
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
 # models (v0.47.3); it is mtime-cached so per-request reads are cheap.
+from muse.core import config
 from muse.core.catalog import _read_catalog, get_manifest
 from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
@@ -148,6 +149,7 @@ def build_gateway(
     timeout: float = 300.0,
     *,
     state: "object | None" = None,
+    aggregation_timeout: float | None = None,
 ) -> FastAPI:
     """Build the gateway FastAPI app.
 
@@ -161,6 +163,15 @@ def build_gateway(
         SupervisorState's lock guards each snapshot.
       - static: pass `routes`, a fixed list of WorkerRoute. Used by
         tests that want a frozen routing table.
+
+    `aggregation_timeout` bounds the per-worker httpx client used by the
+    /v1/models and /health fan-out (NOT the per-request forward timeout,
+    which stays `timeout`). Defaults to `None`, which resolves through
+    `muse.core.config` (`server.aggregation_timeout_seconds` /
+    `MUSE_AGGREGATION_TIMEOUT_SECONDS`, itself defaulting to 5.0) so an
+    explicit caller-supplied value always wins and an unconfigured
+    deployment sees the exact same 5.0s behavior as before this knob
+    existed.
 
     The app exposes:
 
@@ -191,6 +202,10 @@ def build_gateway(
         {r.model_id: r for r in routes} if routes is not None else {}
     )
     app.state.timeout = timeout
+    app.state.aggregation_timeout = (
+        aggregation_timeout if aggregation_timeout is not None
+        else config.get("server.aggregation_timeout_seconds")
+    )
 
     def _routes_now() -> dict[str, WorkerRoute]:
         """Return the current routing table.
@@ -230,18 +245,37 @@ def build_gateway(
         cur = app.state.routes_now()
         worker_urls = {r.worker_url for r in cur.values()}
         aggregated: list[dict] = []
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=app.state.aggregation_timeout) as client:
             async def _one(url: str) -> list[dict]:
                 try:
                     r = await client.get(f"{url}/v1/models")
                     if r.status_code != 200:
                         return []
                     return r.json().get("data", [])
-                except httpx.HTTPError as e:
-                    logger.warning("worker %s unreachable: %s", url, e)
+                except Exception as e:  # noqa: BLE001
+                    # Broad on purpose: a worker is untrusted input once it
+                    # answers at all. httpx.HTTPError covers transport
+                    # failures (down / timeout); a 200 response with a
+                    # non-JSON or non-dict body raises ValueError /
+                    # AttributeError out of r.json() / .get(), which must
+                    # degrade this ONE worker's contribution to "nothing"
+                    # rather than propagate through gather() and 500 the
+                    # whole aggregated endpoint for every client.
+                    logger.warning(
+                        "worker %s unreachable or returned invalid data: %s",
+                        url, e,
+                    )
                     return []
-            results = await asyncio.gather(*[_one(u) for u in worker_urls])
+            results = await asyncio.gather(
+                *[_one(u) for u in worker_urls], return_exceptions=True,
+            )
         for items in results:
+            # _one() already catches everything it can; return_exceptions=True
+            # is belt-and-suspenders so a future gap in _one degrades this one
+            # worker instead of 500ing the endpoint.
+            if isinstance(items, BaseException):
+                logger.warning("worker aggregation task failed: %s", items)
+                continue
             aggregated.extend(items)
 
         # v0.47.4: fill last_loaded_at on resident entries. Workers
@@ -270,18 +304,27 @@ def build_gateway(
         modalities: set[str] = set()
         models: set[str] = set()
         any_down = False
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=app.state.aggregation_timeout) as client:
             async def _one(url: str) -> dict | None:
                 try:
                     r = await client.get(f"{url}/health")
                     if r.status_code != 200:
                         return None
                     return r.json()
-                except httpx.HTTPError:
+                except Exception as e:  # noqa: BLE001
+                    # See the matching comment in list_models: a 200 with a
+                    # non-JSON body must degrade this worker to "down", not
+                    # 500 the whole /health aggregation.
+                    logger.warning(
+                        "worker %s unreachable or returned invalid data: %s",
+                        url, e,
+                    )
                     return None
-            results = await asyncio.gather(*[_one(u) for u in worker_urls])
+            results = await asyncio.gather(
+                *[_one(u) for u in worker_urls], return_exceptions=True,
+            )
         for body in results:
-            if body is None:
+            if body is None or isinstance(body, BaseException):
                 any_down = True
                 continue
             modalities.update(body.get("modalities", []))
@@ -448,6 +491,30 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
     return out
 
 
+def _director_headroom(director: Any) -> dict[str, float]:
+    """Extract `{gpu_headroom_gb, cpu_headroom_gb}` kwargs from `director`.
+
+    Used to thread the LoadDirector's OWN configured headroom into
+    `revalidate_servability` so the gateway's servability gate and the
+    director's admit/evict fit check never diverge (see
+    `_route_via_director` step 1). Only includes a key when the attribute
+    is present AND numeric: a bare `MagicMock()` director (as several
+    tests construct) auto-creates a `MagicMock` attribute for any name
+    accessed, which is not a float and would blow up the headroom
+    subtraction in `_available_pools`. Omitting the key in that case falls
+    through to `revalidate_servability`'s own hardcoded defaults, matching
+    pre-fix behavior for tests that don't care about headroom.
+    """
+    kwargs: dict[str, float] = {}
+    gpu = getattr(director, "gpu_headroom_gb", None)
+    if isinstance(gpu, (int, float)):
+        kwargs["gpu_headroom_gb"] = float(gpu)
+    cpu = getattr(director, "cpu_headroom_gb", None)
+    if isinstance(cpu, (int, float)):
+        kwargs["cpu_headroom_gb"] = float(cpu)
+    return kwargs
+
+
 async def _route_via_director(
     request: Request,
     full_path: str,
@@ -495,7 +562,18 @@ async def _route_via_director(
     with state.lock:
         unservable_reason = state.unservable_reasons.get(model_id)
     if unservable_reason is not None:
-        unservable_reason = revalidate_servability(state, model_id)
+        # Thread the SAME headroom state.director was built with, not
+        # revalidate_servability's hardcoded 1.0/2.0 defaults. Otherwise an
+        # operator-configured server.gpu_headroom_gb / cpu_headroom_gb
+        # (MUSE_GPU_HEADROOM_GB / MUSE_CPU_HEADROOM_GB) makes this gate use
+        # a DIFFERENT headroom than the director's own admit/evict fit
+        # check, so the gate can falsely 503 a model the director would
+        # actually admit (or vice versa). state.director is guaranteed
+        # non-None here (checked by the caller before dispatching to this
+        # function).
+        unservable_reason = revalidate_servability(
+            state, model_id, **_director_headroom(state.director),
+        )
     if unservable_reason is not None:
         return _openai_error(
             503,
@@ -543,6 +621,25 @@ async def _route_via_director(
         return _openai_error(
             exc.status, exc.code, exc.message,
             error_type=error_type_for_status(exc.status),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A non-OperationError out of director.acquire (e.g. a pynvml
+        # hiccup inside _decide) must not surface as a raw 500 to the
+        # request that happened to elect the LOADER role, while same-model
+        # WAITERS on the identical failure get a mapped 503 via
+        # _acquire_coalesced's mapless-failure branch (see _settle in
+        # _acquire_coalesced). Log the real exception -- it would otherwise
+        # be swallowed from the client's perspective -- and return the
+        # SAME status + code waiters see, so loader and waiters degrade
+        # identically instead of diverging on an accident of scheduling.
+        logger.error(
+            "director.acquire(%r) raised an unexpected error",
+            model_id, exc_info=True,
+        )
+        return _openai_error(
+            503, "model_load_failed",
+            f"load of {model_id!r} failed",
+            error_type="server_error",
         )
 
     # 4. Forward. The release call is wired into the response shape:

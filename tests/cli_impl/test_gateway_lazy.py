@@ -465,6 +465,35 @@ class TestAcquireRaises:
         state.director.acquire.assert_called_once()
         state.director.release.assert_not_called()
 
+    def test_unexpected_acquire_error_returns_503_not_500(self):
+        """A non-OperationError from director.acquire (e.g. a pynvml hiccup
+        in _decide) must degrade the SAME way a same-model WAITER sees the
+        identical root cause: 503 model_load_failed via _acquire_coalesced's
+        mapless-failure branch (see
+        TestColdLoadCoalescing::test_mapless_loader_failure_does_not_herd).
+        Before the fix, only OperationError was caught here, so the loading
+        request itself got a raw 500 while waiters got 503 for the exact
+        same failure.
+        """
+        state = _make_state_with_director(
+            acquire_side_effect=RuntimeError("pynvml hiccup"),
+        )
+        app = build_gateway(state=state)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        with _patch_get_manifest():
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 503
+        body = r.json()
+        assert body["error"]["code"] == "model_load_failed"
+        assert "detail" not in body
+        state.director.acquire.assert_called_once()
+        state.director.release.assert_not_called()
+
 
 # =============================================================================
 # F5: SSE streaming - release on stream-close, not first-chunk
@@ -676,6 +705,91 @@ class TestStaleUnservableRevalidation:
         assert r.status_code == 503
         assert r.json()["error"]["code"] == "model_unservable"
         state.director.acquire.assert_not_called()
+
+
+class TestRevalidationHonorsDirectorHeadroom:
+    """The request-path servability re-check must use the SAME headroom the
+    director was built with (state.director.gpu_headroom_gb /
+    .cpu_headroom_gb), not the hardcoded 1.0/2.0 defaults baked into
+    revalidate_servability's signature. An operator who configures a looser
+    headroom (server.cpu_headroom_gb / MUSE_CPU_HEADROOM_GB) must see that
+    SAME looser headroom applied here; otherwise the gate can 503 a model
+    the director would actually admit.
+    """
+
+    class _FakeProbe:
+        """Fixed 10 GB free CPU, no live GPU info -- deterministic fit math."""
+
+        def cpu_free_gb(self) -> float:
+            return 10.0
+
+        def gpu_free_gb(self, device_id: int = 0):
+            return None
+
+    def test_revalidate_uses_director_configured_headroom(self):
+        # 8.5 GB model: with the hardcoded 2.0 GB default headroom, only
+        # 8.0 GB is available (10.0 - 2.0) -> does NOT fit -> stays
+        # unservable. With the director's configured 0.5 GB headroom,
+        # 9.5 GB is available -> FITS -> the stamp must clear.
+        reason = "exceeds device capacity (stale boot stamp)"
+        state = _make_state_with_director(
+            acquire_port=9001, unservable={"fake-model": reason},
+        )
+        state.director.cpu_headroom_gb = 0.5
+        state.director.gpu_headroom_gb = 1.0
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        fresh_catalog = {
+            "fake-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {"capabilities": {"memory_gb": 8.5, "device": "cpu"}},
+            },
+        }
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
+        ), patch(
+            "muse.cli_impl.supervisor._MemoryProbeAdapter",
+            return_value=self._FakeProbe(),
+        ), _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_async_client_json(mock_cls)
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 200
+        state.director.acquire.assert_called_once()
+        assert "fake-model" not in state.unservable_reasons
+
+    def test_mock_director_without_headroom_attrs_falls_back_to_defaults(self):
+        """A director that doesn't expose numeric headroom attrs (e.g. a
+        bare MagicMock in older tests) must not crash the servability
+        check; it falls back to revalidate_servability's own defaults."""
+        reason = "no memory estimate; run `muse models probe` to populate"
+        state = _make_state_with_director(unservable={"fake-model": reason})
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        fresh_catalog = {
+            "fake-model": {
+                "enabled": True,
+                "python_path": "/v/bin/python",
+                "manifest": {"capabilities": {"device": "cpu"}},  # no estimate
+            },
+        }
+        with patch(
+            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
+        ), _patch_get_manifest():
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "fake-model"},
+            )
+
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "model_unservable"
 
 
 # =============================================================================

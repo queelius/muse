@@ -399,6 +399,82 @@ class TestAggregation:
         assert set(body["modalities"]) == {"audio/speech", "image/generation"}
         assert set(body["models"]) == {"soprano-80m", "sd-turbo"}
 
+    def test_v1_models_survives_worker_returning_non_json_body(self):
+        """A worker that answers 200 with a non-JSON body (garbage, a
+        truncated response, whatever) must degrade to "contributes
+        nothing", not 500 the whole aggregated /v1/models for every
+        client. Regression for the gather-blackout finding: r.json()
+        raising json.JSONDecodeError (a ValueError) used to propagate
+        past the httpx-only except and through a bare asyncio.gather.
+        """
+        routes = [
+            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
+            WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
+        ]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {"object": "list", "data": [
+                {"id": "soprano-80m", "modality": "audio/speech", "object": "model"},
+            ]}
+            r_bad = MagicMock(status_code=200)
+            r_bad.json.side_effect = ValueError("Expecting value: line 1 column 1")
+
+            async def fake_get(url, **kwargs):
+                if "9001" in url:
+                    return r_ok
+                return r_bad
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            r = client.get("/v1/models")
+
+        assert r.status_code == 200
+        ids = {m["id"] for m in r.json()["data"]}
+        assert ids == {"soprano-80m"}
+
+    def test_health_survives_worker_returning_non_json_body(self):
+        """Mirror of the /v1/models regression above, for /health."""
+        routes = [
+            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
+            WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
+        ]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {
+                "status": "ok", "modalities": ["audio/speech"], "models": ["soprano-80m"],
+            }
+            r_bad = MagicMock(status_code=200)
+            r_bad.json.side_effect = ValueError("not json")
+
+            async def fake_get(url, **kwargs):
+                if "9001" in url:
+                    return r_ok
+                return r_bad
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            r = client.get("/health")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert "soprano-80m" in body["models"]
+        assert "sd-turbo" not in body["models"]
+
     def test_health_degraded_when_any_worker_down(self):
         routes = [
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
@@ -577,3 +653,107 @@ class TestAdminMount:
         body = r.json()
         # The proxy uses {"error": {...}} (not detail)
         assert body["error"]["code"] == "model_not_found"
+
+
+class TestAggregationTimeout:
+    """/v1/models and /health build a per-worker httpx.AsyncClient to fan
+    out GET requests. Before this fix that client's timeout was hardcoded
+    to 5.0, ignoring build_gateway's own configurable timeout knob, so a
+    >5s (but otherwise healthy) worker was silently dropped from both
+    endpoints with no way for an operator to loosen it.
+    """
+
+    def test_v1_models_default_aggregation_timeout_is_5s(self):
+        """Unchanged default: no aggregation_timeout given -> 5.0s, same
+        as before this fix."""
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {"object": "list", "data": []}
+
+            async def fake_get(url, **kwargs):
+                return r_ok
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            client.get("/v1/models")
+
+        mock_client_cls.assert_called_once_with(timeout=5.0)
+
+    def test_v1_models_uses_configured_aggregation_timeout(self):
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        app = build_gateway(routes, aggregation_timeout=12.5)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {"object": "list", "data": []}
+
+            async def fake_get(url, **kwargs):
+                return r_ok
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            client.get("/v1/models")
+
+        mock_client_cls.assert_called_once_with(timeout=12.5)
+
+    def test_health_uses_configured_aggregation_timeout(self):
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        app = build_gateway(routes, aggregation_timeout=12.5)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {
+                "status": "ok", "modalities": [], "models": [],
+            }
+
+            async def fake_get(url, **kwargs):
+                return r_ok
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            client.get("/health")
+
+        mock_client_cls.assert_called_once_with(timeout=12.5)
+
+    def test_aggregation_timeout_reads_config_when_not_passed(self, monkeypatch):
+        """The `None` sentinel (build_gateway's default) resolves through
+        muse.core.config, so MUSE_AGGREGATION_TIMEOUT_SECONDS works too."""
+        monkeypatch.setenv("MUSE_AGGREGATION_TIMEOUT_SECONDS", "9.0")
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+
+        with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
+            r_ok = MagicMock(status_code=200)
+            r_ok.json.return_value = {"object": "list", "data": []}
+
+            async def fake_get(url, **kwargs):
+                return r_ok
+
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = fake_get
+            mock_client_cls.return_value = mock_client
+
+            client.get("/v1/models")
+
+        mock_client_cls.assert_called_once_with(timeout=9.0)
