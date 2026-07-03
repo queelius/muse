@@ -8,8 +8,7 @@ estimates exceeding device capacity.
 
 These tests verify:
   - SupervisorState carries `director` + `unservable_reasons` fields.
-  - run_supervisor does NOT call plan_workers / does NOT spawn workers
-    eagerly.
+  - run_supervisor does NOT spawn workers eagerly.
   - validate_catalog_at_boot flags models without memory data.
   - validate_catalog_at_boot flags models exceeding device capacity.
   - validate_catalog_at_boot does NOT flag models with valid data fitting.
@@ -410,8 +409,6 @@ class TestRunSupervisorLazyBoot:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
-             patch("muse.cli_impl.supervisor._promote_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
@@ -421,7 +418,6 @@ class TestRunSupervisorLazyBoot:
 
             # The whole point: zero workers spawned at boot.
             mock_spawn.assert_not_called()
-            mock_first.assert_not_called()
 
     def test_run_supervisor_constructs_load_director(self, tmp_catalog):
         """A LoadDirector is on state.director during the run."""
@@ -450,7 +446,6 @@ class TestRunSupervisorLazyBoot:
             raise KeyboardInterrupt()
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._promote_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
@@ -489,7 +484,6 @@ class TestRunSupervisorLazyBoot:
             raise KeyboardInterrupt()
 
         with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._promote_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):

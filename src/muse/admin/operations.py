@@ -84,10 +84,9 @@ def _pick_free_port(
     reserved port still looks free. Two concurrent cold loads of different
     models would then both pick it; the loser fails to bind and
     wait_for_ready times out (~120s) despite ~999 free ports. Excluding the
-    ports already held by pending/live specs closes that window. Mirrors
-    supervisor.plan_workers' used-ports loop. MUST be called while holding
-    state.lock so the reserved-port snapshot is consistent with the append
-    that follows.
+    ports already held by pending/live specs closes that window. MUST be
+    called while holding state.lock so the reserved-port snapshot is
+    consistent with the append that follows.
     """
     used = {s.port for s in state.workers if s.port}
     while True:
@@ -509,6 +508,16 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
 
         spec.models = [m for m in spec.models if m != model_id]
         if not spec.models:
+            # Stamp job_id BEFORE popping so a monitor tick that
+            # snapshotted this spec earlier (see _monitor_workers'
+            # `list(specs)` snapshot) skips it via the `job_id is not
+            # None` guard instead of racing the outside-lock shutdown
+            # below: without this, the monitor could see the SIGTERMed
+            # process exit, ratchet failure_count to threshold, and
+            # _attempt_restart would spawn a brand-new subprocess on
+            # this port that is never tracked in state.workers again
+            # (orphan, leaked VRAM).
+            spec.job_id = f"director-unload-{model_id}"
             # Pop the spec NOW so concurrent admin reads see the
             # eviction commitment immediately. In-place mutation
             # keeps the monitor's captured list reference live.
@@ -590,6 +599,13 @@ def disable_model(model_id: str, *, state: SupervisorState) -> dict:
         else:
             spec.models = [m for m in spec.models if m != model_id]
             if not spec.models:
+                # Stamp job_id BEFORE popping so a monitor tick that
+                # snapshotted this spec earlier skips it via the
+                # `job_id is not None` guard rather than racing the
+                # outside-lock shutdown below and respawning an orphan
+                # worker on the freed port (see unload_model_from_worker
+                # for the full race description).
+                spec.job_id = f"admin-disable-{model_id}"
                 # Pop the spec NOW. In-place mutation keeps the monitor's
                 # captured list reference live.
                 state.workers.remove(spec)

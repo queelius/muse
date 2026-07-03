@@ -489,6 +489,142 @@ class TestDisableModel:
         mock_restart.assert_called_once_with(spec, device="cpu")
 
 
+class TestOrphanRespawnGuard:
+    """Sole-tenant worker removal (unload_model_from_worker / disable_model)
+    must stamp spec.job_id under state.lock BEFORE the outside-lock
+    shutdown runs. Without it, an auto-restart monitor tick that snapshotted
+    the spec earlier (see _monitor_workers' `list(specs)` snapshot) still
+    holds a reference to it after the removal; once the outside-lock
+    shutdown SIGTERMs the process, that stale-snapshot tick sees
+    process.poll() != None, ratchets failure_count to threshold, and
+    _attempt_restart spawns a brand-new subprocess on the freed port that
+    is never tracked in state.workers again (orphan, leaked VRAM). Setting
+    job_id makes the monitor's `if spec.job_id is not None: continue` guard
+    skip the spec, matching the restart-in-place paths' existing contract.
+    """
+
+    def test_unload_sets_job_id_before_outside_lock_shutdown(
+        self, tmp_catalog, state,
+    ):
+        from muse.admin.operations import unload_model_from_worker
+
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        spec.status = "running"
+        state.workers.append(spec)
+
+        seen_job_id = {}
+
+        def _capture_shutdown(specs):
+            seen_job_id["value"] = specs[0].job_id
+
+        with patch(
+            "muse.admin.operations._shutdown_workers",
+            side_effect=_capture_shutdown,
+        ) as mock_sd:
+            unload_model_from_worker("kokoro-82m", state=state)
+
+        mock_sd.assert_called_once()
+        assert seen_job_id["value"] is not None, (
+            "spec.job_id must be set before the outside-lock shutdown so "
+            "a monitor tick that snapshotted the spec earlier skips it"
+        )
+
+    def test_disable_sets_job_id_before_outside_lock_shutdown(
+        self, tmp_catalog, state,
+    ):
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        spec.status = "running"
+        state.workers.append(spec)
+
+        seen_job_id = {}
+
+        def _capture_shutdown(specs):
+            seen_job_id["value"] = specs[0].job_id
+
+        with patch(
+            "muse.admin.operations._shutdown_workers",
+            side_effect=_capture_shutdown,
+        ) as mock_sd:
+            disable_model("kokoro-82m", state=state)
+
+        mock_sd.assert_called_once()
+        assert seen_job_id["value"] is not None, (
+            "spec.job_id must be set before the outside-lock shutdown so "
+            "a monitor tick that snapshotted the spec earlier skips it"
+        )
+
+    def test_monitor_tick_over_presnapshotted_removed_spec_does_not_respawn(
+        self, tmp_catalog, state,
+    ):
+        """Direct simulation of the race: a monitor tick snapshots
+        state.workers BEFORE unload_model_from_worker removes the
+        sole-tenant spec. The operation then removes it (stamping job_id
+        under the fix). Running _monitor_workers over the STALE
+        pre-removal snapshot -- which still references the removed spec,
+        mirroring _monitor_workers' own per-tick `list(specs)` snapshot --
+        must NOT trigger _attempt_restart for it, even though its process
+        looks exited.
+        """
+        import threading
+        import time
+
+        from muse.admin.operations import unload_model_from_worker
+        from muse.cli_impl.supervisor import _monitor_workers
+
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/venv/k", "python_path": "/venv/k/bin/python",
+                "enabled": True,
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/venv/k/bin/python", port=9001,
+        )
+        spec.status = "running"
+        spec.process = MagicMock(poll=MagicMock(return_value=1))  # exited
+        state.workers.append(spec)
+
+        # Simulate the monitor's own per-tick snapshot, taken BEFORE the
+        # removal below.
+        pre_removal_snapshot = list(state.workers)
+
+        with patch("muse.admin.operations._shutdown_workers"):
+            unload_model_from_worker("kokoro-82m", state=state)
+
+        stop_event = threading.Event()
+        with patch("muse.cli_impl.supervisor._attempt_restart") as mock_restart:
+            t = threading.Thread(
+                target=_monitor_workers,
+                args=(pre_removal_snapshot, stop_event),
+                kwargs={"interval": 0.01, "failure_threshold": 1, "max_restarts": 10},
+            )
+            t.start()
+            time.sleep(0.1)
+            stop_event.set()
+            t.join(timeout=2.0)
+
+        mock_restart.assert_not_called()
+
+
 class TestRemoveModel:
     def test_unknown_model_raises_404(self, tmp_catalog, state):
         _seed_catalog({})

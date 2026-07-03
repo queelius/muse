@@ -1,5 +1,6 @@
 """Tests for the supervisor: catalog -> worker specs."""
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
@@ -10,7 +11,6 @@ from muse.cli_impl.supervisor import (
     WorkerSpec,
     clear_supervisor_state,
     get_supervisor_state,
-    plan_workers,
     set_supervisor_state,
 )
 
@@ -48,124 +48,6 @@ def _seed_catalog(data):
     p = _catalog_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data))
-
-
-class TestPlanWorkers:
-    def test_empty_catalog_yields_no_workers(self, tmp_catalog):
-        _seed_catalog({})
-        specs = plan_workers()
-        assert specs == []
-
-    def test_one_model_yields_one_worker(self, tmp_catalog):
-        _seed_catalog({
-            "soprano-80m": {
-                "pulled_at": "2026-04-13T00:00:00Z",
-                "hf_repo": "ekwek/Soprano-1.1-80M",
-                "local_dir": "/fake/local",
-                "venv_path": "/home/user/.muse/venvs/soprano-80m",
-                "python_path": "/home/user/.muse/venvs/soprano-80m/bin/python",
-            },
-        })
-        specs = plan_workers()
-        assert len(specs) == 1
-        spec = specs[0]
-        assert spec.models == ["soprano-80m"]
-        assert spec.python_path == "/home/user/.muse/venvs/soprano-80m/bin/python"
-        assert isinstance(spec.port, int)
-        assert 9001 <= spec.port <= 9999
-
-    def test_models_in_same_venv_share_a_worker(self, tmp_catalog):
-        """If two models share venv_path (rare in M1 but supported), one worker."""
-        shared_venv = "/home/user/.muse/venvs/shared"
-        _seed_catalog({
-            "model-a": {
-                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
-                "venv_path": shared_venv,
-                "python_path": f"{shared_venv}/bin/python",
-            },
-            "model-b": {
-                "pulled_at": "...", "hf_repo": "b", "local_dir": "/b",
-                "venv_path": shared_venv,
-                "python_path": f"{shared_venv}/bin/python",
-            },
-        })
-        specs = plan_workers()
-        assert len(specs) == 1
-        assert set(specs[0].models) == {"model-a", "model-b"}
-
-    def test_different_venvs_yield_different_workers(self, tmp_catalog):
-        _seed_catalog({
-            "model-a": {
-                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
-                "venv_path": "/venvs/a",
-                "python_path": "/venvs/a/bin/python",
-            },
-            "model-b": {
-                "pulled_at": "...", "hf_repo": "b", "local_dir": "/b",
-                "venv_path": "/venvs/b",
-                "python_path": "/venvs/b/bin/python",
-            },
-        })
-        specs = plan_workers()
-        assert len(specs) == 2
-        assert specs[0].port != specs[1].port
-
-    def test_skips_pre_worker_entries_without_python_path(self, tmp_catalog, caplog):
-        """Old catalog entries (no python_path field) are skipped with warning."""
-        _seed_catalog({
-            "legacy-model": {
-                "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
-                # No venv_path / python_path - pre-worker entry
-            },
-            "new-model": {
-                "pulled_at": "...", "hf_repo": "y", "local_dir": "/y",
-                "venv_path": "/venvs/y",
-                "python_path": "/venvs/y/bin/python",
-            },
-        })
-        import logging
-        caplog.set_level(logging.WARNING)
-        specs = plan_workers()
-        all_models = {m for s in specs for m in s.models}
-        assert "legacy-model" not in all_models
-        assert "new-model" in all_models
-        # Warning should mention the legacy model id or re-pulling
-        assert "legacy-model" in caplog.text or "re-pull" in caplog.text.lower() or "re-run" in caplog.text.lower()
-
-    def test_skips_disabled_models(self, tmp_catalog):
-        """Disabled models are filtered out of plan_workers results."""
-        _seed_catalog({
-            "enabled-model": {
-                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
-                "venv_path": "/venvs/a",
-                "python_path": "/venvs/a/bin/python",
-                "enabled": True,
-            },
-            "disabled-model": {
-                "pulled_at": "...", "hf_repo": "b", "local_dir": "/b",
-                "venv_path": "/venvs/b",
-                "python_path": "/venvs/b/bin/python",
-                "enabled": False,
-            },
-        })
-        specs = plan_workers()
-        all_models = {m for s in specs for m in s.models}
-        assert "enabled-model" in all_models
-        assert "disabled-model" not in all_models
-
-    def test_legacy_entries_without_enabled_field_treated_as_enabled(self, tmp_catalog):
-        """Pre-flag entries (no `enabled` key) must still be planned."""
-        _seed_catalog({
-            "legacy-model": {
-                "pulled_at": "...", "hf_repo": "a", "local_dir": "/a",
-                "venv_path": "/venvs/a",
-                "python_path": "/venvs/a/bin/python",
-                # no 'enabled' key
-            },
-        })
-        specs = plan_workers()
-        all_models = {m for s in specs for m in s.models}
-        assert "legacy-model" in all_models
 
 
 class TestSpawnWorker:
@@ -254,8 +136,6 @@ class TestRunSupervisor:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
-             patch("muse.cli_impl.supervisor._promote_workers") as mock_promote, \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers") as mock_shutdown:
@@ -265,8 +145,6 @@ class TestRunSupervisor:
 
             # No eager spawn under lazy load.
             mock_spawn.assert_not_called()
-            mock_first.assert_not_called()
-            mock_promote.assert_not_called()
             # Gateway still starts; shutdown still runs.
             mock_run_uvicorn.assert_called_once()
             mock_shutdown.assert_called_once()
@@ -339,9 +217,35 @@ class TestAttemptRestart:
 
         mock_spawn.assert_called_once_with(spec, device="cpu")
         mock_wait.assert_called_once()
-        assert spec.restart_count == 1
+        # restart_count counts UNSUCCESSFUL restart attempts (see
+        # test_many_successful_restarts_do_not_exhaust_budget below); a
+        # restart that succeeds must not bump it.
+        assert spec.restart_count == 0
         assert spec.failure_count == 0
         assert spec.status == "running"
+
+    def test_many_successful_restarts_do_not_exhaust_budget(self):
+        """restart_count must only count UNSUCCESSFUL restart attempts, per
+        the documented '10 unsuccessful restart attempts' cap. A worker
+        that cleanly recovers well beyond max_restarts times over its
+        lifetime (zero failures) must never be marked dead."""
+        from muse.cli_impl.supervisor import _attempt_restart
+        import threading
+
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        stop_event = threading.Event()
+
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor.wait_for_ready"):
+            for _ in range(15):  # more than _MAX_RESTARTS=10, all successful
+                spec.process = MagicMock(poll=MagicMock(return_value=1))
+                _attempt_restart(
+                    spec, stop_event=stop_event, max_restarts=10, backoff_base=0,
+                )
+
+        assert spec.status == "running"
+        assert spec.status != "dead"
+        assert spec.restart_count == 0
 
     def test_terminates_still_running_process_before_respawn(self):
         from muse.cli_impl.supervisor import _attempt_restart
@@ -561,6 +465,45 @@ class TestCheckWorkerHealth:
             assert check_worker_health(port=9001) is False
 
 
+class TestResolveIdleSweepInterval:
+    """A 0/negative/non-finite MUSE_IDLE_SWEEP_INTERVAL_SECONDS would make
+    `_stop_event.wait(interval)` return immediately, busy-looping
+    IdleSweeper.tick() against the director lock. The adjacent
+    default_idle_timeout resolution already guards <= 0; the sweep
+    interval must too, falling back to the documented 30.0s default.
+    """
+    def test_default_is_thirty(self):
+        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", None)
+            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
+
+    def test_positive_value_passes_through(self):
+        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
+        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "5"}):
+            assert _resolve_idle_sweep_interval() == pytest.approx(5.0)
+
+    def test_zero_falls_back_to_default(self):
+        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
+        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "0"}):
+            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
+
+    def test_negative_falls_back_to_default(self):
+        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
+        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "-5"}):
+            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
+
+    def test_nan_falls_back_to_default(self):
+        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
+        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "nan"}):
+            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
+
+    def test_infinite_falls_back_to_default(self):
+        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
+        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "inf"}):
+            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
+
+
 class TestRunSupervisorMonitor:
     def test_run_supervisor_starts_monitor_thread(self, tmp_catalog):
         """Even at empty-catalog boot, the monitor thread is started so
@@ -727,110 +670,6 @@ class TestRunSupervisorRegistersState:
         assert cleared.workers == []
 
 
-class TestWaitForFirstReady:
-    def test_returns_first_ready_spec(self):
-        """Round-robin polling: a fast spec buried behind a slow one wins."""
-        from muse.cli_impl.supervisor import _wait_for_first_ready
-        import httpx
-
-        slow = WorkerSpec(models=["slow"], python_path="/p", port=9001)
-        fast = WorkerSpec(models=["fast"], python_path="/p", port=9002)
-
-        def side_effect(url, **kw):
-            if "9002" in url:
-                return MagicMock(status_code=200)
-            raise httpx.ConnectError("not yet", request=None)
-
-        with patch("muse.cli_impl.supervisor.httpx.get", side_effect=side_effect):
-            result = _wait_for_first_ready([slow, fast], timeout=2.0,
-                                           poll_interval=0.01)
-        assert result is fast
-
-    def test_returns_immediately_on_first_ready(self):
-        """When the first spec is the one that responds, no extra polls."""
-        from muse.cli_impl.supervisor import _wait_for_first_ready
-
-        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
-        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
-            mock_get.return_value = MagicMock(status_code=200)
-            result = _wait_for_first_ready([spec], timeout=2.0,
-                                           poll_interval=0.01)
-        assert result is spec
-
-    def test_raises_when_no_worker_ready(self):
-        from muse.cli_impl.supervisor import _wait_for_first_ready
-        import httpx
-
-        a = WorkerSpec(models=["a"], python_path="/p", port=9001)
-        b = WorkerSpec(models=["b"], python_path="/p", port=9002)
-        with patch("muse.cli_impl.supervisor.httpx.get") as mock_get:
-            mock_get.side_effect = httpx.ConnectError("nope", request=None)
-            with pytest.raises(TimeoutError, match="no worker became ready"):
-                _wait_for_first_ready([a, b], timeout=0.05,
-                                      poll_interval=0.01)
-
-    def test_raises_on_empty_specs(self):
-        from muse.cli_impl.supervisor import _wait_for_first_ready
-        with pytest.raises(ValueError, match="no specs"):
-            _wait_for_first_ready([], timeout=1.0)
-
-
-class TestPromoteWorkers:
-    def test_promotes_each_to_running(self):
-        from muse.cli_impl.supervisor import _promote_workers
-
-        a = WorkerSpec(models=["a"], python_path="/p", port=9001,
-                       status="pending")
-        b = WorkerSpec(models=["b"], python_path="/p", port=9002,
-                       status="pending")
-        state = SupervisorState(workers=[a, b])
-
-        with patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait:
-            _promote_workers([a, b], state, timeout=1.0)
-
-        assert a.status == "running"
-        assert b.status == "running"
-        assert mock_wait.call_count == 2
-
-    def test_marks_unhealthy_on_timeout(self):
-        from muse.cli_impl.supervisor import _promote_workers
-
-        spec = WorkerSpec(models=["x"], python_path="/p", port=9001,
-                          status="pending")
-        state = SupervisorState(workers=[spec])
-        with patch("muse.cli_impl.supervisor.wait_for_ready",
-                   side_effect=TimeoutError("never ready")):
-            _promote_workers([spec], state, timeout=0.1)
-        assert spec.status == "unhealthy"
-
-    def test_continues_past_failed_promotions(self):
-        """One spec failing should not block promotion of the others."""
-        from muse.cli_impl.supervisor import _promote_workers
-
-        a = WorkerSpec(models=["a"], python_path="/p", port=9001,
-                       status="pending")
-        b = WorkerSpec(models=["b"], python_path="/p", port=9002,
-                       status="pending")
-        state = SupervisorState(workers=[a, b])
-
-        # First call (for a) raises; second (for b) returns
-        call_log: list[int] = []
-
-        def side_effect(*args, **kw):
-            port = kw.get("port") or args[0]
-            call_log.append(port)
-            if port == 9001:
-                raise TimeoutError("a never ready")
-
-        with patch("muse.cli_impl.supervisor.wait_for_ready",
-                   side_effect=side_effect):
-            _promote_workers([a, b], state, timeout=0.1)
-
-        assert a.status == "unhealthy"
-        assert b.status == "running"
-        assert 9001 in call_log and 9002 in call_log
-
-
 class TestRunSupervisorLazyBootOrdering:
     """Tests for the lazy-boot ordering. Replaced the v0.39.x
     eager-boot ordering tests when v0.40.0 lazy load made first-ready
@@ -838,9 +677,10 @@ class TestRunSupervisorLazyBootOrdering:
     """
 
     def test_gateway_starts_immediately_without_worker_wait(self, tmp_catalog):
-        """The gateway must boot immediately on lazy load; no
-        _wait_for_first_ready call. With one or N enabled models in the
-        catalog, the supervisor should still proceed to uvicorn.run.
+        """The gateway must boot immediately on lazy load: no worker spawn
+        and no readiness wait before uvicorn.run. With one or N enabled
+        models in the catalog, the supervisor should still proceed to
+        uvicorn.run.
         """
         _seed_catalog({
             "fast": {
@@ -860,17 +700,11 @@ class TestRunSupervisorLazyBootOrdering:
 
         events: list[str] = []
 
-        def first_ready_side(specs, **kw):
-            events.append("first_ready_returned")
-            return specs[0]
-
         def gateway_side(*a, **kw):
             events.append("gateway_started")
             raise KeyboardInterrupt()
 
-        with patch("muse.cli_impl.supervisor.spawn_worker"), \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready",
-                   side_effect=first_ready_side) as mock_first, \
+        with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
              patch("muse.cli_impl.supervisor._monitor_workers"), \
              patch("muse.cli_impl.supervisor.threading.Thread"), \
              patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
@@ -879,15 +713,12 @@ class TestRunSupervisorLazyBootOrdering:
 
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-        # No first-ready wait under lazy load.
-        mock_first.assert_not_called()
-        assert "first_ready_returned" not in events
+        # No eager spawn under lazy load.
+        mock_spawn.assert_not_called()
         assert "gateway_started" in events
 
     def test_lazy_boot_does_not_invoke_eager_helpers(self, tmp_catalog):
-        """plan_workers, _wait_for_first_ready, _promote_workers,
-        spawn_worker are all silent at boot under lazy load.
-        """
+        """spawn_worker is silent at boot under lazy load."""
         _seed_catalog({
             "x": {
                 "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
@@ -899,19 +730,13 @@ class TestRunSupervisorLazyBootOrdering:
         from muse.cli_impl.supervisor import run_supervisor
 
         with patch("muse.cli_impl.supervisor.spawn_worker") as mock_spawn, \
-             patch("muse.cli_impl.supervisor._wait_for_first_ready") as mock_first, \
-             patch("muse.cli_impl.supervisor._promote_workers") as mock_promote, \
-             patch("muse.cli_impl.supervisor.plan_workers") as mock_plan, \
              patch("muse.cli_impl.supervisor._monitor_workers"), \
              patch("muse.cli_impl.supervisor.run_uvicorn") as mock_run_uvicorn, \
              patch("muse.cli_impl.supervisor._shutdown_workers"):
             mock_run_uvicorn.side_effect = KeyboardInterrupt()
             run_supervisor(host="0.0.0.0", port=8000, device="cpu")
 
-        mock_plan.assert_not_called()
         mock_spawn.assert_not_called()
-        mock_first.assert_not_called()
-        mock_promote.assert_not_called()
 
     def test_monitor_thread_started_at_boot(self, tmp_catalog):
         """The monitor thread is unconditionally started at boot since it
@@ -948,8 +773,6 @@ class TestRunSupervisorLazyBootOrdering:
 
         # _monitor_workers is wired in regardless of catalog size.
         assert "_monitor_workers" in seen_thread_targets
-        # _promote_workers is gone under lazy load (no eager workers to promote).
-        assert "_promote_workers" not in seen_thread_targets
 
 
 class TestGatewayStateRoutes:

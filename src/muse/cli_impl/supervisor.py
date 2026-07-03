@@ -19,6 +19,7 @@ state is registered by `run_supervisor` and cleared on its way out.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import subprocess
 import threading
@@ -33,7 +34,6 @@ from muse.cli_impl.serve_util import run_uvicorn
 from muse.cli_impl.idle_sweeper import IdleSweeper
 from muse.core import config
 from muse.core.catalog import _read_catalog, get_manifest
-from muse.core.venv import find_free_port
 
 from muse.core.memory_probe import declared_device
 
@@ -46,7 +46,9 @@ class WorkerSpec:
 
     Fields mutated by the monitor thread (after startup):
       - process: replaced on restart
-      - restart_count: total restart attempts (caps at _MAX_RESTARTS)
+      - restart_count: consecutive/cumulative UNSUCCESSFUL restart attempts
+        (caps at _MAX_RESTARTS); a restart that succeeds does not bump it
+        (see _attempt_restart)
       - failure_count: consecutive unhealthy polls
       - last_spawn_at: time.monotonic() of most recent spawn (for backoff)
       - status: pending -> running -> unhealthy -> dead
@@ -162,54 +164,6 @@ def clear_supervisor_state() -> None:
     _state = None
 
 
-def plan_workers(port_start: int = 9001, port_end: int = 9999) -> list[WorkerSpec]:
-    """Read catalog, group by venv, allocate ports.
-
-    Returns one WorkerSpec per unique venv (identified by python_path).
-    Pre-worker catalog entries (missing python_path) are logged + skipped.
-    """
-    catalog = _read_catalog()
-
-    # Group by python_path. Preserve insertion order for determinism.
-    groups: dict[str, list[str]] = {}
-    for model_id, entry in catalog.items():
-        python = entry.get("python_path")
-        if not python:
-            logger.warning(
-                "skipping pre-worker catalog entry %r - no python_path; "
-                "re-run `muse pull %s` to create its venv",
-                model_id, model_id,
-            )
-            continue
-        # Default True covers legacy entries without the field
-        # (also backfilled by _read_catalog's setdefault)
-        if not entry.get("enabled", True):
-            logger.info(
-                "skipping disabled model %r (use `muse models enable %s` to re-enable)",
-                model_id, model_id,
-            )
-            continue
-        groups.setdefault(python, []).append(model_id)
-
-    specs: list[WorkerSpec] = []
-    used_ports: set[int] = set()
-    for python_path, models in groups.items():
-        # Allocate a free port, avoiding collisions with ports already
-        # assigned to earlier specs in this planning pass.
-        while True:
-            port = find_free_port(start=port_start, end=port_end)
-            if port not in used_ports:
-                used_ports.add(port)
-                break
-            port_start = port + 1
-        specs.append(WorkerSpec(
-            models=sorted(models),
-            python_path=python_path,
-            port=port,
-        ))
-    return specs
-
-
 def spawn_worker(spec: WorkerSpec, *, device: str) -> None:
     """Start a worker subprocess using its venv's Python.
 
@@ -256,80 +210,6 @@ def wait_for_ready(
     )
 
 
-def _wait_for_first_ready(
-    specs: list[WorkerSpec],
-    *,
-    timeout: float = 60.0,
-    poll_interval: float = 0.5,
-) -> WorkerSpec:
-    """Block until ANY spec's /health returns 200; return that spec.
-
-    Round-robin polling across all specs in each tick. A worker that
-    responds 200 first wins, regardless of position in the list. This
-    means the gateway can boot as soon as the fastest worker is up,
-    independent of slower workers buried earlier in the list.
-
-    Raises TimeoutError if no spec passes within timeout. The caller
-    treats this as a fatal supervisor-bringup failure: every spawned
-    worker is sick, gateway should not start.
-    """
-    if not specs:
-        raise ValueError("_wait_for_first_ready called with no specs")
-    deadline = time.monotonic() + timeout
-    last_err: Exception | None = None
-    while time.monotonic() < deadline:
-        for spec in specs:
-            try:
-                r = httpx.get(
-                    f"http://127.0.0.1:{spec.port}/health", timeout=2.0,
-                )
-                if r.status_code == 200:
-                    return spec
-            except httpx.HTTPError as e:
-                last_err = e
-        time.sleep(poll_interval)
-    raise TimeoutError(
-        f"no worker became ready within {timeout}s "
-        f"(spawned {len(specs)}; last error: {last_err})"
-    )
-
-
-def _promote_workers(
-    specs: list[WorkerSpec],
-    state: SupervisorState,
-    *,
-    timeout: float = 120.0,
-) -> None:
-    """Background-thread target: poll /health for late-loading workers.
-
-    For each spec, polls /health via wait_for_ready. On success, sets
-    spec.status = 'running' under state.lock. On timeout, sets
-    'unhealthy' so the auto-restart monitor's next tick triggers a
-    respawn.
-
-    Failures here are non-fatal: the gateway is already serving the
-    first-ready worker, so a slow late-boot doesn't keep clients
-    from reaching healthy workers.
-    """
-    for spec in specs:
-        try:
-            wait_for_ready(port=spec.port, timeout=timeout)
-            with state.lock:
-                spec.status = "running"
-            logger.info(
-                "late-promote: worker on port %d (%s) ready",
-                spec.port, spec.models,
-            )
-        except TimeoutError:
-            with state.lock:
-                spec.status = "unhealthy"
-            logger.warning(
-                "late-promote: worker on port %d did not become ready in %ds; "
-                "auto-restart monitor will retry",
-                spec.port, timeout,
-            )
-
-
 def check_worker_health(*, port: int, timeout: float = 2.0) -> bool:
     """Single /health poll. Returns True iff the worker responds 200.
 
@@ -365,6 +245,13 @@ def _attempt_restart(
     Mutates spec.process, spec.restart_count, spec.failure_count, spec.status.
     Marks spec.status = "dead" if restart_count reaches max_restarts.
     Returns early if stop_event fires during backoff.
+
+    restart_count counts consecutive/cumulative UNSUCCESSFUL restart
+    attempts, matching the documented "10 unsuccessful restart attempts"
+    cap: it is bumped only in the except branch below (a spawn or
+    readiness failure), never on a successful respawn. A worker that
+    flaps and recovers cleanly any number of times over its lifetime
+    therefore never exhausts the budget; only a run of failures does.
     """
     if spec.restart_count >= max_restarts:
         logger.error(
@@ -395,8 +282,11 @@ def _attempt_restart(
         except Exception as e:
             logger.warning("worker on port %d: terminate failed: %s", spec.port, e)
 
-    # Respawn. Always bump restart_count so we can't loop forever.
-    spec.restart_count += 1
+    # Respawn. restart_count bumps ONLY on failure below (see docstring):
+    # a successful respawn must not count toward the unsuccessful-attempts
+    # budget, else a worker that flaps and cleanly recovers many times
+    # over its lifetime would eventually be marked dead despite never
+    # having a run of consecutive failures.
     try:
         spawn_worker(spec, device=spec.device)
         wait_for_ready(port=spec.port, timeout=ready_timeout)
@@ -411,6 +301,7 @@ def _attempt_restart(
         # monitor daemon thread, silently disabling health-monitoring and
         # auto-restart for ALL workers (M10).
         logger.error("worker on port %d: restart failed: %s", spec.port, e)
+        spec.restart_count += 1
         spec.status = "unhealthy"
 
 
@@ -980,6 +871,29 @@ def _build_load_director(state: SupervisorState) -> "Any":
     )
 
 
+# Fallback when the configured idle-sweep interval is not usable (see
+# _resolve_idle_sweep_interval). Matches the documented / registry default
+# for server.idle_sweep_interval_seconds.
+_DEFAULT_IDLE_SWEEP_INTERVAL_SECONDS = 30.0
+
+
+def _resolve_idle_sweep_interval() -> float:
+    """Resolve the idle-sweep tick interval, clamped to a safe value.
+
+    `IdleSweeper._run` sleeps via `stop_event.wait(interval_seconds)`
+    between ticks. A 0, negative, or non-finite (NaN/inf) interval makes
+    `wait` return (almost) immediately, busy-looping `tick()` against the
+    director lock on every iteration. The adjacent default_idle_timeout
+    resolution already guards its own <= 0 case; this mirrors that guard
+    (and `serve_util.shutdown_grace_seconds`'s analogous guard for the
+    graceful-shutdown timeout) for the sweep interval.
+    """
+    value = config.get("server.idle_sweep_interval_seconds")
+    if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return _DEFAULT_IDLE_SWEEP_INTERVAL_SECONDS
+    return float(value)
+
+
 def run_supervisor(*, host: str, port: int, device: str) -> int:
     """Entry point for `muse serve` (v0.40.0+: lazy load).
 
@@ -1045,7 +959,7 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     # background thread that shares stop_event with the monitor; the
     # sweeper reads loaded-set entries via the director's public surface
     # and unloads anything past its `capabilities.idle_timeout_seconds`.
-    sweep_interval = config.get("server.idle_sweep_interval_seconds")
+    sweep_interval = _resolve_idle_sweep_interval()
     # Global default idle timeout, applied to models that declare no
     # per-model capabilities.idle_timeout_seconds. The registry default
     # is 600.0s (v0.5x); an operator who wants the old "never idle-evict"
