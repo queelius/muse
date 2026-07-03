@@ -1,0 +1,496 @@
+{
+  "server": "http://192.168.0.204:8000",
+  "records": [
+    {
+      "scenario": "A_same_model_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 0,
+      "dispatch_offset_s": 0.0001,
+      "latency_s": 10.858,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 1,
+      "dispatch_offset_s": 0.0005,
+      "latency_s": 28.78,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 2,
+      "dispatch_offset_s": 0.0007,
+      "latency_s": 42.491,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 3,
+      "dispatch_offset_s": 0.0009,
+      "latency_s": 56.521,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 4,
+      "dispatch_offset_s": 0.0011,
+      "latency_s": 72.187,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 5,
+      "dispatch_offset_s": 0.0013,
+      "latency_s": 87.761,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "model": "qwen3.5-4b-q4",
+      "idx": 0,
+      "dispatch_offset_s": 0.0,
+      "latency_s": 15.443,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "model": "qwen3.5-4b-q4",
+      "idx": 1,
+      "dispatch_offset_s": 15.443,
+      "latency_s": 15.678,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "model": "qwen3.5-4b-q4",
+      "idx": 2,
+      "dispatch_offset_s": 31.1209,
+      "latency_s": 16.589,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "model": "qwen3.5-4b-q4",
+      "idx": 3,
+      "dispatch_offset_s": 47.7097,
+      "latency_s": 16.177,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "model": "qwen3.5-4b-q4",
+      "idx": 4,
+      "dispatch_offset_s": 63.8866,
+      "latency_s": 17.232,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "model": "qwen3.5-4b-q4",
+      "idx": 5,
+      "dispatch_offset_s": 81.1182,
+      "latency_s": 16.989,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "model": "qwen3-embedding-0.6b",
+      "idx": 0,
+      "dispatch_offset_s": 0.0001,
+      "latency_s": 60.445,
+      "status": 200,
+      "ok": true,
+      "note": "2x1024"
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "model": "bge-reranker-v2-m3",
+      "idx": 0,
+      "dispatch_offset_s": 0.0005,
+      "latency_s": 59.615,
+      "status": 200,
+      "ok": true,
+      "note": "top=0 s=1.000"
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "model": "text-moderation",
+      "idx": 0,
+      "dispatch_offset_s": 0.001,
+      "latency_s": 60.744,
+      "status": 200,
+      "ok": true,
+      "note": "flagged=False"
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "model": "bart-large-cnn",
+      "idx": 0,
+      "dispatch_offset_s": 0.0012,
+      "latency_s": 61.768,
+      "status": 200,
+      "ok": true,
+      "note": "summary 302chars"
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "model": "kokoro-82m",
+      "idx": 0,
+      "dispatch_offset_s": 0.0015,
+      "latency_s": 60.442,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "B_light_models_concurrent_kokoro-82m_0.wav"
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "model": "qwen3.5-4b-q4",
+      "idx": 0,
+      "dispatch_offset_s": 0.0017,
+      "latency_s": 69.3,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "C_eviction_storm",
+      "model": "sd-turbo",
+      "idx": 0,
+      "dispatch_offset_s": 0.0001,
+      "latency_s": 116.914,
+      "status": 200,
+      "ok": true,
+      "note": "png 512x512 583401B",
+      "out": "C_eviction_storm_sd-turbo_0.png"
+    },
+    {
+      "scenario": "C_eviction_storm",
+      "model": "sdxl-turbo",
+      "idx": 0,
+      "dispatch_offset_s": 0.0005,
+      "latency_s": 28.968,
+      "status": 503,
+      "ok": false,
+      "note": "model_too_large_for_device"
+    },
+    {
+      "scenario": "C_eviction_storm",
+      "model": "pixel-art-xl",
+      "idx": 0,
+      "dispatch_offset_s": 0.0008,
+      "latency_s": 28.968,
+      "status": 503,
+      "ok": false,
+      "note": "model_too_large_for_device"
+    },
+    {
+      "scenario": "C_eviction_storm",
+      "model": "sd_pixelart_spritesheet_generator",
+      "idx": 0,
+      "dispatch_offset_s": 0.001,
+      "latency_s": 121.519,
+      "status": 200,
+      "ok": true,
+      "note": "png 512x512 439472B",
+      "out": "C_eviction_storm_sd_pixelart_spritesheet_generator_0.png"
+    },
+    {
+      "scenario": "C_eviction_storm",
+      "model": "all-in-one-pixel-model",
+      "idx": 0,
+      "dispatch_offset_s": 0.0013,
+      "latency_s": 115.013,
+      "status": 200,
+      "ok": true,
+      "note": "png 512x512 411272B",
+      "out": "C_eviction_storm_all-in-one-pixel-model_0.png"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "sdxl-turbo",
+      "idx": 0,
+      "dispatch_offset_s": 0.0,
+      "latency_s": 37.317,
+      "status": 200,
+      "ok": true,
+      "note": "png 512x512 364936B",
+      "out": "D_cold_load_probe_sdxl-turbo_0.png"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "kokoro-82m",
+      "idx": 1,
+      "dispatch_offset_s": 0.2514,
+      "latency_s": 35.14,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "D_cold_load_probe_kokoro-82m_1.wav"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "kokoro-82m",
+      "idx": 2,
+      "dispatch_offset_s": 0.2519,
+      "latency_s": 35.248,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "D_cold_load_probe_kokoro-82m_2.wav"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "kokoro-82m",
+      "idx": 3,
+      "dispatch_offset_s": 0.2521,
+      "latency_s": 35.387,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "D_cold_load_probe_kokoro-82m_3.wav"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "kokoro-82m",
+      "idx": 4,
+      "dispatch_offset_s": 0.2523,
+      "latency_s": 35.659,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "D_cold_load_probe_kokoro-82m_4.wav"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "kokoro-82m",
+      "idx": 5,
+      "dispatch_offset_s": 0.2525,
+      "latency_s": 35.862,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "D_cold_load_probe_kokoro-82m_5.wav"
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "model": "kokoro-82m",
+      "idx": 6,
+      "dispatch_offset_s": 0.2527,
+      "latency_s": 35.691,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "D_cold_load_probe_kokoro-82m_6.wav"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "qwen3.5-4b-q4",
+      "idx": 0,
+      "dispatch_offset_s": 0.0001,
+      "latency_s": 122.042,
+      "status": 200,
+      "ok": true,
+      "note": "chat 168chars"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "qwen3-embedding-0.6b",
+      "idx": 0,
+      "dispatch_offset_s": 0.0006,
+      "latency_s": 112.791,
+      "status": 200,
+      "ok": true,
+      "note": "2x1024"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "bge-reranker-v2-m3",
+      "idx": 0,
+      "dispatch_offset_s": 0.001,
+      "latency_s": 109.209,
+      "status": 200,
+      "ok": true,
+      "note": "top=0 s=1.000"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "text-moderation",
+      "idx": 0,
+      "dispatch_offset_s": 0.0013,
+      "latency_s": 110.971,
+      "status": 200,
+      "ok": true,
+      "note": "flagged=False"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "bart-large-cnn",
+      "idx": 0,
+      "dispatch_offset_s": 0.0017,
+      "latency_s": 112.306,
+      "status": 200,
+      "ok": true,
+      "note": "summary 302chars"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "kokoro-82m",
+      "idx": 0,
+      "dispatch_offset_s": 0.002,
+      "latency_s": 112.215,
+      "status": 200,
+      "ok": true,
+      "note": "wav 128444B",
+      "out": "E_thundering_herd_kokoro-82m_0.wav"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "sd-turbo",
+      "idx": 0,
+      "dispatch_offset_s": 0.0024,
+      "latency_s": 112.68,
+      "status": 200,
+      "ok": true,
+      "note": "png 512x512 416212B",
+      "out": "E_thundering_herd_sd-turbo_0.png"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "sdxl-turbo",
+      "idx": 0,
+      "dispatch_offset_s": 0.0027,
+      "latency_s": 87.836,
+      "status": 503,
+      "ok": false,
+      "note": "model_too_large_for_device"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "pixel-art-xl",
+      "idx": 0,
+      "dispatch_offset_s": 0.0031,
+      "latency_s": 107.837,
+      "status": 503,
+      "ok": false,
+      "note": "model_too_large_for_device"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "sd_pixelart_spritesheet_generator",
+      "idx": 0,
+      "dispatch_offset_s": 0.0034,
+      "latency_s": 107.837,
+      "status": 503,
+      "ok": false,
+      "note": "model_too_large_for_device"
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "model": "all-in-one-pixel-model",
+      "idx": 0,
+      "dispatch_offset_s": 0.0038,
+      "latency_s": 107.837,
+      "status": 503,
+      "ok": false,
+      "note": "model_too_large_for_device"
+    }
+  ],
+  "summaries": [
+    {
+      "scenario": "A_same_model_concurrent",
+      "n": 6,
+      "ok": 6,
+      "failed": 0,
+      "wall_s": 87.76,
+      "sum_latency_s": 298.6,
+      "concurrency_factor": 3.4,
+      "min_latency_s": 10.858,
+      "max_latency_s": 87.761
+    },
+    {
+      "scenario": "A_same_model_sequential",
+      "n": 6,
+      "ok": 6,
+      "failed": 0,
+      "wall_s": 98.11,
+      "sum_latency_s": 98.11,
+      "concurrency_factor": 1.0,
+      "min_latency_s": 15.443,
+      "max_latency_s": 17.232
+    },
+    {
+      "scenario": "B_light_models_concurrent",
+      "n": 6,
+      "ok": 6,
+      "failed": 0,
+      "wall_s": 69.3,
+      "sum_latency_s": 372.31,
+      "concurrency_factor": 5.37,
+      "min_latency_s": 59.615,
+      "max_latency_s": 69.3
+    },
+    {
+      "scenario": "C_eviction_storm",
+      "n": 5,
+      "ok": 3,
+      "failed": 2,
+      "wall_s": 121.52,
+      "sum_latency_s": 411.38,
+      "concurrency_factor": 3.39,
+      "min_latency_s": 28.968,
+      "max_latency_s": 121.519
+    },
+    {
+      "scenario": "D_cold_load_probe",
+      "n": 7,
+      "ok": 7,
+      "failed": 0,
+      "wall_s": 37.32,
+      "sum_latency_s": 250.3,
+      "concurrency_factor": 6.71,
+      "min_latency_s": 35.14,
+      "max_latency_s": 37.317
+    },
+    {
+      "scenario": "E_thundering_herd",
+      "n": 11,
+      "ok": 7,
+      "failed": 4,
+      "wall_s": 122.04,
+      "sum_latency_s": 1203.56,
+      "concurrency_factor": 9.86,
+      "min_latency_s": 87.836,
+      "max_latency_s": 122.042
+    }
+  ]
+}

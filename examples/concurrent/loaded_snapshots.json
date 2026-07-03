@@ -1,0 +1,125 @@
+{
+  "start": {
+    "loaded": [
+      "kokoro-82m",
+      "sd_pixelart_spritesheet_generator",
+      "whisper-base"
+    ],
+    "t": 1783029708.9445257
+  },
+  "A_same_model_concurrent:before": {
+    "loaded": [
+      "kokoro-82m",
+      "qwen3.5-4b-q4",
+      "sd_pixelart_spritesheet_generator",
+      "whisper-base"
+    ],
+    "t": 1783029724.536978
+  },
+  "A_same_model_concurrent:after": {
+    "loaded": [
+      "kokoro-82m",
+      "qwen3.5-4b-q4",
+      "sd_pixelart_spritesheet_generator",
+      "whisper-base"
+    ],
+    "t": 1783029812.5141356
+  },
+  "B_light_models_concurrent:before": {
+    "loaded": [
+      "kokoro-82m",
+      "qwen3.5-4b-q4",
+      "sd_pixelart_spritesheet_generator",
+      "whisper-base"
+    ],
+    "t": 1783029910.7213314
+  },
+  "B_light_models_concurrent:after": {
+    "loaded": [
+      "bart-large-cnn",
+      "bge-reranker-v2-m3",
+      "kokoro-82m",
+      "qwen3-embedding-0.6b",
+      "qwen3.5-4b-q4",
+      "sd_pixelart_spritesheet_generator",
+      "text-moderation",
+      "whisper-base"
+    ],
+    "t": 1783029980.0964744
+  },
+  "C_eviction_storm:before": {
+    "loaded": [
+      "bart-large-cnn",
+      "bge-reranker-v2-m3",
+      "kokoro-82m",
+      "qwen3-embedding-0.6b",
+      "qwen3.5-4b-q4",
+      "sd_pixelart_spritesheet_generator",
+      "text-moderation",
+      "whisper-base"
+    ],
+    "t": 1783029980.1366951
+  },
+  "C_eviction_storm:after": {
+    "loaded": [
+      "all-in-one-pixel-model",
+      "sd-turbo",
+      "sd_pixelart_spritesheet_generator"
+    ],
+    "t": 1783030102.2756104
+  },
+  "D_pick:loaded": {
+    "loaded": [
+      "kokoro-82m",
+      "sd-turbo",
+      "sd_pixelart_spritesheet_generator"
+    ],
+    "t": 1783030129.4347622
+  },
+  "D_cold_load_probe:before": {
+    "loaded": [
+      "kokoro-82m",
+      "sd-turbo",
+      "sd_pixelart_spritesheet_generator"
+    ],
+    "t": 1783030129.4862952
+  },
+  "D_cold_load_probe:after": {
+    "loaded": [
+      "kokoro-82m",
+      "sdxl-turbo"
+    ],
+    "t": 1783030166.8771243
+  },
+  "E_thundering_herd:before": {
+    "loaded": [
+      "kokoro-82m",
+      "sdxl-turbo"
+    ],
+    "t": 1783030166.9260085
+  },
+  "E_thundering_herd:after": {
+    "loaded": [
+      "bart-large-cnn",
+      "bge-reranker-v2-m3",
+      "kokoro-82m",
+      "qwen3-embedding-0.6b",
+      "qwen3.5-4b-q4",
+      "sd-turbo",
+      "text-moderation"
+    ],
+    "t": 1783030289.581234
+  },
+  "end": {
+    "loaded": [
+      "bart-large-cnn",
+      "bge-reranker-v2-m3",
+      "kokoro-82m",
+      "qwen3-embedding-0.6b",
+      "qwen3.5-4b-q4",
+      "sd-turbo",
+      "text-moderation"
+    ],
+    "t": 1783030289.68407
+  }
+}
