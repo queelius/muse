@@ -23,13 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 from typing import Union
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.image_embedding.codec import embedding_to_base64
@@ -46,7 +46,7 @@ MODALITY = "image/embedding"
 # Conservative caps: a request with input=[10MB image] x 100 entries
 # would OOM the worker decoding the batch. Tunable via env so power
 # users with big GPUs can lift them.
-_MAX_BATCH = int(os.environ.get("MUSE_IMAGE_EMBEDDINGS_MAX_BATCH", "64"))
+_MAX_BATCH = config.get("limits.image_embeddings_max_batch")
 
 
 class _ImageEmbeddingsRequest(BaseModel):

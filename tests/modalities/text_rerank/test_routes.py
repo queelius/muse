@@ -212,3 +212,36 @@ def test_rerank_backend_error_returns_500_envelope():
     body = r.json()
     assert "error" in body
     assert body["error"]["code"] == "internal_error"
+
+
+# ---------------- config-hierarchy migration (limits.rerank_*, multi-cap file) ----------------
+
+
+def test_rerank_caps_are_import_time_consts_sourced_from_config(monkeypatch):
+    """text_rerank/routes.py declares three import-time cap constants
+    (_MAX_DOCUMENTS, _MAX_QUERY_CHARS, _MAX_DOC_CHARS) from the same
+    limits.rerank_* keys. Prove each is sourced from muse.core.config,
+    not raw os.environ, by reloading the module under a changed env
+    and checking the frozen values."""
+    from muse.core import config as cfg
+    monkeypatch.setenv("MUSE_RERANK_MAX_DOCUMENTS", "17")
+    monkeypatch.setenv("MUSE_RERANK_MAX_QUERY_CHARS", "18")
+    monkeypatch.setenv("MUSE_RERANK_MAX_DOC_CHARS", "19")
+    cfg.reset_config()
+    assert cfg.get("limits.rerank_max_documents") == 17
+    assert cfg.get("limits.rerank_max_query_chars") == 18
+    assert cfg.get("limits.rerank_max_doc_chars") == 19
+
+    import importlib
+    from muse.modalities.text_rerank import routes as routes_mod
+    importlib.reload(routes_mod)
+    try:
+        assert routes_mod._MAX_DOCUMENTS == 17
+        assert routes_mod._MAX_QUERY_CHARS == 18
+        assert routes_mod._MAX_DOC_CHARS == 19
+    finally:
+        monkeypatch.delenv("MUSE_RERANK_MAX_DOCUMENTS", raising=False)
+        monkeypatch.delenv("MUSE_RERANK_MAX_QUERY_CHARS", raising=False)
+        monkeypatch.delenv("MUSE_RERANK_MAX_DOC_CHARS", raising=False)
+        cfg.reset_config()
+        importlib.reload(routes_mod)

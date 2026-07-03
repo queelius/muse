@@ -14,12 +14,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import os
 import time
 
 
 from fastapi import APIRouter, File, Form, UploadFile
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.image_generation.image_input import decode_image_file
@@ -32,17 +32,12 @@ MODALITY = "image/upscale"
 
 
 def _max_input_side() -> int:
-    """Read the per-request input-side cap from the environment.
+    """Read the per-request input-side cap via muse.core.config.
 
     Default 1024. Tunable via MUSE_UPSCALE_MAX_INPUT_SIDE so users with
     more VRAM can lift the cap without a code change.
     """
-    raw = os.environ.get("MUSE_UPSCALE_MAX_INPUT_SIDE", "1024")
-    try:
-        v = int(raw)
-        return v if v > 0 else 1024
-    except ValueError:
-        return 1024
+    return config.get("limits.upscale_max_input_side")
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

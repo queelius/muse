@@ -24,12 +24,12 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import os
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.model_3d_generation.codec import encode_3d_response
@@ -47,29 +47,13 @@ MODALITY = "3d/generation"
 logger = logging.getLogger(__name__)
 
 
-_HARD_DEFAULT_MAX_BYTES = 20 * 1024 * 1024
-
-
 def _max_bytes() -> int:
-    """Read MUSE_3D_INPUT_MAX_BYTES per call so operators can change
-    the cap without a server restart. Garbled or non-positive values
-    fall back to the 20MB hardcoded default. Matches the v0.34.0
+    """Read the image-to-3d upload byte cap via muse.core.config (env:
+    MUSE_3D_INPUT_MAX_BYTES) per call, so operators can change the cap
+    without a server restart. Garbled values fall back to the registry
+    default (20MB) with a logged warning. Matches the v0.34.0
     MUSE_IMAGE_INPUT_MAX_BYTES + MUSE_AUDIO_CLS_MAX_BYTES pattern."""
-    raw = os.environ.get("MUSE_3D_INPUT_MAX_BYTES")
-    if raw is None:
-        return _HARD_DEFAULT_MAX_BYTES
-    try:
-        n = int(raw)
-        if n <= 0:
-            raise ValueError("must be positive")
-        return n
-    except ValueError as e:
-        logger.warning(
-            "MUSE_3D_INPUT_MAX_BYTES=%r is not a positive integer (%s); "
-            "falling back to %d-byte cap",
-            raw, e, _HARD_DEFAULT_MAX_BYTES,
-        )
-        return _HARD_DEFAULT_MAX_BYTES
+    return config.get("limits.model_3d_input_max_bytes")
 
 
 class _Generation3DRequest(BaseModel):

@@ -30,12 +30,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_classification.codec import (
@@ -60,30 +60,19 @@ logger = logging.getLogger(__name__)
 # 400 so the client knows the request was rejected (vs. silently
 # truncated).
 #
-# Read per-request so changes via env take effect immediately and so
-# tests that patch env don't need to reload the module. Matches the
-# v0.34.0 MUSE_IMAGE_INPUT_MAX_BYTES pattern.
+# Read per-request via muse.core.config so changes via env take effect
+# immediately and so tests that patch env don't need to reload the
+# module. Matches the v0.34.0 MUSE_IMAGE_INPUT_MAX_BYTES pattern.
 def _max_batch() -> int:
-    try:
-        return int(os.environ.get("MUSE_MODERATIONS_MAX_BATCH", "1024"))
-    except ValueError:
-        return 1024
+    return config.get("limits.moderations_max_batch")
 
 
 def _max_chars_per_item() -> int:
-    try:
-        return int(
-            os.environ.get("MUSE_MODERATIONS_MAX_CHARS_PER_ITEM", "100000")
-        )
-    except ValueError:
-        return 100000
+    return config.get("limits.moderations_max_chars_per_item")
 
 
 def _max_candidate_labels() -> int:
-    try:
-        return int(os.environ.get("MUSE_CLASSIFICATIONS_MAX_LABELS", "200"))
-    except ValueError:
-        return 200
+    return config.get("limits.classifications_max_labels")
 
 
 class _ModerationsRequest(BaseModel):

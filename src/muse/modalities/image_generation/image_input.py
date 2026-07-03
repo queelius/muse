@@ -17,10 +17,10 @@ from __future__ import annotations
 import base64
 import io
 import logging
-import os
 import re
 from typing import Any
 
+from muse.core import config
 from muse.core.net_fetch import (
     afetch_url_bytes,
     validate_public_host as _validate_public_host_impl,
@@ -42,25 +42,17 @@ _HTTP_TIMEOUT = 30.0
 
 
 def _default_max_bytes() -> int:
-    """Read MUSE_IMAGE_INPUT_MAX_BYTES per call so operators can raise
-    the cap without a server restart. Falls back to 10MB on missing or
-    unparseable values, with a one-time-per-call warning logged on
-    parse failure (operators see the misconfiguration in worker logs)."""
-    raw = os.environ.get("MUSE_IMAGE_INPUT_MAX_BYTES")
-    if raw is None:
+    """Read the image-input byte cap via muse.core.config (env:
+    MUSE_IMAGE_INPUT_MAX_BYTES), so operators can raise the cap without
+    a server restart. config.get() already warns and falls back to the
+    registry default on an unparseable value; a resolved value that is
+    zero or negative (parseable but nonsensical as a byte cap) also
+    falls back to the hardcoded default here, since the registry has no
+    notion of "must be positive"."""
+    n = config.get("limits.image_input_max_bytes")
+    if n is None or n <= 0:
         return _HARD_DEFAULT_MAX_BYTES
-    try:
-        n = int(raw)
-        if n <= 0:
-            raise ValueError("must be positive")
-        return n
-    except ValueError as e:
-        logger.warning(
-            "MUSE_IMAGE_INPUT_MAX_BYTES=%r is not a positive integer (%s); "
-            "falling back to %d-byte cap",
-            raw, e, _HARD_DEFAULT_MAX_BYTES,
-        )
-        return _HARD_DEFAULT_MAX_BYTES
+    return n
 
 
 async def decode_image_input(value: str, *, max_bytes: int | None = None) -> Any:

@@ -14,12 +14,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.video_generation.codec import (
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # at once. mp4/webm are container-compressed and have no such ceiling, so the
 # cap applies only to frames_b64. Tunable for power users; clips above it
 # should use response_format=mp4/webm.
-_MAX_FRAMES_B64 = int(os.environ.get("MUSE_VIDEO_MAX_FRAMES_B64", "240"))
+_MAX_FRAMES_B64 = config.get("limits.video_max_frames_b64")
 
 
 class VideoGenerationRequest(BaseModel):

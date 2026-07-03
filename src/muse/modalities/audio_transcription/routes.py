@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import tempfile
 from typing import Literal
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import Response
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_transcription.codec import encode_transcription
@@ -45,7 +45,7 @@ VALID_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
 
 
 def _max_upload_bytes() -> int:
-    mb = int(os.environ.get("MUSE_ASR_MAX_MB", "100"))
+    mb = config.get("limits.asr_max_mb")
     return mb * 1024 * 1024
 
 

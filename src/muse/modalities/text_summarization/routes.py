@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_summarization.codec import (
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Defaults are conservative. A request with text=10MB can OOM the worker
 # trying to tokenize it; cap is tunable via env so power users with big
 # GPUs can lift it.
-_MAX_TEXT_CHARS = int(os.environ.get("MUSE_SUMMARIZE_MAX_TEXT_CHARS", "100000"))
+_MAX_TEXT_CHARS = config.get("limits.summarize_max_text_chars")
 
 
 _VALID_LENGTHS = ("short", "medium", "long")

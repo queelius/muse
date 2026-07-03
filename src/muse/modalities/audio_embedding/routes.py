@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 
 from fastapi import APIRouter, File, Form, UploadFile
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_embedding.codec import embedding_to_base64
@@ -44,15 +44,9 @@ MODALITY = "audio/embedding"
 
 
 def _max_upload_bytes() -> int:
-    """Per-file byte cap. Default 50MB; tunable via env."""
-    mb_default = 50
-    raw = os.environ.get("MUSE_AUDIO_EMBEDDINGS_MAX_BYTES")
-    if raw is None:
-        return mb_default * 1024 * 1024
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return mb_default * 1024 * 1024
+    """Per-file byte cap via muse.core.config (env:
+    MUSE_AUDIO_EMBEDDINGS_MAX_BYTES). Default 50MB; tunable via env."""
+    return config.get("limits.audio_embeddings_max_bytes")
 
 
 _VALID_FORMATS = {"float", "base64"}

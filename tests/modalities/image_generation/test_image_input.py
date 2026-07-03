@@ -347,3 +347,34 @@ def test_default_max_bytes_helper_reads_env(monkeypatch):
     from muse.modalities.image_generation.image_input import _default_max_bytes
     monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "20971520")  # 20MB
     assert _default_max_bytes() == 20 * 1024 * 1024
+
+
+# ---------------- config-hierarchy migration (limits.image_input_max_bytes) ----------------
+
+
+def test_default_max_bytes_reads_config_env(monkeypatch):
+    """The cap now resolves through muse.core.config, not raw os.environ."""
+    from muse.core import config as cfg
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "12345")
+    cfg.reset_config()
+    from muse.modalities.image_generation.image_input import _default_max_bytes
+    assert _default_max_bytes() == 12345
+    cfg.reset_config()
+
+
+def test_default_max_bytes_reads_config_file(tmp_path, monkeypatch):
+    """A config.yaml value (no env var set) reaches the accessor too.
+
+    This is the behavior that a bare os.environ.get() implementation
+    cannot provide: proof the site is routed through the registry
+    rather than reading the env var directly.
+    """
+    from muse.core import config as cfg
+    monkeypatch.delenv("MUSE_IMAGE_INPUT_MAX_BYTES", raising=False)
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("limits:\n  image_input_max_bytes: 54321\n")
+    monkeypatch.setenv("MUSE_CONFIG", str(cfg_file))
+    cfg.reset_config()
+    from muse.modalities.image_generation.image_input import _default_max_bytes
+    assert _default_max_bytes() == 54321
+    cfg.reset_config()

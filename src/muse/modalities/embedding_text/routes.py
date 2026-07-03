@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 from typing import Union
 
@@ -30,6 +29,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.embedding_text.codec import embedding_to_base64
@@ -43,10 +43,8 @@ MODALITY = "embedding/text"
 # prevent worker OOM on giant batches). Embedding caps are higher
 # because RAG ingestion legitimately wants thousands at a time, but
 # they're still finite.
-_MAX_BATCH = int(os.environ.get("MUSE_EMBEDDINGS_MAX_BATCH", "2048"))
-_MAX_CHARS_PER_ITEM = int(
-    os.environ.get("MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM", "100000")
-)
+_MAX_BATCH = config.get("limits.embeddings_max_batch")
+_MAX_CHARS_PER_ITEM = config.get("limits.embeddings_max_chars_per_item")
 
 
 class EmbeddingsRequest(BaseModel):

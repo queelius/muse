@@ -25,11 +25,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 
 
 from fastapi import APIRouter, File, Form, UploadFile
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.image_generation.image_input import decode_image_file
@@ -62,12 +62,7 @@ _MODE_HUMAN = {
 
 
 def _max_input_side() -> int:
-    raw = os.environ.get("MUSE_SEGMENTATION_MAX_INPUT_SIDE", "2048")
-    try:
-        v = int(raw)
-        return v if v > 0 else 2048
-    except ValueError:
-        return 2048
+    return config.get("limits.segmentation_max_input_side")
 
 
 def _parse_points_json(raw: str) -> list[list[int]] | None:

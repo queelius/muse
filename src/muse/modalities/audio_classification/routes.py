@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_classification.codec import (
@@ -31,28 +32,12 @@ MODALITY = "audio/classification"
 logger = logging.getLogger(__name__)
 
 
-_HARD_DEFAULT_MAX_BYTES = 50 * 1024 * 1024
-
-
 def _max_bytes() -> int:
-    """Read MUSE_AUDIO_CLS_MAX_BYTES per call so operators can change
-    the cap without a server restart. Garbled or non-positive values
-    fall back to the 50MB hardcoded default."""
-    raw = os.environ.get("MUSE_AUDIO_CLS_MAX_BYTES")
-    if raw is None:
-        return _HARD_DEFAULT_MAX_BYTES
-    try:
-        n = int(raw)
-        if n <= 0:
-            raise ValueError("must be positive")
-        return n
-    except ValueError as e:
-        logger.warning(
-            "MUSE_AUDIO_CLS_MAX_BYTES=%r is not a positive integer (%s); "
-            "falling back to %d-byte cap",
-            raw, e, _HARD_DEFAULT_MAX_BYTES,
-        )
-        return _HARD_DEFAULT_MAX_BYTES
+    """Read the audio-classification byte cap via muse.core.config
+    (env: MUSE_AUDIO_CLS_MAX_BYTES) per call, so operators can change
+    the cap without a server restart. Garbled values fall back to the
+    registry default (50MB) with a logged warning."""
+    return config.get("limits.audio_cls_max_bytes")
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

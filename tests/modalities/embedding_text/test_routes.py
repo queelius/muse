@@ -204,6 +204,31 @@ def test_oversized_item_returns_400(monkeypatch):
     assert "MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM=10" in r.json()["error"]["message"]
 
 
+# ---------------- config-hierarchy migration (limits.embeddings_max_batch) ----------------
+
+
+def test_max_batch_is_import_time_const_sourced_from_config(monkeypatch):
+    """_MAX_BATCH is a module-level constant frozen at import time, so
+    the module itself can't observe an env change after import -- but
+    the value it froze must have come from muse.core.config, not raw
+    os.environ. Prove it by comparing what a fresh import captures
+    against what config.get() resolves for the same env value."""
+    from muse.core import config as cfg
+    monkeypatch.setenv("MUSE_EMBEDDINGS_MAX_BATCH", "5150")
+    cfg.reset_config()
+    assert cfg.get("limits.embeddings_max_batch") == 5150
+
+    import importlib
+    from muse.modalities.embedding_text import routes as routes_mod
+    importlib.reload(routes_mod)
+    try:
+        assert routes_mod._MAX_BATCH == 5150
+    finally:
+        monkeypatch.delenv("MUSE_EMBEDDINGS_MAX_BATCH", raising=False)
+        cfg.reset_config()
+        importlib.reload(routes_mod)
+
+
 def test_embed_backend_error_returns_500_envelope():
     """L14: a backend exception surfaces as the OpenAI 500 envelope."""
     class _RaisingModel:

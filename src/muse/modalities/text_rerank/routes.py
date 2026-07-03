@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_rerank.codec import encode_rerank_response
@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 # Defaults are conservative. A request with documents=10000 can OOM the
 # worker by trying to materialize a giant batch of pairs. Caps are
 # tunable via env so power users with big GPUs can lift them.
-_MAX_DOCUMENTS = int(os.environ.get("MUSE_RERANK_MAX_DOCUMENTS", "1000"))
-_MAX_QUERY_CHARS = int(os.environ.get("MUSE_RERANK_MAX_QUERY_CHARS", "4000"))
-_MAX_DOC_CHARS = int(os.environ.get("MUSE_RERANK_MAX_DOC_CHARS", "100000"))
+_MAX_DOCUMENTS = config.get("limits.rerank_max_documents")
+_MAX_QUERY_CHARS = config.get("limits.rerank_max_query_chars")
+_MAX_DOC_CHARS = config.get("limits.rerank_max_doc_chars")
 
 
 class _RerankRequest(BaseModel):

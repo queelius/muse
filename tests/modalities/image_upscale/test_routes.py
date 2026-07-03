@@ -196,6 +196,20 @@ def test_post_upscale_oversize_input_returns_400(client, monkeypatch):
     )
 
 
+# ---------------- config-hierarchy migration (limits.upscale_max_input_side) ----------------
+
+
+def test_max_input_side_reads_config(monkeypatch):
+    """The per-request accessor now resolves through muse.core.config,
+    not raw os.environ, matching the config-hierarchy migration."""
+    from muse.core import config as cfg
+    monkeypatch.setenv("MUSE_UPSCALE_MAX_INPUT_SIDE", "77")
+    cfg.reset_config()
+    from muse.modalities.image_upscale import routes
+    assert routes._max_input_side() == 77
+    cfg.reset_config()
+
+
 def test_post_upscale_n_over_limit_rejected(client):
     r = client.post(
         "/v1/images/upscale",
