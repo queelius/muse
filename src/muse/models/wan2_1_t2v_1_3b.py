@@ -1,7 +1,13 @@
-"""Wan 2.1 T2V 1.3B: Apache 2.0, ~3GB at fp16, 5s clips at 832x480.
+"""Wan 2.1 T2V 1.3B: Apache 2.0, 5s clips at 832x480.
 
-Default low-VRAM video generation bundle. Fits comfortably on 8GB
-cards but tight; 12GB+ recommended for headroom.
+Default low-VRAM video generation bundle. The 1.3B transformer alone is
+small, but the pipeline also bundles a UMT5-XXL text encoder (~11GB at
+fp16); full-resident load is ~11-12GB and OOMs a 12GB card. The bundle
+therefore defaults to sequential CPU offload (`capabilities.cpu_offload
+= "sequential"`), which fits 8-12GB GPUs at the cost of speed. On a
+bigger card, set `server.video_cpu_offload model` (whole-component
+offload, faster) or `off` (full .to(cuda), fastest) to trade VRAM
+headroom for speed.
 
 Constructs robustly across diffusers versions:
   - WanPipeline.from_pretrained when WanPipeline is exported (>=0.32.0)
@@ -17,6 +23,7 @@ from typing import Any
 
 from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.video_generation.protocol import VideoResult
+from muse.modalities.video_generation.runtimes._offload import place_pipeline
 
 
 logger = logging.getLogger(__name__)
@@ -62,8 +69,10 @@ MANIFEST = {
     # which diffusers cannot load -- the "-Diffusers" suffix is the port.
     "hf_repo": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "description": (
-        "Wan 2.1 T2V 1.3B: ~3GB, 5s videos at 832x480, "
-        "fits 8GB GPUs, Apache 2.0"
+        "Wan 2.1 T2V 1.3B: 5s videos at 832x480, Apache 2.0. The UMT5-XXL "
+        "text encoder makes full-resident load ~11-12GB, so the bundle "
+        "defaults to sequential CPU offload to fit 8-12GB GPUs (slower; "
+        "set server.video_cpu_offload model|off on a bigger card for speed)"
     ),
     "license": "Apache 2.0",
     "pip_extras": (
@@ -85,7 +94,9 @@ MANIFEST = {
         "default_steps": 30,
         "default_guidance": 5.0,
         "supports_image_to_video": False,
-        "memory_gb": 6.0,
+        "memory_gb": 3.0,
+        "cpu_offload": "sequential",
+        "vae_tiling": True,
     },
     "allow_patterns": [
         "*.safetensors", "*.json", "*.txt", "*.md",
@@ -121,6 +132,8 @@ class Model:
         local_dir: str | None = None,
         device: str = "auto",
         dtype: str = "float16",
+        cpu_offload: Any = None,
+        vae_tiling: bool = False,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -151,8 +164,10 @@ class Model:
         self._pipe = pipeline_cls.from_pretrained(
             src, torch_dtype=torch_dtype,
         )
-        if self._device != "cpu":
-            self._pipe = self._pipe.to(self._device)
+        self._pipe = place_pipeline(
+            self._pipe, self._device,
+            cpu_offload=cpu_offload, vae_tiling=vae_tiling,
+        )
 
     def generate(
         self,

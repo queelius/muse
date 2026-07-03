@@ -14,6 +14,7 @@ from typing import Any
 
 from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.video_generation.protocol import VideoResult
+from muse.modalities.video_generation.runtimes._offload import place_pipeline
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,9 @@ class CogVideoXRuntime:
       - default_duration_seconds, default_fps, default_size, default_steps,
         default_guidance: manifest-driven defaults injected via the
         capabilities splat
+      - cpu_offload: None|"model"|"sequential" -- per-model capability;
+        see muse.modalities.video_generation.runtimes._offload
+      - vae_tiling: bool -- enable_vae_tiling/slicing after placement
       - **kwargs: absorbed (future capability flags)
     """
 
@@ -71,6 +75,8 @@ class CogVideoXRuntime:
         default_size: tuple[int, int] = (720, 480),
         default_steps: int = 50,
         default_guidance: float = 6.0,
+        cpu_offload: Any = None,
+        vae_tiling: bool = False,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -100,8 +106,10 @@ class CogVideoXRuntime:
         self._pipe = CogVideoXPipeline.from_pretrained(
             src, torch_dtype=torch_dtype,
         )
-        if self._device != "cpu":
-            self._pipe = self._pipe.to(self._device)
+        self._pipe = place_pipeline(
+            self._pipe, self._device,
+            cpu_offload=cpu_offload, vae_tiling=vae_tiling,
+        )
 
     def generate(
         self,

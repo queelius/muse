@@ -23,6 +23,8 @@ def _patched_pipe(n_frames=5):
     fake_frame = MagicMock()
     fake_frame.size = (832, 480)
     fake_pipe.return_value.frames = [[fake_frame] * n_frames]
+    # Mirror real diffusers pipelines: .to(device) returns self.
+    fake_pipe.to.return_value = fake_pipe
     return fake_pipe
 
 
@@ -308,6 +310,101 @@ def test_generate_records_actual_duration_from_returned_frames():
         r = rt.generate("test", duration_seconds=5.0, fps=5)
     assert len(r.frames) == 25
     assert r.duration_seconds == 5.0  # 25 / 5
+
+
+def test_construction_with_cpu_offload_model_skips_to_call():
+    """cpu_offload='model' must dispatch to enable_model_cpu_offload and
+    must NOT call .to(device) -- the two are mutually exclusive."""
+    fake_wan_pipeline = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.WanPipeline",
+        fake_wan_pipeline,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.DiffusionPipeline",
+        MagicMock(),
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.torch",
+        MagicMock(),
+    ):
+        WanRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+            cpu_offload="model",
+        )
+    inner_pipe.enable_model_cpu_offload.assert_called_once_with(device="cuda")
+    inner_pipe.to.assert_not_called()
+
+
+def test_construction_with_cpu_offload_sequential_skips_to_call():
+    fake_wan_pipeline = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.WanPipeline",
+        fake_wan_pipeline,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.DiffusionPipeline",
+        MagicMock(),
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.torch",
+        MagicMock(),
+    ):
+        WanRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+            cpu_offload="sequential",
+        )
+    inner_pipe.enable_sequential_cpu_offload.assert_called_once_with(device="cuda")
+    inner_pipe.to.assert_not_called()
+
+
+def test_construction_without_cpu_offload_calls_to_as_before():
+    """Default path (no cpu_offload capability) is unchanged."""
+    fake_wan_pipeline = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.WanPipeline",
+        fake_wan_pipeline,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.DiffusionPipeline",
+        MagicMock(),
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.torch",
+        MagicMock(),
+    ):
+        WanRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+        )
+    inner_pipe.to.assert_called_once_with("cuda")
+    inner_pipe.enable_model_cpu_offload.assert_not_called()
+    inner_pipe.enable_sequential_cpu_offload.assert_not_called()
+
+
+def test_construction_with_vae_tiling_calls_helpers():
+    fake_wan_pipeline = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.WanPipeline",
+        fake_wan_pipeline,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.DiffusionPipeline",
+        MagicMock(),
+    ), patch(
+        "muse.modalities.video_generation.runtimes.wan_runtime.torch",
+        MagicMock(),
+    ):
+        WanRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+            vae_tiling=True,
+        )
+    inner_pipe.enable_vae_tiling.assert_called_once()
+    inner_pipe.enable_vae_slicing.assert_called_once()
 
 
 def test_generate_forwards_seed_via_generator():

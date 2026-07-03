@@ -30,6 +30,7 @@ def test_expected_settings_present():
     for key in (
         "server.idle_timeout_seconds",
         "server.gpu_headroom_gb",
+        "server.video_cpu_offload",
         "admin.token",
         "client.server_url",
         "paths.catalog_dir",
@@ -38,6 +39,14 @@ def test_expected_settings_present():
         "limits.rerank_max_documents",
     ):
         assert key in cfg.SETTINGS_BY_KEY, key
+
+
+def test_video_cpu_offload_setting_shape():
+    s = cfg.SETTINGS_BY_KEY["server.video_cpu_offload"]
+    assert s.env == "MUSE_VIDEO_CPU_OFFLOAD"
+    assert s.type == "opt_str"
+    assert s.default is None
+    assert s.group == "server"
 
 
 def test_idle_timeout_default_is_600():

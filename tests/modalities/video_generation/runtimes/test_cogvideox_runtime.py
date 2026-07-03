@@ -21,6 +21,8 @@ def _patched_pipe(n_frames=49):
     fake_frame = MagicMock()
     fake_frame.size = (720, 480)
     fake_pipe.return_value.frames = [[fake_frame] * n_frames]
+    # Mirror real diffusers pipelines: .to(device) returns self.
+    fake_pipe.to.return_value = fake_pipe
     return fake_pipe
 
 
@@ -190,6 +192,86 @@ def test_construction_absorbs_unknown_kwargs():
             max_duration_seconds=10.0,
             memory_gb=9.0,
         )
+
+
+def test_construction_with_cpu_offload_model_skips_to_call():
+    fake_cogvideox = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_cogvideox.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.CogVideoXPipeline",
+        fake_cogvideox,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.torch",
+        MagicMock(),
+    ):
+        CogVideoXRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+            cpu_offload="model",
+        )
+    inner_pipe.enable_model_cpu_offload.assert_called_once_with(device="cuda")
+    inner_pipe.to.assert_not_called()
+
+
+def test_construction_with_cpu_offload_sequential_skips_to_call():
+    fake_cogvideox = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_cogvideox.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.CogVideoXPipeline",
+        fake_cogvideox,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.torch",
+        MagicMock(),
+    ):
+        CogVideoXRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+            cpu_offload="sequential",
+        )
+    inner_pipe.enable_sequential_cpu_offload.assert_called_once_with(device="cuda")
+    inner_pipe.to.assert_not_called()
+
+
+def test_construction_without_cpu_offload_calls_to_as_before():
+    fake_cogvideox = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_cogvideox.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.CogVideoXPipeline",
+        fake_cogvideox,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.torch",
+        MagicMock(),
+    ):
+        CogVideoXRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+        )
+    inner_pipe.to.assert_called_once_with("cuda")
+    inner_pipe.enable_model_cpu_offload.assert_not_called()
+    inner_pipe.enable_sequential_cpu_offload.assert_not_called()
+
+
+def test_construction_with_vae_tiling_calls_helpers():
+    fake_cogvideox = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_cogvideox.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.CogVideoXPipeline",
+        fake_cogvideox,
+    ), patch(
+        "muse.modalities.video_generation.runtimes.cogvideox_runtime.torch",
+        MagicMock(),
+    ):
+        CogVideoXRuntime(
+            hf_repo="x", local_dir="/fake", device="cuda", model_id="m",
+            vae_tiling=True,
+        )
+    inner_pipe.enable_vae_tiling.assert_called_once()
+    inner_pipe.enable_vae_slicing.assert_called_once()
 
 
 def test_generate_forwards_seed_via_generator():

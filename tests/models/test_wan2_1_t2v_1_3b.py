@@ -40,7 +40,9 @@ def test_manifest_capabilities_advertise_defaults():
     assert tuple(caps["default_size"]) == (832, 480)
     assert caps["default_steps"] == 30
     assert caps["supports_image_to_video"] is False
-    assert caps["memory_gb"] == 6.0
+    assert caps["memory_gb"] == 3.0
+    assert caps["cpu_offload"] == "sequential"
+    assert caps["vae_tiling"] is True
 
 
 def _patched_pipe(n_frames=25):
@@ -48,6 +50,8 @@ def _patched_pipe(n_frames=25):
     fake_frame = MagicMock()
     fake_frame.size = (832, 480)
     fake_pipe.return_value.frames = [[fake_frame] * n_frames]
+    # Mirror real diffusers pipelines: .to(device) returns self.
+    fake_pipe.to.return_value = fake_pipe
     return fake_pipe
 
 
@@ -132,6 +136,53 @@ def test_generate_returns_video_result():
     assert len(r.frames) == 25
     assert r.fps == 5  # MANIFEST default
     assert r.metadata["model"] == "wan2-1-t2v-1-3b"
+
+
+def test_construction_honors_manifest_cpu_offload_capability():
+    """The bundled Model class must actually consult cpu_offload /
+    vae_tiling -- declaring them in MANIFEST is inert unless the
+    constructor wires them through to the shared place_pipeline helper
+    (mirrors WanRuntime; catalog.load_backend splats capabilities into
+    the constructor kwargs)."""
+    fake_wan_pipeline = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
+    ), patch(
+        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", MagicMock(),
+    ), patch(
+        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
+    ):
+        from muse.models.wan2_1_t2v_1_3b import Model
+        Model(
+            hf_repo="x", local_dir="/fake", device="cuda",
+            cpu_offload="sequential", vae_tiling=True,
+        )
+    inner_pipe.enable_sequential_cpu_offload.assert_called_once_with(device="cuda")
+    inner_pipe.to.assert_not_called()
+    inner_pipe.enable_vae_tiling.assert_called_once()
+    inner_pipe.enable_vae_slicing.assert_called_once()
+
+
+def test_construction_without_cpu_offload_calls_to_as_before():
+    fake_wan_pipeline = MagicMock()
+    inner_pipe = _patched_pipe()
+    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
+
+    with patch(
+        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
+    ), patch(
+        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", MagicMock(),
+    ), patch(
+        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
+    ):
+        from muse.models.wan2_1_t2v_1_3b import Model
+        Model(hf_repo="x", local_dir="/fake", device="cuda")
+    inner_pipe.to.assert_called_once_with("cuda")
+    inner_pipe.enable_sequential_cpu_offload.assert_not_called()
+    inner_pipe.enable_model_cpu_offload.assert_not_called()
 
 
 def test_generate_forwards_request_overrides_to_pipeline():

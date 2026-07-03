@@ -102,6 +102,9 @@ SETTINGS: list[Setting] = [
     Setting("server.device", "MUSE_DEVICE",
             "str", "auto", "server",
             "Default device for models (auto|cpu|cuda|mps); `muse serve --device` overrides."),
+    Setting("server.video_cpu_offload", "MUSE_VIDEO_CPU_OFFLOAD",
+            "opt_str", None, "server",
+            "Global override for video CPU offload mode (model|sequential|off); unset uses the per-model capability."),
     # --- admin ---
     Setting("admin.token", "MUSE_ADMIN_TOKEN",
             "opt_str", None, "admin",
