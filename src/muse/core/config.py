@@ -324,7 +324,7 @@ def render_template() -> str:
         lines.append(f"{group}:")
         for s in [x for x in SETTINGS if x.group == group]:
             leaf = s.key.split(".", 1)[1]
-            default_yaml = yaml.safe_dump(s.default, default_flow_style=True).strip()
+            default_yaml = yaml.safe_dump(s.default, default_flow_style=True).strip().splitlines()[0]
             lines.append(f"  # {s.help} (env: {s.env})")
             if s.key in bootstrap:
                 lines.append(f"  # {leaf}: {default_yaml}   # resolved from env/default; file cannot set its own path")
