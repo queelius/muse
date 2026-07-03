@@ -220,7 +220,7 @@ Group `limits` (per-modality request caps; keep each site's read timing):
 | limits.summarize_max_text_chars | MUSE_SUMMARIZE_MAX_TEXT_CHARS | int | 100000 | text_summarization/routes.py:42 |
 | limits.video_max_frames_b64 | MUSE_VIDEO_MAX_FRAMES_B64 | int | 240 | video_generation/routes.py:43 |
 
-36 settings total. Confirm each default against the cited line during
+35 settings total. Confirm each default against the cited line during
 migration (the table is the intent; the code is the ground truth for any
 default that has drifted).
 

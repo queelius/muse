@@ -567,16 +567,20 @@ re-check (see below) and 503s at the gateway WITHOUT reaching the
 eviction loop -- deferring an impossible model to the director would
 only evict the whole idle working set before 503'ing.
 
-Configuration env vars (all optional):
+Memory-accounting settings (all optional; read via the config registry,
+so each can be set as a `MUSE_*` env var OR in `~/.muse/config.yaml` OR
+via `muse config set` -- see "Configuration" below and docs/CONFIG.md).
+As of v0.52.0 the four budget/headroom knobs are actually wired into the
+LoadDirector (before v0.52.0 they were documented but inert):
 
-- `MUSE_GPU_BUDGET_GB`: declared cap on GPU memory; muse uses
-  `min(declared, live)` when both are available.
-- `MUSE_CPU_BUDGET_GB`: declared cap on host RAM.
-- `MUSE_GPU_HEADROOM_GB` (default `1.0`): subtracted from live free
-  VRAM before deciding fit; protects against driver allocations and
-  fragmentation.
-- `MUSE_CPU_HEADROOM_GB` (default `2.0`): subtracted from live free
-  RAM before deciding fit.
+- `MUSE_GPU_BUDGET_GB` (`server.gpu_budget_gb`): declared cap on GPU
+  memory; muse uses `min(declared, live)` when both are available.
+- `MUSE_CPU_BUDGET_GB` (`server.cpu_budget_gb`): declared cap on host RAM.
+- `MUSE_GPU_HEADROOM_GB` (`server.gpu_headroom_gb`, default `1.0`):
+  subtracted from live free VRAM before deciding fit; protects against
+  driver allocations and fragmentation.
+- `MUSE_CPU_HEADROOM_GB` (`server.cpu_headroom_gb`, default `2.0`):
+  subtracted from live free RAM before deciding fit.
 
 `muse models list` shows a five-state status enum:
 
@@ -701,21 +705,24 @@ background sweeper thread runs every `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`
 the timeout AND whose refcount is 0. This frees memory without
 waiting for traffic-driven LRU.
 
-A GLOBAL default idle timeout (`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`,
-v0.51.0+) applies to any model that declares no per-model
-`idle_timeout_seconds`. Precedence: per-model
+A GLOBAL default idle timeout (`server.idle_timeout_seconds`, env
+`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`, v0.51.0+) applies to any model that
+declares no per-model `idle_timeout_seconds`. Precedence: per-model
 `capabilities.idle_timeout_seconds` wins; otherwise the global default;
-otherwise never idle-evict. The env is parsed defensively in the
-supervisor (unset, non-numeric, or <= 0 all mean OFF), so a bad value
-cannot crash boot. This is the knob for "reclaim any idle model after N
-minutes" on a shared single-GPU box, where bundled models (which declare
-no per-model timeout) would otherwise sit resident until memory pressure.
+otherwise never idle-evict. As of v0.52.0 the global default is **600
+seconds (10 minutes)**, not off -- an untouched model with refcount 0 is
+reclaimed after 10 minutes by default. The value is resolved through the
+config registry (lenient: a non-numeric env/file value logs a warning and
+falls back to the 600s default, so a bad value cannot crash boot). This
+is the knob for "reclaim any idle model after N minutes" on a shared
+single-GPU box, where bundled models (which declare no per-model timeout)
+would otherwise sit resident until memory pressure.
 
-Default behavior preserved: with no per-model timeout AND no global
-default, a model is NEVER idle-evicted; only memory pressure can release
-it. Turning the global default on is a deliberate operator choice (a
-silent unload trades a later cold-reload for freed VRAM), so it defaults
-to off.
+To DISABLE idle eviction entirely, set `server.idle_timeout_seconds` (or
+`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`) to `0` (or any value `<= 0`); the
+IdleSweeper's `<= 0` guard then never idle-evicts, and only memory
+pressure releases a model. Per-model `capabilities.idle_timeout_seconds`
+still overrides the global default in both directions.
 
 The sweeper reuses the on-demand eviction's disable_fn primitive,
 so the orphan-worker-on-disable-failure remediation (re-insert
@@ -724,8 +731,48 @@ LoadEntry) applies uniformly. Idle eviction is logged in
 
 Configuration:
 - Per-model: `capabilities.idle_timeout_seconds: <number>` in manifest. Null/absent = fall back to the global default.
-- Global default: `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS` env (default unset = off). Applied to models without a per-model timeout.
-- Sweep interval: `MUSE_IDLE_SWEEP_INTERVAL_SECONDS` env (default 30).
+- Global default: `server.idle_timeout_seconds` (env `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`), default **600** (10 min); set `<= 0` to disable. Applied to models without a per-model timeout.
+- Sweep interval: `server.idle_sweep_interval_seconds` (env `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`), default 30.
+
+## Configuration
+
+All server settings live in ONE declarative registry,
+`muse.core.config.SETTINGS` (v0.52.0+). Each setting is one `Setting` row
+(`key`, `env`, `type`, `default`, `group`, `help`); env reads, file reads,
+`muse config`, and the generated template all derive from that single
+list. There is no parallel lookup table. See docs/CONFIG.md for the full
+settings inventory.
+
+Resolution precedence (first wins): **CLI-override arg > `MUSE_*` env var >
+`~/.muse/config.yaml` > built-in default.** The config file lives at
+`<MUSE_CATALOG_DIR or ~/.muse>/config.yaml` (override the whole path with
+`MUSE_CONFIG`). The two bootstrap keys (`paths.catalog_dir`,
+`paths.config_file`) resolve from env+default ONLY -- the file cannot
+redirect the path that locates the file. `config.get(key)` reads env LIVE
+on every call and parses the file once (cached); it is LENIENT (a bad
+value logs a warning and falls back to the default, never raises), so a
+typo in one setting cannot 500 the request path. `muse config set` is the
+STRICT path (validates and refuses a bad value).
+
+`muse config` CLI verbs:
+- `muse config generate [--force]` -- write a fully-commented `config.yaml`
+  from the registry (every setting, its default, its env name).
+- `muse config show [--json]` -- every setting's effective value AND source
+  (default / file / env). `admin.token` is redacted to `set` / `unset`.
+- `muse config path` -- print the resolved config-file path.
+- `muse config get <key>` -- print one effective value.
+- `muse config set <key> <value>` -- validate and write one value into the
+  file (atomic, preserves other keys).
+
+Scope boundary: `config.yaml` is for SERVER / global settings only.
+Per-model state (enable/disable, `device_override` from
+`muse models set-device`, probe `measurements`) lives in
+`~/.muse/catalog.json` and is edited via `muse models ...`. Shipped
+recommendations live in `src/muse/curated.yaml` (package data, not
+per-deployment editable). A setting can have both a global default and a
+per-model override (idle-timeout is the canonical example: global
+`server.idle_timeout_seconds` vs per-model
+`capabilities.idle_timeout_seconds`, per-model wins).
 
 ## Admin REST API
 
@@ -982,14 +1029,19 @@ PY
   `{"error":{"code","message","type"}}`; the latter gives `{"detail":...}`.
 - **Streaming uses producer thread + `asyncio.Queue`**, not `list(generator)`.
   Synthesis chunks must dispatch as they're produced, not after full generation.
-- **Env vars:** `MUSE_SERVER` (client base URL), `MUSE_CATALOG_DIR` (catalog
-  location, defaults `~/.muse/`), `MUSE_HOME` (voices dir base),
-  `MUSE_ALLOW_PRIVATE_FETCH=1` (opt-in escape hatch for the SSRF guard
-  on `_fetch_http_url`; needed only when operators on a trusted
-  network want `image` URLs to reach internal services),
-  `MUSE_IMAGE_INPUT_MAX_BYTES` (per-request size cap for image uploads
-  and data URLs; default 10485760 / 10MB; read per-call so changes
-  take effect without a server restart).
+- **Env vars are registry settings (v0.52.0+).** Every `MUSE_*` knob is a
+  row in the `muse.core.config` registry, so it can equivalently be set as
+  an env var, in `~/.muse/config.yaml`, or via `muse config set`. See the
+  "Configuration" section and docs/CONFIG.md for the full list. Common ones:
+  `MUSE_SERVER` / `client.server_url` (client base URL), `MUSE_CATALOG_DIR`
+  / `paths.catalog_dir` (catalog + config.yaml location, defaults
+  `~/.muse/`), `MUSE_HOME` / `paths.home` (voices dir base),
+  `MUSE_ALLOW_PRIVATE_FETCH` / `fetch.allow_private` (opt-in escape hatch
+  for the SSRF guard on `_fetch_http_url`; default off; needed only when
+  operators on a trusted network want `image` URLs to reach internal
+  services), `MUSE_IMAGE_INPUT_MAX_BYTES` / `limits.image_input_max_bytes`
+  (per-request size cap for image uploads and data URLs; default 10485760 /
+  10MB; read per-call so changes take effect without a server restart).
 - **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.
 - **Enable/disable is catalog state; loaded/unloaded is runtime state (v0.40.0+).** The two are decoupled. `enabled: true` means "in service; allowed to lazy-load." `loaded` (visible via `/v1/models` and `muse models list`'s `enabled_loaded` glyph) means "currently resident on a worker." LRU eviction unloads without disabling; `muse models warmup` loads without bumping refcount. Operator-driven `muse models enable/disable` flips the catalog bit and (when the supervisor is running with `MUSE_ADMIN_TOKEN`) syncs runtime state via `enable_model` / `disable_model`; lazy-load and eviction paths use `load_model_into_worker` / `unload_model_from_worker` which skip the catalog flip.
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).

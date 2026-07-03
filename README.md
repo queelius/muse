@@ -370,9 +370,28 @@ combined with live measurements as `min(declared, live)`.
 | `muse models disable <model-id>` | mark a pulled model inactive in the catalog (refuses to lazy-load) |
 | `muse models warmup <model-id>` | pre-load a model into a worker without serving traffic; first real request is hot |
 | `muse models refresh <id> \| --all \| --enabled` | re-install museq[server,extras] into per-model venv(s) (after `pip install -U museq`) |
+| `muse config generate \| show \| path \| get \| set` | manage `~/.muse/config.yaml` (see Configuration below) |
 | `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (29 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.
+
+## Configuration
+
+Every muse server setting lives in one registry and resolves by precedence
+**CLI flag > `MUSE_*` env var > `~/.muse/config.yaml` > built-in default**. Any
+`MUSE_*` env var can equivalently be set in the config file.
+
+```bash
+muse config generate            # write a commented ~/.muse/config.yaml
+muse config show                # effective value + source for every setting
+muse config set server.idle_timeout_seconds 0   # e.g. disable idle eviction
+```
+
+The config file holds SERVER / global settings (memory budgets, request-size
+limits, idle-timeout, paths, fetch policy). Per-model state (enable/disable,
+device pin, memory measurements) lives in `~/.muse/catalog.json` and is managed
+with `muse models ...`. See [docs/CONFIG.md](docs/CONFIG.md) for the full
+settings inventory and precedence rules.
 
 ## HTTP endpoints
 
