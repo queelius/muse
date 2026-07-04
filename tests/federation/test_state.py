@@ -23,3 +23,15 @@ def test_no_summary_means_in_flight_none():
     st = build_node_state(SPEC, models_payload={"data": [{"id": "m"}]}, health_payload={"status": "ok"},
                           summary_payload=None, now=1.0)
     assert st.in_flight is None and st.models["m"].loaded is False  # no loaded key -> False
+
+
+def test_entry_missing_id_is_skipped_not_raised():
+    """A data entry lacking a usable "id" (a differently-shaped/older
+    muse node) is skipped rather than raising KeyError; the node stays
+    reachable and the well-formed entries survive."""
+    st = build_node_state(SPEC,
+        models_payload={"data": [{"name": "x"}, {"id": "m1", "loaded": True}]},
+        health_payload={"status": "ok"}, summary_payload=None, now=7.0)
+    assert st.reachable is True
+    assert "m1" in st.models and st.models["m1"].loaded is True
+    assert len(st.models) == 1  # the id-less entry is absent, not raised

@@ -44,7 +44,9 @@ def build_node_state(
       cannot read is unroutable).
     - models: one ModelAvail per entry in models_payload["data"], keyed by
       entry["id"]. Missing/absent "data" (or models_payload is None)
-      yields an empty dict.
+      yields an empty dict. Entries lacking a usable string "id" (falsy
+      or non-string) are skipped rather than raising, so one malformed
+      entry does not nuke the rest of the node's model list.
     - in_flight = summary_payload.get("in_flight") if summary_payload is
       not None, else None.
     - last_poll_ts = now (passed in, never read from a clock here).
@@ -54,7 +56,10 @@ def build_node_state(
     models: dict[str, ModelAvail] = {}
     if models_payload is not None:
         for entry in models_payload.get("data") or []:
-            models[entry["id"]] = ModelAvail(
+            model_id = entry.get("id")
+            if not model_id or not isinstance(model_id, str):
+                continue
+            models[model_id] = ModelAvail(
                 loaded=bool(entry.get("loaded")),
                 enabled=True,
             )

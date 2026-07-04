@@ -14,6 +14,7 @@ health_payload, summary_payload)`, each `None` on any per-call failure.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 
@@ -21,6 +22,8 @@ import httpx
 
 from muse.federation.nodes import NodeSpec
 from muse.federation.state import NodeState, build_node_state
+
+logger = logging.getLogger(__name__)
 
 _FETCH_TIMEOUT_SECONDS = 3.0
 
@@ -87,12 +90,60 @@ class NodeRegistry:
             now=self._clock(),
         )
 
+    async def _fetch_one_isolated(self, spec: NodeSpec) -> NodeState:
+        """Wrap `_fetch_one` so a raised exception for THIS node degrades
+        to an unreachable NodeState rather than propagating. This is what
+        gives `refresh_once` per-node isolation: one bad node (raised
+        exception anywhere in fetch-or-reduce) never prevents the other
+        nodes' states from being built."""
+        try:
+            return await self._fetch_one(spec)
+        except Exception:
+            logger.warning(
+                "federation: refresh failed for node %r, marking unreachable",
+                spec.name,
+            )
+            return NodeState(
+                spec=spec,
+                reachable=False,
+                models={},
+                in_flight=None,
+                last_poll_ts=self._clock(),
+            )
+
     async def refresh_once(self) -> None:
         """Concurrently poll every node and atomically replace the cached
-        snapshot list."""
-        states = await asyncio.gather(*(self._fetch_one(spec) for spec in self._nodes))
+        snapshot list. Per-node failures are isolated: a raised exception
+        while fetching/reducing one node degrades only that node's state
+        to unreachable, and never aborts the refresh for the others."""
+        results = await asyncio.gather(
+            *(self._fetch_one_isolated(spec) for spec in self._nodes),
+            return_exceptions=True,
+        )
+        states: list[NodeState] = []
+        for spec, result in zip(self._nodes, results):
+            if isinstance(result, BaseException):
+                # Belt-and-suspenders backstop: _fetch_one_isolated already
+                # catches Exception, so this only fires for something it
+                # didn't (e.g. a BaseException subclass slipping through).
+                logger.warning(
+                    "federation: unexpected error refreshing node %r, "
+                    "marking unreachable",
+                    spec.name,
+                )
+                states.append(
+                    NodeState(
+                        spec=spec,
+                        reachable=False,
+                        models={},
+                        in_flight=None,
+                        last_poll_ts=self._clock(),
+                    )
+                )
+            else:
+                states.append(result)
         with self._lock:
-            self._states = list(states)
+            self._states = states
 
     def snapshot(self) -> list[NodeState]:
         """Return the cached states (empty list before the first refresh).
