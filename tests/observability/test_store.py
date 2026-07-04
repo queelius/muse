@@ -35,3 +35,48 @@ def test_prune(store):
     removed = store.prune(older_than_ts=100.0)
     assert removed == 1
     assert store.summary_counts()["total"] == 1
+
+
+def test_vram_series(store):
+    store.insert_many([
+        event_to_row("sample", 61.0, free_vram_gb=4.0),
+        event_to_row("sample", 65.0, free_vram_gb=6.0),
+    ])
+    out = store.series("vram", since_ts=0.0, bucket_seconds=60.0)
+    assert out["metric"] == "vram"
+    p = out["points"][0]
+    # bucket [60,120) labeled by its END, per the bucketing convention
+    # exercised in test_insert_and_request_rate_bucketing.
+    assert p["t"] == 120.0
+    assert p["avg"] == 5.0
+
+
+def test_ram_series(store):
+    store.insert_many([
+        event_to_row("sample", 61.0, free_ram_gb=8.0),
+        event_to_row("sample", 65.0, free_ram_gb=12.0),
+    ])
+    out = store.series("ram", since_ts=0.0, bucket_seconds=60.0)
+    assert out["metric"] == "ram"
+    p = out["points"][0]
+    assert p["t"] == 120.0
+    assert p["avg"] == 10.0
+
+
+def test_load_evict_series(store):
+    store.insert_many([
+        event_to_row("model_load", 61.0, model_id="m1"),
+        event_to_row("model_load", 65.0, model_id="m2"),
+        event_to_row("model_evict", 70.0, model_id="m1"),
+    ])
+    out = store.series("load_evict", since_ts=0.0, bucket_seconds=60.0)
+    assert out["metric"] == "load_evict"
+    p = out["points"][0]
+    assert p["t"] == 120.0
+    assert p["loads"] == 2
+    assert p["evicts"] == 1
+
+
+def test_series_unknown_metric_raises(store):
+    with pytest.raises(ValueError):
+        store.series("bogus", since_ts=0.0, bucket_seconds=60.0)
