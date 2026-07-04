@@ -161,6 +161,38 @@ class TestDepthRoute:
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "model_not_found"
 
+    def test_unknown_model_404s_without_decoding_oversized_image(self, monkeypatch):
+        """Model resolution must happen before the image is decoded: an
+        oversized upload against an unknown model still 404s
+        (model_not_found), rather than 400 from the decode-time size
+        cap tripping first."""
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+        backend = _FakeDepth(model_id="real")
+        client = _client(backend, {"supports_depth": True})
+        oversized = b"\x00" * 100  # > cap; would 400 "exceeds max" if decoded
+        r = client.post(
+            "/v1/images/depth",
+            files={"image": ("t.png", oversized, "image/png")},
+            data={"model": "ghost"},
+        )
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "model_not_found"
+
+    def test_wrong_primitive_400s_without_decoding_oversized_image(self, monkeypatch):
+        """The capability gate must run before decode too: an oversized
+        upload against a model that doesn't support depth still 400s
+        wrong_primitive, not the decode-time size-cap error."""
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+        backend = _FakeDepth()
+        client = _client(backend, {"supports_keypoints": True})
+        oversized = b"\x00" * 100
+        r = client.post(
+            "/v1/images/depth",
+            files={"image": ("t.png", oversized, "image/png")},
+        )
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "wrong_primitive"
+
     def test_corrupt_image_returns_400(self):
         backend = _FakeDepth()
         client = _client(backend, {"supports_depth": True})
@@ -236,6 +268,37 @@ class TestKeypointsRoute:
         )
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "wrong_primitive"
+
+    def test_wrong_primitive_400s_without_decoding_oversized_image(self, monkeypatch):
+        """The capability gate must run before decode: an oversized
+        upload against a model that doesn't support keypoints still
+        400s wrong_primitive, not the decode-time size-cap error."""
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+        backend = _FakeKeypoint()
+        client = _client(backend, {"supports_depth": True})
+        oversized = b"\x00" * 100
+        r = client.post(
+            "/v1/images/keypoints",
+            files={"image": ("t.png", oversized, "image/png")},
+        )
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "wrong_primitive"
+
+    def test_unknown_model_404s_without_decoding_oversized_image(self, monkeypatch):
+        """Model resolution must happen before decode: an oversized
+        upload against an unknown model still 404s, rather than 400
+        from the decode-time size cap tripping first."""
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+        backend = _FakeKeypoint(model_id="real")
+        client = _client(backend, {"supports_keypoints": True})
+        oversized = b"\x00" * 100
+        r = client.post(
+            "/v1/images/keypoints",
+            files={"image": ("t.png", oversized, "image/png")},
+            data={"model": "ghost"},
+        )
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "model_not_found"
 
     def test_omits_threshold_when_absent(self):
         backend = _FakeKeypoint()
@@ -314,6 +377,37 @@ class TestDetectionRoute:
         )
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "wrong_primitive"
+
+    def test_wrong_primitive_400s_without_decoding_oversized_image(self, monkeypatch):
+        """The capability gate must run before decode: an oversized
+        upload against a model that doesn't support detection still
+        400s wrong_primitive, not the decode-time size-cap error."""
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+        backend = _FakeDetection()
+        client = _client(backend, {"supports_depth": True})
+        oversized = b"\x00" * 100
+        r = client.post(
+            "/v1/images/detect",
+            files={"image": ("t.png", oversized, "image/png")},
+        )
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "wrong_primitive"
+
+    def test_unknown_model_404s_without_decoding_oversized_image(self, monkeypatch):
+        """Model resolution must happen before decode: an oversized
+        upload against an unknown model still 404s, rather than 400
+        from the decode-time size cap tripping first."""
+        monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+        backend = _FakeDetection(model_id="real")
+        client = _client(backend, {"supports_detection": True})
+        oversized = b"\x00" * 100
+        r = client.post(
+            "/v1/images/detect",
+            files={"image": ("t.png", oversized, "image/png")},
+            data={"model": "ghost"},
+        )
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "model_not_found"
 
     def test_omits_optional_when_absent(self):
         backend = _FakeDetection()

@@ -219,6 +219,48 @@ def test_sd_turbo_generate_img2img_caches_pipeline():
     assert fake_i2i.from_pipe.call_count == 1
 
 
+def test_sd_turbo_img2img_lazy_build_is_thread_safe():
+    """Two concurrent first-access img2img calls must build the lazy
+    i2i pipeline exactly once. Without a lock guarding the
+    check-then-assign gap in _generate_img2img, two threads racing on
+    the first call can both see self._i2i_pipe is None and both call
+    from_pipe(...), briefly doubling VRAM and leaking one pipeline
+    instance. A slow from_pipe widens the race window so the bug
+    reproduces reliably when unguarded."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_i2i = MagicMock()
+
+    def _slow_from_pipe(*_a, **_kw):
+        time.sleep(0.05)
+        return _patched_pipe()
+
+    fake_i2i.from_pipe.side_effect = _slow_from_pipe
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForImage2Image", fake_i2i), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [
+                ex.submit(m.generate, "repaint", init_image=init_img, strength=0.6)
+                for _ in range(2)
+            ]
+            for f in futures:
+                f.result()
+
+    assert fake_i2i.from_pipe.call_count == 1
+
+
 def test_sd_turbo_img2img_bumps_steps_to_satisfy_strength_contract():
     """sd-turbo defaults to 1 step; with strength=0.4 must bump to >= ceil(1/0.4)=3."""
     from PIL import Image
@@ -330,6 +372,43 @@ def test_sd_turbo_inpaint_caches_pipeline():
         mask = Image.new("L", (64, 64), 255)
         m.inpaint("a", init_image=init_img, mask_image=mask)
         m.inpaint("b", init_image=init_img, mask_image=mask)
+
+    assert fake_inp.from_pipe.call_count == 1
+
+
+def test_sd_turbo_inpaint_lazy_build_is_thread_safe():
+    """Same double-build race as img2img, guarded by self._inp_lock."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from PIL import Image
+
+    fake_t2i = MagicMock()
+    fake_t2i.from_pretrained.return_value = _patched_pipe()
+    fake_inp = MagicMock()
+
+    def _slow_from_pipe(*_a, **_kw):
+        time.sleep(0.05)
+        return _patched_pipe()
+
+    fake_inp.from_pipe.side_effect = _slow_from_pipe
+
+    with patch("muse.models.sd_turbo.AutoPipelineForText2Image", fake_t2i), \
+         patch("muse.models.sd_turbo.AutoPipelineForInpainting", fake_inp), \
+         patch("muse.models.sd_turbo.torch", MagicMock()):
+        from muse.models.sd_turbo import Model as SDTurboModel
+        m = SDTurboModel(
+            hf_repo="stabilityai/sd-turbo", local_dir="/tmp/fake", device="cpu",
+        )
+        init_img = Image.new("RGB", (64, 64))
+        mask = Image.new("L", (64, 64), 255)
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [
+                ex.submit(m.inpaint, "a", init_image=init_img, mask_image=mask)
+                for _ in range(2)
+            ]
+            for f in futures:
+                f.result()
 
     assert fake_inp.from_pipe.call_count == 1
 

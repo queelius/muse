@@ -40,7 +40,12 @@ logger = logging.getLogger(__name__)
 # at once. mp4/webm are container-compressed and have no such ceiling, so the
 # cap applies only to frames_b64. Tunable for power users; clips above it
 # should use response_format=mp4/webm.
-_MAX_FRAMES_B64 = config.get("limits.video_max_frames_b64")
+#
+# Read per-request via muse.core.config so an operator's env change takes
+# effect on the next request, not at server restart. Matches the
+# MUSE_IMAGE_INPUT_MAX_BYTES / MUSE_MODERATIONS_MAX_BATCH pattern.
+def _max_frames_b64() -> int:
+    return config.get("limits.video_max_frames_b64")
 
 
 class VideoGenerationRequest(BaseModel):
@@ -103,12 +108,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # Checked post-generation because the frame count is only known once
         # the model has run (duration_seconds/fps may be model defaults).
         if req.response_format == "frames_b64":
+            max_frames = _max_frames_b64()
             total_frames = sum(len(r.frames) for r in results)
-            if total_frames > _MAX_FRAMES_B64:
+            if total_frames > max_frames:
                 return error_response(
                     400, "invalid_parameter",
                     f"frames_b64 would emit {total_frames} frames, exceeding "
-                    f"MUSE_VIDEO_MAX_FRAMES_B64={_MAX_FRAMES_B64}; request a "
+                    f"MUSE_VIDEO_MAX_FRAMES_B64={max_frames}; request a "
                     f"shorter clip or use response_format=mp4 or webm "
                     f"(no frame cap).",
                 )
@@ -119,6 +125,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 encoded = _encode(req.response_format, r)
             except UnsupportedFormatError as e:
                 return error_response(400, "invalid_parameter", str(e))
+            except ValueError as e:
+                # mp4/webm encoders raise a plain ValueError when the
+                # backend hands back zero frames ("frames list is
+                # empty"). That's a backend/model misbehavior, not a
+                # bad request, so surface it as the OpenAI-shape 500
+                # envelope instead of letting it escape to FastAPI's
+                # bare default handler.
+                logger.exception("video encode failed")
+                return error_response(500, "internal_error", str(e))
             if req.response_format == "frames_b64":
                 # encoded is list[str]; expand into per-frame data entries.
                 # For n>1 the per-result frame lists are appended in order;

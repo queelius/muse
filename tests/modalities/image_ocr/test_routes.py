@@ -95,6 +95,24 @@ def test_ocr_unknown_model_returns_404():
     assert body["error"]["code"] == "model_not_found"
 
 
+def test_ocr_unknown_model_404s_without_decoding_oversized_image(monkeypatch):
+    """Model resolution must happen before the image is decoded: an
+    oversized upload against an unknown model still 404s
+    (model_not_found), rather than 400 from the decode-time size cap
+    tripping first."""
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "10")
+    backend = _FakeOcr(model_id="real-model")
+    client = _client(backend)
+    oversized = b"\x00" * 100  # > cap; would 400 "exceeds max" if decoded
+    r = client.post(
+        "/v1/images/ocr",
+        files={"image": ("t.png", oversized, "image/png")},
+        data={"model": "ghost"},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "model_not_found"
+
+
 def test_ocr_missing_image_returns_422():
     """FastAPI raises 422 when the required `image` field is missing."""
     backend = _FakeOcr()

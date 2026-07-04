@@ -129,18 +129,19 @@ def test_post_response_format_frames_b64(client_default):
     assert body["metadata"]["format"] == "frames_b64"
 
 
-def test_frames_b64_exceeding_cap_returns_400(client_default):
+def test_frames_b64_exceeding_cap_returns_400(client_default, monkeypatch):
     # RecordingModel emits 5 frames; lower the cap to 3 so frames_b64 trips
     # the payload guard. mp4/webm are uncapped, so the cap is format-specific.
-    import muse.modalities.video_generation.routes as vroutes
+    # The cap is read per-request via config, not a module constant, so an
+    # env var set at test time is honored without a reload.
+    monkeypatch.setenv("MUSE_VIDEO_MAX_FRAMES_B64", "3")
 
     client, _ = client_default
-    with patch.object(vroutes, "_MAX_FRAMES_B64", 3):
-        r = client.post(
-            "/v1/video/generations",
-            json={"prompt": "x", "model": "fake-vid",
-                  "response_format": "frames_b64"},
-        )
+    r = client.post(
+        "/v1/video/generations",
+        json={"prompt": "x", "model": "fake-vid",
+              "response_format": "frames_b64"},
+    )
     assert r.status_code == 400
     body = r.json()
     assert body["error"]["code"] == "invalid_parameter"
@@ -148,14 +149,14 @@ def test_frames_b64_exceeding_cap_returns_400(client_default):
     assert "MUSE_VIDEO_MAX_FRAMES_B64" in body["error"]["message"]
 
 
-def test_mp4_not_subject_to_frames_b64_cap(client_default):
+def test_mp4_not_subject_to_frames_b64_cap(client_default, monkeypatch):
     # The same 5-frame result is fine for mp4 even with the frame cap at 3:
     # the cap only protects the inline-JSON frames_b64 path.
-    import muse.modalities.video_generation.routes as vroutes
+    monkeypatch.setenv("MUSE_VIDEO_MAX_FRAMES_B64", "3")
 
     client, _ = client_default
     fake = _fake_imageio_factory(b"FAKEMP4")
-    with patch.object(vroutes, "_MAX_FRAMES_B64", 3), patch(
+    with patch(
         "muse.modalities.video_generation.codec._try_import_imageio",
         return_value=fake,
     ):
@@ -164,6 +165,23 @@ def test_mp4_not_subject_to_frames_b64_cap(client_default):
             json={"prompt": "x", "model": "fake-vid", "response_format": "mp4"},
         )
     assert r.status_code == 200
+
+
+def test_max_frames_b64_reads_config_live(monkeypatch):
+    """MUSE_VIDEO_MAX_FRAMES_B64 set after import is reflected by the
+    accessor once config.reset_config() clears the cached Config
+    singleton. The cap must be a per-request function reading
+    muse.core.config, not a module-level constant frozen at import
+    time, so an operator's env change takes effect on the next
+    request rather than requiring a server restart. Matches the
+    MUSE_IMAGE_INPUT_MAX_BYTES / MUSE_MODERATIONS_MAX_BATCH pattern."""
+    from muse.core import config as cfg
+    import muse.modalities.video_generation.routes as vroutes
+
+    monkeypatch.setenv("MUSE_VIDEO_MAX_FRAMES_B64", "42")
+    cfg.reset_config()
+    assert vroutes._max_frames_b64() == 42
+    cfg.reset_config()
 
 
 def test_post_n_2_returns_two_videos_for_mp4(client_default):
@@ -320,3 +338,39 @@ def test_video_backend_error_returns_500_envelope():
     r = client.post("/v1/video/generations", json={"prompt": "a cat", "model": "fake-vid"})
     assert r.status_code == 500
     assert r.json()["error"]["code"] == "internal_error"
+
+
+def test_empty_frames_returns_openai_error_envelope():
+    """A backend that returns zero frames trips encode_mp4/encode_webm's
+    plain `ValueError("...frames list is empty")`. The route must catch
+    it and return the OpenAI-shape error envelope, not let it escape as
+    FastAPI's bare default 500 handler."""
+
+    class _EmptyFramesModel:
+        model_id = "fake-vid"
+
+        def generate(self, prompt, **kwargs):
+            return VideoResult(
+                frames=[], fps=5, width=720, height=480,
+                duration_seconds=1.0, seed=-1, metadata={"prompt": prompt},
+            )
+
+    reg = ModalityRegistry()
+    reg.register(MODALITY, _EmptyFramesModel(), manifest={"model_id": "fake-vid"})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    fake = _fake_imageio_factory(b"FAKEMP4")
+    with patch(
+        "muse.modalities.video_generation.codec._try_import_imageio",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/v1/video/generations",
+            json={"prompt": "a cat", "model": "fake-vid"},
+        )
+    assert r.status_code in (422, 500)
+    body = r.json()
+    assert "error" in body
+    assert body["error"]["code"]
+    assert "empty" in body["error"]["message"]

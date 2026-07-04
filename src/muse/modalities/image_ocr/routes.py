@@ -53,13 +53,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"got {max_new_tokens}",
                 )
 
-        # Decode the multipart upload (size-capped via decode_image_file;
-        # MUSE_IMAGE_INPUT_MAX_BYTES env cap applies).
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
-
         try:
             backend = registry.get(MODALITY, model)
         except KeyError:
@@ -68,6 +61,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         effective_id = backend.model_id
+
+        # Decode the multipart upload (size-capped via decode_image_file;
+        # MUSE_IMAGE_INPUT_MAX_BYTES env cap applies).
+        try:
+            pil_image = await decode_image_file(image)
+        except ValueError as e:
+            return error_response(400, "invalid_parameter", str(e))
 
         def _call():
             with backend._inference_lock:

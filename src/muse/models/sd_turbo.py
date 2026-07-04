@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Any
 
 from muse.core.runtime_helpers import dtype_for_name, select_device
@@ -159,6 +160,13 @@ class Model:
         self._torch_dtype = torch_dtype
         self._i2i_pipe = None
         self._inp_pipe = None
+        # Guard the lazy img2img/inpaint pipeline builds against a
+        # double-build race: route handlers run each request on its own
+        # asyncio.to_thread worker, so two concurrent first requests could
+        # otherwise both see `self._i2i_pipe is None`, both call
+        # `from_pipe(...)`, briefly double VRAM, and leak one instance.
+        self._i2i_lock = threading.Lock()
+        self._inp_lock = threading.Lock()
         logger.info(
             "loading SD-Turbo from %s (device=%s, dtype=%s)",
             self._src, self._device, dtype,
@@ -246,24 +254,30 @@ class Model:
         seed: int | None,
     ) -> ImageResult:
         # Lazy-load the img2img pipeline, cached on the instance.
+        # Double-checked locking: the cheap unlocked check keeps the hot
+        # (already-built) path lock-free, while the lock around the build
+        # itself serializes two concurrent first-access callers so only
+        # one from_pipe() ever runs.
         if self._i2i_pipe is None:
-            import muse.models.sd_turbo as _self_mod
-            _i2i = _self_mod.AutoPipelineForImage2Image
-            if _i2i is None:
-                raise RuntimeError(
-                    "diffusers AutoPipelineForImage2Image is not available; "
-                    "run `muse pull sd-turbo`"
-                )
-            logger.info(
-                "loading SD-Turbo img2img pipeline from %s (device=%s, dtype=%s)",
-                self._src, self._device, self._dtype,
-            )
-            # Share UNet/VAE/text-encoders with the already-loaded t2i pipeline so we
-            # don't double VRAM on small GPUs. AutoPipelineForImage2Image.from_pipe
-            # is the canonical diffusers idiom for this; from_pretrained allocates a
-            # fresh copy and OOMs.
-            # Reference: https://huggingface.co/docs/diffusers/api/pipelines/auto_pipeline
-            self._i2i_pipe = _i2i.from_pipe(self._pipe)
+            with self._i2i_lock:
+                if self._i2i_pipe is None:
+                    import muse.models.sd_turbo as _self_mod
+                    _i2i = _self_mod.AutoPipelineForImage2Image
+                    if _i2i is None:
+                        raise RuntimeError(
+                            "diffusers AutoPipelineForImage2Image is not available; "
+                            "run `muse pull sd-turbo`"
+                        )
+                    logger.info(
+                        "loading SD-Turbo img2img pipeline from %s (device=%s, dtype=%s)",
+                        self._src, self._device, self._dtype,
+                    )
+                    # Share UNet/VAE/text-encoders with the already-loaded t2i pipeline so we
+                    # don't double VRAM on small GPUs. AutoPipelineForImage2Image.from_pipe
+                    # is the canonical diffusers idiom for this; from_pretrained allocates a
+                    # fresh copy and OOMs.
+                    # Reference: https://huggingface.co/docs/diffusers/api/pipelines/auto_pipeline
+                    self._i2i_pipe = _i2i.from_pipe(self._pipe)
 
         n_steps = steps if steps is not None else 1
         cfg = guidance if guidance is not None else 0.0
@@ -344,19 +358,22 @@ class Model:
         Lazy-loads AutoPipelineForInpainting via from_pipe(self._pipe)
         to share VRAM with the loaded t2i pipeline.
         """
+        # Double-checked locking: see _generate_img2img for rationale.
         if self._inp_pipe is None:
-            import muse.models.sd_turbo as _self_mod
-            _inp = _self_mod.AutoPipelineForInpainting
-            if _inp is None:
-                raise RuntimeError(
-                    "diffusers AutoPipelineForInpainting is not available; "
-                    "run `muse pull sd-turbo`"
-                )
-            logger.info(
-                "loading SD-Turbo inpaint pipeline from %s (device=%s, dtype=%s)",
-                self._src, self._device, self._dtype,
-            )
-            self._inp_pipe = _inp.from_pipe(self._pipe)
+            with self._inp_lock:
+                if self._inp_pipe is None:
+                    import muse.models.sd_turbo as _self_mod
+                    _inp = _self_mod.AutoPipelineForInpainting
+                    if _inp is None:
+                        raise RuntimeError(
+                            "diffusers AutoPipelineForInpainting is not available; "
+                            "run `muse pull sd-turbo`"
+                        )
+                    logger.info(
+                        "loading SD-Turbo inpaint pipeline from %s (device=%s, dtype=%s)",
+                        self._src, self._device, self._dtype,
+                    )
+                    self._inp_pipe = _inp.from_pipe(self._pipe)
 
         # Normalize mask to grayscale (mode L). Diffusers accepts L or
         # RGB; mode L is the documented contract. RGBA masks (alpha as

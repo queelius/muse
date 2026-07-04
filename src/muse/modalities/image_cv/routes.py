@@ -97,15 +97,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"got {response_format!r}",
             )
 
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
-
         backend = _resolve_backend(registry, model)
         gate = _capability_gate(registry, backend, primitive="depth")
         if gate is not None:
             return gate
+
+        try:
+            pil_image = await decode_image_file(image)
+        except ValueError as e:
+            return error_response(400, "invalid_parameter", str(e))
 
         def _call():
             with backend._inference_lock:
@@ -140,15 +140,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"threshold must be in [0, 1]; got {threshold}",
             )
 
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
-
         backend = _resolve_backend(registry, model)
         gate = _capability_gate(registry, backend, primitive="keypoints")
         if gate is not None:
             return gate
+
+        try:
+            pil_image = await decode_image_file(image)
+        except ValueError as e:
+            return error_response(400, "invalid_parameter", str(e))
 
         kwargs: dict = {}
         if threshold is not None:
@@ -188,15 +188,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"max_detections must be in [1, 10000]; got {max_detections}",
             )
 
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
-
         backend = _resolve_backend(registry, model)
         gate = _capability_gate(registry, backend, primitive="detection")
         if gate is not None:
             return gate
+
+        try:
+            pil_image = await decode_image_file(image)
+        except ValueError as e:
+            return error_response(400, "invalid_parameter", str(e))
 
         kwargs: dict = {}
         if threshold is not None:
