@@ -93,3 +93,15 @@ def test_config_path_explicit_override(monkeypatch, tmp_path):
     p = tmp_path / "custom.yaml"
     monkeypatch.setenv("MUSE_CONFIG", str(p))
     assert cfg.config_path() == p
+
+
+def test_telemetry_settings_present():
+    from muse.core import config as cfg
+    for key, default in [
+        ("telemetry.enabled", True),
+        ("telemetry.retention_days", 7),
+        ("telemetry.log_buffer_kb", 64),
+        ("telemetry.sample_interval_seconds", 10.0),
+    ]:
+        assert key in cfg.SETTINGS_BY_KEY, key
+        assert cfg.SETTINGS_BY_KEY[key].default == default

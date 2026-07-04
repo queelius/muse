@@ -108,6 +108,16 @@ SETTINGS: list[Setting] = [
     Setting("server.video_cpu_offload", "MUSE_VIDEO_CPU_OFFLOAD",
             "opt_str", None, "server",
             "Global override for video CPU offload mode (model|sequential|off); unset uses the per-model capability."),
+    # --- telemetry ---
+    Setting("telemetry.enabled", "MUSE_TELEMETRY_ENABLED",
+            "bool", True, "telemetry",
+            "Record telemetry events + serve the /dashboard observability UI."),
+    Setting("telemetry.retention_days", "MUSE_TELEMETRY_RETENTION_DAYS",
+            "int", 7, "telemetry", "Rolling retention window for telemetry events."),
+    Setting("telemetry.log_buffer_kb", "MUSE_TELEMETRY_LOG_BUFFER_KB",
+            "int", 64, "telemetry", "Per-model recent-log ring-buffer size (KB)."),
+    Setting("telemetry.sample_interval_seconds", "MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS",
+            "float", 10.0, "telemetry", "Seconds between VRAM/RAM/loaded samples."),
     # --- admin ---
     Setting("admin.token", "MUSE_ADMIN_TOKEN",
             "opt_str", None, "admin",
