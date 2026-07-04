@@ -84,8 +84,22 @@ class TestInitTelemetry:
             recorder.record("request", model_id="m", latency_ms=1.0)
             recorder.flush()
             assert recorder.dropped == 0
+
+            # The sampler shares state.stop_event (mirrors IdleSweeper): once
+            # the shared event is set and the sampler is stopped, its thread
+            # must actually exit -- this is the shutdown path run_supervisor's
+            # finally block now performs (sampler.stop() + store.close()).
+            assert state.telemetry_sampler is not None
+            assert state.telemetry_sampler._stop is state.stop_event
         finally:
             state.stop_event.set()
+            sampler_thread = state.telemetry_sampler._thread
+            state.telemetry_sampler.stop()
+            # stop() joins the thread and clears the handle to None; check
+            # the captured reference (not the now-None state.telemetry_sampler
+            # ._thread) to confirm the thread actually exited.
+            assert sampler_thread is not None and not sampler_thread.is_alive()
+            assert state.telemetry_sampler._thread is None
             if state.telemetry_store is not None:
                 state.telemetry_store.close()
             reset_recorder()
@@ -106,6 +120,8 @@ class TestInitTelemetry:
             assert not state.stop_event.is_set()
         finally:
             state.stop_event.set()
+            if state.telemetry_sampler is not None:
+                state.telemetry_sampler.stop()
             if state.telemetry_store is not None:
                 state.telemetry_store.close()
             reset_recorder()

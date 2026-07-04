@@ -993,7 +993,12 @@ def _init_telemetry(state: SupervisorState) -> None:
         callers pipe worker stdout into it.
       - A periodic `Sampler` recording free VRAM/RAM + loaded/in-flight
         counts, reading the live director state via closures (so it
-        always reflects the current loaded set, not a snapshot).
+        always reflects the current loaded set, not a snapshot). Shares
+        `state.stop_event` (same pattern as `IdleSweeper`) so a single
+        Ctrl+C/SIGTERM unblocks the sampler's loop along with the other
+        supervisor-owned daemon threads; `run_supervisor`'s shutdown
+        `finally` block also calls `sampler.stop()` to join the thread
+        and `state.telemetry_store.close()` to release the sqlite handle.
       - A retention-prune daemon that shares `state.stop_event` with the
         rest of the supervisor's background threads, deleting events
         older than `telemetry.retention_days` once an hour.
@@ -1012,6 +1017,7 @@ def _init_telemetry(state: SupervisorState) -> None:
         interval=float(config.get("telemetry.sample_interval_seconds")),
         loaded_fn=lambda: state.director.loaded,
         inflight_fn=lambda: len(getattr(state.director, "in_flight_loads", {}) or {}),
+        stop_event=state.stop_event,
     )
     sampler.start()
     state.telemetry_sampler = sampler
@@ -1163,6 +1169,23 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
             monitor_thread.join(timeout=5.0)
         if sweeper_thread is not None:
             sweeper_thread.join(timeout=5.0)
+        # Telemetry teardown (symmetric with the store/sampler wiring in
+        # _init_telemetry). Both attributes are None when telemetry.enabled
+        # is False, so this is a no-op in that case. state.stop_event is
+        # already shared with the sampler's loop (set above), so stop()
+        # here is belt-and-suspenders + joins the sampler thread.
+        sampler = getattr(state, "telemetry_sampler", None)
+        if sampler is not None:
+            try:
+                sampler.stop()
+            except Exception:
+                logger.warning("telemetry sampler stop failed", exc_info=True)
+        store = getattr(state, "telemetry_store", None)
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                logger.warning("telemetry store close failed", exc_info=True)
         # Whatever workers were loaded by the director get torn down here.
         # Empty list is a no-op.
         _shutdown_workers(state.workers)

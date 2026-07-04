@@ -30,7 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 class Sampler:
-    """Background daemon that periodically records a `sample` event."""
+    """Background daemon that periodically records a `sample` event.
+
+    `stop_event` is an optional external `threading.Event`. Pass the
+    supervisor-wide `state.stop_event` so a single Ctrl+C / SIGTERM
+    unblocks this sampler's loop along with every other supervisor-owned
+    daemon thread (mirrors `IdleSweeper`'s `stop_event` parameter). If
+    omitted, the sampler creates its own private Event (unchanged
+    behavior for existing callers/tests).
+    """
 
     def __init__(
         self,
@@ -39,12 +47,13 @@ class Sampler:
         loaded_fn: Callable[[], dict[str, Any]],
         inflight_fn: Callable[[], int],
         record_fn: Callable[..., None] = record,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.interval = interval
         self.loaded_fn = loaded_fn
         self.inflight_fn = inflight_fn
         self.record_fn = record_fn
-        self._stop = threading.Event()
+        self._stop = stop_event if stop_event is not None else threading.Event()
         self._thread: threading.Thread | None = None
 
     def sample_once(self) -> None:
