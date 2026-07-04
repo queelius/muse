@@ -39,7 +39,7 @@ from muse.core.catalog import CatalogError, _read_catalog, get_manifest
 from muse.core.memory_probe import declared_device
 
 from muse.observability.store import TelemetryStore
-from muse.observability.recorder import init_recorder
+from muse.observability.recorder import init_recorder, reset_recorder
 from muse.observability.sampler import Sampler
 from muse.observability.logs import LogHub
 
@@ -295,6 +295,7 @@ def _attempt_restart(
     backoff_base: float = _BACKOFF_BASE,
     backoff_cap: float = _BACKOFF_CAP,
     ready_timeout: float = 60.0,
+    log_hub: "Any | None" = None,
 ) -> None:
     """Terminate existing process if alive, wait backoff, respawn.
 
@@ -308,6 +309,10 @@ def _attempt_restart(
     readiness failure), never on a successful respawn. A worker that
     flaps and recovers cleanly any number of times over its lifetime
     therefore never exhausts the budget; only a run of failures does.
+
+    `log_hub` is forwarded to `spawn_worker` so a respawned worker keeps
+    piping its stdout into the LogHub when telemetry is enabled (mirrors
+    the admin `_restart_worker_inplace` path in `muse.admin.operations`).
     """
     if spec.restart_count >= max_restarts:
         logger.error(
@@ -344,7 +349,7 @@ def _attempt_restart(
     # over its lifetime would eventually be marked dead despite never
     # having a run of consecutive failures.
     try:
-        spawn_worker(spec, device=spec.device)
+        spawn_worker(spec, device=spec.device, log_hub=log_hub)
         wait_for_ready(port=spec.port, timeout=ready_timeout)
         spec.failure_count = 0
         spec.status = "running"
@@ -368,6 +373,7 @@ def _monitor_workers(
     interval: float = _MONITOR_INTERVAL,
     failure_threshold: int = _FAILURE_THRESHOLD,
     max_restarts: int = _MAX_RESTARTS,
+    state: "SupervisorState | None" = None,
 ) -> None:
     """Poll each worker; restart after `failure_threshold` consecutive failures.
 
@@ -386,6 +392,14 @@ def _monitor_workers(
     iterated in that tick; its process is already being torn down by the
     operation that removed it, so any restart the monitor would trigger
     is harmless (the spec will not be re-added to state.workers).
+
+    `state`, when given, is read for its `log_hub` attribute at EACH
+    restart (not captured once at thread-start time), so a restart still
+    forwards the live LogHub even though the monitor thread is started
+    before `_init_telemetry` populates `state.log_hub` during supervisor
+    boot. Optional (defaults to None) so existing callers that invoke
+    this with just `(specs, stop_event)` keep today's behavior (no log
+    piping on restart) unchanged.
     """
     while not stop_event.is_set():
         for spec in list(specs):  # snapshot: safe against concurrent remove()
@@ -427,7 +441,10 @@ def _monitor_workers(
                 )
 
             if spec.failure_count >= failure_threshold:
-                _attempt_restart(spec, stop_event=stop_event, max_restarts=max_restarts)
+                _attempt_restart(
+                    spec, stop_event=stop_event, max_restarts=max_restarts,
+                    log_hub=getattr(state, "log_hub", None),
+                )
 
         # Sleep with early-exit if stop_event fires
         if stop_event.wait(interval):
@@ -1084,9 +1101,15 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
     # next polling tick without extra coordination. Started always (not
     # gated on a non-empty worker list, since lazy load means workers
     # arrive later).
+    # `state` is passed (not a captured `state.log_hub` value) because the
+    # monitor thread starts before `_init_telemetry` (below) populates
+    # `state.log_hub`; `_monitor_workers` reads `state.log_hub` live, at
+    # restart time, so the restart path still forwards the hub once
+    # telemetry finishes wiring up (see `_monitor_workers` docstring).
     monitor_thread = threading.Thread(
         target=_monitor_workers,
         args=(state.workers, stop_event),
+        kwargs={"state": state},
         daemon=True,
         name="muse-monitor",
     )
@@ -1182,6 +1205,17 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
                 logger.warning("telemetry sampler stop failed", exc_info=True)
         store = getattr(state, "telemetry_store", None)
         if store is not None:
+            # Stop the recorder's flush thread (and drain its final batch
+            # into the store) BEFORE closing the store. reset_recorder()
+            # -> TelemetryRecorder.stop() joins the flush thread and then
+            # does one last flush() against the still-open store; closing
+            # the store first would let a subsequent periodic flush tick
+            # call insert_many on a closed sqlite connection, logging
+            # "flush failed" noise on every shutdown.
+            try:
+                reset_recorder()
+            except Exception:
+                logger.warning("telemetry recorder stop failed", exc_info=True)
             try:
                 store.close()
             except Exception:

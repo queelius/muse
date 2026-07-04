@@ -215,7 +215,7 @@ class TestAttemptRestart:
              patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait:
             _attempt_restart(spec, stop_event=stop_event, max_restarts=10, backoff_base=0)
 
-        mock_spawn.assert_called_once_with(spec, device="cpu")
+        mock_spawn.assert_called_once_with(spec, device="cpu", log_hub=None)
         mock_wait.assert_called_once()
         # restart_count counts UNSUCCESSFUL restart attempts (see
         # test_many_successful_restarts_do_not_exhaust_budget below); a

@@ -975,6 +975,15 @@ thread; `store.close()` closes the sqlite connection).
   (exchange the real token for a one-time, narrowly-scoped ticket
   before opening the `EventSource`) rather than passing the long-lived
   secret itself.
+- **The live log tail can miss a single line emitted in the brief window
+  between the initial history snapshot and the SSE subscription.**
+  `_stream_model_logs` drains `hub.snapshot(model_id)` (buffered history)
+  and then calls `hub.subscribe(model_id)`; a line appended to the hub in
+  that narrow window lands in neither the snapshot nor the subscription
+  queue and is dropped. Buffered history and every subsequent line are
+  unaffected. Not fixed: subscribing before draining the snapshot would
+  trade this rare lost line for rare duplicate lines, which is a
+  different (not obviously better) trade-off.
 
 ## MCP server (Using muse from Claude Desktop)
 
