@@ -144,6 +144,28 @@ The five `limits.*` byte/side caps that have a positivity guard
 a non-positive value (`<= 0`, or empty for the opt-int byte caps) as "use the
 default", so setting one to 0 falls back rather than rejecting every request.
 
+### telemetry (observability recorder + dashboard)
+
+| key | env | default |
+|---|---|---|
+| `telemetry.enabled` | `MUSE_TELEMETRY_ENABLED` | true |
+| `telemetry.retention_days` | `MUSE_TELEMETRY_RETENTION_DAYS` | 7 |
+| `telemetry.log_buffer_kb` | `MUSE_TELEMETRY_LOG_BUFFER_KB` | 64 |
+| `telemetry.sample_interval_seconds` | `MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS` | 10.0 |
+
+`telemetry.enabled` gates the whole subsystem: the event recorder, the
+per-model log ring buffer, the periodic resource sampler, and the
+`/dashboard` data endpoints. Setting it to `false` swaps in a no-op
+recorder (zero queue/thread overhead) and skips wiring the log hub, so
+worker spawning is unchanged from a pre-telemetry `muse serve`.
+`telemetry.retention_days` bounds how far back `/v1/telemetry/series`
+history is pruned. `telemetry.log_buffer_kb` sizes each model's
+per-worker stdout ring buffer (KB, not lines).
+`telemetry.sample_interval_seconds` is how often the background sampler
+records a `sample` event (free VRAM/RAM, loaded/in-flight counts). See
+the "Observability" section of `CLAUDE.md` for the full event model and
+endpoint surface.
+
 ## Adding a new setting
 
 Add one `Setting(...)` row to `SETTINGS` in `src/muse/core/config.py`, then read

@@ -839,6 +839,143 @@ CLI's `muse models enable/disable` falls back to AdminClient when
 `MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, otherwise
 to the legacy catalog-only mutation with a warning.
 
+## Observability
+
+`muse.observability/` (v0.51.x, on the `feature/observability-dashboard`
+branch) is a self-contained telemetry package: a sparse single-table
+event model, a fire-and-forget recorder, a per-worker log ring buffer,
+a periodic resource sampler, and a `/dashboard` HTML page backed by a
+small set of gated JSON/SSE endpoints. It has no dependency on any
+other modality; the rest of muse depends on it only through the thin
+`record(...)` call.
+
+Import-hygiene contract: `muse.observability/__init__.py` re-exports
+`EVENT_COLUMNS`, `event_to_row`, `TelemetryStore`, `TelemetryRecorder`,
+`record`, `get_recorder`, `init_recorder`, `reset_recorder`, `Sampler`,
+and `LogHub` EAGERLY (all stdlib-only), but re-exports
+`build_dashboard_router`, `DASHBOARD_HTML`, `require_dashboard_auth`,
+and `check_dashboard_token` LAZILY via a PEP 562 module `__getattr__`,
+because `dashboard.py` and `dashboard_auth.py` import fastapi and
+sse_starlette at module top. The director, gateway, and supervisor all
+import `muse.observability.recorder` from the hot request path, and
+importing any submodule runs `__init__.py` first -- an eager dashboard
+import there would drag fastapi into `muse --help` / `muse pull`,
+violating the project's deferred-imports convention. Regression guard:
+`tests/observability/test_public_api.py` re-imports `recorder` in a
+clean subprocess and asserts `"fastapi" not in sys.modules`.
+
+**Event model.** One sparse SQLite table, `events`
+(`muse.observability.store.TelemetryStore`), with columns
+`EVENT_COLUMNS` (`muse.observability.events`): `ts`, `type`, plus every
+field any event type might carry (`model_id`, `pool`, `gb`,
+`latency_ms`, `status`, `reason`, `cold_load_seconds`, `stream`,
+`free_vram_gb`, `free_ram_gb`, `gpu_used_gb`, `loaded_count`,
+`in_flight_count`, `modality`) -- unset fields are `NULL`, not one
+table per event type. `event_to_row(type, ts, **fields)` builds the
+full row and raises `ValueError` on an unknown field name (a typo'd
+kwarg fails loud instead of silently writing `NULL` to the wrong
+column). Four event types are recorded today: `model_load` and
+`model_evict` (from `LoadDirector.acquire` / eviction, `pool` +
+`gb`/`cold_load_seconds`), `request` (from the gateway's forwarding
+path, `latency_ms`/`status`/`stream`/`modality`), and `sample` (from
+`Sampler`, a periodic snapshot of `free_vram_gb`/`free_ram_gb`/
+`loaded_count`/`in_flight_count`). `TelemetryStore.series(metric,
+since_ts, bucket_seconds)` buckets rows into a fixed set of named
+metrics (`request_rate`, `latency`, `vram`, `ram`, `load_evict`); v1
+latency is avg+max per bucket, not exact percentiles.
+
+**Fire-and-forget recording.** `muse.observability.recorder.record(type,
+**fields)` is meant to be called from every hot path (director,
+gateway) and must never block or raise. `TelemetryRecorder` enqueues
+onto a bounded `queue.Queue` (`max_queue=10000`) and a daemon flush
+thread batches inserts into the store every `flush_interval` (0.5s
+default); when the queue is full the event is dropped and
+`recorder.dropped` increments rather than blocking the caller --
+`/v1/telemetry/summary` surfaces the running drop count so an operator
+can tell if the recorder is falling behind. Every call site
+(`load_director.py`, `gateway.py`) wraps `record(...)` in its own
+try/except so a telemetry regression can never break a real model load,
+eviction, or request. `init_recorder(store, enabled=...)` /
+`get_recorder()` / `reset_recorder()` manage a module-level singleton;
+`enabled=False` (or `telemetry.enabled: false`) swaps in a
+`_NoopRecorder` so a disabled deployment pays no queue/thread cost at
+all.
+
+**Log capture.** Each worker's stdout is piped into a per-model
+`LogHub` (`muse.observability.logs`) ring buffer, byte-bounded by
+`telemetry.log_buffer_kb` (KB, not lines), when telemetry is enabled;
+`spawn_worker(..., log_hub=state.log_hub)` in the supervisor starts a
+daemon reader thread (`_pump_worker_logs`) that tees each line to both
+the aggregate supervisor stdout and `hub.append(model_id, line)`. When
+telemetry is disabled `log_hub` stays `None` and workers spawn exactly
+as before (no reader thread, no behavior change). `LogHub` also fans
+out live lines to subscriber queues for the SSE tail; `snapshot(id)`
+returns the buffered history for a late-connecting client.
+
+**`/dashboard` + telemetry endpoints.** `build_dashboard_router(state)`
+(lazily imported, see above) mounts:
+- `GET /dashboard` -- a single self-contained HTML/CSS/JS page
+  (`DASHBOARD_HTML`), UN-GATED so it always loads (even with no token
+  configured yet) and prompts the browser for a token before hitting
+  any gated endpoint, storing it in `sessionStorage`.
+- `GET /v1/telemetry/summary` -- gated JSON: currently loaded models
+  (`model_id`/`pool`/`gb`/`last_used`), `in_flight` count,
+  `dropped_events`, and a federation-forward `node` id (`state.node_url`
+  or `state.node_id` if set, else `socket.gethostname()`) so a future
+  multi-node aggregator can tell which box a summary came from.
+- `GET /v1/telemetry/series?metric=...&window=...` -- gated JSON time
+  series from `TelemetryStore.series`; unknown `metric` returns 400
+  `invalid_metric`.
+- `GET /v1/telemetry/logs/{model_id}` -- gated SSE tail: drains
+  `hub.snapshot(model_id)` then polls `hub.subscribe(model_id)` every
+  250ms until the client disconnects, unsubscribing in a `finally` so a
+  disconnect/cancel/exception never leaks a subscriber queue.
+
+**Auth.** `muse.observability.dashboard_auth.check_dashboard_token`
+mirrors the admin API's closed-by-default policy: with no `admin.token`
+configured, every gated endpoint 503s `dashboard_closed` (same token as
+`MUSE_ADMIN_TOKEN`/admin API -- there is no separate dashboard secret).
+With a token set, the request needs it either as `Authorization: Bearer
+<token>` (regular fetch calls) or `?access_token=<token>` (the SSE
+`EventSource` client, which cannot set custom headers). Comparison is
+`secrets.compare_digest`; the token is never echoed in an error message
+or log line.
+
+**Config.** Four `telemetry.*` settings (see "Configuration" above and
+`docs/CONFIG.md`): `telemetry.enabled` (`MUSE_TELEMETRY_ENABLED`,
+default `true`), `telemetry.retention_days` (`MUSE_TELEMETRY_RETENTION_DAYS`,
+default `7`), `telemetry.log_buffer_kb` (`MUSE_TELEMETRY_LOG_BUFFER_KB`,
+default `64`), `telemetry.sample_interval_seconds`
+(`MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS`, default `10.0`). The
+supervisor wires the store, recorder, sampler, and log hub together
+once at boot (`_init_telemetry`, gated on `telemetry.enabled`) and tears
+them down symmetrically on shutdown (`sampler.stop()` joins the sampler
+thread; `store.close()` closes the sqlite connection).
+
+### Known limitations (v1)
+
+- **Idle-sweep eviction is not instrumented.** `IdleSweeper` (the
+  DEFAULT reclaim path for an untouched model past its idle timeout)
+  does not currently call `record("model_evict", ...)`; only
+  `LoadDirector`'s memory-pressure eviction path does. The `load_evict`
+  series therefore undercounts real evictions on a lightly-loaded box
+  where idle timeout, not memory pressure, is doing most of the
+  reclaiming.
+- **Pool attribution is best-effort.** `summary.loaded[].pool` and the
+  `model_evict` event's `pool` field both read `getattr(entry, "pool",
+  None)`, but `LoadEntry` has no `pool`/`device` field today, so this is
+  currently always `None` in practice. A future `LoadEntry.pool` field
+  would need to land before this attribution becomes real.
+- **The SSE `?access_token=` puts the admin token in the URL.** This is
+  the standard workaround for `EventSource` (which cannot set custom
+  headers), but it means the token can land in server access logs,
+  proxy logs, or browser history. Acceptable for a single-operator box
+  behind a private network; a caveat for any internet-exposed
+  deployment. The planned hardening is a short-lived SSE ticket
+  (exchange the real token for a one-time, narrowly-scoped ticket
+  before opening the `EventSource`) rather than passing the long-lived
+  secret itself.
+
 ## MCP server (Using muse from Claude Desktop)
 
 `muse mcp` runs an MCP (Model Context Protocol) server that exposes

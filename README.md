@@ -492,6 +492,16 @@ print(admin.memory())
 
 The `muse models enable/disable` CLI commands route through this admin API automatically when `MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, falling back to a catalog-only mutation (effective on next `muse serve`) otherwise.
 
+### Observability dashboard
+
+`muse serve` also ships a lightweight `/dashboard` page: loaded models, request-rate and latency charts, and a live per-model log tail, all served from a single self-contained HTML file with no build step. It is on by default (`telemetry.enabled` / `MUSE_TELEMETRY_ENABLED`, default `true`); set it to `false` to turn recording off entirely. The dashboard's data endpoints are closed-by-default and reuse the same `MUSE_ADMIN_TOKEN` as the admin API above; the page itself always loads and prompts for a token.
+
+```bash
+export MUSE_ADMIN_TOKEN="$(openssl rand -hex 32)"
+muse serve
+# open http://localhost:8000/dashboard and paste the token in
+```
+
 ## MCP server (since v0.29.0)
 
 `muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 29 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 18 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
