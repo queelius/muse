@@ -4,7 +4,7 @@ A single Console instance is used across CLI commands so that
 formatting (truecolor support, terminal width, NO_COLOR handling) is
 consistent. Rich already respects the NO_COLOR env automatically; the
 explicit `--no-color` flag on user-facing commands overrides via
-`force_terminal=False`.
+`Console(no_color=True, highlight=False)`.
 
 Status encoding is symbolic: each of the five model statuses gets
 exactly one glyph + color pair. Glyphs are single East-Asian-Width
@@ -51,8 +51,9 @@ def get_console(force_no_color: bool = False) -> Console:
 
     `force_no_color=True` is the explicit `--no-color` override on
     user-facing commands. NO_COLOR env is handled by rich automatically
-    via auto-detection; passing force_terminal=False here is the harder
-    override (also disables color spans in output).
+    via auto-detection; passing `no_color=True` here is the harder
+    override (also disables color spans in output, unlike relying on
+    auto-detection alone).
     """
     if force_no_color or os.environ.get("NO_COLOR"):
         return Console(no_color=True, highlight=False)
@@ -83,16 +84,3 @@ def status_legend() -> Text:
     for p in parts:
         out.append(p)
     return out
-
-
-def truncate(text: str, max_width: int, *, ellipsis: str = "…") -> str:
-    """Truncate text to fit within max_width, including the ellipsis.
-
-    A no-op when the text already fits. max_width <= len(ellipsis)
-    returns just the ellipsis.
-    """
-    if len(text) <= max_width:
-        return text
-    if max_width <= len(ellipsis):
-        return ellipsis
-    return text[: max_width - len(ellipsis)] + ellipsis

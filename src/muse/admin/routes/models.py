@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from muse.admin.jobs import JobStore, get_default_store
+from muse.admin.jobs import get_default_store
 from muse.admin.operations import (
     OperationError,
     disable_model,
@@ -35,7 +35,7 @@ from muse.admin.operations import (
     remove_model,
     warmup_model,
 )
-from muse.cli_impl.supervisor import SupervisorState, get_supervisor_state
+from muse.cli_impl.supervisor import get_supervisor_state
 from muse.core.catalog import _read_catalog, known_models
 from muse.core.errors import error_response
 
@@ -44,23 +44,13 @@ def _operation_error_to_response(e: OperationError) -> JSONResponse:
     return error_response(e.status, e.code, e.message)
 
 
-def _resolve_state() -> SupervisorState:
-    """Indirection so tests can inject a state without going through the
-    module-level singleton."""
-    return get_supervisor_state()
-
-
-def _resolve_store() -> JobStore:
-    return get_default_store()
-
-
 def build_models_router() -> APIRouter:
     router = APIRouter()
 
     @router.post("/models/{model_id}/enable")
     def enable(model_id: str, _body: dict | None = Body(default=None)):
-        state = _resolve_state()
-        store = _resolve_store()
+        state = get_supervisor_state()
+        store = get_default_store()
         # Quick existence check up-front so unknown ids return 404
         # synchronously rather than via job.error.
         if model_id not in known_models():
@@ -81,7 +71,7 @@ def build_models_router() -> APIRouter:
 
     @router.post("/models/{model_id}/disable")
     def disable(model_id: str, _body: dict | None = Body(default=None)):
-        state = _resolve_state()
+        state = get_supervisor_state()
         try:
             return disable_model(model_id, state=state)
         except OperationError as e:
@@ -98,7 +88,7 @@ def build_models_router() -> APIRouter:
         wrapper (deferred to v1.next) would mirror the enable route's
         202 + job_id pattern.
         """
-        state = _resolve_state()
+        state = get_supervisor_state()
         try:
             return warmup_model(model_id, state=state)
         except OperationError as e:
@@ -106,8 +96,8 @@ def build_models_router() -> APIRouter:
 
     @router.post("/models/{model_id}/probe")
     def probe(model_id: str, body: dict | None = Body(default=None)):
-        state = _resolve_state()
-        store = _resolve_store()
+        state = get_supervisor_state()
+        store = get_default_store()
         if model_id not in known_models():
             return error_response(
                 404, "model_not_found", f"unknown model {model_id!r}",
@@ -138,7 +128,7 @@ def build_models_router() -> APIRouter:
         used directly (works for bundled-script ids and curated aliases
         without `://`).
         """
-        store = _resolve_store()
+        store = get_default_store()
         body = body or {}
         identifier = body.get("identifier") or model_id
         if not identifier or identifier == "_":
@@ -168,7 +158,7 @@ def build_models_router() -> APIRouter:
         model_id: str,
         purge: bool = Query(default=False),
     ):
-        state = _resolve_state()
+        state = get_supervisor_state()
         try:
             return remove_model(model_id, state=state, purge=purge)
         except OperationError as e:
@@ -176,7 +166,7 @@ def build_models_router() -> APIRouter:
 
     @router.get("/models/{model_id}/status")
     def status(model_id: str):
-        state = _resolve_state()
+        state = get_supervisor_state()
         catalog_known = known_models()
         catalog = _read_catalog()
 

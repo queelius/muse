@@ -90,6 +90,24 @@ def run_search(
     return 0
 
 
+def _format_size(size_gb: float | None) -> str:
+    """Render a result's size, or "?" only when genuinely unknown.
+
+    Guards on `is not None` (not truthiness) so a real 0.0 GB result
+    renders as "0.0 GB" instead of being conflated with "unknown".
+    """
+    return f"{size_gb:.1f} GB" if size_gb is not None else "?"
+
+
+def _format_downloads(downloads: int | None) -> str:
+    """Render a result's download count, or "?" only when unknown.
+
+    Guards on `is not None` (not truthiness) so a real 0 downloads
+    renders as "0" instead of being conflated with "unknown".
+    """
+    return f"{downloads:,}" if downloads is not None else "?"
+
+
 def _render_rich_search(results: list) -> None:
     """Pretty interactive table for search results."""
     from rich import box
@@ -111,10 +129,9 @@ def _render_rich_search(results: list) -> None:
     table.add_column("license", no_wrap=True)
     table.add_column("description", overflow="ellipsis", no_wrap=True, ratio=1)
     for r in results:
-        size = f"{r.size_gb:.1f} GB" if r.size_gb else "?"
-        downloads = f"{r.downloads:,}" if r.downloads else "?"
         table.add_row(
-            r.uri, size, downloads, r.license or "", r.description or "",
+            r.uri, _format_size(r.size_gb), _format_downloads(r.downloads),
+            r.license or "", r.description or "",
         )
     console.print(table)
 
@@ -122,18 +139,12 @@ def _render_rich_search(results: list) -> None:
 def _render_plain_search(results: list) -> None:
     """Plain aligned text for piped / non-TTY output."""
     uri_w = max((len(r.uri) for r in results), default=0)
-    size_w = max(
-        (len(f"{r.size_gb:.1f} GB" if r.size_gb else "?") for r in results),
-        default=0,
-    )
-    dl_w = max(
-        (len(f"{r.downloads:,}" if r.downloads else "?") for r in results),
-        default=0,
-    )
+    size_w = max((len(_format_size(r.size_gb)) for r in results), default=0)
+    dl_w = max((len(_format_downloads(r.downloads)) for r in results), default=0)
     lic_w = max((len(r.license or "") for r in results), default=0)
     for r in results:
-        size = f"{r.size_gb:.1f} GB" if r.size_gb else "?"
-        downloads = f"{r.downloads:,}" if r.downloads else "?"
+        size = _format_size(r.size_gb)
+        downloads = _format_downloads(r.downloads)
         print(
             f"  {r.uri:<{uri_w}s}  "
             f"{size:>{size_w}s}  "

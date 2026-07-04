@@ -72,6 +72,27 @@ def _seed_catalog(data: dict) -> None:
     _reset_known_models_cache()
 
 
+def test_models_route_module_resolves_singletons_like_its_siblings():
+    """All /v1/admin route modules must resolve shared singletons
+    (SupervisorState, JobStore) the same way.
+
+    jobs.py, workers.py, and memory.py all call
+    `get_supervisor_state()` / `get_default_store()` directly. models.py
+    used to route through private `_resolve_state()` / `_resolve_store()`
+    wrappers whose docstring claimed "so tests can inject a state
+    without going through the module-level singleton" -- untrue, since
+    no test ever monkeypatched those wrappers; injection happens via
+    `set_supervisor_state()` / `reset_default_store()` either way. A
+    test that tried to patch the resolution point for models.py would
+    have needed a different target than one patching the other three
+    modules.
+    """
+    import muse.admin.routes.models as models_route_module
+
+    assert not hasattr(models_route_module, "_resolve_state")
+    assert not hasattr(models_route_module, "_resolve_store")
+
+
 class TestEnableRoute:
     def test_unknown_model_returns_404(self, client, headers, tmp_catalog):
         _seed_catalog({})

@@ -908,27 +908,35 @@ def _try_admin_action(action: str, model_id: str) -> bool:
         if action == "enable":
             out = client.enable(model_id)
             job_id = out.get("job_id")
-            if job_id:
-                typer.echo(f"enable job submitted: {job_id}")
-                try:
-                    final = client.wait(job_id, timeout=120.0, poll=0.5)
-                    if final.get("state") == "done":
-                        port = (final.get("result") or {}).get("worker_port")
-                        msg = f"enabled {model_id}"
-                        if port:
-                            msg += f" (worker port {port})"
-                        typer.echo(msg)
-                        return True
-                    typer.echo(
-                        f"error: enable failed: {final.get('error')}", err=True,
-                    )
+            if not job_id:
+                # client.enable() didn't raise, so the admin API already
+                # accepted the request; a missing/empty job_id is a
+                # degenerate but still-successful response shape. Treat
+                # it as handled so the caller does NOT fall through to
+                # the catalog-only fallback (which would both re-do the
+                # mutation and print a misleading "catalog only" message).
+                typer.echo(f"enabled {model_id} (admin API accepted)")
+                return True
+            typer.echo(f"enable job submitted: {job_id}")
+            try:
+                final = client.wait(job_id, timeout=120.0, poll=0.5)
+                if final.get("state") == "done":
+                    port = (final.get("result") or {}).get("worker_port")
+                    msg = f"enabled {model_id}"
+                    if port:
+                        msg += f" (worker port {port})"
+                    typer.echo(msg)
                     return True
-                except TimeoutError:
-                    typer.echo(
-                        f"warning: enable still running; poll job {job_id} for status",
-                        err=True,
-                    )
-                    return True
+                typer.echo(
+                    f"error: enable failed: {final.get('error')}", err=True,
+                )
+                return True
+            except TimeoutError:
+                typer.echo(
+                    f"warning: enable still running; poll job {job_id} for status",
+                    err=True,
+                )
+                return True
         elif action == "disable":
             out = client.disable(model_id)
             typer.echo(f"disabled {model_id}")
@@ -963,9 +971,21 @@ def main(argv: list[str] | None = None) -> int:
     is that any other click exception (`NoArgsIsHelpError` when the
     user runs `muse` with no subcommand; `UsageError` for bad flags;
     `Abort` for SIGINT) also propagates here. We catch the click
-    base class `ClickException` and use its `exit_code` so the user
-    sees the help that click already rendered, without a Python
-    traceback chasing it.
+    base class `ClickException` and use its `exit_code`.
+
+    Critically, with `standalone_mode=False` neither click nor typer's
+    own `_main` override ever calls `ClickException.show()` -- both
+    just re-raise (see `click.core.BaseCommand.main` and
+    `typer.core._main`'s `if not standalone_mode: raise` branches).
+    Rendering the error is therefore entirely our job here; skipping
+    `e.show()` (a past bug) meant every usage error (unknown
+    command/option, missing argument, bad value) exited nonzero with
+    completely empty stdout+stderr on the shipped `muse` binary.
+    `NoArgsIsHelpError` is the one exception already visible before we
+    get here: typer's rich help renderer prints as a side effect of
+    building `ctx.get_help()` while the exception is constructed, so
+    calling `.show()` on it too only adds a harmless blank line to
+    stderr, not a duplicate help render.
     """
     import click
     try:
@@ -982,10 +1002,10 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as e:
         return int(e.code) if e.code is not None else 0
     except click.exceptions.ClickException as e:
-        # NoArgsIsHelpError already rendered the help (its message
-        # IS the help text); other ClickExceptions print their own
-        # message via show() in standalone mode but we suppress
-        # double-print here. Just return the exit code click set.
+        # Render the error/usage message ourselves: standalone_mode=False
+        # suppresses click's own show()+sys.exit() so nothing gets
+        # printed otherwise (see docstring above).
+        e.show()
         return e.exit_code
 
 

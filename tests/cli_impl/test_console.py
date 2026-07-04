@@ -3,7 +3,6 @@ from muse.cli_impl.console import (
     STATUS_STYLE,
     status_glyph,
     status_legend,
-    truncate,
 )
 
 
@@ -54,19 +53,3 @@ def test_status_legend_contains_every_status():
     legend = status_legend().plain
     for status in STATUS_STYLE:
         assert status in legend
-
-
-def test_truncate_no_op_when_fits():
-    assert truncate("hello", 10) == "hello"
-    assert truncate("hello", 5) == "hello"
-
-
-def test_truncate_adds_ellipsis():
-    assert truncate("hello world", 8) == "hello w…"
-    assert truncate("hello world", 8).endswith("…")
-
-
-def test_truncate_max_width_too_small():
-    """When max_width is no larger than the ellipsis, return only the ellipsis."""
-    assert truncate("hello", 1) == "…"
-    assert truncate("hello", 0) == "…"

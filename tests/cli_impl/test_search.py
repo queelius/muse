@@ -101,6 +101,25 @@ def test_run_search_silences_noisy_third_party_loggers():
         )
 
 
+def test_run_search_renders_zero_size_and_zero_downloads_not_unknown(capsys):
+    """size_gb=0.0 and downloads=0 are real values, not "unknown".
+
+    `if r.size_gb` / `if r.downloads` treat a genuine falsy 0 the same
+    as None, rendering "?" instead of the actual value. Guard on
+    `is not None` instead (consistent with the None-vs-0 distinction
+    already honored by the --max-size-gb filtering above).
+    """
+    results = [
+        SearchResult(uri="hf://zero@q1", model_id="zero-q1", modality="chat/completion",
+                     size_gb=0.0, downloads=0, license=None, description=""),
+    ]
+    with patch("muse.cli_impl.search.search", return_value=results):
+        run_search(query="x", limit=10, sort="downloads")
+    out = capsys.readouterr().out
+    assert "0.0 GB" in out
+    assert "?" not in out
+
+
 def test_run_search_does_not_lower_already_silent_loggers():
     """If a user pre-set httpx to ERROR (extra-quiet), don't loosen them."""
     import logging
