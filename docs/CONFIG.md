@@ -170,6 +170,25 @@ valid; the dashboard's `EventSource` client uses one of these instead of
 putting the admin token in the URL. See the "Observability" section of
 `CLAUDE.md` for the full event model and endpoint surface.
 
+### federation (coordinator: `muse federate`)
+
+| key | env | default |
+|---|---|---|
+| `federation.refresh_interval_seconds` | `MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS` | 3.0 |
+| `federation.forward_timeout_seconds` | `MUSE_FEDERATION_FORWARD_TIMEOUT_SECONDS` | 300.0 |
+| `federation.config_file` | `MUSE_FEDERATION_CONFIG` | null |
+
+`federation.refresh_interval_seconds` is how often the coordinator's
+background task polls each node's `/v1/models` + `/health` (+ gated
+`/v1/telemetry/summary` if a per-node token is configured) and refreshes
+its cached routing snapshot. `federation.forward_timeout_seconds` bounds
+each request the coordinator forwards to a node; it defaults high
+(300s) because generation requests can run for minutes.
+`federation.config_file` is an explicit path to the node-list yaml; when
+unset, `muse federate` falls back to `<catalog_dir>/federation.yaml` if
+that file exists, else nodes come from `--node` CLI entries alone. See
+the "Federation" section of `CLAUDE.md` for the coordinator design.
+
 ## Adding a new setting
 
 Add one `Setting(...)` row to `SETTINGS` in `src/muse/core/config.py`, then read

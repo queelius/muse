@@ -32,11 +32,20 @@ relay runs independently and this function is not on the hook for it)
 retries ONCE against a different candidate for the same model. If no
 other candidate exists, or the retry also fails, the coordinator returns
 502 `no_node_available`.
+
+`run_coordinator` is this module's other export: it resolves the node
+list (CLI `--node` entries merged with an optional `federation.yaml`),
+builds a `NodeRegistry` + the coordinator app, and blocks serving it via
+uvicorn. It is the implementation behind the `muse federate` CLI command
+in `muse.cli`.
 """
 
 from __future__ import annotations
 
+import sys
 import time
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -44,6 +53,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from muse.cli_impl.gateway import _forward, _openai_error, extract_model_from_request
+from muse.cli_impl.serve_util import run_uvicorn
+from muse.federation.nodes import load_nodes
+from muse.federation.registry import NodeRegistry
 from muse.federation.router import select_node
 from muse.federation.state import NodeState
 
@@ -75,8 +87,28 @@ def build_coordinator(
     shared dict passed through to `select_node` for round-robin
     tie-breaking across requests; `None` disables rotation (deterministic
     first-by-url).
+
+    Registry lifecycle is wired via a FastAPI lifespan context manager:
+    `registry.start()` runs on startup (launching the background refresh
+    task on the server's OWN event loop, which is what `NodeRegistry.start`
+    needs -- `asyncio.ensure_future` requires a running loop) and
+    `registry.aclose()` runs on shutdown. This only fires when the ASGI
+    lifespan protocol actually runs (real `run_uvicorn` serving, or a
+    `with TestClient(app) as c:` block); a bare `TestClient(app).get(...)`
+    (as the existing route tests in this module use) never triggers
+    lifespan, so those tests' plain-`.snapshot()`-only fakes are
+    unaffected by this wiring.
     """
-    app = FastAPI(title="Muse Federation Coordinator")
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        registry.start()
+        try:
+            yield
+        finally:
+            await registry.aclose()
+
+    app = FastAPI(title="Muse Federation Coordinator", lifespan=_lifespan)
     app.state.registry = registry
     app.state.timeout = timeout
     app.state.rr_counter = rr_counter
@@ -190,3 +222,59 @@ def build_coordinator(
                 )
 
     return app
+
+
+def run_coordinator(
+    *,
+    host: str,
+    port: int,
+    cli_nodes: list[str] | None,
+    config_path: str | None,
+) -> int:
+    """Resolve federation nodes, build the coordinator app, and serve it.
+
+    Node-list resolution order:
+      1. `config_path` (the CLI `--config` flag) if given.
+      2. Else `federation.config_file` (`MUSE_FEDERATION_CONFIG` / config.yaml).
+      3. Else `<catalog_dir>/federation.yaml`, ONLY if that file actually
+         exists (so a fresh install with no federation.yaml does not
+         error trying to read a missing file -- `load_nodes` treats
+         `config_path=None` as "no yaml source" and merges CLI nodes only).
+
+    `load_nodes` then merges CLI `--node` entries with the resolved yaml
+    file (CLI wins on url collision, per `muse.federation.nodes`).
+
+    Returns 2 (and starts nothing) when the merged node list is empty --
+    a coordinator with zero nodes would boot healthy and 404 every
+    request, which is a worse failure mode than refusing to start.
+    Otherwise builds the `NodeRegistry` + coordinator app (whose lifespan
+    hook starts/stops the registry's background refresh loop, see
+    `build_coordinator`) and blocks on uvicorn; returns 0 after a clean
+    shutdown.
+    """
+    from muse.core import config
+
+    resolved_config_path = config_path or config.get("federation.config_file")
+    if resolved_config_path is None:
+        catalog_dir = Path(config.get("paths.catalog_dir")).expanduser()
+        candidate = catalog_dir / "federation.yaml"
+        if candidate.exists():
+            resolved_config_path = str(candidate)
+
+    nodes = load_nodes(cli_nodes=cli_nodes, config_path=resolved_config_path)
+    if not nodes:
+        print(
+            "no federation nodes: pass --node URL or create a federation.yaml",
+            file=sys.stderr,
+        )
+        return 2
+
+    registry = NodeRegistry(
+        nodes,
+        refresh_interval=config.get("federation.refresh_interval_seconds"),
+    )
+    app = build_coordinator(
+        registry, timeout=config.get("federation.forward_timeout_seconds")
+    )
+    run_uvicorn(app, host=host, port=port)
+    return 0

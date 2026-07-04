@@ -994,6 +994,134 @@ thread; `store.close()` closes the sqlite connection).
   trade this rare lost line for rare duplicate lines, which is a
   different (not obviously better) trade-off.
 
+## Federation
+
+`muse federate` (branch `feature/federation-coordinator`, see
+`docs/superpowers/specs/2026-07-04-federation-design.md` for the full
+design) runs a thin coordinator process that fronts a static list of
+unmodified muse `serve` nodes so a client sees "one server with all the
+GPUs" instead of N separate boxes. This is the second sub-project of
+the federation arc; it consumes the per-node observability surface
+(`/v1/models`, `/v1/telemetry/summary`) shipped in v0.53.0.
+
+```
+                 clients (OpenAI SDK, curl, ...)
+                          |
+                 [ muse federate ]  :8100        <- new coordinator
+                  /       |       \
+             node A     node B     node C         <- unmodified muse servers
+```
+
+Nodes need NO code changes: they are plain `muse serve` instances. The
+coordinator lives in `muse.federation` (node-membership model, async
+poll-and-cache registry, pure model-locality router) plus
+`muse.cli_impl.federation` (the FastAPI app + `run_coordinator`,
+structurally a sibling of the existing single-host gateway in
+`muse.cli_impl.gateway`, reusing its `_forward` + SSE-relay machinery
+and `extract_model_from_request`).
+
+**Node membership (static, v1).** Nodes come from two merged sources,
+CLI entries winning on url collision:
+- `--node http://host:8000` or `--node name=http://host:8000` (repeatable).
+- A yaml file, `nodes: [{url, name?, token?}, ...]`. Default location is
+  `<catalog_dir>/federation.yaml` when it exists and neither `--config`
+  nor `federation.config_file` names an explicit path. The optional
+  per-node `token` is used ONLY by the coordinator's own outbound poll
+  to read that node's gated `/v1/telemetry/summary`; it is never
+  exposed to clients. Dynamic membership (registration, gossip,
+  health-based ejection) is deferred to v2.
+
+**Node-state refresh.** `muse.federation.registry.NodeRegistry` polls
+every node concurrently on a background interval
+(`federation.refresh_interval_seconds`, default 3.0s) and caches a
+`NodeState` snapshot per node: `GET <node>/v1/models` (reachability +
+per-model `loaded`), `GET <node>/health`, and (only if that node has a
+configured token) `GET <node>/v1/telemetry/summary` for `in_flight`.
+Route handlers read the cache via `.snapshot()`, so routing is a fast
+local lookup, never a per-request fan-out. A node whose poll fails is
+marked unreachable and skipped by the router until it recovers
+(per-node failure isolation: one bad node never aborts the refresh for
+the others).
+
+**Routing policy (model-locality, v1).** `muse.federation.router.select_node`
+is a pure function over the cached snapshot:
+1. Candidates = reachable nodes whose `/v1/models` lists the requested
+   model.
+2. Prefer loaded: among candidates, those with the model currently
+   `loaded` win over those that would have to cold-load it.
+3. Tie-break: lowest `in_flight` (from telemetry, if a token is
+   configured for that node), else round-robin over the tied set.
+4. No candidate -> 404 `model_not_available` (OpenAI-shape).
+
+Deferred to v2: hardware-aware routing (route a big model to the node
+whose GPU actually fits it), true queue-depth/latency-aware routing,
+sticky sessions, an aggregated cluster dashboard (v1 links out to each
+node's own `/dashboard` via `/v1/federation/nodes`), and
+coordinator-side inference auth (v1's inference routes are open,
+mirroring an unmodified node's own gateway; per-node tokens are used
+only for the coordinator's outbound telemetry poll, never exposed to
+clients).
+
+**Request forwarding + failover.** The catch-all proxy extracts `model`
+from the request body/query (the same logic the single-host gateway
+uses), asks `select_node`, and forwards via the shared `_forward`
+helper (buffered + SSE relay, unchanged). A forward that fails at
+connect/timeout (never mid-stream -- once a `StreamingResponse` starts,
+the relay is on its own) retries ONCE against a different candidate for
+the same model; if no other candidate exists, or the retry also fails,
+the coordinator returns 502 `no_node_available`.
+
+**Aggregated read endpoints**, mounted before the catch-all so they are
+never shadowed:
+- `GET /v1/models` -- OpenAI-shape union of model ids across reachable
+  nodes, each annotated with `loaded` (true if loaded on ANY node) and
+  `nodes` (which node names carry it).
+- `GET /health` -- `"ok"` if at least one node is reachable, else
+  `"degraded"`; per-node reachability/model-count/in_flight breakdown
+  in the body.
+- `GET /v1/federation/nodes` -- operator view: each node's url/name,
+  reachable state, loaded model list, in_flight (if known), and
+  last-poll age in seconds.
+
+**Config** (three settings under the `federation.*` group in
+`muse.core.config.SETTINGS`; see "Configuration" above and
+`docs/CONFIG.md`):
+- `federation.refresh_interval_seconds` (`MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS`,
+  default `3.0`) -- seconds between background polls of each node.
+- `federation.forward_timeout_seconds` (`MUSE_FEDERATION_FORWARD_TIMEOUT_SECONDS`,
+  default `300.0`) -- per-request timeout when forwarding to a node
+  (long, since generation requests can run for minutes).
+- `federation.config_file` (`MUSE_FEDERATION_CONFIG`, default unset) --
+  explicit path to the node-list yaml, overriding the
+  `<catalog_dir>/federation.yaml` default-if-exists lookup.
+
+**CLI:** `muse federate --port 8100 --node http://192.168.0.204:8000
+--node http://192.168.0.50:8000` (or `--config path/to/federation.yaml`).
+`run_coordinator` (`muse.cli_impl.federation`) resolves the node list
+(`--config` > `federation.config_file` > `<catalog_dir>/federation.yaml`
+if it exists), and refuses to start a server -- exiting 2 with a clear
+stderr message -- if the merged node list is empty; a coordinator with
+zero nodes would otherwise boot healthy and 404 every request, a worse
+failure mode than refusing outright. Once nodes resolve, it builds a
+`NodeRegistry` + the coordinator app and blocks on
+`muse.cli_impl.serve_util.run_uvicorn` (the same bounded-graceful-
+shutdown uvicorn wrapper `muse serve` uses). Registry lifecycle is
+wired through the coordinator app's ASGI lifespan (an
+`asynccontextmanager` passed to `FastAPI(..., lifespan=...)` inside
+`build_coordinator`): `registry.start()` runs on startup, launching the
+background refresh loop on the SERVER'S OWN running event loop (which
+`NodeRegistry.start`'s `asyncio.ensure_future` requires), and
+`await registry.aclose()` runs on shutdown. This only fires when the
+ASGI lifespan protocol actually executes (a real uvicorn run, or a
+`with TestClient(app) as c:` block); a bare `TestClient(app).get(...)`
+(the style the existing route tests in `tests/cli_impl/test_federation_app.py`
+use) never triggers lifespan, so wiring it into `build_coordinator`
+did not disturb those tests' plain `.snapshot()`-only fakes.
+
+Client usage is unchanged OpenAI-compat, just pointed at the
+coordinator: `OpenAI(base_url="http://coordinator:8100/v1",
+api_key="not-used")`.
+
 ## MCP server (Using muse from Claude Desktop)
 
 `muse mcp` runs an MCP (Model Context Protocol) server that exposes

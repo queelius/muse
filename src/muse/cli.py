@@ -339,6 +339,44 @@ def mcp(
     ) or 0)
 
 
+@app.command("federate")
+def federate(
+    host: Annotated[str, typer.Option(help="bind address")] = "0.0.0.0",
+    port: Annotated[int, typer.Option(help="bind port")] = 8100,
+    node: Annotated[
+        list[str],
+        typer.Option(
+            "--node",
+            help=(
+                "remote muse node URL (repeatable), e.g. "
+                "http://192.168.0.204:8000 or name=http://host:8000"
+            ),
+        ),
+    ] = [],
+    config: Annotated[
+        Optional[str],
+        typer.Option(
+            "--config",
+            help=(
+                "path to a federation node-list yaml (default: "
+                "$MUSE_FEDERATION_CONFIG, else <catalog_dir>/federation.yaml "
+                "if it exists)"
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Start the federation coordinator (fronts a fixed set of muse nodes).
+
+    Merges `--node` entries with the resolved yaml file, routes each
+    request by model-locality across the node cluster, and exits 2
+    without starting a server if no nodes resolve from either source.
+    """
+    from muse.cli_impl.federation import run_coordinator
+    raise typer.Exit(run_coordinator(
+        host=host, port=port, cli_nodes=node or None, config_path=config,
+    ) or 0)
+
+
 # Hidden internal commands invoked by the supervisor as subprocesses.
 # They never show up in `muse --help` and aren't documented for users.
 

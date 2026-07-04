@@ -539,6 +539,32 @@ Tools split into two groups:
 
 Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or `<name>_path` (local file). Image and audio outputs return as MCP `ImageContent` / `AudioContent` blocks plus a JSON summary.
 
+## Federation
+
+`muse federate` runs a thin coordinator in front of a fixed list of
+unmodified muse `serve` nodes, so one OpenAI-compatible endpoint fronts
+your whole cluster instead of clients having to know which box has
+which model.
+
+```bash
+muse federate --port 8100 \
+    --node http://192.168.0.204:8000 \
+    --node http://192.168.0.50:8000
+# or: muse federate --config ~/.muse/federation.yaml
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://coordinator:8100/v1", api_key="not-used")
+client.chat.completions.create(model="qwen3.5-4b-q4", messages=[...])
+```
+
+Requests are routed by model-locality (a node that already has the
+model loaded wins over one that would have to cold-load it), with an
+in-flight-count tie-break. `GET /v1/models`, `/health`, and
+`/v1/federation/nodes` on the coordinator aggregate across the cluster.
+See the "Federation" section of `CLAUDE.md` for the full design.
+
 ## Architecture
 
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
