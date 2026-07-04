@@ -17,6 +17,7 @@ import asyncio
 import logging
 import threading
 import time
+from functools import partial
 
 import httpx
 
@@ -25,7 +26,12 @@ from muse.federation.state import NodeState, build_node_state
 
 logger = logging.getLogger(__name__)
 
-_FETCH_TIMEOUT_SECONDS = 3.0
+# Default per-node poll timeout. Chosen ABOVE a node's own
+# server.aggregation_timeout_seconds (default 5s) so a node that is briefly
+# slow to aggregate its workers' /v1/models (e.g. a worker mid-generation on
+# a CPU box) is NOT falsely marked unreachable and dropped from routing. The
+# coordinator overrides this from federation.poll_timeout_seconds.
+_FETCH_TIMEOUT_SECONDS = 10.0
 
 
 async def _get_json(client: httpx.AsyncClient, url: str, **kwargs) -> dict | None:
@@ -40,13 +46,13 @@ async def _get_json(client: httpx.AsyncClient, url: str, **kwargs) -> dict | Non
 
 
 async def _default_fetch(
-    url: str, token: str | None
+    url: str, token: str | None, *, timeout: float = _FETCH_TIMEOUT_SECONDS
 ) -> tuple[dict | None, dict | None, dict | None]:
     """Default httpx-based fetch: GET /v1/models and /health always;
     GET /v1/telemetry/summary (bearer-authed) only when `token` is
     truthy. Every GET is isolated: a failure on one payload never
     prevents the others from being fetched."""
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT_SECONDS) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         models_payload = await _get_json(client, f"{url}/v1/models")
         health_payload = await _get_json(client, f"{url}/health")
         summary_payload = None
@@ -69,11 +75,18 @@ class NodeRegistry:
         refresh_interval: float,
         clock=time.monotonic,
         fetch=None,
+        poll_timeout: float | None = None,
     ) -> None:
         self._nodes = list(nodes)
         self._refresh_interval = refresh_interval
         self._clock = clock
-        self._fetch = fetch if fetch is not None else _default_fetch
+        if fetch is not None:
+            self._fetch = fetch
+        else:
+            # Bind the configured per-node poll timeout into the default fetch,
+            # preserving the (url, token) fetch protocol that injected fetches use.
+            _timeout = poll_timeout if poll_timeout is not None else _FETCH_TIMEOUT_SECONDS
+            self._fetch = partial(_default_fetch, timeout=_timeout)
         self._lock = threading.Lock()
         self._states: list[NodeState] = []
         self._task: asyncio.Task | None = None

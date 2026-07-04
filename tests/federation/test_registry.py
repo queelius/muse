@@ -56,3 +56,43 @@ async def test_refresh_once_skips_id_less_entry_but_stays_reachable():
 
     assert snap["a"].reachable is True
     assert snap["a"].models == {}
+
+
+def test_poll_timeout_binds_into_default_fetch():
+    """NodeRegistry(poll_timeout=X) binds X into the default httpx fetch."""
+    from functools import partial
+    from muse.federation.nodes import NodeSpec
+    from muse.federation.registry import NodeRegistry, _default_fetch
+    reg = NodeRegistry(
+        [NodeSpec(url="http://a:8000", name="a")],
+        refresh_interval=3.0,
+        poll_timeout=7.5,
+    )
+    assert isinstance(reg._fetch, partial)
+    assert reg._fetch.func is _default_fetch
+    assert reg._fetch.keywords["timeout"] == 7.5
+
+
+def test_poll_timeout_defaults_when_unset():
+    """No poll_timeout -> falls back to the module default (>= node aggregation timeout)."""
+    from functools import partial
+    from muse.federation.nodes import NodeSpec
+    from muse.federation.registry import NodeRegistry, _FETCH_TIMEOUT_SECONDS
+    reg = NodeRegistry([NodeSpec(url="http://a:8000", name="a")], refresh_interval=3.0)
+    assert isinstance(reg._fetch, partial)
+    assert reg._fetch.keywords["timeout"] == _FETCH_TIMEOUT_SECONDS
+    assert _FETCH_TIMEOUT_SECONDS >= 5.0  # above the 5s node aggregation timeout
+
+
+def test_injected_fetch_is_used_as_is():
+    """An injected fetch is NOT wrapped (preserves the test-injection contract)."""
+    from muse.federation.nodes import NodeSpec
+    from muse.federation.registry import NodeRegistry
+    async def fake(url, token): return (None, None, None)
+    reg = NodeRegistry([NodeSpec(url="http://a:8000", name="a")], refresh_interval=3.0, fetch=fake)
+    assert reg._fetch is fake
+
+
+def test_federation_poll_timeout_config_default():
+    from muse.core import config
+    assert config.get("federation.poll_timeout_seconds") == 10.0

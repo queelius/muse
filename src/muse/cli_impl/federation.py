@@ -304,6 +304,7 @@ def run_coordinator(
     registry = NodeRegistry(
         nodes,
         refresh_interval=config.get("federation.refresh_interval_seconds"),
+        poll_timeout=config.get("federation.poll_timeout_seconds"),
     )
     app = build_coordinator(
         registry, timeout=config.get("federation.forward_timeout_seconds")

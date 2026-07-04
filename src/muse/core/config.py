@@ -128,6 +128,11 @@ SETTINGS: list[Setting] = [
     Setting("federation.forward_timeout_seconds", "MUSE_FEDERATION_FORWARD_TIMEOUT_SECONDS",
             "float", 300.0, "federation",
             "Per-request timeout when the coordinator forwards to a node."),
+    Setting("federation.poll_timeout_seconds", "MUSE_FEDERATION_POLL_TIMEOUT_SECONDS",
+            "float", 10.0, "federation",
+            "Per-node timeout for the coordinator's /v1/models + /health poll. "
+            "Keep above a node's server.aggregation_timeout_seconds (5s) so a "
+            "briefly-slow node is not falsely dropped from routing."),
     Setting("federation.config_file", "MUSE_FEDERATION_CONFIG",
             "opt_str", None, "federation",
             "Path to the coordinator node-list yaml (default <catalog_dir>/federation.yaml)."),
