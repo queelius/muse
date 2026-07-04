@@ -1,0 +1,135 @@
+"""Async node registry for the muse federation coordinator.
+
+`NodeRegistry` polls every configured node concurrently, folds each
+node's payloads into a `NodeState` via the pure reducer in
+`muse.federation.state`, and caches the resulting snapshot list. Route
+handlers (sync) read the cache via `snapshot()`; a background asyncio
+task refreshes it on an interval via `start()` / `aclose()`.
+
+The fetch function is injectable so tests never touch the network or
+depend on wall-clock sleeps: `fetch(url, token) -> (models_payload,
+health_payload, summary_payload)`, each `None` on any per-call failure.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+
+import httpx
+
+from muse.federation.nodes import NodeSpec
+from muse.federation.state import NodeState, build_node_state
+
+_FETCH_TIMEOUT_SECONDS = 3.0
+
+
+async def _get_json(client: httpx.AsyncClient, url: str, **kwargs) -> dict | None:
+    """GET `url` and return parsed JSON, or None on any error (connect,
+    timeout, non-200 status, or a body that is not valid JSON)."""
+    try:
+        response = await client.get(url, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+async def _default_fetch(
+    url: str, token: str | None
+) -> tuple[dict | None, dict | None, dict | None]:
+    """Default httpx-based fetch: GET /v1/models and /health always;
+    GET /v1/telemetry/summary (bearer-authed) only when `token` is
+    truthy. Every GET is isolated: a failure on one payload never
+    prevents the others from being fetched."""
+    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT_SECONDS) as client:
+        models_payload = await _get_json(client, f"{url}/v1/models")
+        health_payload = await _get_json(client, f"{url}/health")
+        summary_payload = None
+        if token:
+            summary_payload = await _get_json(
+                client,
+                f"{url}/v1/telemetry/summary",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    return models_payload, health_payload, summary_payload
+
+
+class NodeRegistry:
+    """Polls a fixed set of nodes and caches their `NodeState` snapshot."""
+
+    def __init__(
+        self,
+        nodes: list[NodeSpec],
+        *,
+        refresh_interval: float,
+        clock=time.monotonic,
+        fetch=None,
+    ) -> None:
+        self._nodes = list(nodes)
+        self._refresh_interval = refresh_interval
+        self._clock = clock
+        self._fetch = fetch if fetch is not None else _default_fetch
+        self._lock = threading.Lock()
+        self._states: list[NodeState] = []
+        self._task: asyncio.Task | None = None
+
+    async def _fetch_one(self, spec: NodeSpec) -> NodeState:
+        models_payload, health_payload, summary_payload = await self._fetch(
+            spec.url, spec.token
+        )
+        return build_node_state(
+            spec,
+            models_payload=models_payload,
+            health_payload=health_payload,
+            summary_payload=summary_payload,
+            now=self._clock(),
+        )
+
+    async def refresh_once(self) -> None:
+        """Concurrently poll every node and atomically replace the cached
+        snapshot list."""
+        states = await asyncio.gather(*(self._fetch_one(spec) for spec in self._nodes))
+        with self._lock:
+            self._states = list(states)
+
+    def snapshot(self) -> list[NodeState]:
+        """Return the cached states (empty list before the first refresh).
+        Returns a fresh list copy so callers cannot mutate the internal
+        cache."""
+        with self._lock:
+            return list(self._states)
+
+    def node_by_url(self, url: str) -> NodeSpec | None:
+        for spec in self._nodes:
+            if spec.url == url:
+                return spec
+        return None
+
+    def start(self) -> None:
+        """Launch the background refresh loop as an asyncio task. One
+        failed refresh is logged-and-swallowed (via try/except) rather
+        than killing the loop."""
+
+        async def _loop() -> None:
+            while True:
+                try:
+                    await self.refresh_once()
+                except Exception:
+                    pass
+                await asyncio.sleep(self._refresh_interval)
+
+        self._task = asyncio.ensure_future(_loop())
+
+    async def aclose(self) -> None:
+        """Cancel the background refresh task and await its cancellation
+        cleanly."""
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
