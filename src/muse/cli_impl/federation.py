@@ -25,13 +25,18 @@ import target has no effect on the gateway module's own callers, and
 this module always calls its OWN `_forward` name (not
 `gateway._forward`), so the patch takes effect.
 
-Failover: a `_forward` call that fails at connect/timeout (never a
-mid-stream failure -- `_forward` only raises those exceptions synchronously
-before it returns a Response; once it returns a StreamingResponse the
-relay runs independently and this function is not on the hook for it)
-retries ONCE against a different candidate for the same model. If no
-other candidate exists, or the retry also fails, the coordinator returns
-502 `no_node_available`.
+Failover: a `_forward` call that fails at CONNECT time (the node is
+unreachable/down -- never a mid-stream failure, and never a request the
+node already accepted; `_forward` only raises those exceptions
+synchronously before it returns a Response; once it returns a
+StreamingResponse the relay runs independently and this function is not
+on the hook for it) retries ONCE against a different candidate for the
+same model. If no other candidate exists, or the retry also fails, the
+coordinator returns 502 `no_node_available`. A `httpx.ReadTimeout` (the
+node accepted the request and is processing or stuck) is deliberately
+NOT a failover trigger: retrying would re-execute a full, possibly
+non-idempotent generation on a second node. A ReadTimeout propagates
+straight to the client instead.
 
 `run_coordinator` is this module's other export: it resolves the node
 list (CLI `--node` entries merged with an optional `federation.yaml`),
@@ -42,6 +47,7 @@ in `muse.cli`.
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -65,12 +71,18 @@ from muse.federation.state import NodeState
 # name below, which Python resolves against THIS module's globals.
 _forward = _forward
 
-# Connect/timeout failures that make a node worth failing over from.
+# Connect-phase failures that make a node worth failing over from.
 # Deliberately NOT httpx.HTTPError broadly: a worker that connects and
 # then returns a 4xx/5xx response is not a transport failure, it is a
 # real answer that should be relayed to the client, not retried against
-# a different node.
-_FAILOVER_EXCEPTIONS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)
+# a different node. Also deliberately NOT httpx.ReadTimeout: a read
+# timeout means the node ACCEPTED the request and is processing (or
+# stuck) -- failing over would re-execute a full (possibly
+# non-idempotent) generation on a second node. Only connect-phase
+# failures (the node is unreachable/down) trigger failover; a request
+# the node has already accepted is never retried elsewhere and any
+# ReadTimeout propagates straight to the client.
+_FAILOVER_EXCEPTIONS = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
 def build_coordinator(
@@ -85,23 +97,43 @@ def build_coordinator(
     exposing `.snapshot() -> list[NodeState]`; tests pass a plain fake).
     `timeout` bounds each forwarded request. `rr_counter` is an optional
     shared dict passed through to `select_node` for round-robin
-    tie-breaking across requests; `None` disables rotation (deterministic
-    first-by-url).
+    tie-breaking across requests. When the caller passes `None` (the
+    default -- this is what `run_coordinator` does for the deployed
+    coordinator), a fresh `{}` is created and stored on `app.state`
+    instead, so a real deployment actually rotates same-model traffic
+    across tied candidates rather than pinning every request to the
+    alphabetically-first node. Pass an explicit dict to inject a shared
+    counter (or to observe/reset it) from a test.
 
     Registry lifecycle is wired via a FastAPI lifespan context manager:
-    `registry.start()` runs on startup (launching the background refresh
-    task on the server's OWN event loop, which is what `NodeRegistry.start`
-    needs -- `asyncio.ensure_future` requires a running loop) and
+    the coordinator warms the snapshot with one `await
+    registry.refresh_once()` BEFORE serving (best-effort: a slow or
+    failing node at boot is caught and logged rather than crashing
+    startup, since the background loop will retry it), then
+    `registry.start()` runs (launching the background refresh task on
+    the server's OWN event loop, which is what `NodeRegistry.start`
+    needs -- `asyncio.ensure_future` requires a running loop), and
     `registry.aclose()` runs on shutdown. This only fires when the ASGI
     lifespan protocol actually runs (real `run_uvicorn` serving, or a
     `with TestClient(app) as c:` block); a bare `TestClient(app).get(...)`
     (as the existing route tests in this module use) never triggers
-    lifespan, so those tests' plain-`.snapshot()`-only fakes are
-    unaffected by this wiring.
+    lifespan, so those tests' plain-`.snapshot()`-only fakes (which don't
+    implement `refresh_once`/`start`/`aclose`) are unaffected by this
+    wiring.
     """
+    rr_counter = {} if rr_counter is None else rr_counter
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        try:
+            await registry.refresh_once()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "federation: initial refresh_once failed at boot; serving "
+                "with an empty snapshot until the background loop's first "
+                "poll lands",
+                exc_info=True,
+            )
         registry.start()
         try:
             yield

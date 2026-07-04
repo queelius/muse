@@ -108,6 +108,47 @@ def test_failover_to_second_node(monkeypatch):
     ]
 
 
+def test_default_rr_counter_rotates_across_tied_same_model_nodes(monkeypatch):
+    """Regression guard for the deployed (no explicit rr_counter) path.
+
+    `run_coordinator` never passes an rr_counter, so `build_coordinator`
+    must default it to a real dict rather than leaving it None -- else
+    `select_node` falls back to its deterministic first-by-url pick and
+    same-model traffic across a multi-replica deployment never rotates.
+    Two nodes both serve the SAME model, both with in_flight=None (no
+    telemetry token), so they tie on every select_node criterion up to
+    the round-robin tie-break. Firing the same request twice must hit
+    two DIFFERENT node urls.
+    """
+
+    def _snap_tied():
+        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True, True)}, None, 0.0)
+        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True, True)}, None, 0.0)
+        return [a, b]
+
+    class FakeRegTied:
+        def snapshot(self):
+            return _snap_tied()
+
+    seen_urls = []
+
+    async def fake_forward(request, target_url, timeout):
+        seen_urls.append(target_url)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(fed, "_forward", fake_forward)
+    # No rr_counter passed: exercises the deployed default path.
+    app = fed.build_coordinator(FakeRegTied(), timeout=5)
+    c = TestClient(app)
+
+    r1 = c.post("/v1/chat/completions", json={"model": "m", "messages": []})
+    r2 = c.post("/v1/chat/completions", json={"model": "m", "messages": []})
+
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert len(seen_urls) == 2
+    assert seen_urls[0] != seen_urls[1]
+
+
 def test_failover_502_when_all_nodes_fail(monkeypatch):
     def _snap_both():
         a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True, True)}, 0, 0.0)
