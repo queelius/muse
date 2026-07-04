@@ -35,14 +35,16 @@ class LogHub:
         with self._lock:
             buf = self._buffers.setdefault(model_id, collections.deque())
             buf.append(line)
-            self._byte_counts[model_id] = self._byte_counts.get(model_id, 0) + len(line)
+            self._byte_counts[model_id] = self._byte_counts.get(model_id, 0) + len(
+                line.encode("utf-8")
+            )
 
             # Evict oldest lines until under the byte bound, but always keep
             # at least one line so a single oversized line is retained
             # rather than evicted to empty.
             while len(buf) > 1 and self._byte_counts[model_id] > self._buffer_bytes:
                 oldest = buf.popleft()
-                self._byte_counts[model_id] -= len(oldest)
+                self._byte_counts[model_id] -= len(oldest.encode("utf-8"))
 
             subscribers = self._subscribers.get(model_id, ())
             for q in subscribers:
