@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +45,15 @@ from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest
 from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
+
+# Bare name (not `from muse.observability import recorder`) so tests can
+# monkeypatch `muse.cli_impl.gateway.record` directly. `record` is itself
+# fire-and-forget (see muse.observability.recorder), but the call site in
+# `_route_via_director` still wraps it in try/except: telemetry must never
+# break request forwarding, even if a future change to `record` regresses
+# that guarantee.
+from muse.observability.dashboard import build_dashboard_router
+from muse.observability.recorder import record
 
 # Module-top (no import cycle: supervisor imports gateway only lazily).
 # `revalidate_servability` re-checks a stale boot unservable stamp against
@@ -364,6 +374,17 @@ def build_gateway(
     # default {"detail": {"error": {...}}} double-wrap.
     install_admin_error_handler(app)
 
+    # Dashboard router (/dashboard shell + gated /v1/telemetry/* JSON+SSE
+    # endpoints). Gated on BOTH: telemetry.enabled (a global off-switch)
+    # AND state is not None (the legacy static-routes test path passes no
+    # SupervisorState, so there is no state.telemetry_store/log_hub for
+    # the data endpoints to read). Mounting here is safe even before Task
+    # 11 wires telemetry_store/log_hub onto SupervisorState: the /dashboard
+    # HTML shell itself never touches state, only the gated data endpoints
+    # do, and those aren't hit until a client actually requests them.
+    if config.get("telemetry.enabled") and state is not None:
+        app.include_router(build_dashboard_router(state))
+
     @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(request: Request, full_path: str):
         # NOTE: aggregated endpoints (/v1/models, /health) land in D3 as
@@ -670,10 +691,48 @@ async def _route_via_director(
     # finally clause when the upstream iteration ends (or raises). Both
     # paths converge in `_forward_with_release`.
     target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
-    return await _forward_with_release(
+    t0 = time.monotonic()
+    response = await _forward_with_release(
         request, target_url, timeout,
         director=state.director, model_id=model_id,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    stream = isinstance(response, StreamingResponse)
+    # Fire-and-forget: telemetry must NEVER break request forwarding, even
+    # if `record` or `_modality_from_path` regresses. Latency semantic:
+    # for buffered responses this is the full request duration; for
+    # streams it is time-to-response-object only, since
+    # StreamingResponse returns before the body actually streams (the
+    # `stream` flag records which one this event measured).
+    try:
+        record(
+            "request",
+            model_id=model_id,
+            modality=_modality_from_path(full_path),
+            latency_ms=latency_ms,
+            status=getattr(response, "status_code", None),
+            stream=stream,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("telemetry record('request') failed", exc_info=True)
+    return response
+
+
+def _modality_from_path(full_path: str) -> str:
+    """Derive a modality label from the request path, structurally.
+
+    `full_path` has no leading slash (e.g. "v1/chat/completions",
+    "v1/images/generations", "v1/embeddings"). Strips a leading "v1/" if
+    present, then keeps the first two remaining segments (or the one
+    segment if that's all there is) as the label, e.g. "chat/completions",
+    "images/generations", "embeddings". Deliberately NOT a hardcoded
+    per-route lookup table: new routes get a sensible label for free.
+    """
+    path = full_path.split("?", 1)[0].strip("/")
+    parts = path.split("/") if path else []
+    if parts and parts[0] == "v1":
+        parts = parts[1:]
+    return "/".join(parts[:2]) if parts else "unknown"
 
 
 async def _acquire_off_loop(state, model_id, manifest, *, on_settle=None) -> int:
