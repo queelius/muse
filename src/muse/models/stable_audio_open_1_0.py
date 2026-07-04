@@ -78,6 +78,11 @@ MANIFEST = {
         # numpy is pulled by torch but the runtime imports it directly
         # for waveform shaping (#110).
         "numpy",
+        # StableAudioPipeline's default CosineDPMSolverMultistepScheduler
+        # needs torchsde for its stochastic SDE solver; diffusers imports
+        # it lazily at load time, so a venv without it fails at model load
+        # (not at import). Declare it explicitly.
+        "torchsde",
     ),
     # ffmpeg is optional; only needed for mp3/opus response_format.
     # Declaring it here lets `muse pull` ensure it's available, but
