@@ -33,7 +33,7 @@ from muse.cli_impl.serve_util import run_uvicorn
 
 from muse.cli_impl.idle_sweeper import IdleSweeper
 from muse.core import config
-from muse.core.catalog import _read_catalog, get_manifest
+from muse.core.catalog import CatalogError, _read_catalog, get_manifest
 
 from muse.core.memory_probe import declared_device
 
@@ -646,13 +646,32 @@ def validate_catalog_at_boot(
     `/v1/models` consult this dict to short-circuit 503 before calling
     the director.
 
+    A corrupt catalog.json with no last-known-good cache makes
+    `_read_catalog` raise `CatalogError` (see its corrupt-guard
+    docstring). Boot must not crash with a raw traceback over this: log
+    one clear, actionable line naming the catalog path (no exc_info; the
+    underlying corruption was already logged by `_read_catalog`) and
+    degrade gracefully by returning early with no stamps, exactly like
+    the pre-existing missing/empty-catalog case. The gateway still 503s
+    `catalog_unavailable` per request via its own CatalogError handling
+    around `get_manifest`, so operators get a live, actionable signal on
+    every request rather than a supervisor that refuses to boot.
+
     `memory_probe` defaults to the production adapter; tests inject a
     MagicMock with the desired return values.
     """
     if memory_probe is None:
         memory_probe = _MemoryProbeAdapter()
 
-    catalog = _read_catalog()
+    try:
+        catalog = _read_catalog()
+    except CatalogError as exc:
+        logger.error(
+            "muse serve: catalog is corrupt; boot continues with no "
+            "models validated until it is fixed: %s", exc,
+        )
+        return
+
     cpu_available_gb, gpu_available_gb = _available_pools(
         memory_probe,
         gpu_headroom_gb=gpu_headroom_gb,

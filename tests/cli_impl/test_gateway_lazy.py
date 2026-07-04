@@ -29,6 +29,7 @@ from starlette.requests import ClientDisconnect
 
 from muse.cli_impl.gateway import build_gateway
 from muse.cli_impl.supervisor import SupervisorState
+from muse.core.catalog import CatalogError
 
 
 def _manifest(memory_gb: float = 0.5, device: str = "cpu") -> dict:
@@ -427,6 +428,56 @@ class TestUnknownModel:
             client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "ghost"},
+            )
+
+        state.director.acquire.assert_not_called()
+        state.director.release.assert_not_called()
+
+
+# =============================================================================
+# Regression: get_manifest raising CatalogError (corrupt catalog.json, no
+# last-known-good cache) must NOT surface as a bare 500 `{"detail": ...}`.
+# Pre-fix, a corrupt catalog silently 404'd (get_manifest returned nothing
+# useful); the corrupt-guard now raises a distinct CatalogError, and the
+# route must translate that into a clean OpenAI-shaped 503, matching the
+# model_unservable envelope shape used elsewhere in this function.
+# =============================================================================
+
+
+class TestCatalogErrorOnGetManifest:
+    def test_returns_clean_openai_shaped_503(self):
+        state = _make_state_with_director()
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        with patch(
+            "muse.cli_impl.gateway.get_manifest",
+            side_effect=CatalogError("catalog at /tmp/catalog.json is corrupt"),
+        ):
+            r = client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "some-model"},
+            )
+
+        assert r.status_code == 503
+        body = r.json()
+        assert "error" in body
+        assert "detail" not in body
+        assert body["error"]["code"] == "catalog_unavailable"
+        assert body["error"]["type"] == "server_error"
+
+    def test_does_not_call_acquire(self):
+        state = _make_state_with_director()
+        app = build_gateway(state=state)
+        client = TestClient(app)
+
+        with patch(
+            "muse.cli_impl.gateway.get_manifest",
+            side_effect=CatalogError("catalog is corrupt"),
+        ):
+            client.post(
+                "/v1/audio/speech",
+                json={"input": "hi", "model": "some-model"},
             )
 
         state.director.acquire.assert_not_called()

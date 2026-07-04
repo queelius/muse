@@ -41,7 +41,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
 # models (v0.47.3); it is mtime-cached so per-request reads are cheap.
 from muse.core import config
-from muse.core.catalog import _read_catalog, get_manifest
+from muse.core.catalog import CatalogError, _read_catalog, get_manifest
 from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
 
@@ -534,7 +534,10 @@ async def _route_via_director(
       2. Resolve the manifest via `muse.core.catalog.get_manifest`. The
          director's load + eviction decisions read `capabilities.memory_gb`
          and `capabilities.device` from this dict. KeyError (model not in
-         catalog) -> 404 model_not_found.
+         catalog) -> 404 model_not_found. CatalogError (catalog.json is
+         corrupt and no last-known-good cache exists) -> 503
+         catalog_unavailable, so a corrupt catalog degrades to a clean
+         OpenAI-shaped error instead of an uncaught 500.
       3. Call `state.director.acquire(model_id, manifest=...)`. This may
          block on cold load + eviction. On `OperationError` (the director's
          user-facing failure type, e.g. model_too_large_for_device), map
@@ -596,6 +599,25 @@ async def _route_via_director(
         return _openai_error(
             404, "model_not_found",
             f"model {model_id!r} is not in the catalog",
+        )
+    except CatalogError as exc:
+        # catalog.json is corrupt and no last-known-good cache exists
+        # (muse.core.catalog._read_catalog's corrupt-guard). Pre-fix this
+        # propagated uncaught to FastAPI's default handler, surfacing a
+        # bare {"detail": "Internal Server Error"} instead of muse's
+        # OpenAI-shaped envelope. Log once here (no traceback needed;
+        # _read_catalog already logged the underlying corruption) and
+        # degrade to a clean 503, matching the model_unservable shape
+        # used elsewhere in this function.
+        logger.error(
+            "get_manifest(%r) failed: catalog is unavailable: %s",
+            model_id, exc,
+        )
+        return _openai_error(
+            503,
+            "catalog_unavailable",
+            f"model catalog is temporarily unavailable: {exc}",
+            error_type="server_error",
         )
 
     # 2b. Size the load. The director sizes loads + drives LRU eviction

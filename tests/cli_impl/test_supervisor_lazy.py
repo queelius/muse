@@ -367,6 +367,74 @@ class TestValidateCatalogAtBoot:
 
 
 # ---------------------------------------------------------------------------
+# Regression: a corrupt catalog.json (no last-known-good cache) must not
+# crash boot with a raw traceback. `_read_catalog` raises `CatalogError` in
+# that case (the corrupt-guard); `validate_catalog_at_boot` must catch it,
+# log one clear line naming the catalog path (no traceback), and degrade
+# gracefully -- boot continues with no models flagged unservable, the same
+# as the pre-existing missing/empty-catalog case.
+# ---------------------------------------------------------------------------
+
+
+class TestValidateCatalogAtBootCorruptCatalog:
+    def test_corrupt_catalog_does_not_raise(self, tmp_catalog):
+        from muse.core.catalog import _catalog_path
+
+        _catalog_path().parent.mkdir(parents=True, exist_ok=True)
+        _catalog_path().write_text("{not valid json")
+
+        state = SupervisorState()
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 32.0
+
+        # Must not raise CatalogError (or anything else) out of boot.
+        validate_catalog_at_boot(state, memory_probe=probe)
+
+    def test_corrupt_catalog_leaves_no_unservable_stamps(self, tmp_catalog):
+        """Degrades the same way an empty/missing catalog does: nothing
+        gets flagged since nothing could be read."""
+        from muse.core.catalog import _catalog_path
+
+        _catalog_path().parent.mkdir(parents=True, exist_ok=True)
+        _catalog_path().write_text("{not valid json")
+
+        state = SupervisorState()
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 32.0
+
+        validate_catalog_at_boot(state, memory_probe=probe)
+        assert state.unservable_reasons == {}
+
+    def test_corrupt_catalog_logs_one_clear_line_no_traceback(self, tmp_catalog, caplog):
+        from muse.core.catalog import _catalog_path
+
+        _catalog_path().parent.mkdir(parents=True, exist_ok=True)
+        _catalog_path().write_text("{not valid json")
+
+        state = SupervisorState()
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 32.0
+
+        with caplog.at_level("ERROR", logger="muse.cli_impl.supervisor"):
+            validate_catalog_at_boot(state, memory_probe=probe)
+
+        boot_records = [
+            r for r in caplog.records
+            if r.name == "muse.cli_impl.supervisor"
+        ]
+        assert len(boot_records) == 1
+        record = boot_records[0]
+        # No traceback: the underlying CatalogError was already logged by
+        # _read_catalog; this call site logs a plain message, not exc_info.
+        assert record.exc_info is None
+        assert str(_catalog_path()) in record.getMessage()
+        assert "corrupt" in record.getMessage()
+
+
+# ---------------------------------------------------------------------------
 # E3: run_supervisor lazy-boot path
 # ---------------------------------------------------------------------------
 
