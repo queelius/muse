@@ -121,6 +121,16 @@ SETTINGS: list[Setting] = [
     Setting("telemetry.log_ticket_ttl_seconds", "MUSE_TELEMETRY_LOG_TICKET_TTL_SECONDS",
             "float", 60.0, "telemetry",
             "Seconds a dashboard SSE log-stream ticket stays valid."),
+    # --- federation ---
+    Setting("federation.refresh_interval_seconds", "MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS",
+            "float", 3.0, "federation",
+            "Seconds between coordinator polls of each node's state."),
+    Setting("federation.forward_timeout_seconds", "MUSE_FEDERATION_FORWARD_TIMEOUT_SECONDS",
+            "float", 300.0, "federation",
+            "Per-request timeout when the coordinator forwards to a node."),
+    Setting("federation.config_file", "MUSE_FEDERATION_CONFIG",
+            "opt_str", None, "federation",
+            "Path to the coordinator node-list yaml (default <catalog_dir>/federation.yaml)."),
     # --- admin ---
     Setting("admin.token", "MUSE_ADMIN_TOKEN",
             "opt_str", None, "admin",
