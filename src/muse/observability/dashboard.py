@@ -4,13 +4,23 @@ Wire surface:
   GET /dashboard                         -- HTMLResponse, UN-GATED shell.
   GET /v1/telemetry/summary              -- gated JSON snapshot.
   GET /v1/telemetry/series               -- gated JSON time series.
-  GET /v1/telemetry/logs/{model_id}      -- gated SSE log tail.
+  POST /v1/telemetry/logs-ticket         -- gated (header) ticket mint.
+  GET /v1/telemetry/logs/{model_id}      -- gated (ticket OR header) SSE log tail.
 
 `/dashboard` is intentionally un-gated: it is a static shell that prompts
 the browser for a token and stores it in sessionStorage before hitting
 any of the gated data endpoints. Gating those endpoints (not the shell)
 means the page always loads, even with no token configured yet, so the
 operator can see the prompt instead of a blank 503.
+
+The SSE logs endpoint is a special case: `EventSource` cannot set a
+custom Authorization header, so it cannot use `require_dashboard_auth`
+as a dependency. Instead the dashboard JS first mints a short-lived
+ticket via the header-gated `POST /v1/telemetry/logs-ticket`, then opens
+the `EventSource` with that ticket in the query string. The logs route
+itself checks the ticket (or, for curl-style clients, an Authorization
+header) inline before opening the stream. The admin token itself never
+rides a URL.
 
 `state` is a duck-typed namespace (see muse.cli_impl.supervisor's
 SupervisorState in production, or a SimpleNamespace in tests) exposing:
@@ -26,12 +36,14 @@ import queue
 import socket
 import time
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 
 from muse.admin.auth import _err
-from muse.observability.dashboard_auth import require_dashboard_auth
+from muse.core import config
+from muse.observability.dashboard_auth import check_dashboard_token, require_dashboard_auth
+from muse.observability.log_tickets import LogTicketStore
 from muse.observability.recorder import get_recorder
 
 # Roughly 60 buckets across any requested window.
@@ -103,6 +115,7 @@ def _loaded_entry_dict(model_id: str, entry) -> dict:
 
 def build_dashboard_router(state) -> APIRouter:
     router = APIRouter()
+    tickets = LogTicketStore(config.get("telemetry.log_ticket_ttl_seconds"))
 
     @router.get("/dashboard", response_class=HTMLResponse)
     def dashboard() -> HTMLResponse:
@@ -138,11 +151,29 @@ def build_dashboard_router(state) -> APIRouter:
         except ValueError:
             raise _err(400, "invalid_metric", "Unknown telemetry metric")
 
-    @router.get(
-        "/v1/telemetry/logs/{model_id}",
+    @router.post(
+        "/v1/telemetry/logs-ticket",
         dependencies=[Depends(require_dashboard_auth)],
     )
-    async def logs(model_id: str, request: Request) -> EventSourceResponse:
+    def mint_logs_ticket() -> dict:
+        ticket, expires_in = tickets.mint()
+        return {"ticket": ticket, "expires_in": expires_in}
+
+    @router.get("/v1/telemetry/logs/{model_id}")
+    async def logs(
+        model_id: str,
+        request: Request,
+        ticket: str | None = Query(default=None),
+        authorization: str | None = Header(default=None),
+    ) -> EventSourceResponse:
+        # This route cannot use require_dashboard_auth as a dependency:
+        # EventSource clients cannot set an Authorization header, so they
+        # authenticate via a short-lived ticket instead. A valid ticket is
+        # accepted outright; otherwise fall back to the header check (for
+        # curl-style clients), which raises the usual 503/401/403.
+        # ?access_token=<admin-token> is intentionally NOT accepted here.
+        if not (ticket and tickets.validate(ticket)):
+            check_dashboard_token(authorization)
         return EventSourceResponse(_stream_model_logs(state.log_hub, model_id, request))
 
     return router
@@ -320,19 +351,29 @@ DASHBOARD_HTML = """<title>muse dashboard</title>
   function connectLogs() {
     var modelId = document.getElementById("log-model-id").value || "default";
     if (logSource) { logSource.close(); }
-    var url = "/v1/telemetry/logs/" + encodeURIComponent(modelId) +
-      "?access_token=" + encodeURIComponent(getToken());
-    logSource = new EventSource(url);
-    var panel = document.getElementById("log-panel");
-    logSource.onmessage = function (ev) {
-      var line = document.createElement("div");
-      line.textContent = ev.data;
-      panel.appendChild(line);
-      panel.scrollTop = panel.scrollHeight;
-    };
-    logSource.onerror = function () {
-      setStatus("log stream error");
-    };
+    fetch("/v1/telemetry/logs-ticket", { method: "POST", headers: authHeaders() })
+      .then(function (r) {
+        if (!r.ok) { throw new Error("logs-ticket " + r.status); }
+        return r.json();
+      })
+      .then(function (data) {
+        var url = "/v1/telemetry/logs/" + encodeURIComponent(modelId) +
+          "?ticket=" + encodeURIComponent(data.ticket);
+        logSource = new EventSource(url);
+        var panel = document.getElementById("log-panel");
+        logSource.onmessage = function (ev) {
+          var line = document.createElement("div");
+          line.textContent = ev.data;
+          panel.appendChild(line);
+          panel.scrollTop = panel.scrollHeight;
+        };
+        logSource.onerror = function () {
+          setStatus("log stream error");
+        };
+      })
+      .catch(function () {
+        setStatus("log auth failed");
+      });
   }
 
   document.getElementById("connect-btn").addEventListener("click", function () {

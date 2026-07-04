@@ -10,16 +10,25 @@ def test_no_token_configured_returns_503_dashboard_closed(monkeypatch):
     monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
     config.reset_config()
     with pytest.raises(HTTPException) as exc_info:
-        check_dashboard_token(None, None)
+        check_dashboard_token(None)
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["error"]["code"] == "dashboard_closed"
 
 
-def test_token_set_neither_supplied_returns_401_missing_token(monkeypatch):
+def test_token_set_no_header_returns_401_missing_token(monkeypatch):
     monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
     config.reset_config()
     with pytest.raises(HTTPException) as exc_info:
-        check_dashboard_token(None, None)
+        check_dashboard_token(None)
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["error"]["code"] == "missing_token"
+
+
+def test_token_set_malformed_header_returns_401_missing_token(monkeypatch):
+    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
+    config.reset_config()
+    with pytest.raises(HTTPException) as exc_info:
+        check_dashboard_token("secret123")
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail["error"]["code"] == "missing_token"
 
@@ -28,16 +37,7 @@ def test_token_set_wrong_bearer_returns_403_invalid_token(monkeypatch):
     monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
     config.reset_config()
     with pytest.raises(HTTPException) as exc_info:
-        check_dashboard_token("Bearer wrongtoken", None)
-    assert exc_info.value.status_code == 403
-    assert exc_info.value.detail["error"]["code"] == "invalid_token"
-
-
-def test_token_set_wrong_access_token_returns_403_invalid_token(monkeypatch):
-    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
-    config.reset_config()
-    with pytest.raises(HTTPException) as exc_info:
-        check_dashboard_token(None, "wrongtoken")
+        check_dashboard_token("Bearer wrongtoken")
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail["error"]["code"] == "invalid_token"
 
@@ -45,21 +45,7 @@ def test_token_set_wrong_access_token_returns_403_invalid_token(monkeypatch):
 def test_token_set_correct_via_bearer_returns_none(monkeypatch):
     monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
     config.reset_config()
-    assert check_dashboard_token("Bearer secret123", None) is None
-
-
-def test_token_set_correct_via_access_token_returns_none(monkeypatch):
-    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
-    config.reset_config()
-    assert check_dashboard_token(None, "secret123") is None
-
-
-def test_malformed_bearer_falls_through_to_correct_access_token(monkeypatch):
-    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
-    config.reset_config()
-    # "secret123" without the "Bearer " prefix is malformed as a bearer value;
-    # the correct access_token should still be accepted via fallthrough.
-    assert check_dashboard_token("secret123", "secret123") is None
+    assert check_dashboard_token("Bearer secret123") is None
 
 
 @pytest.fixture
@@ -89,8 +75,10 @@ def client(app):
 
 class TestRequireDashboardAuth:
     """Exercises require_dashboard_auth (the FastAPI dependency) through
-    real HTTP, so the Header/Query parameter wiring routes will actually
-    mount is under test -- not just check_dashboard_token's internal logic.
+    real HTTP, so the Header parameter wiring routes will actually mount
+    is under test -- not just check_dashboard_token's internal logic.
+
+    Header-only (v1 hardening): there is no ?access_token= path any more.
     """
 
     def test_no_token_configured_returns_503(self, client, monkeypatch):
@@ -116,17 +104,15 @@ class TestRequireDashboardAuth:
         assert r.status_code == 200
         assert r.json() == {"ok": True}
 
-    def test_token_set_correct_via_query_param_returns_200(self, client, monkeypatch):
-        """The SSE path: EventSource clients cannot set custom headers, so
-        the query param must work standalone with NO Authorization header.
-        This is the most important assertion in this module -- it proves
-        the Query(...) wiring on require_dashboard_auth actually works
-        through real HTTP, not just via a direct Python call."""
+    def test_query_param_access_token_is_no_longer_accepted(self, client, monkeypatch):
+        """The admin-token-in-URL path is REMOVED: a request that only
+        supplies ?access_token= (no header) must be rejected, proving the
+        query-param credential path is gone."""
         monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
         config.reset_config()
         r = client.get("/protected?access_token=secret123")
-        assert r.status_code == 200
-        assert r.json() == {"ok": True}
+        assert r.status_code == 401
+        assert r.json()["detail"]["error"]["code"] == "missing_token"
 
     def test_token_set_wrong_via_header_returns_403(self, client, monkeypatch):
         monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")

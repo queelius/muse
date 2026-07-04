@@ -124,6 +124,83 @@ def test_logs_requires_token(client_no_token):
     assert r.status_code == 503
 
 
+def test_logs_ticket_mint_requires_token(client_no_token):
+    r = client_no_token.post("/v1/telemetry/logs-ticket")
+    assert r.status_code == 503
+
+
+def test_logs_ticket_mint_wrong_bearer_returns_403(client_with_token):
+    r = client_with_token.post(
+        "/v1/telemetry/logs-ticket", headers={"Authorization": "Bearer wrong"}
+    )
+    assert r.status_code == 403
+
+
+def test_logs_ticket_mint_correct_bearer_returns_ticket(client_with_token):
+    r = client_with_token.post(
+        "/v1/telemetry/logs-ticket", headers={"Authorization": "Bearer t"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["ticket"], str) and len(body["ticket"]) > 0
+    assert isinstance(body["expires_in"], int) and body["expires_in"] > 0
+
+
+def test_logs_stream_rejects_invalid_ticket_with_no_header(client_with_token):
+    r = client_with_token.get("/v1/telemetry/logs/some-model?ticket=bogus-ticket")
+    assert r.status_code in (401, 403)
+
+
+def test_logs_stream_rejects_no_ticket_no_header(client_with_token):
+    r = client_with_token.get("/v1/telemetry/logs/some-model")
+    assert r.status_code == 401
+
+
+def test_logs_stream_rejects_removed_access_token_query_path(client_with_token):
+    # Proves the admin-token-in-URL path is gone: ?access_token=<token>
+    # with no header and no valid ticket must NOT open the stream.
+    r = client_with_token.get("/v1/telemetry/logs/some-model?access_token=t")
+    assert r.status_code != 200
+    assert r.status_code == 401
+
+
+def test_logs_endpoint_opens_stream_with_valid_ticket(tmp_path, monkeypatch):
+    # Direct-call pattern (see test_logs_endpoint_returns_event_source_response_with_token
+    # below): TestClient/ASGITransport fully drain an unbounded SSE generator
+    # before returning, so a real HTTP round-trip through a 200 stream-open
+    # would hang. Calling the route function directly avoids the ASGI
+    # dispatch while still exercising the real auth branch (ticket path).
+    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "t")
+    config.reset_config()
+    state = _make_state(tmp_path)
+    router = build_dashboard_router(state)
+    route = next(
+        r for r in router.routes if getattr(r, "path", None) == "/v1/telemetry/logs/{model_id}"
+    )
+    mint_route = next(
+        r for r in router.routes if getattr(r, "path", None) == "/v1/telemetry/logs-ticket"
+    )
+
+    class _UnusedRequest:
+        async def is_disconnected(self):
+            raise AssertionError("must not be invoked without ASGI dispatch")
+
+    mint_body = mint_route.endpoint()
+    ticket = mint_body["ticket"]
+
+    response = asyncio.run(
+        route.endpoint(
+            model_id="m",
+            request=_UnusedRequest(),
+            ticket=ticket,
+            authorization=None,
+        )
+    )
+    assert isinstance(response, EventSourceResponse)
+    assert response.status_code == 200
+    state.telemetry_store.close()
+
+
 def test_logs_endpoint_returns_event_source_response_with_token(tmp_path, monkeypatch):
     # The ASGI test transports available here (Starlette TestClient and
     # httpx.ASGITransport) both fully await the app callable before
@@ -146,7 +223,14 @@ def test_logs_endpoint_returns_event_source_response_with_token(tmp_path, monkey
         async def is_disconnected(self):
             raise AssertionError("must not be invoked without ASGI dispatch")
 
-    response = asyncio.run(route.endpoint(model_id="m", request=_UnusedRequest()))
+    response = asyncio.run(
+        route.endpoint(
+            model_id="m",
+            request=_UnusedRequest(),
+            ticket=None,
+            authorization="Bearer t",
+        )
+    )
     assert isinstance(response, EventSourceResponse)
     assert response.status_code == 200
     state.telemetry_store.close()

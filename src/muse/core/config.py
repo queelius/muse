@@ -118,6 +118,9 @@ SETTINGS: list[Setting] = [
             "int", 64, "telemetry", "Per-model recent-log ring-buffer size (KB)."),
     Setting("telemetry.sample_interval_seconds", "MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS",
             "float", 10.0, "telemetry", "Seconds between VRAM/RAM/loaded samples."),
+    Setting("telemetry.log_ticket_ttl_seconds", "MUSE_TELEMETRY_LOG_TICKET_TTL_SECONDS",
+            "float", 60.0, "telemetry",
+            "Seconds a dashboard SSE log-stream ticket stays valid."),
     # --- admin ---
     Setting("admin.token", "MUSE_ADMIN_TOKEN",
             "opt_str", None, "admin",

@@ -926,7 +926,15 @@ returns the buffered history for a late-connecting client.
 - `GET /v1/telemetry/series?metric=...&window=...` -- gated JSON time
   series from `TelemetryStore.series`; unknown `metric` returns 400
   `invalid_metric`.
-- `GET /v1/telemetry/logs/{model_id}` -- gated SSE tail: drains
+- `POST /v1/telemetry/logs-ticket` -- gated (header): mints a
+  short-lived ticket (`muse.observability.log_tickets.LogTicketStore`)
+  the dashboard exchanges for SSE access without putting the admin
+  token in a URL.
+- `GET /v1/telemetry/logs/{model_id}` -- SSE tail, authenticated INSIDE
+  the handler (not via the `require_dashboard_auth` dependency, since
+  `EventSource` sends no custom headers): a valid `?ticket=` OR an
+  `Authorization: Bearer <token>` header (for curl-style clients)
+  is accepted; `?access_token=<token>` is NOT. Once authenticated, drains
   `hub.snapshot(model_id)` then polls `hub.subscribe(model_id)` every
   250ms until the client disconnects, unsubscribing in a `finally` so a
   disconnect/cancel/exception never leaks a subscriber queue.
@@ -935,18 +943,28 @@ returns the buffered history for a late-connecting client.
 mirrors the admin API's closed-by-default policy: with no `admin.token`
 configured, every gated endpoint 503s `dashboard_closed` (same token as
 `MUSE_ADMIN_TOKEN`/admin API -- there is no separate dashboard secret).
-With a token set, the request needs it either as `Authorization: Bearer
-<token>` (regular fetch calls) or `?access_token=<token>` (the SSE
-`EventSource` client, which cannot set custom headers). Comparison is
-`secrets.compare_digest`; the token is never echoed in an error message
-or log line.
+The admin token is HEADER-ONLY everywhere: a request needs it as
+`Authorization: Bearer <token>`; there is no `?access_token=` query-param
+fallback. The one place a header alone cannot work is the SSE log
+stream (`EventSource` cannot set custom headers), which instead
+authenticates with a short-lived, random ticket
+(`telemetry.log_ticket_ttl_seconds`, default 60s) minted from the
+header-gated `POST /v1/telemetry/logs-ticket`. The ticket is reusable
+within its TTL (not single-use, so `EventSource` auto-reconnect keeps
+working) and unscoped (it authorizes the logs SSE surface generally,
+matching the admin token's own all-or-nothing scope). So the admin
+token itself never rides a URL, and a leaked ticket in an access log
+is useless once its TTL elapses. Comparison is `secrets.compare_digest`;
+the token is never echoed in an error message or log line.
 
-**Config.** Four `telemetry.*` settings (see "Configuration" above and
+**Config.** Five `telemetry.*` settings (see "Configuration" above and
 `docs/CONFIG.md`): `telemetry.enabled` (`MUSE_TELEMETRY_ENABLED`,
 default `true`), `telemetry.retention_days` (`MUSE_TELEMETRY_RETENTION_DAYS`,
 default `7`), `telemetry.log_buffer_kb` (`MUSE_TELEMETRY_LOG_BUFFER_KB`,
 default `64`), `telemetry.sample_interval_seconds`
-(`MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS`, default `10.0`). The
+(`MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS`, default `10.0`),
+`telemetry.log_ticket_ttl_seconds`
+(`MUSE_TELEMETRY_LOG_TICKET_TTL_SECONDS`, default `60.0`). The
 supervisor wires the store, recorder, sampler, and log hub together
 once at boot (`_init_telemetry`, gated on `telemetry.enabled`) and tears
 them down symmetrically on shutdown (`sampler.stop()` joins the sampler
@@ -966,15 +984,6 @@ thread; `store.close()` closes the sqlite connection).
   None)`, but `LoadEntry` has no `pool`/`device` field today, so this is
   currently always `None` in practice. A future `LoadEntry.pool` field
   would need to land before this attribution becomes real.
-- **The SSE `?access_token=` puts the admin token in the URL.** This is
-  the standard workaround for `EventSource` (which cannot set custom
-  headers), but it means the token can land in server access logs,
-  proxy logs, or browser history. Acceptable for a single-operator box
-  behind a private network; a caveat for any internet-exposed
-  deployment. The planned hardening is a short-lived SSE ticket
-  (exchange the real token for a one-time, narrowly-scoped ticket
-  before opening the `EventSource`) rather than passing the long-lived
-  secret itself.
 - **The live log tail can miss a single line emitted in the brief window
   between the initial history snapshot and the SSE subscription.**
   `_stream_model_logs` drains `hub.snapshot(model_id)` (buffered history)
