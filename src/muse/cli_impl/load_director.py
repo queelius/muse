@@ -95,6 +95,17 @@ _INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
 
 from muse.core.memory_probe import declared_device
 
+# Task 9: fire-and-forget telemetry. Import the NAME (not the module) so
+# `record` is a module global here; tests monkeypatch
+# `muse.cli_impl.load_director.record` directly, which is only effective
+# because the calls below reference the bare name. The observability
+# package-level re-export (`from muse.observability import record`) lands
+# in a later task; importing straight from the submodule avoids depending
+# on that re-export existing yet. This import is import-light (stdlib +
+# two observability siblings, no torch), so it is safe on the CLI import
+# path.
+from muse.observability.recorder import record
+
 logger = logging.getLogger(__name__)
 
 
@@ -689,6 +700,7 @@ class LoadDirector:
             # endpoints yet the delta is still polluted).
             solo_at_start = len(self.in_flight_loads) == 1
             epoch_before = self._inflight_epoch
+        load_start = time.monotonic()
         try:
             worker_port = self.enable_fn(model_id)
         except BaseException as e:
@@ -736,6 +748,22 @@ class LoadDirector:
                 reason="fit",
                 evicted=[],
             ))
+
+            # Task 9: fire-and-forget telemetry event for this cold load.
+            # Guarded by a local try/except so an unexpected failure here
+            # (e.g. a broken monkeypatch in a test, or _resolve_pool_device
+            # raising) can never break a real model load; `record` itself
+            # already swallows a full queue internally.
+            try:
+                record(
+                    "model_load",
+                    model_id=model_id,
+                    pool=self._resolve_pool_device(device),
+                    gb=memory_gb,
+                    cold_load_seconds=(time.monotonic() - load_start),
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
             # Read the overlap snapshot BEFORE popping our own slot: len==1
             # here means we are still the only in-flight load.
@@ -917,6 +945,19 @@ class LoadDirector:
                     evicted=[victim_id],
                 )
                 self.recent_decisions.append(decision)
+
+                # Task 9: fire-and-forget telemetry event for this
+                # eviction. Guarded the same way as the load-site record()
+                # call above: telemetry can never break a real eviction.
+                try:
+                    record(
+                        "model_evict",
+                        model_id=victim_id,
+                        pool=self._resolve_pool_device(device),
+                        reason=f"evicted_for_{model_id}",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
             # ---- lock released: slow steps ----
             try:
