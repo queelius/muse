@@ -152,7 +152,7 @@ class TestEnableModel:
         assert job.result["spawned_new"] is False
         assert "soprano-80m" in spec.models
         assert "kokoro-82m" in spec.models
-        mock_restart.assert_called_once_with(spec, device="cpu")
+        mock_restart.assert_called_once_with(spec, device="cpu", log_hub=None)
 
     def test_unpulled_model_marks_failed(self, tmp_catalog, state, store):
         # Bundled known but not yet in catalog.json.
@@ -314,7 +314,7 @@ class TestLoadModelIntoWorkerDeadSpec:
 
         spawn_count = {"n": 0}
 
-        def _slow_spawn(spec, device):
+        def _slow_spawn(spec, device, **_kwargs):
             spawn_count["n"] += 1
             # Simulate a slow GGUF load. The fix releases state.lock
             # before this point, so the second concurrent enable can
@@ -376,7 +376,7 @@ class TestLoadModelIntoWorkerDeadSpec:
             },
         })
 
-        def _slow_spawn(spec, device):
+        def _slow_spawn(spec, device, **_kwargs):
             time.sleep(0.4)
 
         monkeypatch.setattr("muse.admin.operations.spawn_worker", _slow_spawn)
@@ -486,7 +486,7 @@ class TestDisableModel:
         assert out["worker_terminated"] is False
         assert "kokoro-82m" in out["remaining_models_in_worker"]
         assert "soprano-80m" not in spec.models
-        mock_restart.assert_called_once_with(spec, device="cpu")
+        mock_restart.assert_called_once_with(spec, device="cpu", log_hub=None)
 
 
 class TestOrphanRespawnGuard:

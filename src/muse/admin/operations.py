@@ -279,7 +279,7 @@ def enable_model(
 
         if plan == "restart_sibling":
             try:
-                _restart_worker_inplace(spec_ref, device=state.device)
+                _restart_worker_inplace(spec_ref, device=state.device, log_hub=getattr(state, "log_hub", None))
             except Exception:
                 with state.lock:
                     spec_ref.status = "dead"
@@ -300,7 +300,7 @@ def enable_model(
 
         if plan == "spawn_new":
             try:
-                spawn_worker(spec_ref, device=state.device)
+                spawn_worker(spec_ref, device=state.device, log_hub=getattr(state, "log_hub", None))
                 wait_for_ready(port=spec_ref.port, timeout=120.0)
             except Exception:
                 with state.lock:
@@ -442,7 +442,7 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
 
     if plan == "restart_sibling":
         try:
-            _restart_worker_inplace(spec_ref, device=state.device)
+            _restart_worker_inplace(spec_ref, device=state.device, log_hub=getattr(state, "log_hub", None))
         except Exception:
             with state.lock:
                 spec_ref.status = "dead"
@@ -454,7 +454,7 @@ def load_model_into_worker(model_id: str, *, state: SupervisorState) -> int:
 
     if plan == "spawn_new":
         try:
-            spawn_worker(spec_ref, device=state.device)
+            spawn_worker(spec_ref, device=state.device, log_hub=getattr(state, "log_hub", None))
             wait_for_ready(port=spec_ref.port, timeout=120.0)
         except Exception:
             with state.lock:
@@ -538,7 +538,7 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
 
     assert spec_to_restart is not None
     try:
-        _restart_worker_inplace(spec_to_restart, device=state.device)
+        _restart_worker_inplace(spec_to_restart, device=state.device, log_hub=getattr(state, "log_hub", None))
     except Exception:
         with state.lock:
             spec_to_restart.status = "dead"
@@ -634,7 +634,7 @@ def disable_model(model_id: str, *, state: SupervisorState) -> dict:
 
     assert spec_to_restart is not None
     try:
-        _restart_worker_inplace(spec_to_restart, device=state.device)
+        _restart_worker_inplace(spec_to_restart, device=state.device, log_hub=getattr(state, "log_hub", None))
     except Exception:
         # M12: invariant on restart failure in the disable path.
         #
@@ -868,7 +868,9 @@ def _run_subprocess_into_job(
         store.update(job.job_id, state="failed", error=str(e))
 
 
-def _restart_worker_inplace(spec: WorkerSpec, *, device: str) -> None:
+def _restart_worker_inplace(
+    spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None,
+) -> None:
     """Terminate + respawn one worker with its current `spec.models`.
 
     Used by enable_model (joining a venv group) and disable_model
@@ -876,12 +878,16 @@ def _restart_worker_inplace(spec: WorkerSpec, *, device: str) -> None:
     port, python_path, and updated models list. restart_count bumps so
     the auto-restart monitor sees this in its bookkeeping; failure_count
     resets so we don't carry over stale unhealthy state.
+
+    `log_hub` is forwarded to `spawn_worker` so a restart-in-place keeps
+    piping the worker's stdout into the LogHub when telemetry is enabled
+    (callers pass `state.log_hub`).
     """
     _shutdown_workers([spec])
     spec.process = None
     spec.failure_count = 0
     spec.restart_count += 1
-    spawn_worker(spec, device=device)
+    spawn_worker(spec, device=device, log_hub=log_hub)
     wait_for_ready(port=spec.port, timeout=120.0)
     spec.status = "running"
 

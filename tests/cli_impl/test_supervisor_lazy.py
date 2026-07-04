@@ -740,7 +740,7 @@ class TestMonitorSkipsInFlightSpecs:
         spawn_count = {"n": 0}
         spawn_done = threading.Event()
 
-        def slow_spawn(spec, device):
+        def slow_spawn(spec, device, **_kwargs):
             spawn_count["n"] += 1
             time.sleep(0.4)  # simulate slow GGUF / SDXL load
             spawn_done.set()
@@ -902,7 +902,7 @@ class TestUnloadReleasesLockDuringSlowIO:
         spec.status = "running"
         state.workers.append(spec)
 
-        def slow_restart(spec, *, device):
+        def slow_restart(spec, *, device, **_kwargs):
             time.sleep(0.4)
 
         unload_done = threading.Event()

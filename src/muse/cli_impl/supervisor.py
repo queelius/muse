@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -36,6 +37,11 @@ from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest
 
 from muse.core.memory_probe import declared_device
+
+from muse.observability.store import TelemetryStore
+from muse.observability.recorder import init_recorder
+from muse.observability.sampler import Sampler
+from muse.observability.logs import LogHub
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +132,14 @@ class SupervisorState:
     stop_event: threading.Event = field(default_factory=threading.Event)
     idle_sweeper: "IdleSweeper | None" = None
     idle_sweeper_thread: "threading.Thread | None" = None
+    # Observability (Task 11). Both are None unless `telemetry.enabled` is
+    # true, in which case `_init_telemetry` populates them during
+    # `run_supervisor` boot, before the gateway is built, so the mounted
+    # dashboard router can read them. `telemetry_store` is the sqlite-backed
+    # TelemetryStore; `log_hub` is the per-model ring-buffer log fan-out that
+    # `spawn_worker` pipes each worker's stdout into.
+    telemetry_store: "Any | None" = None
+    log_hub: "Any | None" = None
     # #319 same-model cold-load coalescing (v0.51.0). model_id -> asyncio.Future
     # gate. The FIRST request for a cold model becomes the loader (dispatches
     # one off-loop director.acquire); concurrent requests for the SAME model
@@ -164,12 +178,42 @@ def clear_supervisor_state() -> None:
     _state = None
 
 
-def spawn_worker(spec: WorkerSpec, *, device: str) -> None:
+def _pump_worker_logs(proc: "Any", model_id: str, hub: "Any") -> None:
+    """Daemon-thread reader loop: pipe one worker's stdout into a LogHub.
+
+    Reads `proc.stdout` line by line, appending each line to the hub
+    (for `/v1/admin/*` log tailing and the dashboard) and re-emitting it
+    to the aggregate supervisor log so `muse serve`'s own stdout is
+    unchanged. `line` from a text-mode pipe already carries its trailing
+    newline, hence `end=""` on the re-emit.
+
+    Runs until `proc.stdout` hits EOF (the worker process exited) or
+    raises; either way the thread must exit quietly rather than crash
+    the supervisor process it runs alongside.
+    """
+    try:
+        for line in proc.stdout:
+            hub.append(model_id, line)
+            print(f"[{model_id}] {line}", end="", flush=True)
+    except Exception:
+        logger.warning("log pump for %r stopped", model_id, exc_info=True)
+
+
+def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None) -> None:
     """Start a worker subprocess using its venv's Python.
 
     Persists `device` onto the spec so the monitor thread can respawn
     with the same settings on restart. Records last_spawn_at for the
     backoff timer in _attempt_restart.
+
+    When `log_hub` is given (telemetry enabled), the worker's stdout is
+    piped and a daemon thread pumps each line into the hub via
+    `_pump_worker_logs`, keyed by the worker's first model id (lazy-load
+    spawns one model per worker, so this is the common case; a
+    multi-model worker's logs are attributed to `spec.models[0]` only).
+    When `log_hub` is None (telemetry disabled, the default), spawning
+    is unchanged from before Task 11: a bare `Popen(cmd)` with inherited
+    stdio.
     """
     spec.device = device
     cmd = [
@@ -181,7 +225,19 @@ def spawn_worker(spec: WorkerSpec, *, device: str) -> None:
     for m in spec.models:
         cmd.extend(["--model", m])
     logger.info("spawning worker: %s", " ".join(cmd))
-    spec.process = subprocess.Popen(cmd)
+    if log_hub is not None:
+        spec.process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        model_id = spec.models[0] if spec.models else "worker"
+        t = threading.Thread(
+            target=_pump_worker_logs, args=(spec.process, model_id, log_hub),
+            daemon=True, name=f"muse-logpump-{spec.port}",
+        )
+        t.start()
+    else:
+        spec.process = subprocess.Popen(cmd)
     spec.last_spawn_at = time.monotonic()
 
 
@@ -913,6 +969,66 @@ def _resolve_idle_sweep_interval() -> float:
     return float(value)
 
 
+def _init_telemetry(state: SupervisorState) -> None:
+    """Boot-time telemetry wiring: store + recorder + log hub + sampler + prune.
+
+    Called from `run_supervisor` when `telemetry.enabled` is true, after
+    `state.stop_event` is set but before the gateway is built, so the
+    mounted dashboard router can read `state.telemetry_store` /
+    `state.log_hub` from its very first request.
+
+    Factored out (rather than inlined in `run_supervisor`) so it is
+    unit-testable without spinning up uvicorn: tests build a minimal
+    SupervisorState (a `director` stub with `.loaded` / `.in_flight_loads`
+    and a real `stop_event`), call this directly, and assert on the
+    resulting state + recorder.
+
+    Wires four pieces:
+      - `TelemetryStore` at `<catalog_dir>/telemetry.db`, plus
+        `init_recorder(store, enabled=True)` so `muse.observability
+        .recorder.record(...)` calls from request-handling code actually
+        persist instead of hitting the shared no-op recorder.
+      - `LogHub` sized from `telemetry.log_buffer_kb`, attached to
+        `state.log_hub` so `spawn_worker(..., log_hub=state.log_hub)`
+        callers pipe worker stdout into it.
+      - A periodic `Sampler` recording free VRAM/RAM + loaded/in-flight
+        counts, reading the live director state via closures (so it
+        always reflects the current loaded set, not a snapshot).
+      - A retention-prune daemon that shares `state.stop_event` with the
+        rest of the supervisor's background threads, deleting events
+        older than `telemetry.retention_days` once an hour.
+    """
+    store_path = Path(config.get("paths.catalog_dir")).expanduser() / "telemetry.db"
+    store = TelemetryStore(store_path)
+    init_recorder(store, enabled=True)
+
+    log_buffer_kb = config.get("telemetry.log_buffer_kb")
+    hub = LogHub(buffer_bytes=int(log_buffer_kb) * 1024)
+
+    state.telemetry_store = store
+    state.log_hub = hub
+
+    sampler = Sampler(
+        interval=float(config.get("telemetry.sample_interval_seconds")),
+        loaded_fn=lambda: state.director.loaded,
+        inflight_fn=lambda: len(getattr(state.director, "in_flight_loads", {}) or {}),
+    )
+    sampler.start()
+    state.telemetry_sampler = sampler
+
+    retention_days = config.get("telemetry.retention_days")
+
+    def _prune_loop() -> None:
+        while not state.stop_event.wait(3600):
+            try:
+                store.prune(time.time() - float(retention_days) * 86400)
+            except Exception:
+                logger.warning("telemetry prune failed", exc_info=True)
+
+    t = threading.Thread(target=_prune_loop, daemon=True, name="muse-telemetry-prune")
+    t.start()
+
+
 def run_supervisor(*, host: str, port: int, device: str) -> int:
     """Entry point for `muse serve` (v0.40.0+: lazy load).
 
@@ -1005,6 +1121,18 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         sweep_interval,
         f"{default_idle_timeout:.0f}s" if default_idle_timeout else "off",
     )
+
+    # Telemetry (observability dashboard). Opt-out via
+    # MUSE_TELEMETRY_ENABLED=false / telemetry.enabled: false. Wired
+    # before build_gateway so the mounted dashboard router sees a
+    # populated state.telemetry_store / state.log_hub on its first
+    # request.
+    if config.get("telemetry.enabled"):
+        _init_telemetry(state)
+        logger.info(
+            "telemetry enabled (db=%s)",
+            Path(config.get("paths.catalog_dir")).expanduser() / "telemetry.db",
+        )
 
     try:
         # Build gateway with a live SupervisorState reference. Routes
