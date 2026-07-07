@@ -1788,8 +1788,7 @@ class TestWeightsSizeFallback:
         d.mkdir()
         for i, n in enumerate(sizes_bytes):
             (d / f"model-{i}.safetensors").write_bytes(b"\0" * n)
-        # A tiny non-weight file (config) should be summed too; it's
-        # negligible vs weights. We sum all regular files for simplicity.
+        # Non-weight files are ignored by the fallback sizer.
         (d / "config.json").write_text("{}")
         return d
 
@@ -1798,8 +1797,8 @@ class TestWeightsSizeFallback:
 
         d = self._make_weights_dir(tmp_path, 1_000_000, 2_000_000)
         gb = _weights_size_gb({"local_dir": str(d)})
-        # ~3 MB plus the 2-byte config; assert within the MB band.
-        assert gb == pytest.approx(3_000_002 / 1024 ** 3, rel=1e-3)
+        # ~3 MB of weights; config.json is not counted.
+        assert gb == pytest.approx(3_000_000 / 1024 ** 3, rel=1e-3)
 
     def test_weights_size_zero_when_no_local_dir(self):
         from muse.cli_impl.supervisor import _weights_size_gb
@@ -1863,7 +1862,7 @@ class TestWeightsSizeFallback:
             "manifest": {"capabilities": {"device": "cpu"}},
         })
         assert has is True
-        assert gb == pytest.approx(800_000_002 / 1024 ** 3, rel=1e-3)
+        assert gb == pytest.approx(800_000_000 / 1024 ** 3, rel=1e-3)
         assert device == "cpu"
 
     def test_declared_memory_wins_over_weights(self, tmp_path):
@@ -1913,3 +1912,82 @@ class TestWeightsSizeFallback:
         probe.cpu_free_gb.return_value = 32.0
         validate_catalog_at_boot(state, memory_probe=probe)
         assert "never-probed" not in state.unservable_reasons
+
+
+class TestWeightsSizeDedup:
+    """The on-disk sizer must de-dup redundant format/dtype variants and
+    skip non-weight blobs, else it OVERestimates (spurious 'too large' 503s)."""
+
+    def _mk(self, tmp_path, files):
+        # files: dict of relpath -> size_bytes
+        import os
+        for rel, size in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"\0" * size)
+        return {"local_dir": str(tmp_path)}
+
+    def test_fp16_and_fp32_counted_once(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        entry = self._mk(tmp_path, {
+            "unet/diffusion_pytorch_model.safetensors": 2 * mib,
+            "unet/diffusion_pytorch_model.fp16.safetensors": 1 * mib,
+        })
+        # only the fp16 variant is counted, not the sum
+        assert _weights_size_gb(entry) == pytest.approx(1 * mib / 1024 ** 3)
+
+    def test_safetensors_preferred_over_bin_and_ckpt(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        entry = self._mk(tmp_path, {
+            "model.safetensors": 2 * mib,
+            "model.ckpt": 2 * mib,
+            "model.bin": 2 * mib,
+        })
+        # one variant counted, not all three formats
+        assert _weights_size_gb(entry) == pytest.approx(2 * mib / 1024 ** 3)
+
+    def test_transformers_dual_format_shards_counted_once(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        entry = self._mk(tmp_path, {
+            "model-00001-of-00002.safetensors": 2 * mib,
+            "model-00002-of-00002.safetensors": 3 * mib,
+            "pytorch_model-00001-of-00002.bin": 2 * mib,
+            "pytorch_model-00002-of-00002.bin": 3 * mib,
+        })
+        # safetensors and PyTorch shards are alternate encodings of the
+        # same two checkpoint shards, so count 5 MiB, not 10 MiB.
+        assert _weights_size_gb(entry) == pytest.approx(5 * mib / 1024 ** 3)
+
+    def test_non_weight_blobs_skipped(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        entry = self._mk(tmp_path, {
+            "model.safetensors": 2 * mib,
+            "fma_dataset_attribution2.csv": 3 * mib,  # big non-weight blob
+            "README.md": 1 * mib,
+            "config.json": 1024,
+        })
+        assert _weights_size_gb(entry) == pytest.approx(2 * mib / 1024 ** 3)
+
+    def test_distinct_components_all_counted(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        entry = self._mk(tmp_path, {
+            "unet/diffusion_pytorch_model.fp16.safetensors": 3 * mib,
+            "vae/diffusion_pytorch_model.fp16.safetensors": 1 * mib,
+            "text_encoder/model.fp16.safetensors": 2 * mib,
+        })
+        # different components in different dirs are all real
+        assert _weights_size_gb(entry) == pytest.approx(6 * mib / 1024 ** 3)
+
+    def test_gguf_file_still_wins(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        (tmp_path / "q4.gguf").write_bytes(b"\0" * (2 * mib))
+        (tmp_path / "q8.gguf").write_bytes(b"\0" * (4 * mib))
+        entry = {"local_dir": str(tmp_path),
+                 "manifest": {"capabilities": {"gguf_file": "q4.gguf"}}}
+        assert _weights_size_gb(entry) == pytest.approx(2 * mib / 1024 ** 3)

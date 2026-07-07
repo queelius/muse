@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -500,9 +501,9 @@ def _weights_size_gb(catalog_entry: dict) -> float:
     Last resort in the sizing ladder: a model that was never probed and
     declares no `memory_gb` can still be sized from the bytes already on
     disk, so it loads on demand (evicting LRU as needed) instead of being
-    503'd "no memory estimate". Sums regular-file sizes under the entry's
-    `local_dir` (an HF snapshot dir whose weight files are symlinks into
-    the blob store; `os.path.getsize` follows them). Returns 0.0 when
+    503'd "no memory estimate". Sums recognized weight files under the
+    entry's `local_dir` (an HF snapshot dir whose weight files are symlinks
+    into the blob store; `os.path.getsize` follows them). Returns 0.0 when
     `local_dir` is absent, missing, or unreadable.
 
     This UNDERestimates live runtime (no activations / KV cache); the
@@ -531,17 +532,100 @@ def _weights_size_gb(catalog_entry: dict) -> float:
             # Declared file missing/unreadable: fall through to the tree walk
             # rather than returning 0.0 and stamping the model unservable.
             pass
-    total = 0
+    # Diffusers / transformers snapshot: sum only the WEIGHT files, and
+    # de-dup redundant format/dtype variants of the same component -- a repo
+    # routinely ships both fp16 and fp32 weights AND both .safetensors and
+    # .ckpt/.bin of the same tensor, plus large non-weight blobs (dataset
+    # attribution CSVs, READMEs). Summing the whole tree OVERestimates
+    # wildly (Stable Audio Open summed 14.6 GB vs its ~2.6 GB real load;
+    # SD-1.5 double-counts fp16+fp32), which 503s a servable model as
+    # "exceeds device capacity". This is the general form of the GGUF fix
+    # above. Per component (same dir + same canonical stem) we count only
+    # ONE variant -- the one that actually loads: fp16 over fp32,
+    # safetensors over .bin/.ckpt. Under-counting is the SAFE direction
+    # (the observed-peak writeback self-heals upward and the monitor
+    # recovers a rare OOM); over-counting is the dangerous one.
     try:
+        # (root, canonical_stem) -> (preference_rank, size_bytes); lower rank
+        # = the variant we count. os.path.getsize follows the HF blob symlinks.
+        groups: dict[tuple, tuple[int, int]] = {}
         for root, _dirs, files in os.walk(local_dir):
             for name in files:
+                canon = _canonical_weight_stem(name)
+                if canon is None:
+                    continue  # not a weight file (config/README/CSV/image/...)
                 try:
-                    total += os.path.getsize(os.path.join(root, name))
+                    size = os.path.getsize(os.path.join(root, name))
                 except OSError:
                     continue
+                key = (root, canon)
+                rank = _weight_variant_rank(name)
+                if key not in groups or rank < groups[key][0]:
+                    groups[key] = (rank, size)
     except OSError:
         return 0.0
-    return total / (1024 ** 3)
+    return sum(size for _rank, size in groups.values()) / (1024 ** 3)
+
+
+# Weight-bearing file extensions the sizer counts; everything else (configs,
+# READMEs, dataset-attribution CSVs, preview images) is skipped.
+_WEIGHT_EXTS = (
+    ".safetensors", ".bin", ".ckpt", ".pt", ".pth", ".onnx", ".msgpack", ".h5",
+    ".gguf",
+)
+_DTYPE_TAGS = (".fp16", ".fp32", ".bf16", ".float16", ".float32", ".f16", ".f32")
+_TRANSFORMERS_CHECKPOINT_RE = re.compile(
+    r"^(model|pytorch_model|tf_model|flax_model)(-\d{5}-of-\d{5})?$",
+    re.IGNORECASE,
+)
+
+
+def _canonical_weight_stem(name: str) -> str | None:
+    """Canonical component key for a weight file, or None if not a weight.
+
+    Strips the weight extension and any dtype variant tag so that
+    `diffusion_pytorch_model.safetensors`,
+    `diffusion_pytorch_model.fp16.safetensors`, and
+    `diffusion_pytorch_model.bin` all map to the same stem
+    (`diffusion_pytorch_model`) and are de-duped to one counted variant.
+    Also normalizes common Transformers checkpoint prefixes so
+    `model-00001-of-00002.safetensors` and
+    `pytorch_model-00001-of-00002.bin` are treated as alternate encodings
+    of the same shard.
+    """
+    lower = name.lower()
+    ext = next((e for e in _WEIGHT_EXTS if lower.endswith(e)), None)
+    if ext is None:
+        return None
+    stem = name[: -len(ext)]
+    stem_l = stem.lower()
+    for tag in _DTYPE_TAGS:
+        if stem_l.endswith(tag):
+            stem = stem[: -len(tag)]
+            stem_l = stem_l[: -len(tag)]
+            break
+    m = _TRANSFORMERS_CHECKPOINT_RE.match(stem_l)
+    if m is not None:
+        shard = m.group(2) or ""
+        return f"model{shard}"
+    return stem
+
+
+def _weight_variant_rank(name: str) -> int:
+    """Lower rank = the variant we prefer to COUNT (the one that loads).
+
+    fp16 is the diffusers default-loaded dtype and is smaller than fp32;
+    safetensors is preferred over pickle (.bin/.ckpt/.pt). Counting the
+    preferred variant (not the largest) leans the estimate DOWN, the safe
+    direction against spurious "exceeds device capacity" 503s.
+    """
+    lower = name.lower()
+    rank = 0
+    if ".fp16." in lower or ".f16." in lower or ".float16." in lower:
+        rank -= 2
+    if lower.endswith(".safetensors"):
+        rank -= 1
+    return rank
 
 
 def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:

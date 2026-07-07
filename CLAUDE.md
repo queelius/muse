@@ -554,7 +554,19 @@ A model's load size comes from a three-tier sizing ladder (in
    that one file, falling back to the tree walk only if it is absent on
    disk. This bug stayed hidden until v0.50.1 routed undeclared-device
    models to the cuda pool, where the inflated estimate first exceeded the
-   card.
+   card. *Diffusers/transformers dedup (v0.54.3):* the same over-count bites
+   any snapshot that ships redundant encodings of one component -- fp16 AND
+   fp32, `.safetensors` AND `.ckpt`/`.bin`, `model-*.safetensors` AND
+   `pytorch_model-*.bin` -- plus large non-weight blobs (dataset-attribution
+   CSVs, READMEs). Stable Audio Open summed 14.6 GB vs its ~2.6 GB real load
+   and 503'd on a 12 GB card. The tree walk now counts only WEIGHT-extension
+   files and, per component (same dir + canonical stem, with dtype tags and
+   the `model`/`pytorch_model`/`tf_model`/`flax_model` prefix normalized),
+   keeps ONE variant -- fp16 over fp32, safetensors over pickle. Counting the
+   loaded variant (not the largest) leans the estimate DOWN, the safe
+   direction: an under-estimate self-heals via the observed-peak writeback
+   and a rare OOM is recovered by the auto-restart monitor, whereas an
+   over-estimate 503s a servable model outright.
 3. Nothing sizable (no annotation, no probe, no weights on disk): the
    model is flagged `unservable_reason` and 503s before any worker
    spawn.
