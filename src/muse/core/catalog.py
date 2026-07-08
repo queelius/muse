@@ -1091,6 +1091,41 @@ def set_device_override(model_id: str, device: str | None) -> None:
     _reset_known_models_cache()
 
 
+def set_gpu_layers_override(model_id: str, n: int | None) -> None:
+    """Set or clear the per-model llama.cpp GPU-layer pin for a pulled model.
+
+    `n` is the llama.cpp `n_gpu_layers` value: -1 = offload every layer the
+    GPU fits, 0 = pure CPU, N > 0 = first N layers on GPU (rest on CPU).
+    Stored as the TOP-LEVEL catalog field `gpu_layers_override` (operator
+    state, mirroring `device_override` -- NOT part of the manifest). Passing
+    ``None`` removes the pin (revert to capabilities.n_gpu_layers / the
+    runtime default).
+
+    Catalog state only: takes effect on the model's next cold load. To
+    apply it to an already-resident worker, evict or restart that worker.
+
+    Raises ValueError for a non-int or n < -1 and KeyError when the model
+    is not pulled. Holds _CATALOG_WRITE_LOCK for the full
+    read->mutate->write (mirrors `set_device_override`).
+    """
+    if n is not None:
+        if isinstance(n, bool) or not isinstance(n, int) or n < -1:
+            raise ValueError(
+                f"invalid gpu layers {n!r}; expected an int >= -1 "
+                "(-1 = all layers on GPU, 0 = pure CPU) or None to clear"
+            )
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        if model_id not in catalog:
+            raise KeyError(f"model {model_id!r} is not pulled")
+        if n is None:
+            catalog[model_id].pop("gpu_layers_override", None)
+        else:
+            catalog[model_id]["gpu_layers_override"] = n
+        _write_catalog(catalog)
+    _reset_known_models_cache()
+
+
 def _import_backend_module(module_path: str):
     """Local indirection for `importlib.import_module`.
 
@@ -1154,6 +1189,17 @@ def load_backend(model_id: str, **kwargs) -> Any:
         merged["device"] = override
     elif "device" in capabilities and capabilities["device"] != "auto":
         merged["device"] = capabilities["device"]
+    # GPU-layers precedence (spec 2026-07-08), most authoritative first:
+    #   1. catalog `gpu_layers_override` (operator, via
+    #      `muse models set-gpu-layers`)
+    #   2. manifest `capabilities.n_gpu_layers` (already in `merged` via the
+    #      capabilities splat above)
+    #   3. runtime default (-1 in LlamaCppModel: everything the GPU fits)
+    # Applied AFTER the kwargs merge, like device_override, so the operator
+    # pin also beats caller kwargs: it is a placement preference.
+    gpu_layers = entry_data.get("gpu_layers_override")
+    if gpu_layers is not None:
+        merged["n_gpu_layers"] = gpu_layers
     return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **merged)
 
 

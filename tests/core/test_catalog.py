@@ -2471,3 +2471,102 @@ class TestBaseOverrideDurability:
         entry = catalog["pixel-art-xl"]
         assert entry.get("base_override") == "sdxl-turbo-pinned"
         assert entry["manifest"]["capabilities"]["base_model"] == "sdxl-turbo-pinned"
+
+
+class TestGpuLayersOverride:
+    """Spec 2026-07-08: operator pin for llama.cpp n_gpu_layers."""
+
+    def _seed(self, tmp_path, monkeypatch, capabilities=None):
+        """Seed a resolver-pulled-style catalog entry with a persisted
+        manifest so known_models() picks up capabilities."""
+        import json
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        from muse.core.catalog import _reset_known_models_cache
+        entry = {
+            "pulled_at": "...", "hf_repo": "org/repo", "local_dir": "/w",
+            "venv_path": "/v", "python_path": "/v/bin/python",
+            "enabled": True, "source": "hf://org/repo",
+            "manifest": {
+                "model_id": "test-gguf", "modality": "chat/completion",
+                "hf_repo": "org/repo",
+                "backend_path": "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel",
+                "capabilities": capabilities or {"gguf_file": "m.gguf"},
+            },
+        }
+        (tmp_path / "catalog.json").write_text(json.dumps({"test-gguf": entry}))
+        _reset_known_models_cache()
+
+    def test_set_and_clear_round_trip(self, tmp_path, monkeypatch):
+        from muse.core.catalog import _read_catalog, set_gpu_layers_override
+        self._seed(tmp_path, monkeypatch)
+        set_gpu_layers_override("test-gguf", 30)
+        assert _read_catalog()["test-gguf"]["gpu_layers_override"] == 30
+        set_gpu_layers_override("test-gguf", None)
+        assert "gpu_layers_override" not in _read_catalog()["test-gguf"]
+
+    def test_minus_one_and_zero_are_valid(self, tmp_path, monkeypatch):
+        from muse.core.catalog import _read_catalog, set_gpu_layers_override
+        self._seed(tmp_path, monkeypatch)
+        set_gpu_layers_override("test-gguf", -1)
+        assert _read_catalog()["test-gguf"]["gpu_layers_override"] == -1
+        set_gpu_layers_override("test-gguf", 0)
+        assert _read_catalog()["test-gguf"]["gpu_layers_override"] == 0
+
+    def test_invalid_values_raise(self, tmp_path, monkeypatch):
+        from muse.core.catalog import set_gpu_layers_override
+        self._seed(tmp_path, monkeypatch)
+        with pytest.raises(ValueError):
+            set_gpu_layers_override("test-gguf", -2)
+        with pytest.raises(ValueError):
+            set_gpu_layers_override("test-gguf", "thirty")
+
+    def test_unknown_model_raises_keyerror(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        from muse.core.catalog import set_gpu_layers_override
+        with pytest.raises(KeyError):
+            set_gpu_layers_override("never-pulled", 10)
+
+    def test_load_backend_pin_beats_capability(self, tmp_path, monkeypatch):
+        """Precedence: catalog pin > capabilities.n_gpu_layers > default."""
+        from unittest.mock import MagicMock, patch as mpatch
+        from muse.core.catalog import load_backend, set_gpu_layers_override
+        self._seed(tmp_path, monkeypatch,
+                   capabilities={"gguf_file": "m.gguf", "n_gpu_layers": 10})
+        set_gpu_layers_override("test-gguf", 30)
+        fake_cls = MagicMock()
+        fake_module = MagicMock()
+        fake_module.LlamaCppModel = fake_cls
+        with mpatch("muse.core.catalog._import_backend_module",
+                    return_value=fake_module), \
+             mpatch("muse.core.catalog.is_pulled", return_value=True):
+            load_backend("test-gguf")
+        assert fake_cls.call_args.kwargs["n_gpu_layers"] == 30
+
+    def test_load_backend_capability_used_without_pin(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock, patch as mpatch
+        from muse.core.catalog import load_backend
+        self._seed(tmp_path, monkeypatch,
+                   capabilities={"gguf_file": "m.gguf", "n_gpu_layers": 10})
+        fake_cls = MagicMock()
+        fake_module = MagicMock()
+        fake_module.LlamaCppModel = fake_cls
+        with mpatch("muse.core.catalog._import_backend_module",
+                    return_value=fake_module), \
+             mpatch("muse.core.catalog.is_pulled", return_value=True):
+            load_backend("test-gguf")
+        assert fake_cls.call_args.kwargs["n_gpu_layers"] == 10
+
+    def test_load_backend_absent_everywhere_passes_nothing(self, tmp_path, monkeypatch):
+        """No pin + no capability: n_gpu_layers not in kwargs; the runtime
+        default (-1) governs."""
+        from unittest.mock import MagicMock, patch as mpatch
+        from muse.core.catalog import load_backend
+        self._seed(tmp_path, monkeypatch)  # gguf_file only
+        fake_cls = MagicMock()
+        fake_module = MagicMock()
+        fake_module.LlamaCppModel = fake_cls
+        with mpatch("muse.core.catalog._import_backend_module",
+                    return_value=fake_module), \
+             mpatch("muse.core.catalog.is_pulled", return_value=True):
+            load_backend("test-gguf")
+        assert "n_gpu_layers" not in fake_cls.call_args.kwargs
