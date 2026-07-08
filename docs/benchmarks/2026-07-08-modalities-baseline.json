@@ -1,0 +1,109 @@
+{
+  "modalities": {
+    "headers": [
+      "case",
+      "model",
+      "median s"
+    ],
+    "rows": [
+      [
+        "image_gen_sd_turbo",
+        "sd-turbo",
+        0.97
+      ],
+      [
+        "image_gen_pixel_lora",
+        "pixelartredmond-1-5v-pixel-art-loras-for-sd-1-5",
+        7.749
+      ],
+      [
+        "tts_kokoro",
+        "kokoro-82m",
+        0.753
+      ],
+      [
+        "tts_supertonic",
+        "supertonic-3",
+        "SKIPPED (not enabled)"
+      ],
+      [
+        "sfx_stable_audio",
+        "stable-audio-open-1.0",
+        19.246
+      ],
+      [
+        "transcribe_whisper-base",
+        "whisper-base",
+        8.27
+      ],
+      [
+        "embed_qwen3-embedding-0.6b",
+        "qwen3-embedding-0.6b",
+        1.118
+      ],
+      [
+        "chat_llama-3.2-3b-q4",
+        "llama-3.2-3b-q4",
+        2.311
+      ]
+    ],
+    "raw": {
+      "image_gen_sd_turbo": {
+        "median_s": 0.97,
+        "reps_s": [
+          0.97,
+          0.938,
+          1.506
+        ]
+      },
+      "image_gen_pixel_lora": {
+        "median_s": 7.749,
+        "reps_s": [
+          6.054,
+          7.859,
+          7.749
+        ]
+      },
+      "tts_kokoro": {
+        "median_s": 0.753,
+        "reps_s": [
+          0.657,
+          1.173,
+          0.753
+        ]
+      },
+      "sfx_stable_audio": {
+        "median_s": 19.246,
+        "reps_s": [
+          20.177,
+          19.246,
+          17.987
+        ]
+      },
+      "transcribe_whisper-base": {
+        "median_s": 8.27,
+        "reps_s": [
+          7.08,
+          8.27,
+          8.829
+        ]
+      },
+      "embed_qwen3-embedding-0.6b": {
+        "median_s": 1.118,
+        "reps_s": [
+          1.118,
+          0.878,
+          1.397
+        ]
+      },
+      "chat_llama-3.2-3b-q4": {
+        "median_s": 2.311,
+        "reps_s": [
+          2.682,
+          2.279,
+          2.311
+        ]
+      }
+    }
+  }
+}

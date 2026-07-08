@@ -1,0 +1,242 @@
+{
+  "short": {
+    "headers": [
+      "server",
+      "median elapsed s",
+      "tok/s (wall)",
+      "tok/s (gen-only, self-reported)"
+    ],
+    "rows": [
+      [
+        "muse",
+        3.04,
+        10.86,
+        "-"
+      ],
+      [
+        "ollama",
+        4.88,
+        7.79,
+        8.6
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "elapsed": 2.8720401669852436,
+          "completion_tokens": 34,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating decorative garden borders.\nInsulation in walls and attics.\nSupporting pavers in a driveway."
+        },
+        {
+          "elapsed": 2.487988217268139,
+          "completion_tokens": 32,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight to concrete mixes.\nInsulation in walls and fireplaces.\nSupporting mortar and plaster.\nDecorative elements in architecture."
+        },
+        {
+          "elapsed": 5.253154895734042,
+          "completion_tokens": 33,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating decorative garden borders.\nInsulation in wall cavities.\nSupporting mortar in masonry joints."
+        },
+        {
+          "elapsed": 3.039456959348172,
+          "completion_tokens": 33,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating decorative garden borders.\nInsulation in walls and attics.\nSupporting concrete blocks in construction."
+        },
+        {
+          "elapsed": 3.05940605700016,
+          "completion_tokens": 30,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight to concrete mixes.\nCreating sculptures and art pieces.\nInsulation in buildings.\nSupporting pavers in pathways."
+        }
+      ],
+      "ollama": [
+        {
+          "elapsed": 2.6124937697313726,
+          "completion_tokens": 20,
+          "prompt_tokens": 40,
+          "eval_s": 2.227655062,
+          "prompt_eval_s": 0.134082965,
+          "content": "Building walls.\nSupporting foundations.\nCreating sculptures.\nInsulating materials.\nCement curing agent."
+        },
+        {
+          "elapsed": 7.059189910069108,
+          "completion_tokens": 55,
+          "prompt_tokens": 40,
+          "eval_s": 6.694433306,
+          "prompt_eval_s": 0.096692603,
+          "content": "1. Construction in buildings and structures.\n2. Bricks can be used as retaining walls.\n3. Masonry for garden borders or paths.\n4. They're often utilized in terracing to create step gardens.\n5. Some are also recycled into landscaping mulch."
+        },
+        {
+          "elapsed": 3.395300776232034,
+          "completion_tokens": 43,
+          "prompt_tokens": 40,
+          "eval_s": 3.013847876,
+          "prompt_eval_s": 0.08374684,
+          "content": "1. Constructing walls.\n2. Building foundations.\n3. Creating sculptures or mosaics.\n4. Serving as a building material in various forms.\n5. Acting as support or reinforcement in construction projects."
+        },
+        {
+          "elapsed": 4.877846303861588,
+          "completion_tokens": 39,
+          "prompt_tokens": 40,
+          "eval_s": 4.533087573,
+          "prompt_eval_s": 0.114252149,
+          "content": "1. Building walls and structures.\n2. Flooring in construction sites.\n3. Furniture legs for temporary set-ups.\n4. Artistic pieces or sculptures.\n5. Educational tools in schools."
+        },
+        {
+          "elapsed": 5.418090864084661,
+          "completion_tokens": 36,
+          "prompt_tokens": 40,
+          "eval_s": 5.003101662,
+          "prompt_eval_s": 0.084915836,
+          "content": "1. Constructing walls.\n2. Building houses and buildings.\n3. Making sculptures or art installations.\n4. Serving as landfill filler.\n5. Used in pottery production."
+        }
+      ]
+    }
+  },
+  "ttft": {
+    "headers": [
+      "server",
+      "median TTFT s",
+      "median inter-token ms"
+    ],
+    "rows": [
+      [
+        "muse",
+        0.476,
+        202.1
+      ],
+      [
+        "ollama",
+        0.315,
+        82.6
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "ttft": 0.496487395837903,
+          "gap_median": 0.2021173823159188,
+          "tokens": 33,
+          "elapsed": 8.354854565113783
+        },
+        {
+          "ttft": 0.3464067941531539,
+          "gap_median": 0.22195824421942234,
+          "tokens": 34,
+          "elapsed": 8.850744143128395
+        },
+        {
+          "ttft": 0.47574944142252207,
+          "gap_median": 0.1491299280896783,
+          "tokens": 30,
+          "elapsed": 5.899657111149281
+        },
+        {
+          "ttft": 0.3478628150187433,
+          "gap_median": 0.31707214191555977,
+          "tokens": 34,
+          "elapsed": 12.516613421030343
+        },
+        {
+          "ttft": 0.5558030470274389,
+          "gap_median": 0.16485186479985714,
+          "tokens": 34,
+          "elapsed": 7.29990572668612
+        }
+      ],
+      "ollama": [
+        {
+          "ttft": 0.4986238833516836,
+          "gap_median": 0.11933395592495799,
+          "tokens": 48,
+          "elapsed": 6.660197393037379
+        },
+        {
+          "ttft": 0.40172710129991174,
+          "gap_median": 0.08901280490681529,
+          "tokens": 42,
+          "elapsed": 4.420916449278593
+        },
+        {
+          "ttft": 0.31019078800454736,
+          "gap_median": 0.08260525017976761,
+          "tokens": 30,
+          "elapsed": 2.840936904307455
+        },
+        {
+          "ttft": 0.31496757408604026,
+          "gap_median": 0.08118323003873229,
+          "tokens": 49,
+          "elapsed": 4.122807575855404
+        },
+        {
+          "ttft": 0.18933064118027687,
+          "gap_median": 0.05924524343572557,
+          "tokens": 45,
+          "elapsed": 2.870756040327251
+        }
+      ]
+    }
+  },
+  "split": {
+    "headers": [
+      "server",
+      "median elapsed s",
+      "tok/s (wall)",
+      "tok/s (gen-only, self-reported)"
+    ],
+    "rows": [
+      [
+        "muse",
+        2.21,
+        15.42,
+        "-"
+      ],
+      [
+        "muse",
+        2.1,
+        15.67,
+        "-"
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "elapsed": 2.1837279009632766,
+          "completion_tokens": 33,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight and stability in construction.\nCreating decorative elements in architecture.\nInsulation in walls and fireplaces.\nSupporting other building materials."
+        },
+        {
+          "elapsed": 2.15797499101609,
+          "completion_tokens": 34,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating decorative garden borders.\nInsulation in walls and attics.\nSupporting pavers in a driveway."
+        },
+        {
+          "elapsed": 1.9148920737206936,
+          "completion_tokens": 30,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating sculptures and art pieces.\nInsulation in building walls.\nStarting a campfire."
+        },
+        {
+          "elapsed": 2.0351789998821914,
+          "completion_tokens": 32,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight to concrete mixes.\nCreating decorative garden borders.\nInsulation in walls and attics.\nSupporting pavers in pathways."
+        },
+        {
+          "elapsed": 2.1029668487608433,
+          "completion_tokens": 31,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating decorative garden borders.\nInsulation in wall cavities.\nSupporting concrete slabs."
+        }
+      ]
+    },
+    "note": "second row is the same muse model via the worker port directly; delta vs row one is gateway/relay overhead"
+  }
+}

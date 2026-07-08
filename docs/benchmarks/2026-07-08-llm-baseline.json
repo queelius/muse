@@ -1,0 +1,315 @@
+{
+  "short": {
+    "headers": [
+      "server",
+      "median elapsed s",
+      "tok/s (wall)",
+      "tok/s (gen-only, self-reported)"
+    ],
+    "rows": [
+      [
+        "muse",
+        7.26,
+        4.51,
+        "-"
+      ],
+      [
+        "ollama",
+        3.92,
+        7.94,
+        9.0
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "elapsed": 7.2566817929036915,
+          "completion_tokens": 32,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nSupporting foundations and footings.\nCreating sculptures and art pieces.\nInsulation in walls and attics.\nFire starting and emergency shelter."
+        },
+        {
+          "elapsed": 6.805137592367828,
+          "completion_tokens": 33,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nSupporting concrete blocks in construction.\nInsulation in walls and fireplaces.\nProviding weight to concrete mixes.\nDecorative elements in architecture."
+        },
+        {
+          "elapsed": 7.3129898882471025,
+          "completion_tokens": 33,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight and stability in construction.\nCreating decorative elements in architecture.\nInsulation in walls and fireplaces.\nSupporting other building materials."
+        }
+      ],
+      "ollama": [
+        {
+          "elapsed": 2.5965070673264563,
+          "completion_tokens": 20,
+          "prompt_tokens": 40,
+          "eval_s": 2.222119723,
+          "prompt_eval_s": 0.085566805,
+          "content": "Building walls.\nSupporting foundations.\nCreating sculptures.\nInsulating buildings.\nStoring building materials."
+        },
+        {
+          "elapsed": 3.922287759836763,
+          "completion_tokens": 33,
+          "prompt_tokens": 40,
+          "eval_s": 3.519668614,
+          "prompt_eval_s": 0.092965337,
+          "content": "1. Constructing walls.\n2. Building houses.\n3. Making sculptures.\n4. Creating decorative borders.\n5. Serving as educational material in building courses."
+        },
+        {
+          "elapsed": 5.792596267070621,
+          "completion_tokens": 46,
+          "prompt_tokens": 40,
+          "eval_s": 5.392750053,
+          "prompt_eval_s": 0.084269078,
+          "content": "1. Constructing walls and buildings.\n2. Producing pottery and ceramics.\n3. Serving as packing material for shipping goods.\n4. Creating sculptures and decorative items.\n5. Generating energy through thermal bricks in power plants."
+        }
+      ]
+    }
+  },
+  "ttft": {
+    "headers": [
+      "server",
+      "median TTFT s",
+      "median inter-token ms"
+    ],
+    "rows": [
+      [
+        "muse",
+        0.336,
+        103.8
+      ],
+      [
+        "ollama",
+        0.294,
+        79.0
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "ttft": 0.3363602450117469,
+          "gap_median": 0.2695224420167506,
+          "tokens": 28,
+          "elapsed": 7.804764292668551
+        },
+        {
+          "ttft": 0.39268825901672244,
+          "gap_median": 0.10376808955334127,
+          "tokens": 25,
+          "elapsed": 3.1629607849754393
+        },
+        {
+          "ttft": 0.08550608903169632,
+          "gap_median": 0.07515682419762015,
+          "tokens": 34,
+          "elapsed": 2.541969215963036
+        }
+      ],
+      "ollama": [
+        {
+          "ttft": 0.29427163070067763,
+          "gap_median": 0.07992665376514196,
+          "tokens": 36,
+          "elapsed": 3.209063974674791
+        },
+        {
+          "ttft": 0.2967888112179935,
+          "gap_median": 0.07900751009583473,
+          "tokens": 42,
+          "elapsed": 3.6585300909355283
+        },
+        {
+          "ttft": 0.18327151518315077,
+          "gap_median": 0.05611747410148382,
+          "tokens": 40,
+          "elapsed": 2.458935813046992
+        }
+      ]
+    }
+  },
+  "long": {
+    "headers": [
+      "server",
+      "prompt tokens",
+      "median elapsed s",
+      "prompt-eval s (self-reported)"
+    ],
+    "rows": [
+      [
+        "muse",
+        1418,
+        2.0,
+        "-"
+      ],
+      [
+        "ollama",
+        1439,
+        4.28,
+        0.06
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "elapsed": 1.9976565828546882,
+          "completion_tokens": 32,
+          "prompt_tokens": 1418,
+          "content": "The sentence \"The quick brown fox jumps over the lazy dog\" appears multiple times in the given text, emphasizing its common use in English language exercises and tests."
+        },
+        {
+          "elapsed": 2.0508726043626666,
+          "completion_tokens": 33,
+          "prompt_tokens": 1418,
+          "content": "The sentence \"The quick brown fox jumps over the lazy dog\" appears repeatedly throughout the given text, emphasizing its prevalence in the list of 100 occurrences."
+        },
+        {
+          "elapsed": 1.763202752918005,
+          "completion_tokens": 28,
+          "prompt_tokens": 1418,
+          "content": "The sentence \"The quick brown fox jumps over the lazy dog\" appears repeatedly throughout the given text, emphasizing its importance or frequency of mention."
+        }
+      ],
+      "ollama": [
+        {
+          "elapsed": 4.142155261244625,
+          "completion_tokens": 61,
+          "prompt_tokens": 1439,
+          "eval_s": 3.894544946,
+          "prompt_eval_s": 0.065724871,
+          "content": "The sentence \"The quick brown fox jumps over the lazy dog\" appears multiple times in a long list of identical sentences, emphasizing its presence and frequency within this repetitive text. This redundancy underscores how frequently this particular sequence is used or emphasized, likely for illustrative purposes or as an example in some context."
+        },
+        {
+          "elapsed": 4.366085221990943,
+          "completion_tokens": 64,
+          "prompt_tokens": 1439,
+          "eval_s": 4.117548082,
+          "prompt_eval_s": 0.064668373,
+          "content": "The sentence \"The quick brown fox jumps over the lazy dog\" is repeated multiple times in the provided text, which seems to be a sample or placeholder content rather than coherent dialogue or description. Despite this repetition, the main idea remains consistent: it's about a quick brown fox leaping gracefully over a lazily lying dog"
+        },
+        {
+          "elapsed": 4.27581955306232,
+          "completion_tokens": 64,
+          "prompt_tokens": 1439,
+          "eval_s": 4.031552597,
+          "prompt_eval_s": 0.064532,
+          "content": "The sentence \"The quick brown fox jumps over the lazy dog\" is repeated multiple times, showcasing how this particular phrase is commonly used for practice in typewriting tests due to its inclusion of all letters of the English alphabet. Here are two sentences summarizing it: \n\n1. The text demonstrates an exercise often used for"
+        }
+      ]
+    }
+  },
+  "turns": {
+    "headers": [
+      "server",
+      "turn 1 s",
+      "turn 2 s",
+      "turn 3 s",
+      "turn 4 s"
+    ],
+    "rows": [
+      [
+        "muse",
+        0.58,
+        2.98,
+        1.44,
+        3.13
+      ],
+      [
+        "ollama",
+        1.08,
+        3.1,
+        1.75,
+        3.26
+      ]
+    ],
+    "raw": {
+      "muse": [
+        [
+          0.7413483941927552,
+          3.137177338823676,
+          1.6819003587588668,
+          3.125251664314419
+        ],
+        [
+          0.5788759412243962,
+          2.1580681460909545,
+          1.4372461377643049,
+          3.139711854979396
+        ],
+        [
+          0.5350035130977631,
+          2.982754971832037,
+          1.4381443001329899,
+          3.027837907895446
+        ]
+      ],
+      "ollama": [
+        [
+          1.0808013919740915,
+          2.7078342558816075,
+          1.7468264736235142,
+          3.2031089337542653
+        ],
+        [
+          2.7720596618019044,
+          3.16091653611511,
+          1.76681711897254,
+          3.2998599903658032
+        ],
+        [
+          0.7144780289381742,
+          3.098123031668365,
+          1.588445199187845,
+          3.257183717098087
+        ]
+      ]
+    }
+  },
+  "split": {
+    "headers": [
+      "server",
+      "median elapsed s",
+      "tok/s (wall)",
+      "tok/s (gen-only, self-reported)"
+    ],
+    "rows": [
+      [
+        "muse",
+        1.89,
+        16.99,
+        "-"
+      ],
+      [
+        "muse",
+        1.97,
+        17.11,
+        "-"
+      ]
+    ],
+    "raw": {
+      "muse": [
+        {
+          "elapsed": 1.9061541971750557,
+          "completion_tokens": 32,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight to concrete mixes.\nCreating decorative elements in masonry.\nInsulation in older buildings.\nSupporting pavers in pathways."
+        },
+        {
+          "elapsed": 1.968997186049819,
+          "completion_tokens": 34,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating decorative garden borders.\nInsulation in walls and attics.\nSupporting pavers in a driveway."
+        },
+        {
+          "elapsed": 2.2215615180321038,
+          "completion_tokens": 38,
+          "prompt_tokens": 19,
+          "content": "Building walls and structures.\nProviding weight for shipping pallets.\nCreating chimneys and fireplaces.\nUsed as a decorative element in masonry.\nForming the base for garden planters."
+        }
+      ]
+    },
+    "note": "second row is the same muse model via the worker port directly; delta vs row one is gateway/relay overhead"
+  }
+}
