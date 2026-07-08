@@ -364,6 +364,21 @@ measurements bucket in `_record_observed_peak`, matching what
 CPU-only host degrades `auto`->cpu, which happens to match the buggy
 CPU-pool accounting; it only bites on a GPU host.
 
+**GPU-layers pin (v0.56.0, GGUF only).** `muse models set-gpu-layers <id> <N>`
+(N >= 0), `--all` (all layers on GPU, i.e. -1; a bare `-1` positional is not
+shell-passable through click), or `--clear` writes a top-level catalog
+`gpu_layers_override` (the `device_override` pattern): llama.cpp `n_gpu_layers`,
+-1 = all layers on GPU, 0 = pure CPU, N > 0 = a static GPU/CPU layer split for
+GGUFs bigger than VRAM. Precedence: pin > `capabilities.n_gpu_layers` > runtime
+default (-1). Refuses non-GGUF models (other runtimes silently ignore the kwarg).
+Takes effect on next cold load; run `muse models probe <id>` after pinning
+so admission sizing measures the split's real (smaller) VRAM peak. The
+probe honors the pin automatically (it constructs via `load_backend`).
+Known limitation: a split model occupies both VRAM and host RAM, but the
+director accounts it against its resolved device's pool only -- the
+Tier-1 static-offload simplification (automatic offload was evaluated and
+rejected; see docs/superpowers/specs/2026-07-08-gpu-layers-pin-design.md).
+
 ### No shared supertype across modalities
 
 `AudioResult` and `ImageResult` do NOT share a common base. Streaming semantics

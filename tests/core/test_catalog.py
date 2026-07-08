@@ -2587,3 +2587,22 @@ class TestGpuLayersOverride:
              mpatch("muse.core.catalog.is_pulled", return_value=True):
             load_backend("test-gguf")
         assert "n_gpu_layers" not in fake_cls.call_args.kwargs
+
+    def test_probe_flow_gets_pin_via_load_backend(self, tmp_path, monkeypatch):
+        """probe_worker constructs via load_backend(model_id, device=...),
+        so the pin flows into the probed construction with zero probe code.
+        This test binds that seam: a caller-passed device kwarg must NOT
+        displace the injected n_gpu_layers."""
+        from unittest.mock import MagicMock, patch as mpatch
+        from muse.core.catalog import load_backend, set_gpu_layers_override
+        self._seed(tmp_path, monkeypatch)
+        set_gpu_layers_override("test-gguf", 25)
+        fake_cls = MagicMock()
+        fake_module = MagicMock()
+        fake_module.LlamaCppModel = fake_cls
+        with mpatch("muse.core.catalog._import_backend_module",
+                    return_value=fake_module), \
+             mpatch("muse.core.catalog.is_pulled", return_value=True):
+            load_backend("test-gguf", device="cuda")  # probe-style call
+        assert fake_cls.call_args.kwargs["n_gpu_layers"] == 25
+        assert fake_cls.call_args.kwargs["device"] == "cuda"
