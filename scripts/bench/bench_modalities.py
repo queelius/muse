@@ -29,10 +29,11 @@ def _post_json(base, path, body):
     return r
 
 
-def _enabled_models(base) -> set[str]:
+def _enabled_models(base) -> dict[str, str]:
+    """id -> modality for every model the server lists."""
     r = httpx.get(f"{base}/v1/models", timeout=TIMEOUT)
     r.raise_for_status()
-    return {m["id"] for m in r.json().get("data", [])}
+    return {m["id"]: m.get("modality", "") for m in r.json().get("data", [])}
 
 
 def _tts_wav(base, model) -> bytes:
@@ -94,7 +95,8 @@ def main() -> int:
     # whisper: needs a wav; generate via the target's own TTS if available
     tts_model = ("kokoro-82m" if "kokoro-82m" in enabled
                  else "supertonic-3" if "supertonic-3" in enabled else None)
-    whisper = next((m for m in sorted(enabled) if "whisper" in m), None)
+    whisper = next((m for m in sorted(enabled)
+                    if enabled[m] == "audio/transcription"), None)
     if tts_model and whisper:
         wav = _tts_wav(base, tts_model)
 
@@ -106,18 +108,19 @@ def main() -> int:
             r.raise_for_status()
         cases.append((f"transcribe_{whisper}", whisper, _transcribe))
 
-    # embeddings: first enabled embedding-ish model by known ids
+    # embeddings: first enabled embedding/text model (by modality, not id)
     embed = next((m for m in sorted(enabled)
-                  if "minilm" in m or "embed" in m.lower()), None)
+                  if enabled[m] == "embedding/text"), None)
     if embed:
         def _embed(b, embed=embed):
             _post_json(b, "/v1/embeddings",
                        {"model": embed, "input": [SENTENCE] * 16})
         cases.append((f"embed_{embed}", embed, _embed))
 
-    # smallest enabled GGUF chat model: heuristic by id
-    chat = next((m for m in sorted(enabled)
-                 if "gguf" in m or "qwen" in m), None)
+    # first enabled chat/completion GGUF (by modality; gguf-id preference
+    # keeps the case on the llama.cpp runtime rather than a VLM)
+    chat_ids = [m for m in sorted(enabled) if enabled[m] == "chat/completion"]
+    chat = next((m for m in chat_ids if "gguf" in m), chat_ids[0] if chat_ids else None)
     if chat:
         def _chat(b, chat=chat):
             _post_json(b, "/v1/chat/completions",
@@ -127,8 +130,6 @@ def main() -> int:
         cases.append((f"chat_{chat}", chat, _chat))
 
     for name, model, fn in cases:
-        if fn is None:
-            continue
         if only and name not in only:
             continue
         if model is not None and model not in enabled:
