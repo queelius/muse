@@ -658,6 +658,80 @@ def models_set_device(
         )
 
 
+@models_app.command("set-gpu-layers")
+def models_set_gpu_layers(
+    model_id: Annotated[str, typer.Argument()],
+    n: Annotated[
+        Optional[int],
+        typer.Argument(
+            help="llama.cpp n_gpu_layers: -1 = all layers on GPU, 0 = pure "
+                 "CPU, N > 0 = first N layers on GPU; omit with --clear",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", help="remove the pin (revert to manifest / runtime default)"),
+    ] = False,
+) -> None:
+    """Pin a GGUF model's llama.cpp GPU/CPU layer split (operator override).
+
+    Writes a per-model `gpu_layers_override` to the catalog. Precedence at
+    load time: pin > manifest capabilities.n_gpu_layers > runtime default
+    (-1, everything the GPU fits). GGUF-only: refuses models without
+    capabilities.gguf_file, since other runtimes silently ignore the kwarg.
+
+    Catalog-only state: takes effect on the model's NEXT cold load. To
+    apply it to an already-resident worker, evict it or restart the
+    supervisor. Run `muse models probe <id>` after pinning so admission
+    sizing measures the split's real (smaller) VRAM peak.
+    """
+    from muse.core.catalog import known_models, set_gpu_layers_override
+
+    if clear:
+        target = None
+    elif n is None:
+        typer.echo(
+            "error: provide a layer count (int >= -1) or pass --clear",
+            err=True,
+        )
+        raise typer.Exit(2)
+    else:
+        target = n
+
+    if target is not None:
+        entry = known_models().get(model_id)
+        capabilities = (entry.extra or {}) if entry is not None else {}
+        if not capabilities.get("gguf_file"):
+            typer.echo(
+                f"error: {model_id!r} is not a GGUF model (no "
+                "capabilities.gguf_file); n_gpu_layers only applies to "
+                "llama.cpp runtimes and would be silently ignored",
+                err=True,
+            )
+            raise typer.Exit(2)
+
+    try:
+        set_gpu_layers_override(model_id, target)
+    except KeyError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(2)
+    except ValueError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(2)
+
+    if target is None:
+        typer.echo(
+            f"cleared gpu-layers pin for {model_id} "
+            "(takes effect on next cold load)"
+        )
+    else:
+        typer.echo(
+            f"set {model_id} gpu layers -> {target} "
+            "(takes effect on next cold load; run `muse models probe "
+            f"{model_id}` to re-measure VRAM)"
+        )
+
+
 @models_app.command("warmup")
 def models_warmup(
     model_id: Annotated[str, typer.Argument()],

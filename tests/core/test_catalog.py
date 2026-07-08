@@ -2556,6 +2556,23 @@ class TestGpuLayersOverride:
             load_backend("test-gguf")
         assert fake_cls.call_args.kwargs["n_gpu_layers"] == 10
 
+    def test_load_backend_pin_beats_caller_kwarg(self, tmp_path, monkeypatch):
+        """The pin wins over BOTH the manifest capability and an explicit
+        caller kwarg (mirrors test_load_backend_device_override_beats_caller_kwarg)."""
+        from unittest.mock import MagicMock, patch as mpatch
+        from muse.core.catalog import load_backend, set_gpu_layers_override
+        self._seed(tmp_path, monkeypatch,
+                   capabilities={"gguf_file": "m.gguf", "n_gpu_layers": 10})
+        set_gpu_layers_override("test-gguf", 30)
+        fake_cls = MagicMock()
+        fake_module = MagicMock()
+        fake_module.LlamaCppModel = fake_cls
+        with mpatch("muse.core.catalog._import_backend_module",
+                    return_value=fake_module), \
+             mpatch("muse.core.catalog.is_pulled", return_value=True):
+            load_backend("test-gguf", n_gpu_layers=5)
+        assert fake_cls.call_args.kwargs["n_gpu_layers"] == 30
+
     def test_load_backend_absent_everywhere_passes_nothing(self, tmp_path, monkeypatch):
         """No pin + no capability: n_gpu_layers not in kwargs; the runtime
         default (-1) governs."""

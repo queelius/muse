@@ -246,6 +246,12 @@ def format_info(
             f"  device override: {override} "
             "(operator pin via `muse models set-device`; overrides manifest device)"
         )
+    layers_pin = catalog_data.get("gpu_layers_override") if is_pulled else None
+    if layers_pin is not None:
+        lines.append(
+            f"  gpu layers pin:  {layers_pin} "
+            "(operator pin via `muse models set-gpu-layers`)"
+        )
 
     # Storage
     if is_pulled:
