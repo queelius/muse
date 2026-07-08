@@ -664,10 +664,20 @@ def models_set_gpu_layers(
     n: Annotated[
         Optional[int],
         typer.Argument(
-            help="llama.cpp n_gpu_layers: -1 = all layers on GPU, 0 = pure "
-                 "CPU, N > 0 = first N layers on GPU; omit with --clear",
+            help="llama.cpp n_gpu_layers: N >= 0 (0 = pure CPU, N > 0 = "
+                 "first N layers on GPU); use --all for -1 (every layer on "
+                 "GPU) or --clear to remove the pin",
         ),
     ] = None,
+    all_layers: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="offload every layer to the GPU (writes -1); shells "
+                 "reject a bare -1 positional (click has no negative-"
+                 "number heuristic), so use this flag instead",
+        ),
+    ] = False,
     clear: Annotated[
         bool,
         typer.Option("--clear", help="remove the pin (revert to manifest / runtime default)"),
@@ -680,6 +690,21 @@ def models_set_gpu_layers(
     (-1, everything the GPU fits). GGUF-only: refuses models without
     capabilities.gguf_file, since other runtimes silently ignore the kwarg.
 
+    Exactly one of a layer count, --all, or --clear is required:
+
+        muse models set-gpu-layers <id> 30      split: first 30 layers on GPU
+        muse models set-gpu-layers <id> 0       pure CPU
+        muse models set-gpu-layers <id> --all   everything on GPU (writes -1)
+        muse models set-gpu-layers <id> --clear remove the pin
+
+    click has no negative-number heuristic for positional arguments, so a
+    bare `-1` is parsed as an unrecognized option and the command dies at
+    the shell before this code ever runs -- that is why -1 is not
+    documented as a positional value above; `--all` is the supported way
+    to request it. Shell die-hards can still pass a literal -1 via the
+    `--` end-of-options marker (`muse models set-gpu-layers <id> -- -1`),
+    which forces click to treat everything after it as positional.
+
     Catalog-only state: takes effect on the model's NEXT cold load. To
     apply it to an already-resident worker, evict it or restart the
     supervisor. Run `muse models probe <id>` after pinning so admission
@@ -687,28 +712,38 @@ def models_set_gpu_layers(
     """
     from muse.core.catalog import known_models, set_gpu_layers_override
 
-    if clear:
-        target = None
-    elif n is None:
+    given = (n is not None, all_layers, clear)
+    if sum(given) != 1:
         typer.echo(
-            "error: provide a layer count (int >= -1) or pass --clear",
+            "error: provide exactly one of a layer count (int >= 0), "
+            "--all, or --clear",
             err=True,
         )
         raise typer.Exit(2)
+
+    if clear:
+        target = None
+    elif all_layers:
+        target = -1
     else:
         target = n
 
     if target is not None:
         entry = known_models().get(model_id)
-        capabilities = (entry.extra or {}) if entry is not None else {}
-        if not capabilities.get("gguf_file"):
-            typer.echo(
-                f"error: {model_id!r} is not a GGUF model (no "
-                "capabilities.gguf_file); n_gpu_layers only applies to "
-                "llama.cpp runtimes and would be silently ignored",
-                err=True,
-            )
-            raise typer.Exit(2)
+        # entry is None (unknown / never-pulled model): skip the GGUF
+        # capability check here and fall through to set_gpu_layers_override
+        # below, whose KeyError produces the uniform "not pulled" error
+        # instead of the misleading "is not a GGUF model" refusal.
+        if entry is not None:
+            capabilities = entry.extra or {}
+            if not capabilities.get("gguf_file"):
+                typer.echo(
+                    f"error: {model_id!r} is not a GGUF model (no "
+                    "capabilities.gguf_file); n_gpu_layers only applies to "
+                    "llama.cpp runtimes and would be silently ignored",
+                    err=True,
+                )
+                raise typer.Exit(2)
 
     try:
         set_gpu_layers_override(model_id, target)
