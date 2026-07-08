@@ -8,6 +8,7 @@ threads via call_soon_threadsafe.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -51,27 +52,60 @@ class ConcurrencyGate:
         # threadsafe; the gateway relay / finally paths may call release_slot
         # off the event loop.
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Guards every read AND mutation of _entered / _caps. depth()/depths()
+        # are called from SYNC admin/telemetry route handlers, which Starlette
+        # dispatches via run_in_threadpool -- a different OS thread than the
+        # event loop thread that mutates _entered on every acquire/release.
+        # Without this lock, depths() iterating _entered can race a
+        # concurrent key-add/key-pop on the loop thread and raise
+        # "dictionary changed size during iteration". A plain (non-reentrant)
+        # Lock is enough: every critical section below is a small, await-free
+        # dict read/write, so there is no risk of blocking the event loop or
+        # of nested acquisition. asyncio.Semaphore operations stay OUTSIDE
+        # the lock -- they are loop-internal already and don't need it.
+        self._mutex = threading.Lock()
 
     def depth(self, model_id: str) -> int:
-        entered = self._entered.get(model_id, 0)
-        cap = self._caps.get(model_id, 0)
-        return max(0, entered - cap)
+        with self._mutex:
+            entered = self._entered.get(model_id, 0)
+            cap = self._caps.get(model_id, 0)
+            return max(0, entered - cap)
 
     def depths(self) -> dict[str, int]:
-        result = {}
-        for model_id in self._entered:
-            d = self.depth(model_id)
-            if d > 0:
-                result[model_id] = d
-        return result
+        with self._mutex:
+            result = {}
+            for model_id, entered in self._entered.items():
+                cap = self._caps.get(model_id, 0)
+                d = max(0, entered - cap)
+                if d > 0:
+                    result[model_id] = d
+            return result
 
     def _sem(self, model_id: str, cap: int) -> asyncio.Semaphore:
         sem = self._sems.get(model_id)
         if sem is None:
             sem = asyncio.Semaphore(cap)
             self._sems[model_id] = sem
-            self._caps[model_id] = cap
+            with self._mutex:
+                self._caps[model_id] = cap
         return sem
+
+    def _check_and_enter_locked(self, model_id: str, cap: int) -> None:
+        """Synchronous check-then-increment for one caller's entry.
+
+        Caller MUST already hold self._mutex. No await anywhere in this
+        method: the read of `entered` and the write to `self._entered` stay
+        adjacent with nothing able to interleave, preserving the burst-
+        arrival accuracy the check relies on (see _acquire_permit's
+        docstring) while also being race-free against a cross-thread
+        depth()/depths() reader.
+        """
+        entered = self._entered.get(model_id, 0)
+        excess = entered - cap
+        max_depth = config.get("server.max_queue_depth") or 0
+        if max_depth > 0 and excess >= max_depth:
+            raise QueueFull(model_id, excess)
+        self._entered[model_id] = entered + 1
 
     async def _acquire_permit(
         self, sem: asyncio.Semaphore, model_id: str, deadline: float,
@@ -114,12 +148,8 @@ class ConcurrencyGate:
         # increment, so this is accurate even under a concurrent burst
         # of arrivals on one event loop (no interleaving is possible
         # between here and the increment below).
-        entered = self._entered.get(model_id, 0)
-        excess = entered - cap
-        max_depth = config.get("server.max_queue_depth") or 0
-        if max_depth > 0 and excess >= max_depth:
-            raise QueueFull(model_id, excess)
-        self._entered[model_id] = entered + 1
+        with self._mutex:
+            self._check_and_enter_locked(model_id, cap)
         try:
             await self._acquire_permit(sem, model_id, deadline)
             try:
@@ -127,9 +157,7 @@ class ConcurrencyGate:
             finally:
                 sem.release()
         finally:
-            self._entered[model_id] -= 1
-            if self._entered[model_id] <= 0:
-                self._entered.pop(model_id, None)
+            self._decr_entered(model_id)
 
     # ------------------------------------------------------------------
     # Split acquire/release variant (used by the gateway request path).
@@ -170,12 +198,8 @@ class ConcurrencyGate:
         # Synchronous compare-and-increment (no await between the read and the
         # increment), so a concurrent burst on one loop cannot slip past the
         # depth bound -- mirrors slot()'s entry check exactly.
-        entered = self._entered.get(model_id, 0)
-        excess = entered - cap
-        max_depth = config.get("server.max_queue_depth") or 0
-        if max_depth > 0 and excess >= max_depth:
-            raise QueueFull(model_id, excess)
-        self._entered[model_id] = entered + 1
+        with self._mutex:
+            self._check_and_enter_locked(model_id, cap)
         try:
             await self._acquire_permit(sem, model_id, deadline)
         except BaseException:
@@ -221,18 +245,27 @@ class ConcurrencyGate:
 
         Only acts when a slot is genuinely held (entered > 0); an extra call
         is dropped so the semaphore is never over-released and entered never
-        goes negative.
+        goes negative. The guard check and the decrement happen inside one
+        locked section so a concurrent depth()/depths() reader can never
+        observe (or race) a half-applied release; sem.release() itself runs
+        outside the lock (asyncio.Semaphore is loop-internal already, and
+        this method itself only ever runs on the loop thread, so there is no
+        cross-thread race on the release call).
         """
         sem = self._sems.get(model_id)
         if sem is None:
             return
-        if self._entered.get(model_id, 0) <= 0:
-            return  # over-release guard: nothing held
-        self._decr_entered(model_id)
+        with self._mutex:
+            if self._entered.get(model_id, 0) <= 0:
+                return  # over-release guard: nothing held
+            self._decr_entered_locked(model_id)
         sem.release()
 
-    def _decr_entered(self, model_id: str) -> None:
-        """Decrement the entered counter, clamped at 0, popping empties."""
+    def _decr_entered_locked(self, model_id: str) -> None:
+        """Decrement _entered, clamped at 0, popping empties.
+
+        Caller MUST already hold self._mutex.
+        """
         n = self._entered.get(model_id, 0)
         if n <= 0:
             self._entered.pop(model_id, None)
@@ -240,6 +273,11 @@ class ConcurrencyGate:
         self._entered[model_id] = n - 1
         if self._entered[model_id] <= 0:
             self._entered.pop(model_id, None)
+
+    def _decr_entered(self, model_id: str) -> None:
+        """Decrement the entered counter, clamped at 0, popping empties."""
+        with self._mutex:
+            self._decr_entered_locked(model_id)
 
 
 class CapacityNotifier:

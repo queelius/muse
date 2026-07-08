@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -323,6 +324,69 @@ class TestAcquireReleaseSlot:
         # timed-out acquirer's increment was undone
         assert gate.depth("m") == 0
         h.cancel()
+
+
+class TestConcurrencyGateCrossThreadReads:
+    """Regression coverage for the depths()/depth() cross-thread race.
+
+    /v1/admin/memory and /v1/telemetry/summary are SYNC route handlers;
+    Starlette dispatches sync handlers via run_in_threadpool, a DIFFERENT
+    OS thread than the gateway's single event-loop thread. That loop thread
+    mutates gate._entered on every acquire_slot/release_slot (key adds when
+    a model_id is first seen, key pops when its count drops to 0). Before
+    the fix, depths() did `for model_id in self._entered` with no
+    synchronization, so a concurrent add/pop from the loop thread could
+    raise "RuntimeError: dictionary changed size during iteration" mid-scan
+    -- surfacing as a 500 on exactly the endpoints an operator polls while
+    the system is busy queueing requests.
+    """
+
+    async def test_depths_survive_concurrent_rotating_mutation(self):
+        gate = ConcurrencyGate()
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def reader() -> None:
+            # Tight loop: no sleeps, maximizing overlap with the mutator's
+            # dict adds/pops on the loop thread.
+            while not stop.is_set():
+                try:
+                    gate.depths()
+                    for i in range(8):
+                        gate.depth(f"m{i}")
+                except BaseException as exc:  # capture ANY exception, not just RuntimeError
+                    errors.append(exc)
+                    return
+
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+
+        async def mutator(offset: int) -> None:
+            # Rotates through 8 model ids so keys are repeatedly ADDED
+            # (first acquire for that id) and POPPED (count back to 0),
+            # changing dict SIZE, not just values -- the precondition for
+            # "dictionary changed size during iteration".
+            end = time.monotonic() + 0.5
+            i = offset
+            while time.monotonic() < end:
+                model_id = f"m{i % 8}"
+                i += 1
+                try:
+                    await gate.acquire_slot(model_id, 1, deadline=_deadline(0.02))
+                except QueueTimeout:
+                    continue
+                await asyncio.sleep(0)  # yield once while the slot is held
+                gate.release_slot(model_id)
+
+        # Several concurrent mutator tasks so multiple model_ids exist in
+        # _entered simultaneously, maximizing add/pop churn during the
+        # reader thread's scan window.
+        await asyncio.gather(*[mutator(k) for k in range(4)])
+
+        stop.set()
+        reader_thread.join(timeout=2)
+        assert not reader_thread.is_alive(), "reader thread did not exit in time"
+        assert errors == [], f"depths()/depth() raised under concurrent mutation: {errors!r}"
 
 
 class TestCapacityNotifier:
