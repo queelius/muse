@@ -78,6 +78,52 @@ def test_summary_ok_with_token(client_with_token):
     assert body["dropped_events"] == 0
 
 
+def test_summary_includes_queue_depth(client_with_token):
+    """loaded[] entries carry the live per-model queue_depth from the
+    gateway's ConcurrencyGate, mirroring /v1/admin/memory's discipline:
+    present (0 or more) when a gate is bound, so an operator can see
+    parked waiters from the dashboard summary too."""
+    from muse.cli_impl.queueing import ConcurrencyGate
+
+    state = client_with_token.state_ref
+    state.director.loaded["m"] = SimpleNamespace(
+        pool=None, memory_gb=1.0, last_touched_at=0.0,
+    )
+    gate = ConcurrencyGate()
+    # cap=1, 3 entered (1 holding + 2 parked) -> depth = 3 - 1 = 2.
+    gate._caps["m"] = 1
+    gate._sems["m"] = asyncio.Semaphore(1)
+    gate._entered["m"] = 3
+    assert gate.depth("m") == 2
+    state.concurrency_gate = gate
+
+    r = client_with_token.get(
+        "/v1/telemetry/summary", headers={"Authorization": "Bearer t"}
+    )
+    assert r.status_code == 200
+    entry = [e for e in r.json()["loaded"] if e["model_id"] == "m"][0]
+    assert entry["queue_depth"] == 2
+
+
+def test_summary_queue_depth_zero_when_no_gate_bound(client_with_token):
+    """Bare test state has no concurrency_gate attribute at all (unlike
+    production SupervisorState's default field), so summary() must guard
+    with getattr and fall back to an empty depths mapping -> queue_depth 0
+    for a loaded model, rather than raising AttributeError."""
+    state = client_with_token.state_ref
+    assert not hasattr(state, "concurrency_gate")
+    state.director.loaded["m"] = SimpleNamespace(
+        pool=None, memory_gb=1.0, last_touched_at=0.0,
+    )
+
+    r = client_with_token.get(
+        "/v1/telemetry/summary", headers={"Authorization": "Bearer t"}
+    )
+    assert r.status_code == 200
+    entry = [e for e in r.json()["loaded"] if e["model_id"] == "m"][0]
+    assert entry["queue_depth"] == 0
+
+
 def test_series_ok(client_with_token):
     r = client_with_token.get(
         "/v1/telemetry/series?metric=request_rate&window=3600",

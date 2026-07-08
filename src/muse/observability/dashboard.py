@@ -97,19 +97,25 @@ async def _stream_model_logs(hub, model_id: str, request: Request):
         hub.unsubscribe(model_id, q)
 
 
-def _loaded_entry_dict(model_id: str, entry) -> dict:
+def _loaded_entry_dict(model_id: str, entry, queue_depth: int | None = None) -> dict:
     """Defensively project a LoadEntry-like object into the wire shape.
 
     Only fields verified on muse.cli_impl.load_director.LoadEntry are
     read directly (memory_gb, last_touched_at); everything else (namely
     "pool", which is not a LoadEntry attribute) falls back to None via
     getattr rather than assuming a name that might not exist.
+
+    `queue_depth` (spec 2026-07-08 Task 4) is passed in by the caller
+    (already resolved from the gateway's ConcurrencyGate, or 0 when no
+    gate is bound) rather than read off `entry`, since queue depth is a
+    property of the model's concurrency gate, not of the LoadEntry.
     """
     return {
         "model_id": model_id,
         "pool": getattr(entry, "pool", None),
         "gb": getattr(entry, "memory_gb", None),
         "last_used": getattr(entry, "last_touched_at", None),
+        "queue_depth": queue_depth,
     }
 
 
@@ -127,8 +133,11 @@ def build_dashboard_router(state) -> APIRouter:
     )
     def summary() -> dict:
         director = state.director
+        gate = getattr(state, "concurrency_gate", None)
+        depths = gate.depths() if gate is not None else {}
         loaded = [
-            _loaded_entry_dict(model_id, entry)
+            _loaded_entry_dict(model_id, entry,
+                               queue_depth=depths.get(model_id, 0))
             for model_id, entry in director.loaded.items()
         ]
         in_flight = len(getattr(director, "in_flight_loads", {}) or {})

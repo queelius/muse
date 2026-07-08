@@ -1,6 +1,7 @@
 """Tests for GET /v1/admin/memory."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 
@@ -163,6 +164,88 @@ class TestMemoryRoute:
         out = _per_model_breakdown("cpu", "cpu")
         assert len(out) == 1
         assert "refcount" not in out[0]
+
+    def test_per_model_breakdown_includes_queue_depth(self, tmp_catalog):
+        """The breakdown surfaces each loaded model's live queue depth from
+        the gateway's ConcurrencyGate, so an operator can see parked waiters
+        without inferring it from latency alone. depth is excess-over-cap
+        (entered - cap, floored at 0): cap=1 with 4 entered means 1 holds
+        the slot and 3 are parked waiting."""
+        from muse.cli_impl.queueing import ConcurrencyGate
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(models=["kokoro-82m"],
+                          python_path="/v/bin/python", port=9001)
+        state = SupervisorState(workers=[spec], device="cpu")
+        state.concurrency_gate = ConcurrencyGate()
+        # Simulate 3 parked waiters via the gate's real internals: cap=1,
+        # 4 entered (1 holding the slot + 3 parked) -> depth = 4 - 1 = 3.
+        gate = state.concurrency_gate
+        gate._caps["kokoro-82m"] = 1
+        gate._sems["kokoro-82m"] = asyncio.Semaphore(1)
+        gate._entered["kokoro-82m"] = 4
+        assert gate.depth("kokoro-82m") == 3
+        set_supervisor_state(state)
+        from muse.admin.routes.memory import _per_model_breakdown
+        out = _per_model_breakdown("cpu", "cpu")
+        assert out[0]["queue_depth"] == 3
+
+    def test_per_model_breakdown_queue_depth_zero_when_gate_bound_but_idle(
+        self, tmp_catalog,
+    ):
+        """A bound gate with no excess waiters reports queue_depth 0 (not
+        omitted): 0 is meaningful ("gate exists, nothing queued"), whereas
+        omission means "no gate bound, unknown"."""
+        from muse.cli_impl.queueing import ConcurrencyGate
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(models=["kokoro-82m"],
+                          python_path="/v/bin/python", port=9001)
+        state = SupervisorState(workers=[spec], device="cpu")
+        state.concurrency_gate = ConcurrencyGate()
+        set_supervisor_state(state)
+        from muse.admin.routes.memory import _per_model_breakdown
+        out = _per_model_breakdown("cpu", "cpu")
+        assert out[0]["queue_depth"] == 0
+
+    def test_per_model_breakdown_omits_queue_depth_without_gate(self, tmp_catalog):
+        """No gate bound (bare state with the field cleared, e.g. a Mock in
+        another test harness): the queue_depth key is omitted rather than
+        falsely reported as 0."""
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(models=["kokoro-82m"],
+                          python_path="/v/bin/python", port=9001)
+        state = SupervisorState(workers=[spec], device="cpu")
+        state.concurrency_gate = None
+        set_supervisor_state(state)
+        from muse.admin.routes.memory import _per_model_breakdown
+        out = _per_model_breakdown("cpu", "cpu")
+        assert "queue_depth" not in out[0]
 
     def test_auto_device_model_resolves_to_gpu_side_on_cuda_supervisor(self, tmp_catalog):
         """A device='auto' bundled model (e.g. kokoro-82m) is accounted on

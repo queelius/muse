@@ -28,6 +28,13 @@ request (> 0). It lets an operator VERIFY a 503 that reports "no evictable
 candidates (all loaded models have refcount > 0)" against reality rather
 than trusting the message. The key is omitted (not 0) when no director is
 bound, so "unknown" is never mistaken for "evictable".
+
+Each entry also carries `queue_depth` (spec 2026-07-08 Task 4) when a
+ConcurrencyGate is bound to the supervisor state: the live count of
+requests parked waiting for a concurrency slot on that model (excess
+over the per-model cap). Mirrors the refcount discipline -- present
+(0 or more) when a gate exists, omitted when no gate is bound, so
+"nothing queued" and "unknown" are never conflated.
 """
 from __future__ import annotations
 
@@ -138,6 +145,20 @@ def _loaded_refcounts() -> dict[str, int]:
         }
 
 
+def _queue_depths() -> dict[str, int] | None:
+    """Live per-model parked-waiter counts from the gateway's gate.
+
+    None when no gate is bound (pre-boot / isolation / a bare test double
+    without the field) -> the caller omits the key entirely, mirroring the
+    refcount discipline: unknown is never rendered as 0.
+    """
+    state = get_supervisor_state()
+    gate = getattr(state, "concurrency_gate", None)
+    if gate is None:
+        return None
+    return gate.depths()
+
+
 def _resolve_auto_side() -> str:
     """Which memory side ('cpu' | 'gpu') an auto-device model loads on.
 
@@ -172,6 +193,7 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
     catalog_known = known_models()
     loaded = _enabled_loaded_model_ids()
     refcounts = _loaded_refcounts()
+    depths = _queue_depths()
     out: list[dict] = []
     for model_id in sorted(loaded):
         entry = catalog.get(model_id) or {}
@@ -208,6 +230,8 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
                 pass
         if model_id in refcounts:
             record["refcount"] = refcounts[model_id]
+        if depths is not None:
+            record["queue_depth"] = depths.get(model_id, 0)
         out.append(record)
     return out
 
