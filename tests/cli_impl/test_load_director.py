@@ -1918,3 +1918,50 @@ class TestCapacitySignal:
     def test_operation_error_default_not_retryable(self):
         from muse.admin.operations import OperationError
         assert OperationError("x", "y").retryable is False
+
+    def test_eviction_success_fires_listener_once(self):
+        """An eviction that frees enough memory fires capacity_listener
+        exactly once (the loop-exited-normally path in
+        _evict_lru_until_fits), so parked gateway capacity-waiters wake."""
+        cpu_free = {"v": 4.0}
+        probe = type("P", (), {
+            "gpu_free_gb": staticmethod(lambda: None),  # no GPU -> cpu pool
+            "cpu_free_gb": staticmethod(lambda: cpu_free["v"]),
+        })()
+
+        def disable(mid):
+            cpu_free["v"] = 12.0  # eviction releases memory
+
+        fired = []
+        d = LoadDirector(enable_fn=lambda mid: 9001, disable_fn=disable,
+                         memory_probe=probe, cpu_headroom_gb=1.0)
+        d.capacity_listener = lambda: fired.append(1)
+        d.loaded["victim"] = self._entry("victim", refcount=0)  # evictable
+
+        d._evict_lru_until_fits(
+            model_id="new", shortfall_gb=4.0, device="cpu", required_gb=6.0,
+        )
+
+        assert fired == [1]
+        assert "victim" not in d.loaded
+
+    def test_fits_now_recheck_fires_listener_once(self):
+        """The no-candidates-but-live-fit re-check path also fires
+        capacity_listener exactly once before returning to let acquire
+        re-decide (-> load)."""
+        fired = []
+        probe = type("P", (), {
+            "gpu_free_gb": staticmethod(lambda: None),
+            "cpu_free_gb": staticmethod(lambda: 10.0),  # 10 - 1 headroom = 9
+        })()
+        d = LoadDirector(enable_fn=lambda mid: 9001, disable_fn=lambda mid: None,
+                         memory_probe=probe, cpu_headroom_gb=1.0)
+        d.capacity_listener = lambda: fired.append(1)
+
+        # No loaded candidates, but live memory now fits (9 >= required 4).
+        d._evict_lru_until_fits(
+            model_id="new", shortfall_gb=4.0, device="cpu", required_gb=4.0,
+        )
+
+        assert fired == [1]
+        assert d.in_flight_loads == {}

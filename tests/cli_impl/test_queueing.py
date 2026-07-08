@@ -159,6 +159,107 @@ class TestConcurrencyGate:
         assert gate.depth("m2") == 0
 
 
+class TestAcquireReleaseSlot:
+    """Split acquire/release variant used by the gateway request path.
+
+    Same entry semantics as slot(), but the held region spans a non-lexical
+    scope: acquire_slot returns holding the slot; release_slot returns it
+    (threadsafe, over-release-safe).
+    """
+
+    async def test_unlimited_cap_is_noop(self):
+        gate = ConcurrencyGate()
+        await gate.acquire_slot("m", None, deadline=_deadline(1))
+        assert gate.depth("m") == 0
+        gate.release_slot("m")  # no-op: nothing was reserved
+        assert gate._entered.get("m", 0) == 0
+
+    async def test_acquire_release_balances_on_success(self):
+        gate = ConcurrencyGate()
+        await gate.acquire_slot("m", 2, deadline=_deadline(1))
+        assert gate.depth("m") == 0  # entered 1, cap 2 -> excess 0
+        gate.release_slot("m")
+        assert gate.depth("m") == 0
+        assert gate._entered.get("m", 0) == 0  # fully drained
+        # slot free again: an immediate re-acquire succeeds
+        await gate.acquire_slot("m", 2, deadline=_deadline(1))
+        gate.release_slot("m")
+
+    async def test_queue_timeout_undoes_entered_increment(self):
+        gate = ConcurrencyGate()
+        started = asyncio.Event()
+
+        async def holder():
+            await gate.acquire_slot("m", 1, deadline=_deadline(5))
+            started.set()
+            await asyncio.sleep(0.3)
+            gate.release_slot("m")
+
+        h = asyncio.create_task(holder())
+        await started.wait()
+        with pytest.raises(QueueTimeout):
+            await gate.acquire_slot("m", 1, deadline=_deadline(0.05))
+        # the timed-out acquirer's increment was undone: only the holder
+        # remains, so no residual queue depth.
+        assert gate.depth("m") == 0
+        await h
+        assert gate._entered.get("m", 0) == 0
+
+    async def test_queue_full_does_not_leak_entered(self, monkeypatch):
+        monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "1")
+        gate = ConcurrencyGate()
+        started = asyncio.Event()
+
+        async def holder():
+            await gate.acquire_slot("m", 1, deadline=_deadline(5))
+            started.set()
+            await asyncio.sleep(0.3)
+            gate.release_slot("m")
+
+        h = asyncio.create_task(holder())
+        await started.wait()
+        w = asyncio.create_task(gate.acquire_slot("m", 1, deadline=_deadline(5)))
+        await asyncio.sleep(0.01)  # w parks; depth == 1 == bound
+        assert gate.depth("m") == 1
+        with pytest.raises(QueueFull):
+            await gate.acquire_slot("m", 1, deadline=_deadline(5))
+        # QueueFull rejects BEFORE the increment -> depth unchanged
+        assert gate.depth("m") == 1
+        h.cancel()
+        w.cancel()
+
+    async def test_release_from_worker_thread_is_threadsafe(self):
+        gate = ConcurrencyGate()
+        await gate.acquire_slot("m", 1, deadline=_deadline(1))
+        # release from OFF the loop: scheduled on the captured loop.
+        await asyncio.to_thread(gate.release_slot, "m")
+        await asyncio.sleep(0.01)  # let the scheduled release run
+        assert gate.depth("m") == 0
+        assert gate._entered.get("m", 0) == 0
+        # slot is free again
+        async with gate.slot("m", 1, deadline=_deadline(1)):
+            pass
+
+    async def test_double_release_is_safe(self):
+        gate = ConcurrencyGate()
+        await gate.acquire_slot("m", 1, deadline=_deadline(1))
+        gate.release_slot("m")
+        gate.release_slot("m")  # extra release: must not corrupt state
+        assert gate.depth("m") == 0
+        assert gate._entered.get("m", 0) == 0  # never negative
+        # the semaphore was not over-released: exactly one slot is free
+        await gate.acquire_slot("m", 1, deadline=_deadline(1))
+        with pytest.raises(QueueTimeout):
+            # a second concurrent acquire must still block (cap==1 intact)
+            await gate.acquire_slot("m", 1, deadline=_deadline(0.05))
+        gate.release_slot("m")
+
+    async def test_release_before_any_acquire_is_noop(self):
+        gate = ConcurrencyGate()
+        gate.release_slot("never-acquired")  # must not raise / corrupt
+        assert gate.depth("never-acquired") == 0
+
+
 class TestCapacityNotifier:
     async def test_snapshot_then_notify_wakes(self):
         n = CapacityNotifier()

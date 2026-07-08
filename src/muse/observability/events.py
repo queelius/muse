@@ -2,9 +2,9 @@ from __future__ import annotations
 from typing import Any
 
 EVENT_COLUMNS: tuple[str, ...] = (
-    "ts", "type", "model_id", "pool", "gb", "latency_ms", "status", "reason",
-    "cold_load_seconds", "stream", "free_vram_gb", "free_ram_gb", "gpu_used_gb",
-    "loaded_count", "in_flight_count", "modality",
+    "ts", "type", "model_id", "pool", "gb", "latency_ms", "queued_ms",
+    "status", "reason", "cold_load_seconds", "stream", "free_vram_gb",
+    "free_ram_gb", "gpu_used_gb", "loaded_count", "in_flight_count", "modality",
 )
 _FIELD_COLUMNS = frozenset(EVENT_COLUMNS) - {"ts", "type"}
 

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS events (
     pool TEXT,
     gb REAL,
     latency_ms REAL,
+    queued_ms REAL,
     status INTEGER,
     reason TEXT,
     cold_load_seconds REAL,
@@ -99,6 +100,13 @@ class TelemetryStore:
             self._conn.execute(_CREATE_TABLE_SQL)
             self._conn.execute(_CREATE_IDX_TS_SQL)
             self._conn.execute(_CREATE_IDX_TYPE_SQL)
+            # Migrate older DBs in place: add any EVENT_COLUMNS the existing
+            # table lacks (new columns are always nullable in the sparse model,
+            # so ALTER TABLE ADD COLUMN is safe and idempotent).
+            have = {row[1] for row in self._conn.execute("PRAGMA table_info(events)")}
+            for col in EVENT_COLUMNS:
+                if col not in have:
+                    self._conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
             self._conn.commit()
 
     def insert_many(self, rows: list[dict]) -> None:

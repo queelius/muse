@@ -77,6 +77,23 @@ class WorkerSpec:
     job_id: str | None = None
 
 
+def _new_gate():
+    """Default factory for SupervisorState.concurrency_gate.
+
+    Lazy import keeps the dataclass default construction free of any module
+    the field type names (queueing.py imports only stdlib + config, so this
+    is cheap; the lazy form simply keeps the import off supervisor's top).
+    """
+    from muse.cli_impl.queueing import ConcurrencyGate
+    return ConcurrencyGate()
+
+
+def _new_notifier():
+    """Default factory for SupervisorState.capacity_notifier."""
+    from muse.cli_impl.queueing import CapacityNotifier
+    return CapacityNotifier()
+
+
 @dataclass
 class SupervisorState:
     """Runtime state shared across the supervisor and admin endpoints.
@@ -148,6 +165,15 @@ class SupervisorState:
     # per model-load instead of N-1. Touched ONLY from the gateway's single
     # event loop, so a plain dict is safe (the loader election is await-free).
     cold_load_gates: dict = field(default_factory=dict)
+    # Request queueing (spec 2026-07-08). `concurrency_gate` enforces the
+    # per-model concurrency cap with FIFO waiters kept ON the event loop;
+    # `capacity_notifier` broadcasts "capacity may have freed" from the
+    # LoadDirector's release/eviction paths so gateway capacity-waiters wake
+    # and re-decide. Both are default-constructed so a bare test state gets
+    # real, usable primitives; run_supervisor wires
+    # director.capacity_listener -> capacity_notifier.notify.
+    concurrency_gate: "ConcurrencyGate" = field(default_factory=_new_gate)
+    capacity_notifier: "CapacityNotifier" = field(default_factory=_new_notifier)
 
 
 # Module-level singleton; admin routes reach this through
@@ -1158,6 +1184,10 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
 
     state = SupervisorState(workers=[], device=device)
     state.director = _build_load_director(state)
+    # Wire the director's capacity signal to the gateway capacity notifier
+    # (spec 2026-07-08): a release-to-zero or a completed eviction fires
+    # capacity_listener, waking queued capacity-waiters so they re-decide.
+    state.director.capacity_listener = state.capacity_notifier.notify
     set_supervisor_state(state)
 
     # Validate the catalog. Models with no memory data or memory > free

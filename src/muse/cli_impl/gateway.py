@@ -30,7 +30,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from fastapi import FastAPI, Request
@@ -70,6 +70,12 @@ from muse.cli_impl.supervisor import (
 # pays a re-import cost on every request even though Python caches the
 # module object.
 from muse.admin.operations import OperationError
+
+# Request-queueing primitives (spec 2026-07-08). Module-top because the
+# request path constructs a deadline + gate slot on every request; queueing.py
+# imports only stdlib + config (no ML deps), so this is safe on the CLI import
+# path.
+from muse.cli_impl.queueing import QueueFull, QueueTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -648,33 +654,84 @@ async def _route_via_director(
     # 0 GB and never evicts to make room for it.
     manifest = backfill_manifest_memory(manifest, model_id)
 
-    # 3. Acquire, OFF the event loop and COALESCED per model. director.acquire
-    # may block for tens of seconds on a cold load; running it synchronously
-    # would freeze the single gateway event loop (fixed v0.50.3). But a burst
-    # of concurrent requests for the SAME cold model each dispatching their own
-    # to_thread(acquire) parks N-1 threads in the director's singleton-collapse
-    # event.wait, exhausting the ThreadPoolExecutor and stalling unrelated hot
-    # traffic (#319, measured 11.5s). _acquire_coalesced elects ONE loader per
-    # cold model; other same-model requests await a shared asyncio Future on the
-    # loop (no thread each). The load still runs off-loop and cancellation stays
-    # leak-safe.
+    # 3. Queueing (spec 2026-07-08). ONE deadline covers the concurrency-gate
+    # wait + the capacity wait + all retries. queue_timeout_seconds == 0
+    # degrades to today's no-wait behavior: an occupied slot / capacity 503
+    # surfaces immediately. `queued_ms` is initialized here so it is always
+    # defined by the time the telemetry record() call runs below.
+    queued_ms = 0.0
+    queue_budget = config.get("server.queue_timeout_seconds") or 0.0
+    deadline = time.monotonic() + max(0.0, float(queue_budget))
+    gate = state.concurrency_gate
+    cap = _effective_max_concurrency(manifest)
+    queued_t0 = time.monotonic()
+
+    # 3a. Concurrency gate: take one per-model slot (no-op when cap is
+    # None/<=0). QueueFull when the per-model queue is already at
+    # server.max_queue_depth; QueueTimeout when no slot frees within budget.
     try:
-        worker_port = await _acquire_coalesced(state, model_id, manifest)
+        await gate.acquire_slot(model_id, cap, deadline=deadline)
+    except QueueTimeout:
+        return _openai_error(
+            503, "queue_timeout",
+            f"waited {queue_budget:.0f}s for a slot on model {model_id!r} "
+            f"(queue depth {gate.depth(model_id)})",
+            error_type="server_error",
+        )
+    except QueueFull as exc:
+        return _openai_error(
+            503, "queue_full",
+            f"queue for model {model_id!r} is full (depth {exc.depth})",
+            error_type="server_error",
+        )
+
+    slot_released = False
+
+    def _release_slot() -> None:
+        # Exactly-once slot release: the flag guards against the forward leg's
+        # multiple release sites (buffered finally, stream-relay finally,
+        # early-failure except) all calling this. release_slot is itself
+        # threadsafe (schedules on the gate's captured loop when off-loop) and
+        # over-release-safe, so this is belt-and-suspenders.
+        nonlocal slot_released
+        if slot_released:
+            return
+        slot_released = True
+        gate.release_slot(model_id)
+
+    # 3b. Acquire, OFF the event loop and COALESCED per model, wrapped in a
+    # bounded capacity wait. director.acquire may block for tens of seconds on
+    # a cold load; running it synchronously would freeze the single gateway
+    # event loop (v0.50.3). _acquire_coalesced elects ONE loader per cold model
+    # (#319). _acquire_with_capacity_wait parks on a retryable capacity 503
+    # until a release/eviction fires capacity_notifier or the deadline lapses.
+    try:
+        worker_port = await _acquire_with_capacity_wait(
+            lambda: _acquire_coalesced(state, model_id, manifest),
+            state.capacity_notifier, deadline=deadline, model_id=model_id,
+        )
+    except QueueTimeout:
+        _release_slot()
+        return _openai_error(
+            503, "queue_timeout",
+            f"waited {queue_budget:.0f}s for capacity for model {model_id!r}",
+            error_type="server_error",
+        )
     except OperationError as exc:
+        _release_slot()
         return _openai_error(
             exc.status, exc.code, exc.message,
             error_type=error_type_for_status(exc.status),
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         # A non-OperationError out of director.acquire (e.g. a pynvml
         # hiccup inside _decide) must not surface as a raw 500 to the
         # request that happened to elect the LOADER role, while same-model
         # WAITERS on the identical failure get a mapped 503 via
-        # _acquire_coalesced's mapless-failure branch (see _settle in
-        # _acquire_coalesced). Log the real exception -- it would otherwise
-        # be swallowed from the client's perspective -- and return the
-        # SAME status + code waiters see, so loader and waiters degrade
-        # identically instead of diverging on an accident of scheduling.
+        # _acquire_coalesced's mapless-failure branch. Release the slot,
+        # log the real exception, and return the SAME status + code waiters
+        # see so loader and waiters degrade identically.
+        _release_slot()
         logger.error(
             "director.acquire(%r) raised an unexpected error",
             model_id, exc_info=True,
@@ -684,17 +741,27 @@ async def _route_via_director(
             f"load of {model_id!r} failed",
             error_type="server_error",
         )
+    except BaseException:
+        # CancelledError (client disconnect / timeout mid capacity-wait): the
+        # gate slot was taken above; release it before propagating so a capped
+        # model's slot is not leaked. The director refcount, if the shielded
+        # acquire later succeeds, is released by _acquire_off_loop's own
+        # cancellation callback.
+        _release_slot()
+        raise
+    queued_ms = (time.monotonic() - queued_t0) * 1000.0
 
-    # 4. Forward. The release call is wired into the response shape:
-    # for buffered responses, fire in a finally clause once the body is
-    # read; for SSE streams, fire from inside the relay generator's
-    # finally clause when the upstream iteration ends (or raises). Both
-    # paths converge in `_forward_with_release`.
+    # 4. Forward. The release calls (director.release + the gate slot release)
+    # are wired into the response shape: for buffered responses, fire in a
+    # finally clause once the body is read; for SSE streams, fire from inside
+    # the relay generator's finally clause when the upstream iteration ends (or
+    # raises). Both paths converge in `_forward_with_release`.
     target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
     t0 = time.monotonic()
     response = await _forward_with_release(
         request, target_url, timeout,
         director=state.director, model_id=model_id,
+        extra_release=_release_slot,
     )
     latency_ms = (time.monotonic() - t0) * 1000.0
     stream = isinstance(response, StreamingResponse)
@@ -710,6 +777,7 @@ async def _route_via_director(
             model_id=model_id,
             modality=_modality_from_path(full_path),
             latency_ms=latency_ms,
+            queued_ms=queued_ms,
             status=getattr(response, "status_code", None),
             stream=stream,
         )
@@ -733,6 +801,59 @@ def _modality_from_path(full_path: str) -> str:
     if parts and parts[0] == "v1":
         parts = parts[1:]
     return "/".join(parts[:2]) if parts else "unknown"
+
+
+def _effective_max_concurrency(manifest: dict) -> int | None:
+    """Per-model concurrency cap: capabilities.max_concurrency, else the
+    config default, else None (unlimited). Lenient: junk values -> next tier.
+
+    Resolution (spec 2026-07-08):
+      1. manifest capabilities.max_concurrency (model author's declared cap)
+      2. server.default_max_concurrency (env MUSE_DEFAULT_MAX_CONCURRENCY)
+      3. None -> unlimited (the gate no-ops, today's behavior)
+    A non-positive or non-int value at any tier falls through to the next.
+    """
+    caps = (manifest or {}).get("capabilities") or {}
+    declared = caps.get("max_concurrency")
+    if declared is not None:
+        try:
+            n = int(declared)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    default = config.get("server.default_max_concurrency") or 0
+    try:
+        return int(default) if int(default) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _acquire_with_capacity_wait(acquire_once, notifier, *, deadline,
+                                      model_id: str) -> int:
+    """Bounded retry around one acquire attempt (spec 2026-07-08).
+
+    `acquire_once` is a zero-arg async callable (the coalesced acquire).
+    On a retryable capacity OperationError: park on the notifier's
+    generation event (armed BEFORE the attempt, so a release that lands
+    mid-attempt still wakes us), bounded by the shared deadline, then
+    retry. Non-retryable errors and every other exception propagate
+    unchanged. Deadline exhaustion raises QueueTimeout.
+    """
+    while True:
+        event = notifier.snapshot()  # arm first: no missed wakeup
+        try:
+            return await acquire_once()
+        except OperationError as exc:
+            if not getattr(exc, "retryable", False):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise  # zero-budget: surface today's immediate 503
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                raise QueueTimeout(model_id) from None
 
 
 async def _acquire_off_loop(state, model_id, manifest, *, on_settle=None) -> int:
@@ -844,9 +965,18 @@ async def _forward_with_release(
     *,
     director: Any,
     model_id: str,
+    extra_release: "Callable[[], None] | None" = None,
 ) -> Response:
     """Forward + release variant: same shape as `_forward`, but wires the
     director.release call into the response lifecycle.
+
+    `extra_release`, when given, is invoked immediately after each
+    director.release site (spec 2026-07-08: the concurrency-gate slot
+    release). It is called at every point director.release fires -- buffered
+    finally, stream-relay finally, body-read except, stream-open except -- so
+    the gate slot is returned on exactly the paths the director refcount is,
+    and never stranded. Its own exceptions are logged and swallowed so a gate
+    hiccup can never break the refcount release or the response.
 
     Buffered (non-stream) response: release runs after `aread()` and
     before the Response is returned. The TestClient consumes the buffer
@@ -865,6 +995,15 @@ async def _forward_with_release(
     (request-body read, stream-open raise, body-aread raise), so refcount
     is never stranded.
     """
+    def _fire_extra_release() -> None:
+        # Guarded gate-slot release, paired with each director.release site.
+        if extra_release is None:
+            return
+        try:
+            extra_release()
+        except Exception:  # noqa: BLE001
+            logger.warning("gate release failed", exc_info=True)
+
     # The body read happens AFTER the caller's director.acquire() bumped
     # the refcount. A ClientDisconnect (client vanished mid-body) here --
     # reachable for a body-bearing GET, whose body is unread during model
@@ -885,6 +1024,7 @@ async def _forward_with_release(
                 "director.release(%r) raised during body-read cleanup",
                 model_id, exc_info=True,
             )
+        _fire_extra_release()
         raise
     excluded = {"host", "content-length", "transfer-encoding", "connection"}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded}
@@ -925,6 +1065,7 @@ async def _forward_with_release(
                 "director.release(%r) raised during stream-open cleanup",
                 model_id, exc_info=True,
             )
+        _fire_extra_release()
         try:
             await client.aclose()
         except Exception:  # noqa: BLE001
@@ -964,6 +1105,7 @@ async def _forward_with_release(
                         "director.release(%r) raised at stream-close",
                         model_id, exc_info=True,
                     )
+                _fire_extra_release()
                 try:
                     await stream_ctx.__aexit__(None, None, None)
                 except Exception:  # noqa: BLE001
@@ -1002,6 +1144,7 @@ async def _forward_with_release(
                 "director.release(%r) raised during buffered-response cleanup",
                 model_id, exc_info=True,
             )
+        _fire_extra_release()
         try:
             await stream_ctx.__aexit__(None, None, None)
         except Exception:  # noqa: BLE001
