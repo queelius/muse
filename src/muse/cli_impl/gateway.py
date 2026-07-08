@@ -658,17 +658,26 @@ async def _route_via_director(
     # wait + the capacity wait + all retries. queue_timeout_seconds == 0
     # degrades to today's no-wait behavior: an occupied slot / capacity 503
     # surfaces immediately. `queued_ms` is initialized here so it is always
-    # defined by the time the telemetry record() call runs below.
+    # defined by the time the telemetry record() call runs below. Per the
+    # spec, queued_ms measures ONLY time parked in the gate + capacity
+    # waits -- NOT the successful director.acquire cold-load span that
+    # follows, which can run tens of seconds and would otherwise conflate
+    # queue delay with load time. gate_wait_seconds and
+    # capacity_wait_seconds are each measured tightly around their own
+    # await below, not via a single wall-clock span across this whole block.
     queued_ms = 0.0
     queue_budget = config.get("server.queue_timeout_seconds") or 0.0
     deadline = time.monotonic() + max(0.0, float(queue_budget))
     gate = state.concurrency_gate
     cap = _effective_max_concurrency(manifest)
-    queued_t0 = time.monotonic()
 
     # 3a. Concurrency gate: take one per-model slot (no-op when cap is
     # None/<=0). QueueFull when the per-model queue is already at
     # server.max_queue_depth; QueueTimeout when no slot frees within budget.
+    # gate_wait_seconds is measured tightly around this one await so it
+    # never picks up any of the cold-load time that follows (see the
+    # capacity-wait measurement below for the matching discipline).
+    gate_wait_t0 = time.monotonic()
     try:
         await gate.acquire_slot(model_id, cap, deadline=deadline)
     except QueueTimeout:
@@ -684,6 +693,7 @@ async def _route_via_director(
             f"queue for model {model_id!r} is full (depth {exc.depth})",
             error_type="server_error",
         )
+    gate_wait_seconds = time.monotonic() - gate_wait_t0
 
     slot_released = False
 
@@ -706,7 +716,7 @@ async def _route_via_director(
     # (#319). _acquire_with_capacity_wait parks on a retryable capacity 503
     # until a release/eviction fires capacity_notifier or the deadline lapses.
     try:
-        worker_port = await _acquire_with_capacity_wait(
+        worker_port, capacity_wait_seconds = await _acquire_with_capacity_wait(
             lambda: _acquire_coalesced(state, model_id, manifest),
             state.capacity_notifier, deadline=deadline, model_id=model_id,
         )
@@ -714,7 +724,8 @@ async def _route_via_director(
         _release_slot()
         return _openai_error(
             503, "queue_timeout",
-            f"waited {queue_budget:.0f}s for capacity for model {model_id!r}",
+            f"waited {queue_budget:.0f}s for capacity for model {model_id!r} "
+            f"(queue depth {gate.depth(model_id)})",
             error_type="server_error",
         )
     except OperationError as exc:
@@ -749,7 +760,7 @@ async def _route_via_director(
         # cancellation callback.
         _release_slot()
         raise
-    queued_ms = (time.monotonic() - queued_t0) * 1000.0
+    queued_ms = (gate_wait_seconds + capacity_wait_seconds) * 1000.0
 
     # 4. Forward. The release calls (director.release + the gate slot release)
     # are wired into the response shape: for buffered responses, fire in a
@@ -830,7 +841,7 @@ def _effective_max_concurrency(manifest: dict) -> int | None:
 
 
 async def _acquire_with_capacity_wait(acquire_once, notifier, *, deadline,
-                                      model_id: str) -> int:
+                                      model_id: str) -> tuple[int, float]:
     """Bounded retry around one acquire attempt (spec 2026-07-08).
 
     `acquire_once` is a zero-arg async callable (the coalesced acquire).
@@ -839,21 +850,32 @@ async def _acquire_with_capacity_wait(acquire_once, notifier, *, deadline,
     mid-attempt still wakes us), bounded by the shared deadline, then
     retry. Non-retryable errors and every other exception propagate
     unchanged. Deadline exhaustion raises QueueTimeout.
+
+    Returns `(worker_port, waited_seconds)`, where `waited_seconds` is the
+    total time spent parked in `event.wait()` across all retries (0.0 if
+    the first attempt succeeds). This excludes the time spent inside
+    `acquire_once()` itself (e.g. a successful cold load), so callers can
+    report queue delay separately from load time.
     """
+    waited_seconds = 0.0
     while True:
         event = notifier.snapshot()  # arm first: no missed wakeup
         try:
-            return await acquire_once()
+            port = await acquire_once()
+            return port, waited_seconds
         except OperationError as exc:
             if not getattr(exc, "retryable", False):
                 raise
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise  # zero-budget: surface today's immediate 503
+            wait_t0 = time.monotonic()
             try:
                 await asyncio.wait_for(event.wait(), timeout=remaining)
             except asyncio.TimeoutError:
                 raise QueueTimeout(model_id) from None
+            finally:
+                waited_seconds += time.monotonic() - wait_t0
 
 
 async def _acquire_off_loop(state, model_id, manifest, *, on_settle=None) -> int:

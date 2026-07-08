@@ -104,13 +104,17 @@ def _run_four_concurrent(monkeypatch):
     """Fire N_REQUESTS concurrent POSTs at the capped model; return
     (status_codes, windows, elapsed_seconds).
     """
-    # Isolate from any queueing env vars a neighboring test left set:
-    # unbounded queue depth, the 300s config default timeout (plenty for
-    # a ~1.2s serialized burst), and no config-level concurrency default
-    # (the manifest's own max_concurrency=1 must be what gates this).
-    monkeypatch.delenv("MUSE_MAX_QUEUE_DEPTH", raising=False)
-    monkeypatch.delenv("MUSE_QUEUE_TIMEOUT_SECONDS", raising=False)
-    monkeypatch.delenv("MUSE_DEFAULT_MAX_CONCURRENCY", raising=False)
+    # Isolate from any queueing env vars a neighboring test left set, AND
+    # from a customized ~/.muse/config.yaml on the host box: env > file
+    # precedence means delenv alone would let a machine-local config.yaml
+    # queueing value leak in and flake this test. Pin neutral values
+    # instead: unbounded queue depth, the 300s config default timeout
+    # (plenty for a ~1.2s serialized burst), and no config-level
+    # concurrency default (the manifest's own max_concurrency=1 must be
+    # what gates this).
+    monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "0")
+    monkeypatch.setenv("MUSE_QUEUE_TIMEOUT_SECONDS", "300")
+    monkeypatch.setenv("MUSE_DEFAULT_MAX_CONCURRENCY", "0")
 
     state = _make_state()
     app = build_gateway(state=state)

@@ -46,7 +46,12 @@ class TestEffectiveCap:
 
 class TestCapacityWaitRetry:
     """_acquire_with_capacity_wait: park on retryable 503, retry after
-    notify, propagate non-retryable immediately, 503 on deadline."""
+    notify, propagate non-retryable immediately, 503 on deadline.
+
+    Returns `(worker_port, waited_seconds)`: waited_seconds is the total
+    time spent parked in the notifier's event across all retries, used by
+    the gateway to keep queued_ms precise (excluding the time spent
+    inside a successful acquire_once(), e.g. a cold load)."""
 
     async def test_retryable_then_success_after_notify(self):
         from muse.cli_impl.gateway import _acquire_with_capacity_wait
@@ -65,11 +70,28 @@ class TestCapacityWaitRetry:
             notifier.notify()
 
         asyncio.create_task(free_capacity_soon())
-        port = await _acquire_with_capacity_wait(
+        port, waited_seconds = await _acquire_with_capacity_wait(
             fake_acquire, notifier, deadline=time.monotonic() + 5,
             model_id="m",
         )
         assert port == 9001 and len(calls) == 2
+        assert waited_seconds > 0.0
+
+    async def test_immediate_success_reports_zero_wait(self):
+        """No retry needed -> waited_seconds is exactly 0.0 (the gateway
+        relies on this so a hot request's queued_ms is 0)."""
+        from muse.cli_impl.gateway import _acquire_with_capacity_wait
+        notifier = CapacityNotifier()
+
+        async def fake_acquire():
+            return 9001
+
+        port, waited_seconds = await _acquire_with_capacity_wait(
+            fake_acquire, notifier, deadline=time.monotonic() + 5,
+            model_id="m",
+        )
+        assert port == 9001
+        assert waited_seconds == 0.0
 
     async def test_non_retryable_propagates_immediately(self):
         from muse.cli_impl.gateway import _acquire_with_capacity_wait
@@ -224,6 +246,29 @@ class TestGatewayReleasePairing:
         # slot returned: no residual queue depth and the semaphore is free
         assert state.concurrency_gate.depth("fake-model") == 0
         assert state.concurrency_gate._entered.get("fake-model", 0) == 0
+
+    def test_hot_request_records_zero_queued_ms(self):
+        """Uncontended request (free gate slot, no capacity retry): queued_ms
+        must be exactly 0.0, not inflated by the (mocked, instant) director
+        acquire span -- regression guard for the bug where queued_ms spanned
+        the whole gate-to-acquire-return window and would have conflated a
+        real cold load's tens-of-seconds with actual queue delay."""
+        state = _state()
+        app = build_gateway(state=state)
+        client = TestClient(app)
+        with _patch_get_manifest(_manifest()), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls, \
+             patch("muse.cli_impl.gateway.record") as mock_record:
+            _wire_json_client(mock_cls)
+            r = client.post("/v1/audio/speech",
+                            json={"input": "hi", "model": "fake-model"})
+        assert r.status_code == 200
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        # Not a strict == 0.0: the no-op gate path still crosses two
+        # time.monotonic() calls, so allow for sub-millisecond clock noise
+        # while still failing loudly if any real wait leaked in.
+        assert 0.0 <= kwargs["queued_ms"] < 1.0
 
 
 class TestGatewayQueueEnvelopesAsync:
