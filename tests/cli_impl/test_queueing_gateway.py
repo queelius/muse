@@ -270,6 +270,24 @@ class TestGatewayQueueEnvelopesAsync:
             release.set()
             await holder
 
+    async def test_zero_timeout_uncontended_request_does_not_queue_timeout(
+        self, monkeypatch,
+    ):
+        """MUSE_QUEUE_TIMEOUT_SECONDS=0 must not 503 an uncontended capped
+        model. A zero wait budget means "do not WAIT", not "do not TRY":
+        the concurrency gate has a free slot, so the request should be
+        forwarded and succeed rather than fail fast with queue_timeout."""
+        monkeypatch.setenv("MUSE_QUEUE_TIMEOUT_SECONDS", "0")
+        state = _state()
+
+        with _patch_get_manifest(_manifest(max_concurrency=1)), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_json_client(mock_cls)
+            resp = await self._route(state)
+        assert resp.status_code == 200
+        # slot returned: no residual queue depth on the capped model
+        assert state.concurrency_gate.depth("fake-model") == 0
+
     async def test_queue_full_envelope(self, monkeypatch):
         monkeypatch.setenv("MUSE_QUEUE_TIMEOUT_SECONDS", "5")
         monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "1")

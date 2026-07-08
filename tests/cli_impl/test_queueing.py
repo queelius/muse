@@ -122,6 +122,38 @@ class TestConcurrencyGate:
         assert len(ok) <= 2  # 1 holding + 1 queued (cap=1, max_depth=1)
         assert len(full) >= 8
 
+    async def test_zero_timeout_free_slot_grants_immediately(self):
+        # A zero/expired wait budget means "do not WAIT", not "do not TRY":
+        # a genuinely free slot must be granted even with an already-expired
+        # deadline.
+        gate = ConcurrencyGate()
+        start = time.monotonic()
+        async with gate.slot("m", 2, deadline=time.monotonic()):
+            assert gate.depth("m") == 0
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05
+        assert gate.depth("m") == 0
+        assert gate._entered.get("m", 0) == 0
+
+    async def test_zero_timeout_occupied_slot_fails_fast(self):
+        gate = ConcurrencyGate()
+        started = asyncio.Event()
+
+        async def holder():
+            async with gate.slot("m", 1, deadline=_deadline(5)):
+                started.set()
+                await asyncio.sleep(0.5)
+
+        h = asyncio.create_task(holder())
+        await started.wait()
+        start = time.monotonic()
+        with pytest.raises(QueueTimeout):
+            async with gate.slot("m", 1, deadline=time.monotonic()):
+                pass
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05
+        h.cancel()
+
     async def test_burst_depth_counts_only_excess(self):
         # depth() must report entered-minus-cap ("actually queued"), not
         # a raw attempt/entry count, even when a burst of concurrent
@@ -258,6 +290,39 @@ class TestAcquireReleaseSlot:
         gate = ConcurrencyGate()
         gate.release_slot("never-acquired")  # must not raise / corrupt
         assert gate.depth("never-acquired") == 0
+
+    async def test_zero_timeout_free_slot_grants_immediately(self):
+        # Same fix, split acquire/release variant: a zero/expired deadline
+        # against a free slot must succeed immediately, not QueueTimeout.
+        gate = ConcurrencyGate()
+        start = time.monotonic()
+        await gate.acquire_slot("m", 2, deadline=time.monotonic())
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05
+        assert gate.depth("m") == 0
+        gate.release_slot("m")
+        assert gate._entered.get("m", 0) == 0
+
+    async def test_zero_timeout_occupied_slot_fails_fast(self):
+        gate = ConcurrencyGate()
+        started = asyncio.Event()
+
+        async def holder():
+            await gate.acquire_slot("m", 1, deadline=_deadline(5))
+            started.set()
+            await asyncio.sleep(0.5)
+            gate.release_slot("m")
+
+        h = asyncio.create_task(holder())
+        await started.wait()
+        start = time.monotonic()
+        with pytest.raises(QueueTimeout):
+            await gate.acquire_slot("m", 1, deadline=time.monotonic())
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05
+        # timed-out acquirer's increment was undone
+        assert gate.depth("m") == 0
+        h.cancel()
 
 
 class TestCapacityNotifier:

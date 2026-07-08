@@ -73,6 +73,37 @@ class ConcurrencyGate:
             self._caps[model_id] = cap
         return sem
 
+    async def _acquire_permit(
+        self, sem: asyncio.Semaphore, model_id: str, deadline: float,
+    ) -> None:
+        """Acquire one permit from sem, honoring the wait deadline.
+
+        A free permit is granted immediately regardless of the deadline: a
+        zero/expired wait budget means "do not WAIT", not "do not TRY" --
+        only a genuinely unavailable permit fails fast with QueueTimeout.
+        This mirrors the capacity-wait path (_acquire_with_capacity_wait in
+        gateway.py), which also attempts before it ever consults a deadline.
+
+        sem.locked() reports live availability (free value, and no queued
+        FIFO waiters ahead of us). On CPython, Semaphore.acquire() has a
+        fast path -- `if not self.locked(): self._value -= 1; return True`
+        -- with no `await` in between, so it cannot yield to another task
+        on the same event loop. There is therefore no window between the
+        locked() check and the grant for a concurrent same-tick caller to
+        steal the permit (verified against 3.10's asyncio/locks.py source
+        plus an empirical burst test; see task-3-report.md).
+        """
+        if not sem.locked():
+            await sem.acquire()
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise QueueTimeout(model_id)
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=remaining)
+        except asyncio.TimeoutError:
+            raise QueueTimeout(model_id) from None
+
     @asynccontextmanager
     async def slot(self, model_id: str, cap: int | None, *, deadline: float):
         if not cap or cap <= 0:
@@ -90,13 +121,7 @@ class ConcurrencyGate:
             raise QueueFull(model_id, excess)
         self._entered[model_id] = entered + 1
         try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise QueueTimeout(model_id)
-            try:
-                await asyncio.wait_for(sem.acquire(), timeout=remaining)
-            except asyncio.TimeoutError:
-                raise QueueTimeout(model_id) from None
+            await self._acquire_permit(sem, model_id, deadline)
             try:
                 yield
             finally:
@@ -152,13 +177,7 @@ class ConcurrencyGate:
             raise QueueFull(model_id, excess)
         self._entered[model_id] = entered + 1
         try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise QueueTimeout(model_id)
-            try:
-                await asyncio.wait_for(sem.acquire(), timeout=remaining)
-            except asyncio.TimeoutError:
-                raise QueueTimeout(model_id) from None
+            await self._acquire_permit(sem, model_id, deadline)
         except BaseException:
             # Failed acquisition (timeout / cancellation): undo the entered
             # increment so the counter stays balanced. The semaphore was NOT
