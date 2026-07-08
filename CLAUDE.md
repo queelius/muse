@@ -810,7 +810,7 @@ Endpoints:
 | `GET /v1/admin/models/{id}/status` | sync | merged catalog + worker view |
 | `GET /v1/admin/workers` | sync | list workers + pid/uptime/restarts |
 | `POST /v1/admin/workers/{port}/restart` | sync | SIGTERM; monitor handles bringup |
-| `GET /v1/admin/memory` | sync | psutil + pynvml + per-model breakdown |
+| `GET /v1/admin/memory` | sync | psutil + pynvml + per-model breakdown (incl. live `refcount` when a director is bound) |
 | `GET /v1/admin/jobs/{job_id}` | sync | one job; 404 once reaped |
 | `GET /v1/admin/jobs` | sync | recent jobs newest-first |
 

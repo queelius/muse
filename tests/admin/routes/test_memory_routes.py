@@ -100,6 +100,70 @@ class TestMemoryRoute:
         assert record["weights_gb"] == 1.0
         assert record["peak_gb"] == 2.0
 
+    def test_per_model_breakdown_includes_refcount_from_director(self, tmp_catalog):
+        """The breakdown surfaces each loaded model's live director refcount,
+        so a 503 'no evictable candidates (all loaded models have refcount >
+        0)' can be verified against reality: refcount 0 means idle-evictable,
+        refcount > 0 means pinned by an in-flight request."""
+        import time
+        from muse.cli_impl.load_director import LoadDirector, LoadEntry
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/v/bin/python", port=9001,
+        )
+        director = LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: None),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        now = time.monotonic()
+        director.loaded["kokoro-82m"] = LoadEntry(
+            model_id="kokoro-82m", worker_port=9001, memory_gb=2.0,
+            refcount=3, last_touched_at=now, loaded_at=now,
+        )
+        state = SupervisorState(workers=[spec], device="cpu")
+        state.director = director
+        set_supervisor_state(state)
+        from muse.admin.routes.memory import _per_model_breakdown
+        out = _per_model_breakdown("cpu", "cpu")
+        assert len(out) == 1
+        assert out[0]["refcount"] == 3
+
+    def test_per_model_breakdown_omits_refcount_without_director(self, tmp_catalog):
+        """No director bound (gateway-in-isolation / pre-boot): the refcount
+        key is omitted rather than falsely reported as 0, which would read as
+        'evictable' when the truth is unknown."""
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        spec = WorkerSpec(
+            models=["kokoro-82m"], python_path="/v/bin/python", port=9001,
+        )
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        from muse.admin.routes.memory import _per_model_breakdown
+        out = _per_model_breakdown("cpu", "cpu")
+        assert len(out) == 1
+        assert "refcount" not in out[0]
+
     def test_auto_device_model_resolves_to_gpu_side_on_cuda_supervisor(self, tmp_catalog):
         """A device='auto' bundled model (e.g. kokoro-82m) is accounted on
         the GPU side when the supervisor runs --device cuda, and NOT on the

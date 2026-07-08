@@ -19,6 +19,15 @@ optional: when neither is installed, the corresponding section is null.
 load/evict decisions for operator visibility into lazy-load behavior.
 Empty list when no director is bound (supervisor not booted, or running
 the gateway in isolation for tests).
+
+Each per-model breakdown entry also carries `refcount` (v0.54.4+) when a
+LoadDirector is bound: the live in-flight refcount from the director's
+loaded set. The eviction candidate filter is `refcount == 0`, so this is
+the field that decides idle-evictable (0) vs pinned by an in-flight
+request (> 0). It lets an operator VERIFY a 503 that reports "no evictable
+candidates (all loaded models have refcount > 0)" against reality rather
+than trusting the message. The key is omitted (not 0) when no director is
+bound, so "unknown" is never mistaken for "evictable".
 """
 from __future__ import annotations
 
@@ -105,6 +114,30 @@ def _enabled_loaded_model_ids() -> set[str]:
     return ids
 
 
+def _loaded_refcounts() -> dict[str, int]:
+    """Live per-model refcount from the LoadDirector's loaded set.
+
+    The eviction candidate filter is `refcount == 0`, so this is the field
+    that decides whether a loaded model is idle-evictable (0) or pinned by
+    an in-flight request (> 0). Surfacing it lets an operator VERIFY a 503
+    that reports "no evictable candidates (all loaded models have refcount
+    > 0)" against reality instead of taking the (hardcoded) message at its
+    word. Read under the director lock so a concurrent acquire/release
+    can't interleave. Returns {} when no director is bound (gateway in
+    isolation, or pre-boot), which the caller treats as "unknown" -> the
+    refcount key is omitted rather than falsely reported as 0.
+    """
+    state = get_supervisor_state()
+    director = getattr(state, "director", None)
+    if director is None:
+        return {}
+    with director.lock:
+        return {
+            model_id: entry.refcount
+            for model_id, entry in director.loaded.items()
+        }
+
+
 def _resolve_auto_side() -> str:
     """Which memory side ('cpu' | 'gpu') an auto-device model loads on.
 
@@ -138,6 +171,7 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
     catalog = _read_catalog()
     catalog_known = known_models()
     loaded = _enabled_loaded_model_ids()
+    refcounts = _loaded_refcounts()
     out: list[dict] = []
     for model_id in sorted(loaded):
         entry = catalog.get(model_id) or {}
@@ -172,6 +206,8 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
                 record["annotated_gb"] = float(annotation)
             except (TypeError, ValueError):
                 pass
+        if model_id in refcounts:
+            record["refcount"] = refcounts[model_id]
         out.append(record)
     return out
 
