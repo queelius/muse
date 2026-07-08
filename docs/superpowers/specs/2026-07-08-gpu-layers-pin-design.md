@@ -1,7 +1,7 @@
 # GPU-Layers Operator Pin Design (`muse models set-gpu-layers`)
 
 - **Date:** 2026-07-08
-- **Status:** approved design, pre-implementation
+- **Status:** implemented (feature/gpu-layers-pin); two as-built amendments below
 - **Ships as:** v0.56.0
 
 ## Problem
@@ -22,6 +22,17 @@ This is the Tier-1 scope agreed after evaluating automatic VRAM-overflow
 offload: static, declared, zero runtime decisions. Explicitly REJECTED
 (Tier 2+): the director choosing offload automatically at admission time
 (silent performance cliffs, dual-pool accounting, contention policy).
+
+## As-built amendments (post-review, both improvements over the literal text)
+
+1. Section 3: `-1` ships as an `--all` flag, not a positional -- click has no
+   negative-number heuristic for positional args, so a bare `-1` is not
+   shell-passable (the `-- -1` escape hatch works and is documented).
+   Positional N is `>= 0`.
+2. Section 4: the probe inherits the pin via `load_backend` (which injects
+   it centrally) rather than a separate probe_worker read -- DRY, and
+   correct because unlike `device_override` the pin does not change WHICH
+   pool is measured, only the VRAM magnitude within it.
 
 ## Design (clone the `set-device` pattern)
 
