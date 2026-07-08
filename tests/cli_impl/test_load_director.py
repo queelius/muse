@@ -1843,3 +1843,78 @@ class TestLoadFailureSurfacesAsOperationError:
         with pytest.raises(OperationError) as ei:
             director.acquire("fake-model", manifest=_manifest())
         assert ei.value is original
+
+
+# ----------------------------------------------------------------------
+# Spec 2026-07-08: retryable flag + capacity_listener hooks
+# ----------------------------------------------------------------------
+
+class TestCapacitySignal:
+    """Spec 2026-07-08: retryable flag + capacity_listener hooks."""
+
+    def _director(self, *, gpu_free=1.0):
+        from muse.cli_impl.load_director import LoadDirector
+        return LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: gpu_free),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+
+    def _entry(self, model_id, refcount):
+        import time
+        from muse.cli_impl.load_director import LoadEntry
+        now = time.monotonic()
+        return LoadEntry(model_id=model_id, worker_port=9001, memory_gb=4.0,
+                         refcount=refcount, last_touched_at=now, loaded_at=now)
+
+    def test_release_to_zero_fires_listener(self):
+        d = self._director()
+        fired = []
+        d.capacity_listener = lambda: fired.append(1)
+        d.loaded["m"] = self._entry("m", refcount=1)
+        d.release("m")
+        assert fired == [1]
+
+    def test_release_above_zero_does_not_fire(self):
+        d = self._director()
+        fired = []
+        d.capacity_listener = lambda: fired.append(1)
+        d.loaded["m"] = self._entry("m", refcount=2)
+        d.release("m")
+        assert fired == []
+
+    def test_listener_exception_swallowed(self):
+        d = self._director()
+        def boom():
+            raise RuntimeError("listener broke")
+        d.capacity_listener = boom
+        d.loaded["m"] = self._entry("m", refcount=1)
+        d.release("m")  # must not raise
+        assert d.loaded["m"].refcount == 0
+
+    def test_capacity_503_retryable_when_inuse_models_block(self):
+        from muse.admin.operations import OperationError
+        d = self._director(gpu_free=1.0)  # 1 GB free, need 8
+        d.loaded["busy"] = self._entry("busy", refcount=1)  # in-use: not evictable
+        with pytest.raises(OperationError) as exc:
+            d._evict_lru_until_fits(
+                model_id="new", shortfall_gb=7.0, device="cuda", required_gb=8.0,
+            )
+        assert exc.value.retryable is True
+
+    def test_capacity_503_not_retryable_when_nothing_will_free(self):
+        from muse.admin.operations import OperationError
+        d = self._director(gpu_free=1.0)
+        # No loaded models at all: nothing will ever release capacity.
+        with pytest.raises(OperationError) as exc:
+            d._evict_lru_until_fits(
+                model_id="new", shortfall_gb=7.0, device="cuda", required_gb=8.0,
+            )
+        assert exc.value.retryable is False
+
+    def test_operation_error_default_not_retryable(self):
+        from muse.admin.operations import OperationError
+        assert OperationError("x", "y").retryable is False

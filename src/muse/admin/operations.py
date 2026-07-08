@@ -105,11 +105,16 @@ class OperationError(Exception):
     operations write the same fields into the Job's `error` instead.
     """
 
-    def __init__(self, code: str, message: str, status: int = 400):
+    def __init__(self, code: str, message: str, status: int = 400,
+                 retryable: bool = False):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        # Spec 2026-07-08: True marks a TRANSIENT capacity failure (in-use
+        # models will release memory); the gateway parks and retries these
+        # instead of surfacing the 503. False (default) = surface as today.
+        self.retryable = retryable
 
 
 def find_worker_for_model(state: SupervisorState, model_id: str) -> WorkerSpec | None:

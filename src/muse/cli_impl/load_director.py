@@ -247,6 +247,13 @@ class LoadDirector:
         # from).
         self._inflight_epoch = 0
 
+        # Fired (fire-and-forget) whenever capacity MAY have freed: a
+        # release() that drops a refcount to 0, or a completed eviction.
+        # The supervisor wires this to CapacityNotifier.notify so gateway
+        # capacity-waiters wake and re-decide. Never allowed to raise into
+        # the caller (wrapped at each call site).
+        self.capacity_listener: Callable[[], None] | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -397,14 +404,38 @@ class LoadDirector:
         Releasing an unknown model_id is a no-op (defensive: an evicted
         model whose final request just finished should not crash the
         gateway's `finally:` clause).
+
+        When this release drops the refcount to 0, fires capacity_listener
+        (outside the lock) so gateway capacity-waiters get a chance to
+        re-decide.
         """
+        dropped_to_zero = False
         with self.lock:
             entry = self.loaded.get(model_id)
             if entry is None:
                 logger.debug("release(%r): model not in loaded set; ignoring", model_id)
                 return
+            before = entry.refcount
             entry.refcount = max(0, entry.refcount - 1)
             entry.last_touched_at = time.monotonic()
+            dropped_to_zero = before > 0 and entry.refcount == 0
+        if dropped_to_zero:
+            self._fire_capacity_listener()
+
+    def _fire_capacity_listener(self) -> None:
+        """Fire capacity_listener, if set, swallowing any exception.
+
+        Called outside self.lock (never call foreign code under the
+        director lock). A listener that raises must never break a
+        release or eviction; it is logged and dropped.
+        """
+        listener = self.capacity_listener
+        if listener is None:
+            return
+        try:
+            listener()
+        except Exception:  # noqa: BLE001
+            logger.warning("capacity_listener raised; ignoring", exc_info=True)
 
     def status(self) -> dict[str, dict[str, Any]]:
         """Snapshot of currently-loaded models for /v1/models lookup.
@@ -866,6 +897,11 @@ class LoadDirector:
         failed_victims: set[str] = set()
 
         while cumulative_freed_gb < shortfall_gb:
+            # fits_now is set inside the lock below only on the "the model
+            # fits again without evicting anything further" path; checked
+            # right after the lock releases so the capacity_listener fire
+            # (which must never run under self.lock) happens outside it.
+            fits_now = False
             # ---- under-lock: pick + pop a victim ----
             with self.lock:
                 # Re-snapshot every iteration: another thread may have
@@ -898,68 +934,84 @@ class LoadDirector:
                         self._resolve_pool_device(device), exclude=model_id,
                     )
                     if (available_gb - reserved_gb) >= required_gb:
-                        return
-                    # Lazy import to avoid a cycle: load_director ->
-                    # admin.operations -> supervisor -> load_director
-                    # (Task E will wire the supervisor to LoadDirector).
-                    from muse.admin.operations import OperationError
-                    raise OperationError(
-                        "model_too_large_for_device",
-                        (
-                            f"cannot fit {model_id!r} on {device}: "
-                            f"shortfall {shortfall_gb:.2f} GB; "
-                            f"no evictable candidates remain "
-                            f"(all loaded models have refcount > 0)"
-                        ),
-                        status=503,
-                    )
+                        fits_now = True
+                    else:
+                        # Spec 2026-07-08: if ANY loaded model is currently
+                        # in-use (refcount > 0), capacity may free once its
+                        # request finishes -- worth the gateway parking and
+                        # retrying instead of surfacing a hard 503. The
+                        # loaded set is not pool-partitioned per-entry, so
+                        # this is the simpler (single-pool-exact,
+                        # mixed-pool-conservative) form rather than
+                        # filtering by device/pool.
+                        any_inuse = any(e.refcount > 0 for e in self.loaded.values())
+                        # Lazy import to avoid a cycle: load_director ->
+                        # admin.operations -> supervisor -> load_director
+                        # (Task E will wire the supervisor to LoadDirector).
+                        from muse.admin.operations import OperationError
+                        raise OperationError(
+                            "model_too_large_for_device",
+                            (
+                                f"cannot fit {model_id!r} on {device}: "
+                                f"shortfall {shortfall_gb:.2f} GB; "
+                                f"no evictable candidates remain "
+                                f"(all loaded models have refcount > 0)"
+                            ),
+                            status=503,
+                            retryable=any_inuse,
+                        )
+                else:
+                    # LRU first.
+                    candidates.sort(key=lambda e: e.last_touched_at)
+                    victim = candidates[0]
+                    victim_id = victim.model_id
+                    victim_memory_gb = victim.memory_gb
 
-                # LRU first.
-                candidates.sort(key=lambda e: e.last_touched_at)
-                victim = candidates[0]
-                victim_id = victim.model_id
-                victim_memory_gb = victim.memory_gb
+                    # Pop from loaded so other threads see the eviction
+                    # commitment immediately. If disable_fn raises, the
+                    # state is already consistent (no zombie LoadEntry
+                    # claiming a worker port that isn't running).
+                    self.loaded.pop(victim_id, None)
+                    # Bump the epoch: an eviction frees VRAM, which pollutes any
+                    # concurrent load's free_before..free_after delta just like a
+                    # concurrent load does. Counting it here lets _load_and_commit's
+                    # solo gate skip that load's observed-peak writeback instead of
+                    # recording an under-estimate.
+                    self._inflight_epoch += 1
 
-                # Pop from loaded so other threads see the eviction
-                # commitment immediately. If disable_fn raises, the
-                # state is already consistent (no zombie LoadEntry
-                # claiming a worker port that isn't running).
-                self.loaded.pop(victim_id, None)
-                # Bump the epoch: an eviction frees VRAM, which pollutes any
-                # concurrent load's free_before..free_after delta just like a
-                # concurrent load does. Counting it here lets _load_and_commit's
-                # solo gate skip that load's observed-peak writeback instead of
-                # recording an under-estimate.
-                self._inflight_epoch += 1
+                    free_before_gb = self._free_for_device(device)
 
-                free_before_gb = self._free_for_device(device)
-
-                decision = DecisionLogEntry(
-                    timestamp=time.time(),
-                    model_id=victim_id,
-                    action="evict",
-                    memory_gb=victim_memory_gb,
-                    free_before_gb=free_before_gb,
-                    free_after_gb=None,
-                    reason=f"evicted_for_{model_id}",
-                    evicted=[victim_id],
-                )
-                self.recent_decisions.append(decision)
-
-                # Task 9: fire-and-forget telemetry event for this
-                # eviction. Guarded the same way as the load-site record()
-                # call above: telemetry can never break a real eviction.
-                try:
-                    record(
-                        "model_evict",
+                    decision = DecisionLogEntry(
+                        timestamp=time.time(),
                         model_id=victim_id,
-                        pool=self._resolve_pool_device(device),
+                        action="evict",
+                        memory_gb=victim_memory_gb,
+                        free_before_gb=free_before_gb,
+                        free_after_gb=None,
                         reason=f"evicted_for_{model_id}",
+                        evicted=[victim_id],
                     )
-                except Exception:  # noqa: BLE001
-                    pass
+                    self.recent_decisions.append(decision)
 
-            # ---- lock released: slow steps ----
+                    # Task 9: fire-and-forget telemetry event for this
+                    # eviction. Guarded the same way as the load-site record()
+                    # call above: telemetry can never break a real eviction.
+                    try:
+                        record(
+                            "model_evict",
+                            model_id=victim_id,
+                            pool=self._resolve_pool_device(device),
+                            reason=f"evicted_for_{model_id}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            # ---- lock released ----
+            if fits_now:
+                self._fire_capacity_listener()
+                return
+
+            # ---- slow steps ----
             try:
                 self.disable_fn(victim_id)
             except Exception as exc:  # noqa: BLE001
@@ -1015,6 +1067,12 @@ class LoadDirector:
                 decision.free_after_gb = free_after_gb
 
             cumulative_freed_gb += freed_this_round
+
+        # Loop exited normally: cumulative_freed_gb >= shortfall_gb, i.e.
+        # eviction freed enough. Outside the lock (the last statement above
+        # released it), so this fire is safe.
+        self._fire_capacity_listener()
+        return
 
     def _wait_for_memory_release(
         self,
