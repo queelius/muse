@@ -270,3 +270,43 @@ def test_llama_cpp_stream_chunk_model_id_overrides_llamacpp_path(tmp_path):
     # Every chunk's model_id is the catalog id, NOT the path
     assert all(c.model_id == "qwen3.5-4b-q4" for c in chunks)
     assert not any("/home/" in c.model_id for c in chunks)
+
+
+class TestPerfKwargsForwarding:
+    """Spec 2026-07-08: optional llama.cpp performance kwargs are forwarded
+    to Llama(...) only when set; defaults leave construction byte-identical."""
+
+    def _construct(self, tmp_path, **extra):
+        local_dir, gguf = _with_existing_gguf(tmp_path)
+        with patch("muse.modalities.chat_completion.runtimes.llama_cpp.Llama") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            from muse.modalities.chat_completion.runtimes.llama_cpp import LlamaCppModel
+            LlamaCppModel(
+                model_id="x", hf_repo="x", local_dir=str(local_dir),
+                gguf_file=gguf, **extra,
+            )
+            return mock_cls.call_args.kwargs
+
+    def test_defaults_add_no_new_kwargs(self, tmp_path):
+        kwargs = self._construct(tmp_path)
+        for k in ("n_threads", "n_threads_batch", "n_batch", "flash_attn",
+                  "use_mlock", "type_k", "type_v"):
+            assert k not in kwargs
+
+    def test_each_kwarg_forwarded_when_set(self, tmp_path):
+        kwargs = self._construct(
+            tmp_path, n_threads=12, n_threads_batch=12, n_batch=1024,
+            flash_attn=True, use_mlock=True, type_k=8, type_v=8,
+        )
+        assert kwargs["n_threads"] == 12
+        assert kwargs["n_threads_batch"] == 12
+        assert kwargs["n_batch"] == 1024
+        assert kwargs["flash_attn"] is True
+        assert kwargs["use_mlock"] is True
+        assert kwargs["type_k"] == 8 and kwargs["type_v"] == 8
+
+    def test_false_and_zero_are_forwarded(self, tmp_path):
+        """None means unset; False/0 are real values and must forward."""
+        kwargs = self._construct(tmp_path, flash_attn=False, n_batch=0)
+        assert kwargs["flash_attn"] is False
+        assert kwargs["n_batch"] == 0

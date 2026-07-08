@@ -47,6 +47,9 @@ class LlamaCppModel:
       - context_length (default 8192)
       - chat_template (default None; uses template embedded in GGUF)
       - n_gpu_layers (default -1; offload everything GPU can fit)
+      - n_threads, n_threads_batch, n_batch, flash_attn, use_mlock,
+        type_k, type_v (all optional; forwarded to Llama(...) only
+        when set, spec 2026-07-08)
       - additional llama.cpp options absorbed by **_
     """
 
@@ -64,6 +67,19 @@ class LlamaCppModel:
         chat_template: str | None = None,  # deprecated alias for chat_format
         n_gpu_layers: int = -1,
         device: str = "auto",
+        # Optional llama.cpp performance kwargs (spec 2026-07-08).
+        # None = unset = do not forward, so default construction stays
+        # byte-identical to pre-v0.57 behavior. Set per-model via manifest
+        # capabilities (they reach here through the load_backend kwargs
+        # merge); tuned values live in catalog/curated entries, never as
+        # code defaults.
+        n_threads: int | None = None,
+        n_threads_batch: int | None = None,
+        n_batch: int | None = None,
+        flash_attn: bool | None = None,
+        use_mlock: bool | None = None,
+        type_k: int | None = None,
+        type_v: int | None = None,
         supports_tools: bool | None = None,  # consumed; not forwarded
         **_: Any,
     ) -> None:
@@ -90,12 +106,24 @@ class LlamaCppModel:
             "loading GGUF %s (ctx=%d, gpu_layers=%d, chat_format=%s)",
             gguf_path, context_length, n_gpu_layers, effective_chat_format,
         )
+        perf_kwargs = {
+            k: v for k, v in {
+                "n_threads": n_threads,
+                "n_threads_batch": n_threads_batch,
+                "n_batch": n_batch,
+                "flash_attn": flash_attn,
+                "use_mlock": use_mlock,
+                "type_k": type_k,
+                "type_v": type_v,
+            }.items() if v is not None
+        }
         self._llama = Llama(
             model_path=str(gguf_path),
             n_ctx=context_length,
             n_gpu_layers=n_gpu_layers,
             chat_format=effective_chat_format,
             verbose=False,
+            **perf_kwargs,
         )
 
     def chat(self, messages: list[dict], **kwargs) -> ChatResult:
