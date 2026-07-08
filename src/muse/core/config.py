@@ -88,6 +88,18 @@ SETTINGS: list[Setting] = [
     Setting("server.shutdown_grace_seconds", "MUSE_SHUTDOWN_GRACE_SECONDS",
             "opt_float", None, "server",
             "Grace period (s) for workers to exit on shutdown; None uses the built-in default."),
+    Setting("server.default_max_concurrency", "MUSE_DEFAULT_MAX_CONCURRENCY",
+            "int", 0, "server",
+            "Default per-model concurrent-request cap for models without "
+            "capabilities.max_concurrency; 0 = unlimited."),
+    Setting("server.queue_timeout_seconds", "MUSE_QUEUE_TIMEOUT_SECONDS",
+            "float", 300.0, "server",
+            "Max seconds a request is held waiting for a concurrency slot "
+            "and/or capacity before a 503 queue_timeout; 0 disables waiting."),
+    Setting("server.max_queue_depth", "MUSE_MAX_QUEUE_DEPTH",
+            "int", 0, "server",
+            "Per-model bound on parked waiters; exceeded requests fail fast "
+            "503 queue_full; 0 = unbounded."),
     Setting("server.gpu_budget_gb", "MUSE_GPU_BUDGET_GB",
             "opt_float", None, "server",
             "Declared GPU memory cap (GB); muse uses min(declared, live)."),
