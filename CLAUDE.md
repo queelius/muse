@@ -748,6 +748,15 @@ Configuration:
 - Global default: `server.idle_timeout_seconds` (env `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`), default **600** (10 min); set `<= 0` to disable. Applied to models without a per-model timeout.
 - Sweep interval: `server.idle_sweep_interval_seconds` (env `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`), default 30.
 
+### Request queueing (v0.55.0+)
+
+Two gateway-side mechanisms (spec docs/superpowers/specs/2026-07-08-request-queueing-design.md), both waiting ON the event loop (never in pool threads):
+
+- **Per-model concurrency cap:** `capabilities.max_concurrency` (else `server.default_max_concurrency`, default 0 = unlimited = no gating). Excess requests park FIFO on a per-model asyncio.Semaphore in `muse.cli_impl.queueing.ConcurrencyGate`. The CPU box's 32B runs with `max_concurrency: 1`.
+- **Capacity-wait:** the LoadDirector tags its capacity 503 `retryable=True` when in-use models block eviction; the gateway parks on `CapacityNotifier` (generation asyncio.Event, fired threadsafe by the director on release-to-zero and post-eviction) and retries under the shared deadline.
+
+One budget covers both: `server.queue_timeout_seconds` (default 300; 0 = today's immediate-503). `server.max_queue_depth` (default 0 = unbounded) fast-fails 503 `queue_full`. Timeout -> 503 `queue_timeout`. Telemetry `request` events carry `queued_ms`; `/v1/admin/memory` and `/v1/telemetry/summary` expose per-model `queue_depth` (the seam a future queue-aware federation router consumes). `/v1/admin/memory` omits queue_depth when no gate is bound (unknown is never rendered as 0), while `/v1/telemetry/summary` always includes it (0 when unbound).
+
 ## Configuration
 
 All server settings live in ONE declarative registry,
