@@ -94,6 +94,70 @@ class TestConcurrencyGate:
         async with gate.slot("m", 1, deadline=_deadline(1)):
             pass
 
+    async def test_burst_arrival_enforces_queue_full(self, monkeypatch):
+        # Regression test for a burst-arrival race: asyncio.wait_for wraps
+        # sem.acquire() in its own sub-Task, so EVERY slot() call runs its
+        # synchronous entry-check prefix before any acquire sub-Task has a
+        # chance to run. A check based on sem.locked() is therefore stale
+        # for concurrent arrivals with no sleeps between them; the entry
+        # check must be a single synchronous compare-and-increment.
+        monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "1")
+        gate = ConcurrencyGate()
+        ok: list[int] = []
+        full: list[int] = []
+
+        async def worker(i: int):
+            try:
+                async with gate.slot("m", 1, deadline=_deadline(5)):
+                    ok.append(i)
+                    await asyncio.sleep(0.05)  # hold the slot briefly
+            except QueueFull:
+                full.append(i)
+            except QueueTimeout:
+                pass
+
+        # No sleeps between task creation: all 10 workers are scheduled
+        # in the same burst.
+        await asyncio.gather(*[worker(i) for i in range(10)])
+        assert len(ok) <= 2  # 1 holding + 1 queued (cap=1, max_depth=1)
+        assert len(full) >= 8
+
+    async def test_burst_depth_counts_only_excess(self):
+        # depth() must report entered-minus-cap ("actually queued"), not
+        # a raw attempt/entry count, even when a burst of concurrent
+        # entries transiently inflates the entered counter before their
+        # acquires settle.
+        gate = ConcurrencyGate()
+        samples: list[int] = []
+
+        async def worker(i: int):
+            async with gate.slot("m", 5, deadline=_deadline(5)):
+                samples.append(gate.depth("m"))
+                await asyncio.sleep(0.02)
+
+        # 20 concurrent acquires against cap=5: entered can transiently
+        # reach 20 (every task runs its synchronous entry-check prefix
+        # before any acquire sub-Task completes -- see
+        # test_burst_arrival_enforces_queue_full), so depth must never
+        # exceed entered - cap == 15, and must settle back to 0.
+        await asyncio.gather(*[worker(i) for i in range(20)])
+        assert all(d <= 15 for d in samples)
+        assert gate.depth("m") == 0
+
+        # No contention (concurrency == cap): depth stays 0 throughout,
+        # not just after the burst settles, because excess never goes
+        # positive when entered never exceeds cap.
+        samples.clear()
+
+        async def worker_no_contention(i: int):
+            async with gate.slot("m2", 5, deadline=_deadline(5)):
+                samples.append(gate.depth("m2"))
+                await asyncio.sleep(0.01)
+
+        await asyncio.gather(*[worker_no_contention(i) for i in range(5)])
+        assert all(d == 0 for d in samples)
+        assert gate.depth("m2") == 0
+
 
 class TestCapacityNotifier:
     async def test_snapshot_then_notify_wakes(self):

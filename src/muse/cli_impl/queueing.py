@@ -43,19 +43,28 @@ class ConcurrencyGate:
 
     def __init__(self) -> None:
         self._sems: dict[str, asyncio.Semaphore] = {}
-        self._waiting: dict[str, int] = {}
+        self._caps: dict[str, int] = {}
+        self._entered: dict[str, int] = {}
 
     def depth(self, model_id: str) -> int:
-        return self._waiting.get(model_id, 0)
+        entered = self._entered.get(model_id, 0)
+        cap = self._caps.get(model_id, 0)
+        return max(0, entered - cap)
 
     def depths(self) -> dict[str, int]:
-        return {m: n for m, n in self._waiting.items() if n > 0}
+        result = {}
+        for model_id in self._entered:
+            d = self.depth(model_id)
+            if d > 0:
+                result[model_id] = d
+        return result
 
     def _sem(self, model_id: str, cap: int) -> asyncio.Semaphore:
         sem = self._sems.get(model_id)
         if sem is None:
             sem = asyncio.Semaphore(cap)
             self._sems[model_id] = sem
+            self._caps[model_id] = cap
         return sem
 
     @asynccontextmanager
@@ -64,13 +73,16 @@ class ConcurrencyGate:
             yield  # unlimited: no gating at all
             return
         sem = self._sem(model_id, cap)
-        if sem.locked():
-            # Will park: enforce the flood bound BEFORE parking.
-            max_depth = config.get("server.max_queue_depth") or 0
-            depth = self._waiting.get(model_id, 0)
-            if max_depth > 0 and depth >= max_depth:
-                raise QueueFull(model_id, depth)
-        self._waiting[model_id] = self._waiting.get(model_id, 0) + 1
+        # Synchronous entry check: no await between the read and the
+        # increment, so this is accurate even under a concurrent burst
+        # of arrivals on one event loop (no interleaving is possible
+        # between here and the increment below).
+        entered = self._entered.get(model_id, 0)
+        excess = entered - cap
+        max_depth = config.get("server.max_queue_depth") or 0
+        if max_depth > 0 and excess >= max_depth:
+            raise QueueFull(model_id, excess)
+        self._entered[model_id] = entered + 1
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -79,14 +91,14 @@ class ConcurrencyGate:
                 await asyncio.wait_for(sem.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
                 raise QueueTimeout(model_id) from None
+            try:
+                yield
+            finally:
+                sem.release()
         finally:
-            self._waiting[model_id] -= 1
-            if self._waiting[model_id] <= 0:
-                self._waiting.pop(model_id, None)
-        try:
-            yield
-        finally:
-            sem.release()
+            self._entered[model_id] -= 1
+            if self._entered[model_id] <= 0:
+                self._entered.pop(model_id, None)
 
 
 class CapacityNotifier:
@@ -98,10 +110,16 @@ class CapacityNotifier:
       3. await ev.wait() (bounded), then loop back to 1.
 
     notify() may be called from any thread (the director's release /
-    eviction paths). It replaces the current event with a fresh one and
-    sets the old, so late snapshots never see a stale set() and early
-    waiters are always woken. Before the first snapshot() there is no
-    captured loop; notify() is a silent no-op (nothing is waiting yet).
+    eviction paths). It only sets() the CURRENT event; it does not itself
+    swap in a fresh one. The generation rollover happens lazily inside
+    snapshot(): the next caller to snapshot() sees an already-set event
+    and replaces it with a fresh, unset one before handing it out. This
+    keeps notify() a cheap threadsafe fire-and-forget and still guarantees
+    every waiter that snapshotted before a notify() gets woken, while a
+    waiter that snapshots AFTER a notify() gets a new, unset event rather
+    than one that is already (stale-)set. Before the first snapshot()
+    there is no captured loop; notify() is a silent no-op (nothing is
+    waiting yet).
     """
 
     def __init__(self) -> None:
