@@ -161,7 +161,7 @@ def scenario_short_gen(clients, reps):
         rows.append(row)
         raw[c.name] = rs
     return {"headers": ["server", "median elapsed s", "tok/s (wall)",
-                        "tok/s (self-reported)"], "rows": rows, "raw": raw}
+                        "tok/s (gen-only, self-reported)"], "rows": rows, "raw": raw}
 
 
 def scenario_stream_ttft(clients, reps):
