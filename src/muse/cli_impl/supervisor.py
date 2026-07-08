@@ -551,15 +551,15 @@ def _weights_size_gb(catalog_entry: dict) -> float:
         groups: dict[tuple, tuple[int, int]] = {}
         for root, _dirs, files in os.walk(local_dir):
             for name in files:
-                canon = _canonical_weight_stem(name)
-                if canon is None:
+                key_rank = _weight_key(name)
+                if key_rank is None:
                     continue  # not a weight file (config/README/CSV/image/...)
+                canon, rank = key_rank
                 try:
                     size = os.path.getsize(os.path.join(root, name))
                 except OSError:
                     continue
                 key = (root, canon)
-                rank = _weight_variant_rank(name)
                 if key not in groups or rank < groups[key][0]:
                     groups[key] = (rank, size)
     except OSError:
@@ -573,25 +573,36 @@ _WEIGHT_EXTS = (
     ".safetensors", ".bin", ".ckpt", ".pt", ".pth", ".onnx", ".msgpack", ".h5",
     ".gguf",
 )
-_DTYPE_TAGS = (".fp16", ".fp32", ".bf16", ".float16", ".float32", ".f16", ".f32")
+# 16-bit dtype tags the sizer PREFERS to count: smaller than fp32 and closer
+# to what muse loads by default. _DTYPE_TAGS is the full set stripped from a
+# stem so every dtype variant of one component groups together; _HALF_TAGS is
+# the subset that earns the preference bonus. Keeping them derived from one
+# base (rather than two hand-maintained lists) is what stops the strip list
+# and the rank list from silently drifting apart.
+_HALF_TAGS = (".fp16", ".f16", ".float16", ".bf16")
+_DTYPE_TAGS = _HALF_TAGS + (".fp32", ".float32", ".f32")
 _TRANSFORMERS_CHECKPOINT_RE = re.compile(
-    r"^(model|pytorch_model|tf_model|flax_model)(-\d{5}-of-\d{5})?$",
-    re.IGNORECASE,
+    r"^(model|pytorch_model|tf_model|flax_model)(-\d{5}-of-\d{5})?$"
 )
 
 
-def _canonical_weight_stem(name: str) -> str | None:
-    """Canonical component key for a weight file, or None if not a weight.
+def _weight_key(name: str) -> tuple[str, int] | None:
+    """Canonical component key + preference rank for a weight file, or None
+    if `name` is not a recognized weight file.
 
-    Strips the weight extension and any dtype variant tag so that
+    The canonical key strips the weight extension and any dtype tag so that
     `diffusion_pytorch_model.safetensors`,
     `diffusion_pytorch_model.fp16.safetensors`, and
-    `diffusion_pytorch_model.bin` all map to the same stem
-    (`diffusion_pytorch_model`) and are de-duped to one counted variant.
-    Also normalizes common Transformers checkpoint prefixes so
-    `model-00001-of-00002.safetensors` and
-    `pytorch_model-00001-of-00002.bin` are treated as alternate encodings
-    of the same shard.
+    `diffusion_pytorch_model.bin` all map to one stem
+    (`diffusion_pytorch_model`); common Transformers checkpoint prefixes
+    (`model` / `pytorch_model` / `tf_model` / `flax_model`, with an optional
+    shard suffix) normalize together so `model-00001-of-00002.safetensors`
+    and `pytorch_model-00001-of-00002.bin` are the same shard.
+
+    Lower rank = the variant the sizer counts (the one that actually loads):
+    a 16-bit dtype over fp32, safetensors over pickle (.bin/.ckpt/.pt).
+    Counting the loaded variant, not the largest, leans the estimate DOWN --
+    the safe direction against spurious "exceeds device capacity" 503s.
     """
     lower = name.lower()
     ext = next((e for e in _WEIGHT_EXTS if lower.endswith(e)), None)
@@ -599,33 +610,17 @@ def _canonical_weight_stem(name: str) -> str | None:
         return None
     stem = name[: -len(ext)]
     stem_l = stem.lower()
+    rank = -1 if ext == ".safetensors" else 0
     for tag in _DTYPE_TAGS:
         if stem_l.endswith(tag):
-            stem = stem[: -len(tag)]
-            stem_l = stem_l[: -len(tag)]
+            stem, stem_l = stem[: -len(tag)], stem_l[: -len(tag)]
+            if tag in _HALF_TAGS:
+                rank -= 2
             break
     m = _TRANSFORMERS_CHECKPOINT_RE.match(stem_l)
     if m is not None:
-        shard = m.group(2) or ""
-        return f"model{shard}"
-    return stem
-
-
-def _weight_variant_rank(name: str) -> int:
-    """Lower rank = the variant we prefer to COUNT (the one that loads).
-
-    fp16 is the diffusers default-loaded dtype and is smaller than fp32;
-    safetensors is preferred over pickle (.bin/.ckpt/.pt). Counting the
-    preferred variant (not the largest) leans the estimate DOWN, the safe
-    direction against spurious "exceeds device capacity" 503s.
-    """
-    lower = name.lower()
-    rank = 0
-    if ".fp16." in lower or ".f16." in lower or ".float16." in lower:
-        rank -= 2
-    if lower.endswith(".safetensors"):
-        rank -= 1
-    return rank
+        stem = f"model{m.group(2) or ''}"
+    return stem, rank
 
 
 def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:

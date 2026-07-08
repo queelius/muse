@@ -1937,6 +1937,17 @@ class TestWeightsSizeDedup:
         # only the fp16 variant is counted, not the sum
         assert _weights_size_gb(entry) == pytest.approx(1 * mib / 1024 ** 3)
 
+    def test_bf16_preferred_over_fp32(self, tmp_path):
+        from muse.cli_impl.supervisor import _weights_size_gb
+        mib = 1024 ** 2
+        entry = self._mk(tmp_path, {
+            "unet/diffusion_pytorch_model.bf16.safetensors": 1 * mib,
+            "unet/diffusion_pytorch_model.safetensors": 2 * mib,  # fp32
+        })
+        # bf16 is a 16-bit variant, preferred over the fp32 plain variant
+        # regardless of os.walk order (the tie would otherwise count fp32).
+        assert _weights_size_gb(entry) == pytest.approx(1 * mib / 1024 ** 3)
+
     def test_safetensors_preferred_over_bin_and_ckpt(self, tmp_path):
         from muse.cli_impl.supervisor import _weights_size_gb
         mib = 1024 ** 2
