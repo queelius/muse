@@ -1431,6 +1431,22 @@ Lightweight models (under ~1 GB on disk, CPU-friendly) are good
 candidates; heavier models need GPU runners and are out of scope for
 the free-tier CI matrix.
 
+## Benchmarks
+
+`scripts/bench/` holds the reusable performance harness (v0.57.0):
+`bench_llm.py` (muse-vs-ollama head-to-head: generation tok/s, streaming
+TTFT/inter-token, long-prompt eval, multi-turn prefix-reuse detection,
+worker-direct vs gateway split) and `bench_modalities.py` (per-modality
+hot latencies against a live server). Reports land in `docs/benchmarks/`.
+Protocol lesson from the 2026-07-08 baseline: on thermally-scaled boxes,
+only alternating same-window comparisons are trustworthy; cross-window
+medians can differ 3x. LlamaCppModel accepts optional perf kwargs
+(n_threads, n_threads_batch, n_batch, flash_attn, use_mlock, type_k,
+type_v) via manifest capabilities; defaults match llama-cpp-python (and
+ollama's thread choice) and shipped untuned because the baseline showed
+muse already competitive (non-streaming faster than ollama; streaming
+within 10-20%).
+
 ## Memory accounting
 
 Three sources of truth, in order of fidelity:
