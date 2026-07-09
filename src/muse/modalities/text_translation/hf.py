@@ -8,33 +8,43 @@ inconsistently tagged -- some carry `text2text-generation` instead of
 tell regardless of tagging.
 
 Disambiguation vs text/summarization's plugin (spec-normative, see
-docs/superpowers/specs/2026-07-09-text-translation-design.md): a repo
-tagged BOTH `summarization` and `translation` is claimed here only when
-its name matches one of the four translation families; otherwise it is
-left to text/summarization's plugin.
+docs/superpowers/specs/2026-07-09-text-translation-design.md):
 
-KNOWN LANDMINE (documented per docs/HF_PLUGINS.md priority-tie rule):
-text/summarization's plugin also sits at priority 110, and
-HFResolver.resolve() iterates plugins in (priority, modality) order,
-first sniff wins. Tie-break at equal priority is alphabetical by
-modality string, and "text/summarization" < "text/translation", so
-summarization's plugin is *always* consulted before this one. Its own
-sniff (`"summarization" in tags`) claims ANY summarization-tagged repo
-unconditionally -- it does not consult the translation tag or the repo
-name. The disambiguation logic in `_sniff` below therefore only fully
-governs resolution when text/summarization's plugin has NOT already
-claimed the repo (i.e. no `summarization` tag present at all); in the
-both-tagged case, summarization's plugin wins the real dispatch
-regardless of what this function returns. This is a real gap between
-the spec's stated rule and the current priority scheme, not a bug in
-this file -- fixing it would require lowering this plugin's priority
-below 110 (a cross-cutting change out of scope for this task) or
-special-casing modality order in the shared dispatcher. No known real
-HF repo triggers the gap today: m2m100/nllb/opus-mt/madlad repos are
-not tagged `summarization` in practice. `_sniff` still implements the
-spec's ideal rule (and is covered by direct unit tests below) so the
-correct behavior is pinned and ready the moment priority ordering is
-revisited.
+  (a) tagged BOTH `summarization` and `translation` -> claimed here iff
+      the repo name matches one of the four translation families.
+  (b) tagged `summarization` WITHOUT `translation` -> NEVER claimed
+      here, even on a family-name match. An "nllb-meeting-summarizer"
+      fine-tune is a summarizer, not a translator; a family-name hit
+      alone cannot override an explicit, unambiguous summarization tag
+      with no competing translation tag.
+  (c) otherwise -> claimed iff the `translation` tag is present or the
+      name matches a translation family.
+
+AS-BUILT NOTE (priority 110 -> 109): text/summarization's plugin also
+sat at priority 110 when this plugin first shipped. HFResolver.resolve()
+iterates plugins in (priority, modality) order (lower priority checked
+first; see docs/HF_PLUGINS.md), first sniff wins; the tie-break at equal
+priority is alphabetical by modality string, and
+"text/summarization" < "text/translation" alphabetically. That meant
+summarization's plugin was *always* consulted before this one in real
+dispatch -- its own sniff (`"summarization" in tags`) claims ANY
+summarization-tagged repo unconditionally, with no chance for this
+plugin's disambiguation rule (a)/(b)/(c) above to run at all on a
+both-tagged repo. The rule was implemented and unit-tested in isolation,
+but unreachable through the real resolver.
+
+The fix adjudicated for this task: move this plugin to priority 109, one
+tier below the 110 group (audio_classification, embedding_text,
+image_animation, image_cv, image_ocr, image_segmentation,
+model_3d_generation, text_summarization). Being checked first means
+translation's own sniff runs before ANY of those, decides per rules
+(a)/(b)/(c) above, and defers (returns False) for every repo it doesn't
+recognize as a translation family -- including plain summarization-only
+repos and repos belonging to the other seven 110-tier modalities (see
+the collateral-shadowing regression tests in
+tests/modalities/text_translation/test_hf_plugin.py). Net effect: the
+both-tagged disambiguation is now genuinely reachable, and nothing else
+in the 110 tier loses any repo it previously claimed.
 
 Loaded via single-file import; no relative imports. See
 docs/HF_PLUGINS.md for authoring rules.
@@ -83,7 +93,12 @@ def _repo_license(info) -> str | None:
 
 
 def _matches_family(repo_id: str) -> bool:
-    name = (repo_id or "").lower()
+    # Scoped to the stripped model-name segment (after the org's
+    # trailing slash), matching _opus_pair's existing discipline. An
+    # org merely NAMED after a translation family (e.g. a hobbyist org
+    # "nllb-fan-org") hosting an unrelated model must not match just
+    # because the family string appears in the ORG segment.
+    name = _model_id(repo_id)
     return any(pattern in name for pattern in _FAMILY_PATTERNS)
 
 
@@ -103,15 +118,26 @@ def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
     repo_id = getattr(info, "id", "") or ""
     family_match = _matches_family(repo_id)
+    has_summarization = "summarization" in tags
+    has_translation = "translation" in tags
 
-    if "summarization" in tags:
-        # Both-tagged (or mistagged) disambiguation: only claim here
-        # when the name unambiguously identifies a translation family.
-        # A generic summarization repo (no translation tag, no family
-        # name) must fall through to text/summarization's plugin.
+    if has_summarization and has_translation:
+        # (a) Both-tagged: only claim here when the name unambiguously
+        # identifies a translation family; otherwise defer to
+        # text/summarization's plugin.
         return family_match
 
-    return "translation" in tags or family_match
+    if has_summarization:
+        # (b) Summarization-tagged WITHOUT a translation tag: never
+        # claim here, even on a family-name match. An
+        # "nllb-meeting-summarizer" fine-tune is a summarizer, not a
+        # translator -- an explicit, unambiguous summarization tag with
+        # no competing translation tag always wins.
+        return False
+
+    # (c) Otherwise: claim iff the translation tag is present or the
+    # name matches a translation family.
+    return has_translation or family_match
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
@@ -192,12 +218,17 @@ HF_PLUGIN = {
     "runtime_path": _RUNTIME_PATH,
     "pip_extras": _PIP_EXTRAS,
     "system_packages": (),
-    # 110: tag-based, more specific than text-classification's catch-all
-    # (200) but loses to file-pattern plugins (100). Same slot as
-    # text/summarization, image_ocr, image_segmentation, audio_embedding.
-    # See the module docstring's KNOWN LANDMINE note for the priority-tie
-    # interaction with text/summarization's plugin.
-    "priority": 110,
+    # 109: tag-based, more specific than text-classification's catch-all
+    # (200) but loses to file-pattern plugins (100). Deliberately ONE
+    # BELOW the 110 tier (text/summarization, audio_classification,
+    # embedding_text, image_animation, image_cv, image_ocr,
+    # image_segmentation, model_3d_generation) so this plugin's sniff is
+    # checked FIRST and its both-tagged disambiguation rule (see the
+    # module docstring's AS-BUILT note) is actually reachable in real
+    # dispatch, rather than being shadowed by text/summarization's
+    # unconditional `"summarization" in tags` catch-all under the old
+    # 110/110 alphabetical tie-break.
+    "priority": 109,
     "sniff": _sniff,
     "resolve": _resolve,
     "search": _search,

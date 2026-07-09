@@ -176,13 +176,42 @@ one generate call.
   - `opus-mt-en-es`, `opus-mt-en-de` (Helsinki-NLP, ~300 MB each,
     permissive, best per-pair quality;
     `capabilities.source_language/target_language` set).
-- **Resolver** (`hf.py`, priority 110): sniffs `translation`-tagged repos
-  (and `text2text-generation` + name-pattern fallback), dispatches
-  family by repo-name pattern (`m2m100`, `nllb`, `opus-mt`, `madlad`).
-  Excludes repos already claimed by summarization's plugin (tag
-  disambiguation: `translation` tag wins here; `summarization` tag wins
-  there; both-tagged repos go to translation only if the name matches a
-  translation family).
+- **Resolver** (`hf.py`, priority 109 -- see as-built note below): sniffs
+  `translation`-tagged repos (and `text2text-generation` + name-pattern
+  fallback), dispatches family by repo-name pattern (`m2m100`, `nllb`,
+  `opus-mt`, `madlad`). Excludes repos already claimed by summarization's
+  plugin (tag disambiguation: `translation` tag wins here; `summarization`
+  tag wins there; both-tagged repos go to translation only if the name
+  matches a translation family).
+
+**As-built amendment (2026-07-09, post-review fix pass):** the resolver
+plugin originally shipped at priority 110, the same tier as
+text/summarization's plugin. `HFResolver.resolve()` iterates plugins in
+`(priority, modality)` order with lower priority checked first (see
+docs/HF_PLUGINS.md); same-priority ties resolve alphabetically by
+modality string. Since `"text/summarization" < "text/translation"`
+alphabetically, summarization's plugin was always consulted first, and
+its unconditional `"summarization" in tags` sniff claimed every
+summarization-tagged repo before translation's both-tagged
+disambiguation rule ever ran -- making that rule correct in isolated
+unit tests but unreachable through the real resolver. The adjudicated
+fix moves this plugin to **priority 109**, one tier below the 110 group
+(audio_classification, embedding_text, image_animation, image_cv,
+image_ocr, image_segmentation, model_3d_generation, text_summarization),
+so translation's sniff is checked first and its disambiguation rule
+(both-tagged -> family-name match required) is now genuinely exercised
+by real dispatch. The rule was also tightened while fixing this: a repo
+tagged `summarization` WITHOUT a `translation` tag is now NEVER claimed
+by this plugin, even on a family-name match (e.g. an
+"nllb-meeting-summarizer" fine-tune belongs to text/summarization) --
+previously a bare family-name match could win regardless of whether the
+`translation` tag was actually present. See the AS-BUILT note atop
+`src/muse/modalities/text_translation/hf.py` for the full mechanics, and
+`tests/modalities/text_translation/test_hf_plugin.py` for direct
+disambiguation-rule tests, a cross-plugin real-`HFResolver` dispatch
+regression test, and a collateral-shadowing guard proving the priority
+move does not cause translation to claim repos belonging to any of the
+eight priority-110 sibling plugins.
 
 ## Testing
 

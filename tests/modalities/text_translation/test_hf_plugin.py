@@ -8,7 +8,7 @@ only when its name matches a known translation family (m2m100, nllb,
 opus-mt, madlad); otherwise it is left to text/summarization's plugin.
 """
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from muse.modalities.text_translation.hf import HF_PLUGIN
 
@@ -30,7 +30,11 @@ def test_plugin_keys_present():
 
 def test_plugin_modality_and_priority():
     assert HF_PLUGIN["modality"] == "text/translation"
-    assert HF_PLUGIN["priority"] == 110
+    # 109: checked BEFORE the 110 tier (which includes
+    # text/summarization) so the both-tagged disambiguation in _sniff
+    # is actually reachable in real dispatch. See the module
+    # docstring's AS-BUILT note.
+    assert HF_PLUGIN["priority"] == 109
 
 
 def test_plugin_runtime_path():
@@ -109,6 +113,18 @@ def test_sniff_false_for_no_tags_attribute():
     assert HF_PLUGIN["sniff"](info) is False
 
 
+def test_sniff_false_when_family_name_only_in_org_segment():
+    """Family-name matching must scope to the model-name segment (the
+    part after the org's trailing slash), matching _opus_pair's existing
+    discipline. An org merely NAMED after a translation family (e.g. a
+    hobbyist org "nllb-fan-org") hosting an unrelated model must not
+    sniff True just because "nllb" appears somewhere in the full
+    org/repo string.
+    """
+    info = _fake_info("nllb-fan-org/bert-base", tags=[])
+    assert HF_PLUGIN["sniff"](info) is False
+
+
 # ---------- sniff: both-tagged disambiguation (spec-normative) ----------
 
 def test_sniff_both_tagged_true_when_name_matches_translation_family():
@@ -133,25 +149,41 @@ def test_sniff_both_tagged_false_when_name_does_not_match_translation_family():
     assert HF_PLUGIN["sniff"](info) is False
 
 
-def test_summarization_plugin_wins_priority_tie_for_bare_summarization_tag():
-    """Documents the actual cross-plugin dispatch outcome (see the
-    comment above HF_PLUGIN['priority'] in hf.py): text/summarization
-    and text/translation share priority 110, and HFResolver's dispatch
-    sorts ties alphabetically by modality ('text/summarization' <
-    'text/translation'), so summarization's plugin is always consulted
-    FIRST. Its own sniff (`"summarization" in tags`) claims any
-    summarization-tagged repo unconditionally, independent of this
-    plugin's disambiguation logic. This test pins that ordering fact
-    directly (no live HFResolver instantiation needed).
+def test_sniff_false_for_summarization_only_repo_even_with_family_name():
+    """Tagged summarization WITHOUT a translation tag: NEVER claim here,
+    even when the name matches a translation family. An
+    "nllb-meeting-summarizer" fine-tune is a summarizer, not a
+    translator -- the family-name match alone is not sufficient once
+    summarization has staked a claim and translation has not.
+    """
+    info = _fake_info(
+        "acme/nllb-meeting-summarizer",
+        tags=["summarization"],
+    )
+    assert HF_PLUGIN["sniff"](info) is False
+
+
+def test_translation_plugin_checked_before_summarization_after_priority_fix():
+    """text/translation moved to priority 109 (below text/summarization's
+    110) specifically so HFResolver's (priority, modality) dispatch
+    consults translation's own disambiguating sniff BEFORE
+    summarization's unconditional `"summarization" in tags` catch-all.
+    Before this fix, both plugins tied at 110 and the alphabetical
+    tie-break ("text/summarization" < "text/translation") meant
+    summarization always ran first, making the both-tagged
+    disambiguation logic above unreachable in real dispatch. This test
+    pins the corrected ordering directly (see hf.py's module docstring
+    AS-BUILT note and docs/HF_PLUGINS.md's "lower checked first" rule).
     """
     from muse.modalities.text_summarization.hf import HF_PLUGIN as SUMM_PLUGIN
 
-    assert SUMM_PLUGIN["priority"] == HF_PLUGIN["priority"] == 110
+    assert HF_PLUGIN["priority"] == 109
+    assert SUMM_PLUGIN["priority"] == 110
     plugins = sorted(
         [HF_PLUGIN, SUMM_PLUGIN], key=lambda p: (p["priority"], p["modality"]),
     )
-    assert plugins[0] is SUMM_PLUGIN
-    assert plugins[1] is HF_PLUGIN
+    assert plugins[0] is HF_PLUGIN
+    assert plugins[1] is SUMM_PLUGIN
 
 
 # ---------- resolve: manifest shape ----------
@@ -269,3 +301,117 @@ def test_search_calls_list_models_with_translation_filter():
     assert kwargs["sort"] == "downloads"
     assert kwargs["limit"] == 5
     assert kwargs["search"] == "x"
+
+
+# ---------- cross-plugin dispatch regression (real plugins, real resolver) ----------
+#
+# Direct unit tests on _sniff (above) exercise the disambiguation rule in
+# isolation, but the priority-tie bug this task fixes was only visible in
+# real HFResolver dispatch (sniff order derived from sorting BOTH
+# plugins' actual priority values). These tests build a real HFResolver
+# over the real translation + summarization HF_PLUGIN dicts, sorted with
+# the real key, and drive it through resolve() end to end, mirroring
+# tests/core/test_hf_resolver_dispatch.py's pattern.
+
+def _sorted_translation_and_summarization_plugins():
+    from muse.modalities.text_summarization.hf import HF_PLUGIN as SUMM_PLUGIN
+
+    return sorted(
+        [HF_PLUGIN, SUMM_PLUGIN], key=lambda p: (p["priority"], p["modality"]),
+    )
+
+
+def test_dispatch_resolves_both_tagged_family_named_repo_to_translation():
+    """Both-tagged AND family-named -> real dispatch resolves to
+    text/translation (the priority fix makes this reachable).
+    """
+    from muse.core.resolvers_hf import HFResolver
+
+    resolver = HFResolver(plugins=_sorted_translation_and_summarization_plugins())
+    info = _fake_info(
+        "acme/opus-mt-en-es-hybrid",
+        tags=["summarization", "translation"],
+    )
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        resolved = resolver.resolve("hf://acme/opus-mt-en-es-hybrid")
+    assert resolved.manifest["modality"] == "text/translation"
+
+
+def test_dispatch_resolves_both_tagged_non_family_repo_to_summarization():
+    """Both-tagged, NOT family-named -> real dispatch falls through to
+    text/summarization (translation's own sniff declines; summarization's
+    unconditional tag-match then claims it).
+    """
+    from muse.core.resolvers_hf import HFResolver
+
+    resolver = HFResolver(plugins=_sorted_translation_and_summarization_plugins())
+    info = _fake_info(
+        "acme/generic-seq2seq-model",
+        tags=["summarization", "translation"],
+    )
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        resolved = resolver.resolve("hf://acme/generic-seq2seq-model")
+    assert resolved.manifest["modality"] == "text/summarization"
+
+
+# ---------- collateral-shadowing guard ----------
+#
+# translation now sits at priority 109, checked BEFORE every plugin that
+# shares the historical 110 tier: audio_classification, embedding_text,
+# image_animation, image_cv, image_ocr, image_segmentation,
+# model_3d_generation, text_summarization. Guard against translation's
+# broadened sniff (translation tag OR family-name match) accidentally
+# claiming a repo that actually belongs to one of those siblings. Each
+# fixture below is a realistic positive for the sibling's OWN sniff
+# (constructed by reading that plugin's _sniff), used here only to
+# confirm translation's sniff stays False on it.
+
+def test_sniff_false_for_representative_repos_of_every_priority_110_sibling():
+    siblings = [
+        # audio/classification: audio-classification tag.
+        _fake_info(
+            "audeering/wav2vec2-emotion-recognition",
+            tags=["audio-classification"],
+        ),
+        # embedding/text: sentence-transformers tag.
+        _fake_info(
+            "sentence-transformers/all-MiniLM-L6-v2",
+            tags=["sentence-transformers"],
+        ),
+        # image/animation: model_index.json + text-to-video tag + name hint.
+        _fake_info(
+            "guoyww/animatediff-motion-adapter-v1-5-2",
+            tags=["text-to-video"],
+            siblings=["model_index.json"],
+        ),
+        # image/cv (depth primitive): depth-estimation tag.
+        _fake_info(
+            "depth-anything/Depth-Anything-V2-Small-hf",
+            tags=["depth-estimation"],
+        ),
+        # image/ocr: image-to-text tag.
+        _fake_info(
+            "microsoft/trocr-base-printed",
+            tags=["image-to-text"],
+        ),
+        # image/segmentation: mask-generation tag.
+        _fake_info(
+            "facebook/sam2-hiera-tiny",
+            tags=["mask-generation"],
+        ),
+        # 3d/generation: image-to-3d tag + triposr name-hint.
+        _fake_info(
+            "stabilityai/TripoSR",
+            tags=["image-to-3d"],
+        ),
+        # text/summarization: summarization tag only, no translation tag,
+        # no translation-family name.
+        _fake_info(
+            "facebook/bart-large-cnn",
+            tags=["summarization"],
+        ),
+    ]
+    for info in siblings:
+        assert HF_PLUGIN["sniff"](info) is False, (
+            f"translation sniff collaterally claimed {info.id!r}"
+        )
