@@ -226,6 +226,21 @@ def upscale_model(remote_health) -> str:
 
 
 @pytest.fixture(scope="session")
+def translation_model(remote_health) -> str:
+    """The text/translation model id integration tests should target.
+
+    Defaults to m2m100-418m (bundled default, all-pairs). Override via
+    MUSE_TRANSLATION_MODEL_ID. Skips the test if the chosen model isn't
+    loaded on the server.
+    """
+    model_id = os.environ.get(
+        "MUSE_TRANSLATION_MODEL_ID", "m2m100-418m",
+    )
+    _require_model(remote_health, model_id)
+    return model_id
+
+
+@pytest.fixture(scope="session")
 def segmentation_model(remote_health) -> str:
     """The image/segmentation model id integration tests should target.
 

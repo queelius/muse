@@ -21,8 +21,9 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text moderation/classification on `/v1/moderations`
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
+- text translation (LibreTranslate-compat) on `/v1/translate` (+ bare `/translate` alias, `GET /languages`)
 
-Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `video/generation`).
+Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -371,7 +372,7 @@ combined with live measurements as `min(declared, live)`.
 | `muse models warmup <model-id>` | pre-load a model into a worker without serving traffic; first real request is hot |
 | `muse models refresh <id> \| --all \| --enabled` | re-install museq[server,extras] into per-model venv(s) (after `pip install -U museq`) |
 | `muse config generate \| show \| path \| get \| set \| unset` | manage `~/.muse/config.yaml` (see Configuration below) |
-| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (29 tools) |
+| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (30 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.
 
@@ -413,6 +414,8 @@ settings inventory and precedence rules.
 | `POST /v1/moderations` | text moderation/classification (OpenAI-compatible) |
 | `POST /v1/rerank` | text rerank (Cohere-compat) |
 | `POST /v1/summarize` | text summarization (Cohere-compat) |
+| `POST /v1/translate` (+ bare `/translate` alias) | text translation (LibreTranslate-compat) |
+| `GET /languages` | supported translation languages (LibreTranslate-compat) |
 | `POST /v1/audio/music` | music generation (capability-gated; muse-native shape) |
 | `POST /v1/audio/sfx` | sound-effect generation (capability-gated; muse-native shape) |
 | `POST /v1/video/generations` | text-to-video generation (mp4/webm/frames_b64; GPU-required) |
@@ -504,7 +507,7 @@ muse serve
 
 ## MCP server (since v0.29.0)
 
-`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 29 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 18 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
+`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 30 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 19 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
 
 ```bash
 muse mcp                                  # stdio mode
@@ -535,7 +538,7 @@ Tools split into two groups:
 
 **Admin (11):** `muse_list_models`, `muse_get_model_info`, `muse_search_models`, `muse_pull_model`, `muse_remove_model`, `muse_enable_model`, `muse_disable_model`, `muse_probe_model`, `muse_get_memory_status`, `muse_get_workers`, `muse_get_jobs`. Long-running ops (pull, probe, enable) return a `job_id` and the LLM polls `muse_get_jobs` to track progress.
 
-**Inference (18):** `muse_chat`, `muse_summarize`, `muse_rerank`, `muse_classify`, `muse_embed_text`, `muse_generate_image`, `muse_edit_image`, `muse_vary_image`, `muse_upscale_image`, `muse_segment_image`, `muse_generate_animation`, `muse_embed_image`, `muse_speak`, `muse_transcribe`, `muse_generate_music`, `muse_generate_sfx`, `muse_embed_audio`, `muse_generate_video`.
+**Inference (19):** `muse_chat`, `muse_summarize`, `muse_rerank`, `muse_classify`, `muse_embed_text`, `muse_translate`, `muse_generate_image`, `muse_edit_image`, `muse_vary_image`, `muse_upscale_image`, `muse_segment_image`, `muse_generate_animation`, `muse_embed_image`, `muse_speak`, `muse_transcribe`, `muse_generate_music`, `muse_generate_sfx`, `muse_embed_audio`, `muse_generate_video`.
 
 Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or `<name>_path` (local file). Image and audio outputs return as MCP `ImageContent` / `AudioContent` blocks plus a JSON summary.
 
@@ -581,6 +584,7 @@ See the "Federation" section of `CLAUDE.md` for the full design.
   - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
   - `text_rerank/` (MODALITY `"text/rerank"`; Cohere `/v1/rerank` wire shape)
   - `text_summarization/` (MODALITY `"text/summarization"`; Cohere `/v1/summarize` wire shape)
+  - `text_translation/` (MODALITY `"text/translation"`; LibreTranslate `/v1/translate` + `/translate` alias + `/languages` wire shape)
   - `video_generation/` (MODALITY `"video/generation"`; includes `runtimes/wan_runtime.py` and `runtimes/cogvideox_runtime.py`)
 - `muse.models/`: flat directory of drop-in model scripts, one file per model (MANIFEST + Model class).
   - `soprano_80m.py`, `kokoro_82m.py`, `bark_small.py`, `supertonic_3.py` (audio/speech; `supertonic_3` is ONNX on-device CPU, 31 languages)
@@ -590,6 +594,7 @@ See the "Federation" section of `CLAUDE.md` for the full design.
   - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
   - `ace_step_v1_3_5b.py` (audio/generation; ACE-Step v1 3.5B full songs + lyrics, Apache 2.0, GPU-required)
   - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
+  - `m2m100_418m.py` (text/translation; facebook/m2m100_418M, MIT, ~2GB, all-pairs across 100 languages)
   - `dinov2_small.py` (image/embedding; facebook/dinov2-small, Apache 2.0, 88MB, 384-dim CPU-friendly)
   - `mert_v1_95m.py` (audio/embedding; m-a-p/MERT-v1-95M, MIT, 95MB, 768-dim music understanding via mean-pool over time)
   - `wan2_1_t2v_1_3b.py` (video/generation; Wan-AI/Wan2.1-T2V-1.3B, Apache 2.0, ~3GB at fp16, 5s clips at 832x480, GPU-required)

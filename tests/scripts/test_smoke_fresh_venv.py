@@ -231,6 +231,129 @@ def test_main_failure_returns_non_zero(tmp_path, fake_known_models, capsys):
     assert "librosa" in record["label"]
 
 
+class _FakeCuratedEntry:
+    """Minimal stand-in for muse.core.curated.CuratedEntry (uri-only)."""
+
+    def __init__(self, id: str, uri: str | None):
+        self.id = id
+        self.uri = uri
+
+
+def test_smoke_one_dispatches_curated_resolver_entry(tmp_path, fake_known_models):
+    """A model_id absent from known_models() but present in curated.yaml
+    with a `uri` (resolver-based, e.g. opus-mt-en-es) routes to
+    _smoke_curated_resolver instead of failing 'unknown model'."""
+    fake_result = smoke.SmokeResult(
+        model_id="opus-mt-en-es", ok=True, error=None,
+        duration_s=1.0, label="opus-mt-en-es: OK (1.0s)",
+    )
+    with patch("muse.core.catalog.known_models", return_value=fake_known_models), \
+         patch(
+             "muse.core.curated.find_curated",
+             return_value=_FakeCuratedEntry("opus-mt-en-es", "hf://Helsinki-NLP/opus-mt-en-es"),
+         ), \
+         patch.object(smoke, "_smoke_curated_resolver", return_value=fake_result) as mock_dispatch:
+        result = smoke.smoke_one("opus-mt-en-es", tmp_path)
+
+    mock_dispatch.assert_called_once_with(
+        "opus-mt-en-es", "hf://Helsinki-NLP/opus-mt-en-es", tmp_path,
+    )
+    assert result is fake_result
+
+
+def test_smoke_one_unknown_model_not_in_curated_either(tmp_path, fake_known_models):
+    """A model_id absent from both known_models() and curated.yaml still
+    fails 'unknown model' (real find_curated lookup, no mock)."""
+    with patch("muse.core.catalog.known_models", return_value=fake_known_models):
+        result = smoke.smoke_one("definitely-not-a-real-model-id", tmp_path)
+
+    assert result.ok is False
+    assert "unknown model" in result.label
+
+
+def test_smoke_curated_resolver_success(tmp_path):
+    """muse pull succeeds, catalog.json carries python_path, load-only
+    probe succeeds -> ok=True."""
+    def _fake_pull(cmd, capture_output, text, env, cwd):
+        catalog_dir = Path(env["MUSE_CATALOG_DIR"])
+        catalog_dir.mkdir(parents=True, exist_ok=True)
+        (catalog_dir / "catalog.json").write_text(json.dumps({
+            "opus-mt-en-es": {
+                "python_path": str(catalog_dir / "venvs" / "opus-mt-en-es" / "bin" / "python"),
+            },
+        }))
+        return MagicMock(returncode=0, stdout="pulled opus-mt-en-es\n", stderr="")
+
+    with patch.object(smoke.subprocess, "run", side_effect=_fake_pull), \
+         patch.object(smoke, "_run_load_only", return_value=(0, '{"ok": 1}')):
+        result = smoke._smoke_curated_resolver(
+            "opus-mt-en-es", "hf://Helsinki-NLP/opus-mt-en-es", tmp_path,
+        )
+
+    assert result.ok is True
+    assert result.model_id == "opus-mt-en-es"
+    assert "OK" in result.label
+
+
+def test_smoke_curated_resolver_pull_fails(tmp_path):
+    """muse pull exits non-zero -> ok=False, error mentions 'pull'."""
+    fail = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="ModuleNotFoundError: No module named 'sentencepiece'\n",
+    )
+    with patch.object(smoke.subprocess, "run", return_value=fail):
+        result = smoke._smoke_curated_resolver(
+            "opus-mt-en-es", "hf://Helsinki-NLP/opus-mt-en-es", tmp_path,
+        )
+
+    assert result.ok is False
+    assert "pull" in result.error
+    assert "FAIL" in result.label
+
+
+def test_smoke_curated_resolver_missing_python_path(tmp_path):
+    """Pull 'succeeds' but the persisted entry has no python_path -> FAIL."""
+    def _fake_pull(cmd, capture_output, text, env, cwd):
+        catalog_dir = Path(env["MUSE_CATALOG_DIR"])
+        catalog_dir.mkdir(parents=True, exist_ok=True)
+        (catalog_dir / "catalog.json").write_text(json.dumps({
+            "opus-mt-en-es": {},
+        }))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(smoke.subprocess, "run", side_effect=_fake_pull):
+        result = smoke._smoke_curated_resolver(
+            "opus-mt-en-es", "hf://Helsinki-NLP/opus-mt-en-es", tmp_path,
+        )
+
+    assert result.ok is False
+    assert "python_path" in result.error
+
+
+def test_smoke_curated_resolver_load_fails(tmp_path):
+    """Pull succeeds but the load-only probe fails -> FAIL with reason."""
+    def _fake_pull(cmd, capture_output, text, env, cwd):
+        catalog_dir = Path(env["MUSE_CATALOG_DIR"])
+        catalog_dir.mkdir(parents=True, exist_ok=True)
+        (catalog_dir / "catalog.json").write_text(json.dumps({
+            "opus-mt-en-es": {
+                "python_path": str(catalog_dir / "venvs" / "opus-mt-en-es" / "bin" / "python"),
+            },
+        }))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    captured = "ModuleNotFoundError: No module named 'sentencepiece'\n"
+    with patch.object(smoke.subprocess, "run", side_effect=_fake_pull), \
+         patch.object(smoke, "_run_load_only", return_value=(1, captured)):
+        result = smoke._smoke_curated_resolver(
+            "opus-mt-en-es", "hf://Helsinki-NLP/opus-mt-en-es", tmp_path,
+        )
+
+    assert result.ok is False
+    assert "missing dep: sentencepiece" in result.label
+
+
 def test_repo_root_finds_pyproject():
     """_repo_root() locates the muse repo via pyproject.toml ancestor walk."""
     root = smoke._repo_root()

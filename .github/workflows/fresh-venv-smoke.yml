@@ -38,6 +38,13 @@ jobs:
           - detr-resnet-50
           - ast-audioset
           - smolvlm-256m-instruct
+          # opus-mt-en-es (~300MB, fixed en->es pair) is the lightweight
+          # text/translation smoke candidate. The bundled default,
+          # m2m100-418m (~2GB), exceeds the "lightweight" guidance for
+          # this free-tier matrix and is deliberately excluded; it is
+          # covered instead by the mocked model tests + the opt-in
+          # tests/integration/test_remote_translation.py suite.
+          - opus-mt-en-es
 
     steps:
       - name: checkout

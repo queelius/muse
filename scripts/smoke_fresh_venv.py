@@ -29,6 +29,7 @@ import argparse
 import dataclasses
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -112,6 +113,8 @@ def _install_pip_extras(
 def _run_load_only(
     venv_python: Path,
     model_id: str,
+    *,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Run the muse probe worker in load-only mode. Returns (rc, captured).
 
@@ -120,6 +123,12 @@ def _run_load_only(
     It calls `load_backend(model_id)`, captures memory, prints a JSON
     record on stdout, and exits 0 on success. The smoke test only cares
     that it loads without ImportError, so we run it on the CPU device.
+
+    `env` overrides the subprocess environment (e.g. `MUSE_CATALOG_DIR`
+    for a curated resolver-based model whose manifest was persisted to
+    an isolated catalog by `_smoke_curated_resolver`). Defaults to the
+    current process environment when omitted, matching bundled-script
+    smoke runs which have no catalog dependency.
     """
     cmd = [
         str(venv_python), "-m", "muse.cli", "_probe_worker",
@@ -128,7 +137,7 @@ def _run_load_only(
         "--no-inference",
     ]
     logger.info("running load-only probe: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -164,6 +173,96 @@ def _extract_failure_reason(captured: str) -> str:
     return "unknown failure"
 
 
+def _smoke_curated_resolver(model_id: str, uri: str, venv_root: Path) -> SmokeResult:
+    """Smoke-test a curated resolver-based (non-bundled) model id.
+
+    Bundled scripts (the common matrix case) are discoverable via
+    `known_models()` with no prior pull, so `smoke_one` can create a
+    plain venv, install the declared `pip_extras`, and run the load-only
+    probe directly. Curated resolver entries (e.g. `opus-mt-en-es`, a
+    `hf://Helsinki-NLP/opus-mt-en-es` URI with no bundled script) have no
+    discovered script: `known_models()` only sees them once a real
+    `muse pull` synthesizes and PERSISTS a manifest into catalog.json.
+
+    Rather than re-implement resolve + venv-create + pip-install +
+    weight-download, this shells out to `muse pull <id> --no-probe`
+    scoped to an isolated `MUSE_CATALOG_DIR` under `venv_root` -- the
+    exact path a user runs, exercising `catalog._pull_via_resolver`'s
+    real venv/pip_extras/weight-download machinery instead of a smoke-
+    script-only reimplementation. `--no-probe` skips the (heavier,
+    inference-touching) memory probe; the load-only check below is the
+    smoke assertion, mirroring the bundled-script path.
+    """
+    t0 = time.monotonic()
+    catalog_dir = venv_root / "catalog"
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["MUSE_CATALOG_DIR"] = str(catalog_dir)
+
+    repo_root = _repo_root()
+    cmd = [
+        sys.executable, "-m", "muse.cli", "pull", model_id, "--no-probe",
+    ]
+    logger.info("pulling curated resolver model: %s", " ".join(cmd))
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, env=env, cwd=str(repo_root),
+    )
+    if proc.returncode != 0:
+        duration = time.monotonic() - t0
+        reason = _extract_failure_reason(proc.stdout + proc.stderr)
+        return SmokeResult(
+            model_id=model_id,
+            ok=False,
+            error=f"muse pull failed: {reason}",
+            duration_s=duration,
+            label=f"{model_id}: FAIL (pull: {reason})",
+        )
+
+    catalog_path = catalog_dir / "catalog.json"
+    try:
+        entry = json.loads(catalog_path.read_text()).get(model_id, {})
+    except (OSError, ValueError) as e:
+        duration = time.monotonic() - t0
+        return SmokeResult(
+            model_id=model_id,
+            ok=False,
+            error=f"catalog unreadable after pull: {e}",
+            duration_s=duration,
+            label=f"{model_id}: FAIL (no catalog after pull)",
+        )
+    python_path = entry.get("python_path")
+    if not python_path:
+        duration = time.monotonic() - t0
+        return SmokeResult(
+            model_id=model_id,
+            ok=False,
+            error="pulled catalog entry has no python_path",
+            duration_s=duration,
+            label=f"{model_id}: FAIL (no python_path after pull)",
+        )
+
+    rc, captured = _run_load_only(Path(python_path), model_id, env=env)
+    if rc != 0:
+        duration = time.monotonic() - t0
+        reason = _extract_failure_reason(captured)
+        return SmokeResult(
+            model_id=model_id,
+            ok=False,
+            error=f"load failed: {reason}",
+            duration_s=duration,
+            label=f"{model_id}: FAIL ({reason})",
+        )
+
+    duration = time.monotonic() - t0
+    return SmokeResult(
+        model_id=model_id,
+        ok=True,
+        error=None,
+        duration_s=duration,
+        label=f"{model_id}: OK ({duration:.1f}s)",
+    )
+
+
 def smoke_one(
     model_id: str,
     venv_root: Path,
@@ -181,11 +280,19 @@ def smoke_one(
     naming the stage and the probable cause.
     """
     from muse.core.catalog import known_models
+    from muse.core.curated import find_curated
 
     t0 = time.monotonic()
 
     catalog_known = known_models()
     if model_id not in catalog_known:
+        # Not a discovered bundled script. A curated resolver-based id
+        # (has a `uri`, no bundled script) needs an actual `muse pull`
+        # to synthesize + persist its manifest before it is loadable at
+        # all -- see _smoke_curated_resolver for why.
+        curated = find_curated(model_id)
+        if curated is not None and curated.uri:
+            return _smoke_curated_resolver(model_id, curated.uri, venv_root)
         duration = time.monotonic() - t0
         return SmokeResult(
             model_id=model_id,

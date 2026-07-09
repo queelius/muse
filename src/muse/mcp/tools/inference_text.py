@@ -1,11 +1,12 @@
 """Inference text tools.
 
-Five tools wrapping the text modalities:
+Six tools wrapping the text modalities:
   - muse_chat        /v1/chat/completions
   - muse_summarize   /v1/summarize
   - muse_rerank      /v1/rerank
   - muse_classify    /v1/moderations
   - muse_embed_text  /v1/embeddings
+  - muse_translate   /v1/translate
 
 Each tool returns the muse server's full JSON envelope as a TextContent
 block; the LLM picks fields it needs from there.
@@ -56,6 +57,12 @@ def _handle_embed_text(client: MuseClient, args: dict) -> list[dict]:
     out = client.embed_text(**body)
     # Return the full envelope; vectors are big so prefer not to log
     # them but the LLM still needs the dimensions for downstream tools.
+    return [_json_block(out)]
+
+
+def _handle_translate(client: MuseClient, args: dict) -> list[dict]:
+    body = {k: v for k, v in args.items() if v is not None}
+    out = client.translate(**body)
     return [_json_block(out)]
 
 
@@ -230,5 +237,39 @@ INFERENCE_TOOLS.extend([
             },
         ),
         handler=_handle_embed_text,
+    ),
+    ToolEntry(
+        tool=Tool(
+            name="muse_translate",
+            description=(
+                "Translate text from one language to another using a "
+                "seq2seq machine translation model. Use this to convert "
+                "text between languages given ISO 639-1 source/target "
+                "codes (e.g. 'en', 'es'). Returns the LibreTranslate-"
+                "shape envelope with `translatedText`."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "q": {
+                        "description": (
+                            "Text to translate. Accepts a single string "
+                            "or an array of strings for batch."
+                        ),
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "ISO 639-1 source language code (e.g. 'en').",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "ISO 639-1 target language code (e.g. 'es').",
+                    },
+                    "model": {"type": "string"},
+                },
+                "required": ["q", "source", "target"],
+            },
+        ),
+        handler=_handle_translate,
     ),
 ])

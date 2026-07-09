@@ -324,7 +324,7 @@ def mcp(
         McpFilter,
         typer.Option(
             "--filter",
-            help="restrict tool surface (default: all 29 tools)",
+            help="restrict tool surface (default: all 30 tools)",
         ),
     ] = McpFilter.all,
 ) -> None:

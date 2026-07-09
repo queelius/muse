@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-nineteen modalities:
+twenty modalities:
 
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
@@ -24,6 +24,7 @@ nineteen modalities:
 - **text/classification**: text moderation via `/v1/moderations` and full label distribution via `/v1/text/classifications` (any HF text-classifier or zero-shot NLI; bundled twitter-roberta sentiment + deberta-v3 zero-shot; capability-gated dispatch on `supports_classification` / `supports_zero_shot`)
 - **text/rerank**: cross-encoder rerank via `/v1/rerank` (bge-reranker-v2-m3 bundled; any cross-encoder reranker on HF; Cohere-compat wire shape)
 - **text/summarization**: BART/PEGASUS seq2seq summarization via `/v1/summarize` (bart-large-cnn bundled; any summarization-tagged HF repo via the resolver; Cohere-compat wire shape)
+- **text/translation**: machine translation via `/v1/translate` and the bare `/translate` alias, plus `GET /languages` (LibreTranslate-compat wire shape; m2m100-418m bundled, ~2GB CPU-runnable; NLLB-200-distilled-600M and Opus-MT en-es/en-de curated via the resolver; the gateway's `MODEL_OPTIONAL_PATHS` default-model seam resolves the model when LibreTranslate clients omit `model` entirely)
 - **video/generation**: text-to-video via `/v1/video/generations` (wan2-1-t2v-1-3b bundled with sequential CPU offload by default to fit 8-12GB GPUs; Wan / CogVideoX / LTX-Video families via the resolver; narrative clips up to 30s; mp4/webm/frames_b64 output; GPU-required; `cpu_offload` capability (model|sequential) + `vae_tiling`, globally overridable via `server.video_cpu_offload`)
 - **3d/generation**: image-to-3d via `/v1/3d/from-image` and text-to-3d via `/v1/3d/generations` (triposr bundled; TRELLIS, Wonder3D, Hunyuan3D-2, Shap-E via the resolver; Shap-E is text-to-3D only via `diffusers.ShapEPipeline`; GLB output as `data:model/gltf-binary;base64,...` URL or b64_json; capability flags `supports_text_to_3d` / `supports_image_to_3d` gate per route; sync/blocking pattern mirroring video/generation)
 
@@ -60,6 +61,58 @@ the curated `bart-cnn-samsum` (`supports_dialog_summarization=true`)
 is dialog-tuned. The HF resolver sniffs any `summarization`-tagged
 repo at priority 110 and serves it via `BartSeq2SeqRuntime` over
 `transformers.AutoModelForSeq2SeqLM` (BART, PEGASUS, T5).
+
+`text/translation` (v0.58.0) is muse's twentieth modality and its
+first LibreTranslate-compat one -- self-hosted translation clients
+(LibreTranslate SDKs, the `libretranslate` CLI) work against muse
+unmodified. Wire shape: `POST /v1/translate` and the bare `POST
+/translate` alias (LT clients hardcode that path) take `{q, source,
+target, format?, model?}` (`q` is a string or list[str]; scalar in ->
+scalar out) and return `{translatedText}`; `GET /languages` returns
+`[{code, name, targets}, ...]` derived live from the resolved model's
+tokenizer, not a hand-maintained table. `model` is a muse extension
+LT clients never send -- see the default-model seam below. Single
+runtime `TranslationRuntime` over `transformers.AutoModelForSeq2SeqLM`
++ `AutoTokenizer`, dispatching per family (`_family_for(hf_repo)`,
+mirroring the 3D modality's precedent): m2m100 and NLLB use
+`forced_bos_token_id` language-token injection (NLLB via a structured
+ISO-639-1 -> FLORES-200 table); Opus-MT checkpoints are fixed-pair
+(`capabilities.source_language`/`target_language`, any other pair
+400s `invalid_language`); MADLAD-400 (curated-only, GPU-oriented)
+prepends a T5-style `<2xx>` target prefix. The bundled `m2m100-418m`
+(facebook/m2m100_418M, MIT, ~2GB, `device: auto`, covers all pairs
+across 100 languages) is the default; curated additions are
+`nllb-200-distilled-600m` (**CC-BY-NC-4.0**, 200 languages, non-
+commercial license called out in its description) and the permissive
+per-pair `opus-mt-en-es` / `opus-mt-en-de` (Helsinki-NLP, ~300MB
+each, best per-pair quality). The HF resolver plugin sniffs
+`translation`-tagged repos (plus `text2text-generation` + name-
+pattern fallback) at **priority 109** -- one tier below the 110 group
+that includes text/summarization's plugin -- so translation's both-
+tagged disambiguation rule (a repo tagged both `summarization` and
+`translation` goes to translation only on a translation-family name
+match) is actually exercised by real `HFResolver` dispatch instead of
+being shadowed by summarization's unconditional `"summarization" in
+tags` sniff (an as-built fix; the design originally shipped this
+plugin at the same 110 tier, which made the rule correct in isolated
+unit tests but unreachable in practice since `"text/summarization" <
+"text/translation"` alphabetically). Because LibreTranslate clients
+never send `model`, the modality exports `MODEL_OPTIONAL_PATHS =
+("/v1/translate", "/translate", "/languages")`; `discover_modalities`
+aggregates every modality's declared paths into a `{path: modality}`
+map, and the gateway's catch-all proxy resolves `model` from that map
+(first ENABLED catalog model of the matching modality, by discovery
+order -- bundled m2m100 wins on a fresh install) instead of 400ing
+`model_required` when a declared path's request omits `model`; no
+enabled model of that modality -> 503 `no_default_model`. Any other
+path with a missing `model` keeps today's 400 exactly. This seam is
+generic: a future modality can opt in by exporting its own
+`MODEL_OPTIONAL_PATHS`, no gateway changes needed. Input size is
+capped by `limits.translate_max_chars` (env `MUSE_TRANSLATE_MAX_CHARS`,
+default 20000, read per-request) -> 400 `input_too_long`.
+`source: "auto"` (language auto-detection) and `POST /detect` are
+explicitly deferred; v1 returns a structured 400
+`source_detection_not_supported`.
 
 `image/embedding` is muse's first image-to-vector modality. The wire
 envelope at `POST /v1/images/embeddings` mirrors `/v1/embeddings`
@@ -1162,7 +1215,7 @@ api_key="not-used")`.
 
 `muse mcp` runs an MCP (Model Context Protocol) server that exposes
 muse's capabilities to LLM clients (Claude Desktop, Cursor, etc.) as
-29 structured tools: 11 admin tools (wrap `/v1/admin/*`) and 18
+30 structured tools: 11 admin tools (wrap `/v1/admin/*`) and 19
 inference tools (one per generation route).
 
 The package layout:
@@ -1174,7 +1227,7 @@ src/muse/mcp/
   binary_io.py  tri-modal binary input resolution (b64 / url / path) + output packers
   tools/
     admin.py             11 admin tools
-    inference_text.py    chat / summarize / rerank / classify / embed_text
+    inference_text.py    chat / summarize / rerank / classify / embed_text / translate
     inference_image.py   generate / edit / vary / upscale / segment / animation / embed_image
     inference_audio.py   speak / transcribe / music / sfx / embed_audio
     inference_video.py   video generation
@@ -1190,9 +1243,9 @@ Two transport modes:
   for remote / web embedders.
 
 Filter mode pins the tool surface:
-- `--filter all` (default): 29 tools.
+- `--filter all` (default): 30 tools.
 - `--filter admin`: 11 tools, only useful with `MUSE_ADMIN_TOKEN`.
-- `--filter inference`: 18 tools, no admin-token needed.
+- `--filter inference`: 19 tools, no admin-token needed.
 
 Auth: `--admin-token` (or `$MUSE_ADMIN_TOKEN`) is forwarded as the
 bearer token for admin tool calls. Inference tools don't need a token.
@@ -1313,7 +1366,7 @@ muse serve --device cuda
 muse mcp                                       # MCP server for LLM clients (stdio mode)
 muse mcp --http --port 8088                    # MCP server in HTTP+SSE mode
 muse mcp --filter admin                        # only the 11 admin tools
-muse mcp --filter inference                    # only the 18 inference tools
+muse mcp --filter inference                    # only the 19 inference tools
 
 # Python clients (HTTP)
 python - <<'PY'
