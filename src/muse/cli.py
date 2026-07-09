@@ -1135,6 +1135,18 @@ def main(argv: list[str] | None = None) -> int:
     stderr, not a duplicate help render.
     """
     import click
+    _click_exceptions = [click.exceptions.ClickException]
+    try:
+        # typer >= 0.26 vendors click as `typer._click`; its exception
+        # classes are DISTINCT from the installed click package's, so
+        # catching only `click.exceptions.ClickException` lets every
+        # usage error escape as an uncaught traceback on the shipped
+        # `muse` binary. Catch both hierarchies.
+        from typer import _click as _typer_click
+        _click_exceptions.append(_typer_click.exceptions.ClickException)
+    except ImportError:
+        pass  # older typer: the installed click IS typer's click
+    _click_exceptions = tuple(_click_exceptions)
     try:
         rv = app(args=argv, standalone_mode=False)
         # With standalone_mode=False, click catches `typer.Exit` itself and
@@ -1148,7 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
         return e.exit_code
     except SystemExit as e:
         return int(e.code) if e.code is not None else 0
-    except click.exceptions.ClickException as e:
+    except _click_exceptions as e:
         # Render the error/usage message ourselves: standalone_mode=False
         # suppresses click's own show()+sys.exit() so nothing gets
         # printed otherwise (see docstring above).
