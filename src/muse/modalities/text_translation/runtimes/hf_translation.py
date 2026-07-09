@@ -170,6 +170,22 @@ class TranslationRuntime:
             # here to keep an empty batch from touching the tokenizer/model
             # at all.
             return TranslationResult(texts=[])
+        # Per-ITEM empty guard (live-validation finding, 2026-07-09): an
+        # empty or whitespace-only input reaching the real model generates a
+        # hallucinated residual token (m2m100 produced "El" for q="") instead
+        # of the spec's empty string. Map such items straight to "" and run
+        # generation only on the non-empty subset, reassembling in order.
+        nonempty_idx = [i for i, t in enumerate(texts) if t.strip()]
+        if len(nonempty_idx) != len(texts):
+            out = [""] * len(texts)
+            if nonempty_idx:
+                subset = self.translate(
+                    [texts[i] for i in nonempty_idx],
+                    source=source, target=target,
+                )
+                for slot, translated in zip(nonempty_idx, subset.texts):
+                    out[slot] = translated
+            return TranslationResult(texts=out)
         if self._family == "m2m100":
             return self._translate_m2m100(texts, source=source, target=target)
         if self._family == "nllb":

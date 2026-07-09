@@ -459,12 +459,39 @@ def test_translate_empty_list_returns_empty_result_without_touching_tokenizer():
     fake_model.generate.assert_not_called()
 
 
-def test_translate_single_empty_string_flows_through_normally():
-    rt, fake_tok, fake_model = _build_runtime(
-        "facebook/m2m100_418M",
-        generate_return=["out-0"],
-        decode_side_effect=lambda ids, **kw: f"decoded-{ids}",
-    )
-    out = rt.translate([""], source="en", target="es")
-    assert out.texts == ["decoded-out-0"]
-    fake_tok.assert_called_once()
+# (A former test asserted [""] flows THROUGH the model. Live validation on
+# 2026-07-09 proved that behavior wrong: the real m2m100 hallucinates a
+# residual token ("El") for empty input. Superseded by TestEmptyStringItems
+# below, which pins the spec-correct empty -> "" mapping.)
+
+
+class TestEmptyStringItems:
+    """Live-validation finding (2026-07-09, frodo): q="" reached the real
+    m2m100 model and generated a hallucinated residual token ("El") instead
+    of the spec's empty string. Empty/whitespace-only ITEMS must map to ""
+    without touching the model; mixed batches reassemble in order with one
+    generate call for the non-empty subset."""
+
+    def test_single_empty_string_returns_empty_without_model_call(self):
+        rt, _tok, model = _build_runtime("facebook/m2m100_418M")
+        result = rt.translate([""], source="en", target="es")
+        assert result.texts == [""]
+        model.generate.assert_not_called()
+
+    def test_whitespace_only_returns_empty_without_model_call(self):
+        rt, _tok, model = _build_runtime("facebook/m2m100_418M")
+        result = rt.translate(["   \n"], source="en", target="es")
+        assert result.texts == [""]
+        model.generate.assert_not_called()
+
+    def test_mixed_batch_preserves_order_and_translates_only_non_empty(self):
+        rt, tok, model = _build_runtime(
+            "facebook/m2m100_418M",
+            generate_return=["row0"],
+            decode_side_effect=lambda ids, **kw: "Hola.",
+        )
+        result = rt.translate(["", "Hello.", "  "], source="en", target="es")
+        assert result.texts == ["", "Hola.", ""]
+        assert model.generate.call_count == 1
+        # Only the non-empty subset was tokenized for generation.
+        assert tok.call_args[0][0] == ["Hello."]
