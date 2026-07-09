@@ -576,6 +576,52 @@
     device: cpu
     memory_gb: 1.5
 
+# ---------- text/translation (m2m100 / NLLB / opus-mt family) ----------
+
+- id: m2m100-418m
+  bundled: true
+
+# Meta's NLLB-200, distilled to 600M. 200 languages via FLORES-200
+# codes. Non-commercial license: muse ships the entry so users can
+# discover it via `muse pull nllb-200-distilled-600m`, but does not
+# bundle it (matches the nougat-base / mms-lid-126 precedent).
+- id: nllb-200-distilled-600m
+  uri: hf://facebook/nllb-200-distilled-600M
+  modality: text/translation
+  size_gb: 2.5
+  description: "NLLB-200 distilled 600M: 200 languages via FLORES-200, ~2.5GB, CC-BY-NC-4.0 (non-commercial)"
+  capabilities:
+    device: auto
+    memory_gb: 3.0
+    num_beams: 4
+
+# Helsinki-NLP OPUS-MT: one fixed-pair model per language direction,
+# ~300MB each, best per-pair translation quality. source_language /
+# target_language are REQUIRED here -- TranslationRuntime derives the
+# fixed pair only from the manifest capabilities; without both keys the
+# model loads but every /v1/translate call 400s as unsupported.
+- id: opus-mt-en-es
+  uri: hf://Helsinki-NLP/opus-mt-en-es
+  modality: text/translation
+  size_gb: 0.3
+  description: "Helsinki-NLP OPUS-MT en->es: fixed-pair English-to-Spanish, ~300MB, Apache 2.0"
+  capabilities:
+    device: auto
+    memory_gb: 0.6
+    source_language: en
+    target_language: es
+
+- id: opus-mt-en-de
+  uri: hf://Helsinki-NLP/opus-mt-en-de
+  modality: text/translation
+  size_gb: 0.3
+  description: "Helsinki-NLP OPUS-MT en->de: fixed-pair English-to-German, ~300MB, Apache 2.0"
+  capabilities:
+    device: auto
+    memory_gb: 0.6
+    source_language: en
+    target_language: de
+
 # ---------- audio/embedding (CLAP / MERT / wav2vec family) ----------
 
 - id: mert-v1-95m
