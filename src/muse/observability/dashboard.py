@@ -140,10 +140,19 @@ def build_dashboard_router(state) -> APIRouter:
                                queue_depth=depths.get(model_id, 0))
             for model_id, entry in director.loaded.items()
         ]
+        # #331: waiters parked on a model during its own cold start are in
+        # the gate but NOT in director.loaded -- exactly when the queue is
+        # deepest. Surface them separately so the pressure is visible.
+        queued = [
+            {"model_id": model_id, "queue_depth": depth}
+            for model_id, depth in sorted(depths.items())
+            if depth > 0 and model_id not in director.loaded
+        ]
         in_flight = len(getattr(director, "in_flight_loads", {}) or {})
         return {
             "node": _node_id(state),
             "loaded": loaded,
+            "queued": queued,
             "in_flight": in_flight,
             "dropped_events": get_recorder().dropped,
         }

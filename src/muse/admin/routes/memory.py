@@ -194,8 +194,16 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
     loaded = _enabled_loaded_model_ids()
     refcounts = _loaded_refcounts()
     depths = _queue_depths()
+    # #331: a model with parked waiters but no live worker yet (its own
+    # cold start -- exactly when the queue is deepest) must still appear,
+    # marked loaded=False, so operators can see the pressure.
+    queued_only: set[str] = set()
+    if depths is not None:
+        queued_only = {
+            m for m, d in depths.items() if d > 0 and m not in loaded
+        }
     out: list[dict] = []
-    for model_id in sorted(loaded):
+    for model_id in sorted(loaded | queued_only):
         entry = catalog.get(model_id) or {}
         cap_device = "auto"
         if model_id in catalog_known:
@@ -232,6 +240,8 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
             record["refcount"] = refcounts[model_id]
         if depths is not None:
             record["queue_depth"] = depths.get(model_id, 0)
+        if model_id in queued_only:
+            record["loaded"] = False
         out.append(record)
     return out
 

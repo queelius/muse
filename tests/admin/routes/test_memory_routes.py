@@ -247,6 +247,38 @@ class TestMemoryRoute:
         out = _per_model_breakdown("cpu", "cpu")
         assert "queue_depth" not in out[0]
 
+    def test_per_model_breakdown_shows_cold_start_queuers(self, tmp_catalog):
+        """#331: a model with parked waiters but NO live worker yet (its own
+        cold start -- exactly when the queue is deepest) must still appear
+        in the breakdown, marked loaded=False, so operators can see the
+        pressure instead of nothing."""
+        import asyncio
+        from muse.cli_impl.queueing import ConcurrencyGate
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+                "measurements": {
+                    "cpu": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+                },
+            },
+        })
+        state = SupervisorState(workers=[], device="cpu")  # nothing loaded
+        gate = ConcurrencyGate()
+        gate._caps["kokoro-82m"] = 1
+        gate._sems["kokoro-82m"] = asyncio.Semaphore(1)
+        gate._entered["kokoro-82m"] = 4
+        assert gate.depth("kokoro-82m") == 3
+        state.concurrency_gate = gate
+        set_supervisor_state(state)
+        from muse.admin.routes.memory import _per_model_breakdown
+        out = _per_model_breakdown("cpu", "cpu")
+        rows = [r for r in out if r["model_id"] == "kokoro-82m"]
+        assert len(rows) == 1
+        assert rows[0]["queue_depth"] == 3
+        assert rows[0]["loaded"] is False
+
     def test_auto_device_model_resolves_to_gpu_side_on_cuda_supervisor(self, tmp_catalog):
         """A device='auto' bundled model (e.g. kokoro-82m) is accounted on
         the GPU side when the supervisor runs --device cuda, and NOT on the

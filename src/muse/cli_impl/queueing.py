@@ -173,16 +173,22 @@ class ConcurrencyGate:
 
     async def acquire_slot(
         self, model_id: str, cap: int | None, *, deadline: float,
-    ) -> None:
+    ) -> bool:
         """Acquire one concurrency slot (no context manager).
 
         Same entry semantics as slot()'s __aenter__: QueueFull if the
         per-model queue is already at server.max_queue_depth, QueueTimeout
         if the deadline passes before a slot frees. cap None/<=0 is a no-op
-        (unlimited): nothing is reserved and release_slot is a matching no-op.
+        (unlimited): nothing is reserved and False is returned.
 
-        On success the entered counter is incremented and the semaphore is
-        HELD; the caller MUST pair the call with exactly one release_slot.
+        Returns True when a slot was actually taken (entered counter
+        incremented, semaphore HELD): the caller MUST pair a True return
+        with exactly one release_slot, and MUST NOT release on False (#332:
+        the cap is re-read live per-request from
+        server.default_max_concurrency, so an uncapped request against a
+        model whose semaphore survives from an earlier capped era would
+        otherwise over-release a concurrent capped holder's slot).
+
         On a failed acquisition (QueueTimeout) the entered increment is undone
         before the exception surfaces, so the counter stays balanced;
         QueueFull raises before the increment. Any other exception (e.g. a
@@ -193,7 +199,7 @@ class ConcurrencyGate:
         # capped request reuses this gate.
         self._loop = asyncio.get_running_loop()
         if not cap or cap <= 0:
-            return  # unlimited: no gating, nothing to release
+            return False  # unlimited: no gating, nothing to release
         sem = self._sem(model_id, cap)
         # Synchronous compare-and-increment (no await between the read and the
         # increment), so a concurrent burst on one loop cannot slip past the
@@ -210,6 +216,7 @@ class ConcurrencyGate:
             raise
         # Success: entered stays incremented and the semaphore is held until
         # release_slot decrements + releases.
+        return True
 
     def release_slot(self, model_id: str) -> None:
         """Release one held concurrency slot. Threadsafe + over-release-safe.

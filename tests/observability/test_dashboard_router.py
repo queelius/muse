@@ -124,6 +124,37 @@ def test_summary_queue_depth_zero_when_no_gate_bound(client_with_token):
     assert entry["queue_depth"] == 0
 
 
+def test_summary_lists_cold_start_queuers(client_with_token):
+    """#331: waiters parked on a model during its own cold start (not yet in
+    director.loaded) must be visible via a `queued` list -- the loaded[]
+    projection alone hides queue pressure exactly when it is deepest."""
+    from muse.cli_impl.queueing import ConcurrencyGate
+
+    state = client_with_token.state_ref
+    gate = ConcurrencyGate()
+    gate._caps["coldy"] = 1
+    gate._sems["coldy"] = asyncio.Semaphore(1)
+    gate._entered["coldy"] = 3  # 1 holding + 2 parked; NOT in director.loaded
+    assert gate.depth("coldy") == 2
+    state.concurrency_gate = gate
+
+    r = client_with_token.get(
+        "/v1/telemetry/summary", headers={"Authorization": "Bearer t"}
+    )
+    assert r.status_code == 200
+    assert r.json()["queued"] == [{"model_id": "coldy", "queue_depth": 2}]
+
+
+def test_summary_queued_empty_when_no_gate(client_with_token):
+    """Shape stability: `queued` is always present (empty without a gate or
+    with no cold-start waiters), so consumers need no key-existence checks."""
+    r = client_with_token.get(
+        "/v1/telemetry/summary", headers={"Authorization": "Bearer t"}
+    )
+    assert r.status_code == 200
+    assert r.json()["queued"] == []
+
+
 def test_series_ok(client_with_token):
     r = client_with_token.get(
         "/v1/telemetry/series?metric=request_rate&window=3600",

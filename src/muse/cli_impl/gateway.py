@@ -680,7 +680,7 @@ async def _route_via_director(
     # capacity-wait measurement below for the matching discipline).
     gate_wait_t0 = time.monotonic()
     try:
-        await gate.acquire_slot(model_id, cap, deadline=deadline)
+        slot_taken = await gate.acquire_slot(model_id, cap, deadline=deadline)
     except QueueTimeout:
         # Report the ACTUAL elapsed wait, not the configured budget: an
         # early fast-fail would otherwise claim "waited 300s" (v0.57.3).
@@ -705,9 +705,11 @@ async def _route_via_director(
         # multiple release sites (buffered finally, stream-relay finally,
         # early-failure except) all calling this. release_slot is itself
         # threadsafe (schedules on the gate's captured loop when off-loop) and
-        # over-release-safe, so this is belt-and-suspenders.
+        # over-release-safe, so this is belt-and-suspenders. Release only
+        # when acquire_slot actually took a slot (#332): re-deriving the cap
+        # here would desync if server.default_max_concurrency changed live.
         nonlocal slot_released
-        if slot_released:
+        if slot_released or not slot_taken:
             return
         slot_released = True
         gate.release_slot(model_id)

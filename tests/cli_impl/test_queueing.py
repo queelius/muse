@@ -218,6 +218,34 @@ class TestAcquireReleaseSlot:
         await gate.acquire_slot("m", 2, deadline=_deadline(1))
         gate.release_slot("m")
 
+    async def test_acquire_slot_reports_whether_slot_taken(self):
+        # #332: the caller must know whether a slot was actually reserved,
+        # so its release can be conditional instead of re-deriving the cap
+        # (which can change live via server.default_max_concurrency).
+        gate = ConcurrencyGate()
+        assert await gate.acquire_slot("m", 2, deadline=_deadline(1)) is True
+        gate.release_slot("m")
+        assert await gate.acquire_slot("m", None, deadline=_deadline(1)) is False
+        assert await gate.acquire_slot("m", 0, deadline=_deadline(1)) is False
+
+    async def test_uncapped_request_cannot_over_release_capped_holder(self):
+        # #332 failure scenario: a semaphore exists from an earlier capped
+        # era; the operator sets default_max_concurrency to 0 live; a new
+        # request resolves cap=None and reserves nothing. Its release --
+        # guarded by acquire_slot's return value -- must not decrement the
+        # concurrently-held capped request's accounting.
+        gate = ConcurrencyGate()
+        took_capped = await gate.acquire_slot("m", 1, deadline=_deadline(1))
+        assert took_capped is True
+        took_uncapped = await gate.acquire_slot("m", None, deadline=_deadline(1))
+        if took_uncapped:  # the gateway's guarded-release contract
+            gate.release_slot("m")
+        # The capped holder's slot is still accounted: cap 1 is still full.
+        assert gate._entered.get("m", 0) == 1
+        with pytest.raises(QueueTimeout):
+            await gate.acquire_slot("m", 1, deadline=_deadline(0.05))
+        gate.release_slot("m")
+
     def test_release_slot_after_loop_closed_does_not_raise(self):
         # v0.57.3 review finding: like CapacityNotifier.notify, the
         # threadsafe branch must swallow the loop-closed RuntimeError
