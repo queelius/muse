@@ -474,3 +474,25 @@ class TestPynvmlFallback:
         meter = probe_worker.PynvmlVramMeter()
         assert meter.start() is False
         assert meter.delta_bytes() == 0
+
+    def test_inference_peak_uses_vram_delta_not_rss(self, monkeypatch):
+        # v0.57.3 review finding: in the torch-less cuda branch the
+        # _run_inference peak is host RSS. For a split GGUF (CPU-side
+        # layers dominate RSS) maxing it in would record tens of GB of
+        # host RAM as the model's cuda peak. The VRAM delta must REPLACE
+        # the reported peak when the meter is active.
+        from muse.cli_impl import probe_worker
+        readings = iter([10.0, 8.0, 8.0])  # baseline, post-load, post-inference
+        monkeypatch.setattr(
+            probe_worker, "_gpu_free_gb", lambda: next(readings))
+        meter = probe_worker.PynvmlVramMeter()
+        assert meter.start() is True
+        weights = meter.delta_bytes()            # 2 GB VRAM
+        rss_peak = 20 * 1024**3                  # host RSS: must be ignored
+        assert probe_worker._inference_peak_bytes(
+            rss_peak, weights, meter) == weights
+
+    def test_inference_peak_without_meter_maxes_reported_and_weights(self):
+        from muse.cli_impl import probe_worker
+        assert probe_worker._inference_peak_bytes(5, 3, None) == 5
+        assert probe_worker._inference_peak_bytes(2, 3, None) == 3

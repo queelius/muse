@@ -234,7 +234,13 @@ class ConcurrencyGate:
         if running is not None and (loop is None or running is loop):
             self._do_release(model_id)
         elif loop is not None:
-            loop.call_soon_threadsafe(self._do_release, model_id)
+            # Mirror CapacityNotifier.notify's shutdown guard (v0.57.3
+            # review finding): a loop closed mid-shutdown must not turn a
+            # release into a RuntimeError -- the slot dies with the loop.
+            try:
+                loop.call_soon_threadsafe(self._do_release, model_id)
+            except RuntimeError:
+                pass  # loop closed during shutdown; nothing to release into
         else:
             # No loop was ever captured (should not happen after acquire_slot):
             # best-effort direct release.

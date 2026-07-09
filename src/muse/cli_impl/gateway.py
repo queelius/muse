@@ -667,7 +667,8 @@ async def _route_via_director(
     # await below, not via a single wall-clock span across this whole block.
     queued_ms = 0.0
     queue_budget = config.get("server.queue_timeout_seconds") or 0.0
-    deadline = time.monotonic() + max(0.0, float(queue_budget))
+    queue_t0 = time.monotonic()
+    deadline = queue_t0 + max(0.0, float(queue_budget))
     gate = state.concurrency_gate
     cap = _effective_max_concurrency(manifest)
 
@@ -681,10 +682,12 @@ async def _route_via_director(
     try:
         await gate.acquire_slot(model_id, cap, deadline=deadline)
     except QueueTimeout:
+        # Report the ACTUAL elapsed wait, not the configured budget: an
+        # early fast-fail would otherwise claim "waited 300s" (v0.57.3).
         return _openai_error(
             503, "queue_timeout",
-            f"waited {queue_budget:.0f}s for a slot on model {model_id!r} "
-            f"(queue depth {gate.depth(model_id)})",
+            f"waited {time.monotonic() - queue_t0:.0f}s for a slot on "
+            f"model {model_id!r} (queue depth {gate.depth(model_id)})",
             error_type="server_error",
         )
     except QueueFull as exc:
@@ -724,8 +727,8 @@ async def _route_via_director(
         _release_slot()
         return _openai_error(
             503, "queue_timeout",
-            f"waited {queue_budget:.0f}s for capacity for model {model_id!r} "
-            f"(queue depth {gate.depth(model_id)})",
+            f"waited {time.monotonic() - queue_t0:.0f}s for capacity for "
+            f"model {model_id!r} (queue depth {gate.depth(model_id)})",
             error_type="server_error",
         )
     except OperationError as exc:
@@ -944,8 +947,14 @@ async def _acquire_coalesced(state, model_id, manifest) -> int:
                 gate.set_result(("fail", None))
             elif acq_fut.exception() is not None:
                 exc = acq_fut.exception()
+                # v0.57.3 (review finding): carry `retryable` through the
+                # tuple. Without it a waiter rebuilds an OperationError
+                # whose retryable defaults to False and fast-fails a
+                # transient capacity 503 the loader itself parks on --
+                # defeating the capacity-wait for same-model cold bursts.
                 info = (
-                    (exc.status, exc.code, exc.message)
+                    (exc.status, exc.code, exc.message,
+                     getattr(exc, "retryable", False))
                     if isinstance(exc, OperationError) else None
                 )
                 gate.set_result(("fail", info))
@@ -966,8 +975,8 @@ async def _acquire_coalesced(state, model_id, manifest) -> int:
         # _decide) becomes a generic 503 so waiters still fail-fast without
         # re-dispatching a thundering herd of cold acquires.
         if info is not None:
-            s, code, msg = info
-            raise OperationError(code, msg, status=s)
+            s, code, msg, retryable = info
+            raise OperationError(code, msg, status=s, retryable=retryable)
         raise OperationError(
             "model_load_failed",
             f"load of {model_id!r} failed",

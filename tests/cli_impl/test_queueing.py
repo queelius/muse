@@ -218,6 +218,20 @@ class TestAcquireReleaseSlot:
         await gate.acquire_slot("m", 2, deadline=_deadline(1))
         gate.release_slot("m")
 
+    def test_release_slot_after_loop_closed_does_not_raise(self):
+        # v0.57.3 review finding: like CapacityNotifier.notify, the
+        # threadsafe branch must swallow the loop-closed RuntimeError
+        # during shutdown instead of propagating out of a release site.
+        gate = ConcurrencyGate()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                gate.acquire_slot("m", 2, deadline=_deadline(1)))
+        finally:
+            loop.close()
+        # No running loop here, captured loop is CLOSED: must not raise.
+        gate.release_slot("m")
+
     async def test_queue_timeout_undoes_entered_increment(self):
         gate = ConcurrencyGate()
         started = asyncio.Event()

@@ -1408,6 +1408,37 @@ class TestColdLoadCoalescing:
         assert state.director.acquire.call_count == 1   # loader only; no retry herd
         assert state.cold_load_gates == {}
 
+    async def test_waiter_receives_loader_retryable_flag(self):
+        """v0.57.3 review finding: the loader's retryable capacity 503 must
+        reach waiters WITH the retryable flag intact -- otherwise the loader
+        parks and retries while every waiter fast-fails, defeating the
+        capacity-wait for same-model cold bursts."""
+        from muse.cli_impl.gateway import _acquire_coalesced
+        from muse.admin.operations import OperationError
+
+        started = threading.Event()
+        release = threading.Event()
+        state = _make_state_with_director()
+
+        def failing_acquire(model_id, *, manifest):
+            started.set()
+            release.wait(timeout=5)
+            raise OperationError(
+                "model_too_large_for_device", "transient", status=503,
+                retryable=True,
+            )
+
+        state.director.acquire.side_effect = failing_acquire
+        tasks = [asyncio.create_task(_acquire_coalesced(state, "M", _manifest()))
+                 for _ in range(4)]
+        await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(0.1)
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert all(isinstance(r, OperationError) for r in results)
+        assert all(getattr(r, "retryable", False) is True for r in results)
+
     async def test_cancelling_one_waiter_does_not_poison_the_group(self):
         """Cancelling one waiter (via shield) must not cancel the shared gate;
         the loader and other waiters still complete."""

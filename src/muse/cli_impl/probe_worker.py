@@ -89,6 +89,22 @@ class PynvmlVramMeter:
         return int(max(0.0, self._max_delta_gb) * 1024**3)
 
 
+def _inference_peak_bytes(reported_peak: int, weights_bytes: int,
+                          nvml_meter) -> int:
+    """Pick the recorded inference peak for the resolved device pool.
+
+    In the torch-less cuda branch (nvml_meter active) _run_inference's
+    reported peak is host RSS; a host-RAM number must never contaminate
+    the cuda-pool measurement (v0.57.3 review finding: a split GGUF's
+    CPU-side layers made RSS dwarf the real VRAM delta, inflating the
+    recorded cuda peak until admission 503'd a fittable model). The VRAM
+    delta REPLACES the reported peak there rather than being maxed in.
+    """
+    if nvml_meter is not None:
+        return max(nvml_meter.delta_bytes(), weights_bytes)
+    return max(reported_peak, weights_bytes)
+
+
 def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
     """In-venv probe entry. Prints JSON record on stdout's last line."""
     from muse.core.catalog import (  # noqa: PLC0415
@@ -184,9 +200,8 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
             shape, peak_bytes = _run_inference(backend, entry, actual_device, cuda)
             record["ran_inference"] = True
             record["shape"] = shape
-            if nvml_meter is not None:
-                peak_bytes = max(peak_bytes, nvml_meter.delta_bytes())
-            record["peak_bytes"] = max(peak_bytes, weights_bytes)
+            record["peak_bytes"] = _inference_peak_bytes(
+                peak_bytes, weights_bytes, nvml_meter)
         except Exception as e:  # noqa: BLE001
             print(f"inference probe failed: {e}", file=sys.stderr)
             record["inference_error"] = str(e)

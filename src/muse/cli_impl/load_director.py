@@ -977,6 +977,14 @@ class LoadDirector:
                             or any(k != model_id for k in self.in_flight_loads)
                             or bool(self.evicting)
                         )
+                        # v0.57.3 (review finding): earlier victims in THIS
+                        # call may have already freed memory; that is a
+                        # capacity event for OTHER parked models even though
+                        # this request still fails. Fire so they re-decide
+                        # instead of sleeping to their deadline. Safe under
+                        # the lock: the listener only schedules threadsafe.
+                        if cumulative_freed_gb > 0.0:
+                            self._fire_capacity_listener()
                         # Lazy import to avoid a cycle: load_director ->
                         # admin.operations -> supervisor -> load_director
                         # (Task E will wire the supervisor to LoadDirector).
@@ -1050,68 +1058,78 @@ class LoadDirector:
                 return
 
             # ---- slow steps ----
+            # v0.57.3 (review finding): the evicting marker must clear on
+            # EVERY exit of this out-of-lock region -- including a
+            # poll/probe exception below, which would otherwise leak the
+            # marker and make every future capacity 503 spuriously
+            # retryable forever. Hence the try/finally, not inline
+            # discards on the known-good paths only.
+            disable_failed = False
             try:
-                self.disable_fn(victim_id)
-            except Exception as exc:  # noqa: BLE001
-                # disable_fn raised. The worker is still alive holding
-                # memory: the OS has NOT reclaimed its slot. Polling for
-                # release would observe ~0 freed and the loop would
-                # iterate to the next victim, but the orphan worker
-                # would persist indefinitely with no remediation path.
-                #
-                # Remediation: re-insert the victim's LoadEntry into
-                # self.loaded so accounting matches reality (worker
-                # alive, slot occupied). Append a structured "evict"
-                # decision log entry recording the failure for the
-                # admin endpoint. Skip cumulative_freed_gb (the slot
-                # did not free). Continue to the next candidate.
-                #
-                # KeyboardInterrupt + SystemExit pass through (we catch
-                # Exception, not BaseException) so the user can still
-                # Ctrl-C out of a stuck eviction.
-                logger.error(
-                    "disable_fn failed for evicted victim %r; re-inserted into loaded set",
-                    victim_id,
-                    exc_info=True,
-                )
+                try:
+                    self.disable_fn(victim_id)
+                except Exception as exc:  # noqa: BLE001
+                    # disable_fn raised. The worker is still alive holding
+                    # memory: the OS has NOT reclaimed its slot. Polling for
+                    # release would observe ~0 freed and the loop would
+                    # iterate to the next victim, but the orphan worker
+                    # would persist indefinitely with no remediation path.
+                    #
+                    # Remediation: re-insert the victim's LoadEntry into
+                    # self.loaded so accounting matches reality (worker
+                    # alive, slot occupied). Append a structured "evict"
+                    # decision log entry recording the failure for the
+                    # admin endpoint. Skip cumulative_freed_gb (the slot
+                    # did not free). Continue to the next candidate.
+                    #
+                    # KeyboardInterrupt + SystemExit pass through (we catch
+                    # Exception, not BaseException) so the user can still
+                    # Ctrl-C out of a stuck eviction.
+                    logger.error(
+                        "disable_fn failed for evicted victim %r; re-inserted into loaded set",
+                        victim_id,
+                        exc_info=True,
+                    )
+                    with self.lock:
+                        # Re-insert the popped LoadEntry. refcount was 0 at
+                        # eviction time (only refcount==0 entries are
+                        # candidates) and we preserve that.
+                        self.loaded[victim_id] = victim
+                        # Update the existing decision entry's reason
+                        # in-place. The deque already holds it; mutating
+                        # the dataclass is sufficient. evicted=[] because
+                        # nothing was actually evicted.
+                        decision.reason = f"disable_fn_raised: {exc}"
+                        decision.evicted = []
+                        # free_after_gb stays None: no poll, no measurement.
+                    # Mark this victim as off-limits for the rest of this
+                    # eviction call. Re-picking would loop forever (the
+                    # re-inserted victim still has the oldest
+                    # last_touched_at and would sort to LRU position).
+                    failed_victims.add(victim_id)
+                    disable_failed = True
+                else:
+                    freed_this_round = self._wait_for_memory_release(
+                        min_freed_gb=victim_memory_gb,
+                        free_at_eviction_start_gb=free_before_gb,
+                        device=device,
+                    )
+
+                    # ---- reacquire the lock briefly: writeback free_after ----
+                    with self.lock:
+                        free_after_gb = self._free_for_device(device)
+                        decision.free_after_gb = free_after_gb
+
+                    cumulative_freed_gb += freed_this_round
+            finally:
+                # Eviction settled (worker down + release observed, or
+                # disable failed and the victim was re-inserted, or an
+                # unexpected exception is propagating): the in-flight
+                # marker must not outlive this iteration.
                 with self.lock:
-                    # Re-insert the popped LoadEntry. refcount was 0 at
-                    # eviction time (only refcount==0 entries are
-                    # candidates) and we preserve that. Clear the
-                    # in-flight-eviction marker: nothing is freeing, and a
-                    # leaked marker would make every future capacity 503
-                    # spuriously retryable forever.
                     self.evicting.discard(victim_id)
-                    self.loaded[victim_id] = victim
-                    # Update the existing decision entry's reason
-                    # in-place. The deque already holds it; mutating
-                    # the dataclass is sufficient. evicted=[] because
-                    # nothing was actually evicted.
-                    decision.reason = f"disable_fn_raised: {exc}"
-                    decision.evicted = []
-                    # free_after_gb stays None: no poll, no measurement.
-                # Mark this victim as off-limits for the rest of this
-                # eviction call. Re-picking would loop forever (the
-                # re-inserted victim still has the oldest
-                # last_touched_at and would sort to LRU position).
-                failed_victims.add(victim_id)
+            if disable_failed:
                 continue
-
-            freed_this_round = self._wait_for_memory_release(
-                min_freed_gb=victim_memory_gb,
-                free_at_eviction_start_gb=free_before_gb,
-                device=device,
-            )
-
-            # ---- reacquire the lock briefly: writeback free_after ----
-            with self.lock:
-                free_after_gb = self._free_for_device(device)
-                decision.free_after_gb = free_after_gb
-                # Eviction complete (worker down, memory release observed
-                # or timed out): clear the in-flight marker.
-                self.evicting.discard(victim_id)
-
-            cumulative_freed_gb += freed_this_round
 
         # Loop exited normally: cumulative_freed_gb >= shortfall_gb, i.e.
         # eviction freed enough. Outside the lock (the last statement above

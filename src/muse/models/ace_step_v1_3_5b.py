@@ -64,16 +64,16 @@ MANIFEST = {
         "default_sample_rate": 48000,
         "default_steps": 60,
         "default_guidance": 15.0,
-        # Conservative VRAM peak (bf16). `muse models probe` measures the
-        # real number; this annotation feeds `muse models list`.
-        # Probed 2026-07-08 on an RTX 3060: 7.46 GB peak (5s clip). 8.0
-        # leaves margin for longer songs (latents grow with duration); the
-        # observed-peak writeback self-heals upward if a long song exceeds
-        # it. The previous hand-estimate of 10.0 made the model unservable
-        # on 12 GB cards once the v0.52 gpu_headroom_gb (default 1.5) went
-        # live: 10.0 > (12 - 1.5 - driver overhead). Declared memory_gb
-        # outranks probe measurements in the sizing ladder, so this
-        # annotation is the authoritative number.
+        # Conservative VRAM peak (bf16). Probed 2026-07-08 on an RTX 3060:
+        # 7.46 GB peak (5s clip). 8.0 leaves margin for longer songs
+        # (latents grow with duration). Declared memory_gb outranks BOTH
+        # probe measurements and the observed-peak writeback in the sizing
+        # ladder, so this value is authoritative and does NOT self-heal: if
+        # long songs are ever measured above 8.0, this number must be
+        # raised by hand. The previous hand-estimate of 10.0 made the model
+        # unservable on 12 GB cards once the v0.52 gpu_headroom_gb wiring
+        # went live (default 1.0; ops boxes commonly configure 1.5):
+        # 10.0 > (12 - headroom - driver overhead).
         "memory_gb": 8.0,
         # Optional low-VRAM / speed knobs forwarded to the pipeline ctor
         # (default off). Operators flip these via a curated overlay.

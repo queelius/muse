@@ -2123,6 +2123,70 @@ class TestEvictionWindowRetryable:
         assert events.index(("fire",)) < events.index(("enable", "new"))
         assert d.evicting == set()
 
+    def test_evicting_cleared_when_memory_poll_raises(self):
+        # v0.57.3 review finding: the marker must clear even when the
+        # out-of-lock post-eviction memory poll raises (e.g. a transient
+        # psutil/probe error). A leaked marker makes every future capacity
+        # 503 spuriously retryable forever.
+        free = {"gb": 1.0}
+        d = LoadDirector(
+            enable_fn=lambda mid: 9002,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: free["gb"]),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+
+        def poll_raises(**kwargs):
+            raise RuntimeError("probe hiccup")
+
+        d._wait_for_memory_release = poll_raises
+        now = time.monotonic()
+        d.loaded["victim"] = LoadEntry(
+            model_id="victim", worker_port=9001, memory_gb=8.0,
+            refcount=0, last_touched_at=now, loaded_at=now,
+        )
+        with pytest.raises(RuntimeError, match="probe hiccup"):
+            d.acquire(
+                "new",
+                manifest={"capabilities": {"memory_gb": 6.0, "device": "cuda"}},
+            )
+        assert d.evicting == set()
+
+    def test_partial_eviction_before_503_fires_listener(self):
+        # v0.57.3 review finding: when an eviction frees SOME memory but the
+        # request still 503s (no candidates left for the remaining
+        # shortfall), the freed memory is a capacity event for OTHER parked
+        # models -- the listener must fire so they re-decide instead of
+        # sleeping to their deadline.
+        free = {"gb": 1.0}
+        fired = []
+
+        def disable_fn(mid):
+            free["gb"] = 5.0  # victim freed 4 GB, still short of 10
+
+        d = LoadDirector(
+            enable_fn=lambda mid: 9002,
+            disable_fn=disable_fn,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: free["gb"]),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        d.capacity_listener = lambda: fired.append(1)
+        now = time.monotonic()
+        d.loaded["victim"] = LoadEntry(
+            model_id="victim", worker_port=9001, memory_gb=4.0,
+            refcount=0, last_touched_at=now, loaded_at=now,
+        )
+        with pytest.raises(OperationError):
+            d.acquire(
+                "huge",
+                manifest={"capabilities": {"memory_gb": 10.0, "device": "cuda"}},
+            )
+        assert fired  # the partial free was signalled despite the 503
+
     def test_evicting_cleared_when_disable_fn_raises(self):
         def disable_fn(mid):
             raise RuntimeError("worker refused to die")
