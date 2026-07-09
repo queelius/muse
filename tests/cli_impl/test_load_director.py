@@ -1965,3 +1965,77 @@ class TestCapacitySignal:
 
         assert fired == [1]
         assert d.in_flight_loads == {}
+
+
+class TestStressFindings:
+    """v0.57.1: gaps found by the 2026-07-08 live stress test on .204.
+
+    1. A capacity 503 raised while OTHER cold loads are in flight must be
+       retryable=True: those loads hold the reservations that made the fit
+       fail, and they WILL complete (freeing reservation into evictable
+       residency) or abort (freeing it outright). The v0.55.0 check only
+       looked at loaded refcounts, so a cold-start burst on an empty card
+       mass-503'd instantly instead of queueing behind the first load.
+    2. The capacity listener must fire on load COMMIT and ABORT (not just
+       release-to-zero and eviction) so parked capacity-waiters re-decide
+       when a reservation resolves.
+    """
+
+    def _director(self, *, gpu_free=1.0):
+        from muse.cli_impl.load_director import LoadDirector
+        return LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: gpu_free),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+
+    def test_capacity_503_retryable_when_other_load_in_flight(self):
+        import threading
+        from muse.admin.operations import OperationError
+        from muse.cli_impl.load_director import InFlightLoad
+        d = self._director(gpu_free=1.0)
+        # No loaded models at all, but ANOTHER model's cold load is in
+        # flight holding a reservation.
+        d.in_flight_loads["other-model"] = InFlightLoad(
+            event=threading.Event(), memory_gb=6.0, pool="cuda",
+        )
+        with pytest.raises(OperationError) as exc:
+            d._evict_lru_until_fits(
+                model_id="new", shortfall_gb=7.0, device="cuda",
+                required_gb=8.0,
+            )
+        assert exc.value.retryable is True
+
+    def test_capacity_503_still_not_retryable_when_truly_empty(self):
+        from muse.admin.operations import OperationError
+        d = self._director(gpu_free=1.0)
+        with pytest.raises(OperationError) as exc:
+            d._evict_lru_until_fits(
+                model_id="new", shortfall_gb=7.0, device="cuda",
+                required_gb=8.0,
+            )
+        assert exc.value.retryable is False
+
+    def test_abort_fires_capacity_listener(self):
+        import threading
+        from muse.cli_impl.load_director import InFlightLoad
+        d = self._director()
+        fired = []
+        d.capacity_listener = lambda: fired.append(1)
+        d.in_flight_loads["m"] = InFlightLoad(
+            event=threading.Event(), memory_gb=2.0, pool="cuda",
+        )
+        d._abort("m")
+        assert fired == [1]
+
+    def test_commit_fires_capacity_listener(self):
+        d = self._director(gpu_free=32.0)
+        fired = []
+        d.capacity_listener = lambda: fired.append(1)
+        manifest = {"capabilities": {"memory_gb": 1.0, "device": "cuda"}}
+        port = d.acquire("m", manifest=manifest)
+        assert port == 9001
+        assert fired  # commit fired the listener at least once

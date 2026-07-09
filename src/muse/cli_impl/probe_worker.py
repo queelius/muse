@@ -47,6 +47,48 @@ def _process_rss_bytes() -> int:
         return 0
 
 
+
+def _gpu_free_gb():
+    """Indirection over memory_probe.gpu_free_gb so tests can patch it."""
+    from muse.core.memory_probe import gpu_free_gb
+    return gpu_free_gb()
+
+
+class PynvmlVramMeter:
+    """VRAM measurement via pynvml free-memory deltas (#330, v0.57.1).
+
+    Fallback for venvs WITHOUT torch (GGUF/llama.cpp, ONNX) whose resolved
+    device is cuda: torch.cuda peak counters are unavailable there, and
+    falling back to RSS mis-records the measurement under `cpu`, which
+    mis-pools the model for admission (a GGUF split got sized against the
+    wrong pool on 2026-07-08). pynvml ships in muse[server] in EVERY venv.
+
+    Approximate by design: free-delta tracks reserved memory, not the true
+    allocation peak, and is monotonic-max across delta_bytes() calls so a
+    post-inference sample cannot shrink the recorded figure.
+    """
+
+    def __init__(self) -> None:
+        self._baseline: float | None = None
+        self._max_delta_gb = 0.0
+
+    def start(self) -> bool:
+        free = _gpu_free_gb()
+        if free is None:
+            return False
+        self._baseline = free
+        return True
+
+    def delta_bytes(self) -> int:
+        if self._baseline is None:
+            return 0
+        free = _gpu_free_gb()
+        if free is None:
+            return 0
+        self._max_delta_gb = max(self._max_delta_gb, self._baseline - free)
+        return int(max(0.0, self._max_delta_gb) * 1024**3)
+
+
 def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
     """In-venv probe entry. Prints JSON record on stdout's last line."""
     from muse.core.catalog import (  # noqa: PLC0415
@@ -77,6 +119,14 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
             vram_baseline = cuda.cuda.memory_allocated()
         except ImportError:
             cuda = None
+    # #330: cuda device but no torch in this venv (GGUF, ONNX): measure
+    # VRAM via pynvml free-deltas so the measurement stays on the cuda
+    # pool instead of degrading to RSS-as-cpu.
+    nvml_meter = None
+    if actual_device.startswith("cuda") and cuda is None:
+        meter = PynvmlVramMeter()
+        if meter.start():
+            nvml_meter = meter
 
     print(
         f"baseline: RAM={ram_baseline/1024**3:.2f} GB, "
@@ -108,6 +158,8 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
 
     if actual_device.startswith("cuda") and cuda is not None:
         weights_bytes = max(0, vram_post_load - vram_baseline)
+    elif nvml_meter is not None:
+        weights_bytes = nvml_meter.delta_bytes()
     else:
         weights_bytes = max(0, ram_post_load - ram_baseline)
 
@@ -132,6 +184,8 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
             shape, peak_bytes = _run_inference(backend, entry, actual_device, cuda)
             record["ran_inference"] = True
             record["shape"] = shape
+            if nvml_meter is not None:
+                peak_bytes = max(peak_bytes, nvml_meter.delta_bytes())
             record["peak_bytes"] = max(peak_bytes, weights_bytes)
         except Exception as e:  # noqa: BLE001
             print(f"inference probe failed: {e}", file=sys.stderr)

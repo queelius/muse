@@ -813,6 +813,12 @@ class LoadDirector:
         if rec is not None:
             rec.event.set()
 
+        # v0.57.1: a committed load resolves its reservation into real
+        # residency (evictable once its refcount drops). Wake parked
+        # capacity-waiters to re-decide; a futile wake costs one cheap
+        # _decide pass.
+        self._fire_capacity_listener()
+
         # Task D: schedule the observed-peak writeback ONLY for a solo load.
         # With overlapping loads the free_before..free_after delta reflects
         # BOTH models, and the writeback (monotonic-upward only) would
@@ -842,6 +848,9 @@ class LoadDirector:
             rec = self.in_flight_loads.pop(model_id, None)
         if rec is not None:
             rec.event.set()
+        # v0.57.1: an aborted load frees its reservation -- capacity may
+        # now fit a parked waiter; wake them to re-decide.
+        self._fire_capacity_listener()
 
     # ------------------------------------------------------------------
     # Eviction (Task C)
@@ -944,7 +953,19 @@ class LoadDirector:
                         # this is the simpler (single-pool-exact,
                         # mixed-pool-conservative) form rather than
                         # filtering by device/pool.
-                        any_inuse = any(e.refcount > 0 for e in self.loaded.values())
+                        # v0.57.1 (stress-test finding): a capacity 503
+                        # is ALSO transient when OTHER cold loads are in
+                        # flight -- their reservations made the fit fail,
+                        # and each will either commit (reservation becomes
+                        # evictable residency) or abort (reservation
+                        # freed). Without this, a cold-start burst of
+                        # distinct models on an empty card mass-503s
+                        # instantly instead of queueing behind the first
+                        # load.
+                        any_inuse = (
+                            any(e.refcount > 0 for e in self.loaded.values())
+                            or any(k != model_id for k in self.in_flight_loads)
+                        )
                         # Lazy import to avoid a cycle: load_director ->
                         # admin.operations -> supervisor -> load_director
                         # (Task E will wire the supervisor to LoadDirector).

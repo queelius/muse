@@ -450,3 +450,27 @@ def test_run_probe_for_pull_returns_nonzero_on_unidentified_pull(tmp_path, monke
     mock_run_probe.assert_not_called()
     err = capsys.readouterr().err
     assert "could not identify" in err.lower() or "skipping probe" in err.lower()
+
+
+class TestPynvmlFallback:
+    """#330 (v0.57.1): when the venv lacks torch but the resolved device is
+    cuda (GGUF split, or any torch-free runtime), the probe must measure
+    VRAM via pynvml free-deltas and record device=cuda -- NOT fall back to
+    RSS-as-cpu, which mis-pools the model for admission."""
+
+    def test_pynvml_meter_free_delta(self, monkeypatch):
+        from muse.cli_impl import probe_worker
+        readings = iter([10.0, 7.5, 6.0])  # free GB: baseline, post-load, post-inference
+        monkeypatch.setattr(
+            probe_worker, "_gpu_free_gb", lambda: next(readings))
+        meter = probe_worker.PynvmlVramMeter()
+        assert meter.start() is True          # baseline 10.0
+        assert meter.delta_bytes() == int(2.5 * 1024**3)   # 10.0 - 7.5
+        assert meter.delta_bytes() == int(4.0 * 1024**3)   # 10.0 - 6.0 (monotonic max ok)
+
+    def test_pynvml_meter_unavailable(self, monkeypatch):
+        from muse.cli_impl import probe_worker
+        monkeypatch.setattr(probe_worker, "_gpu_free_gb", lambda: None)
+        meter = probe_worker.PynvmlVramMeter()
+        assert meter.start() is False
+        assert meter.delta_bytes() == 0
