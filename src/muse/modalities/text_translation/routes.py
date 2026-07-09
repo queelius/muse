@@ -146,9 +146,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_language",
                 _invalid_language_message(e.code, valid),
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side (torch/CUDA/path detail
+            # is operationally useful) but never leak it to the client:
+            # str(e) can carry internal filesystem paths, CUDA driver
+            # text, or other backend-implementation detail that has no
+            # business in an external-facing error body.
             logger.exception("translate failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "translation backend failed; see server logs",
+            )
 
         body = shape_response(result.texts, scalar=scalar)
         return JSONResponse(content=body)

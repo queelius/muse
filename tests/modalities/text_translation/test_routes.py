@@ -178,6 +178,26 @@ class TestErrors:
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "input_too_long"
 
+    def test_backend_exception_returns_generic_500_without_leaking_details(self):
+        backend = _fake_backend()
+        backend.translate.side_effect = RuntimeError(
+            "CUDA out of memory at /internal/path/model.py:123"
+        )
+        client = _make_client(backend)
+        r = client.post(
+            "/v1/translate", json={"q": "hi", "source": "en", "target": "es"},
+        )
+        assert r.status_code == 500
+        body = r.json()
+        assert body["error"]["code"] == "internal_error"
+        # The raw exception text (which can carry CUDA/filesystem detail)
+        # must never reach the client; only a generic message does.
+        assert "CUDA out of memory" not in r.text
+        assert "/internal/path/model.py" not in r.text
+        assert body["error"]["message"] == (
+            "translation backend failed; see server logs"
+        )
+
     def test_unknown_model_returns_404(self):
         client = _make_client(_fake_backend())
         r = client.post(

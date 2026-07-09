@@ -196,6 +196,31 @@ def _ast_extract_model_optional_paths(init_py: Path) -> tuple[str, ...]:
     return ()
 
 
+# Process-lifetime memoization of the dirs=None (default-scan) result.
+# LibreTranslate clients always omit `model`, so the gateway calls
+# model_optional_paths() with no args on the hot path for EVERY
+# model-less request. The AST tree-walk it performs (~4ms, scales with
+# modality count) has no reason to re-run per request: modality packages
+# cannot change at runtime (matches the documented convention behind
+# discovery's other script-scan cache -- a restart picks up new ones).
+# Only the dirs=None call is memoized; explicit `dirs` (the test-seam
+# usage throughout tests/core/test_discovery.py) always computes fresh
+# and never populates or reads this cache.
+_MODEL_OPTIONAL_PATHS_CACHE: dict[str, str] | None = None
+
+
+def _reset_model_optional_paths_cache() -> None:
+    """Test seam: clear the process-lifetime memoization.
+
+    Mirrors `muse.core.chat_formats._reset_cache_for_tests` /
+    `muse.core.curated._reset_curated_cache_for_tests`. Call this between
+    test cases that rely on model_optional_paths()'s default (dirs=None)
+    scan picking up a freshly-constructed temp modality tree.
+    """
+    global _MODEL_OPTIONAL_PATHS_CACHE
+    _MODEL_OPTIONAL_PATHS_CACHE = None
+
+
 def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
     """{request_path: modality_tag} for every modality package that
     exports MODEL_OPTIONAL_PATHS.
@@ -213,8 +238,22 @@ def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
     no paths, even if its own MODEL_OPTIONAL_PATHS differs.
 
     `dirs` defaults to the same bundled + `$MUSE_MODALITIES_DIR` scan
-    roots as `modality_tags()` / `discover_modalities`.
+    roots as `modality_tags()` / `discover_modalities`. The dirs=None
+    result is memoized for the process lifetime (see
+    `_MODEL_OPTIONAL_PATHS_CACHE` above); pass explicit `dirs` to always
+    force a fresh scan (tests do this).
+
+    An unreadable directory (permission error, or a $MUSE_MODALITIES_DIR
+    removed after boot) is logged and skipped rather than raised, so a
+    bad scan root degrades to "no optional paths from that dir" instead
+    of 500ing every model-less request.
     """
+    global _MODEL_OPTIONAL_PATHS_CACHE
+
+    use_cache = dirs is None
+    if use_cache and _MODEL_OPTIONAL_PATHS_CACHE is not None:
+        return _MODEL_OPTIONAL_PATHS_CACHE
+
     if dirs is None:
         bundled = Path(__file__).resolve().parents[1] / "modalities"
         env = config.get("paths.modalities_dir")
@@ -225,7 +264,14 @@ def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
     for d in dirs:
         if not d or not d.is_dir():
             continue
-        for sub in sorted(d.iterdir()):
+        try:
+            entries = sorted(d.iterdir())
+        except OSError as e:
+            logger.warning(
+                "model_optional_paths: cannot list directory %s: %s", d, e,
+            )
+            continue
+        for sub in entries:
             if not sub.is_dir() or sub.name.startswith("_"):
                 continue
             init_py = sub / "__init__.py"
@@ -237,6 +283,9 @@ def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
             seen_tags.add(tag)
             for p in _ast_extract_model_optional_paths(init_py):
                 out.setdefault(p, tag)
+
+    if use_cache:
+        _MODEL_OPTIONAL_PATHS_CACHE = out
     return out
 
 

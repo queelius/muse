@@ -15,6 +15,7 @@ from muse.core.discovery import (
     discover_models,
     discover_modalities,
     model_optional_paths,
+    _reset_model_optional_paths_cache,
 )
 
 
@@ -229,6 +230,16 @@ class TestDiscoverModalities:
 # ---------- MODEL_OPTIONAL_PATHS aggregation (gateway default-model seam) ----------
 
 class TestModelOptionalPaths:
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        # model_optional_paths() memoizes its dirs=None (default-scan) result
+        # for the process lifetime (T3 fix); reset the module-level cache
+        # around every test so these temp-tree scans and the real-bundled
+        # scan below never see a stale cached value from another test.
+        _reset_model_optional_paths_cache()
+        yield
+        _reset_model_optional_paths_cache()
+
     def test_no_modalities_yields_empty_map(self, tmp_path):
         assert model_optional_paths([tmp_path]) == {}
 
@@ -294,6 +305,68 @@ class TestModelOptionalPaths:
         assert result.get("/v1/translate") == "text/translation"
         assert result.get("/translate") == "text/translation"
         assert result.get("/languages") == "text/translation"
+
+    def test_default_scan_is_memoized_for_process_lifetime(self, monkeypatch):
+        """T3 review finding: model_optional_paths() is called with no args
+        on the gateway's hot path for every model-less request (LibreTranslate
+        clients always omit `model`). The AST tree-walk must run at most once
+        per process; subsequent calls return the cached mapping without
+        re-walking the modalities tree, mirroring discovery's existing
+        script-scan cache convention (a restart picks up new modalities).
+        """
+        monkeypatch.delenv("MUSE_MODALITIES_DIR", raising=False)
+        calls = {"n": 0}
+        original_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            calls["n"] += 1
+            return original_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+        first = model_optional_paths()
+        after_first = calls["n"]
+        assert after_first > 0  # sanity: the walk actually happened
+
+        second = model_optional_paths()
+        assert calls["n"] == after_first  # no re-walk on the second call
+        assert first is second  # same cached object, not just equal content
+
+    def test_explicit_dirs_bypass_the_default_scan_cache(self, tmp_path):
+        """Passing explicit `dirs` (the test-seam usage throughout this
+        class) must never be served from the dirs=None memoized cache, and
+        must never populate it either."""
+        _write_modality_package(tmp_path, "fake_translate", """
+            MODALITY = "fake/translate"
+            MODEL_OPTIONAL_PATHS = ("/v1/translate",)
+            def build_router(registry):
+                return None
+        """)
+        result = model_optional_paths([tmp_path])
+        assert result == {"/v1/translate": "fake/translate"}
+        # A subsequent default-scan call must see the REAL bundled tree,
+        # not whatever the explicit-dirs call computed.
+        default_result = model_optional_paths()
+        assert default_result.get("/v1/translate") == "text/translation"
+
+    def test_unreadable_external_dir_degrades_instead_of_raising(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """An unreadable (or since-removed) $MUSE_MODALITIES_DIR must not
+        raise OSError mid-request; it should degrade to contributing no
+        optional paths from that dir, matching the inner extractors'
+        existing lenience (they already swallow OSError/SyntaxError)."""
+        import logging
+        bad_dir = tmp_path / "unreadable"
+        bad_dir.mkdir()
+        bad_dir.chmod(0o000)
+        caplog.set_level(logging.WARNING)
+        try:
+            result = model_optional_paths([bad_dir])
+        finally:
+            bad_dir.chmod(0o755)  # restore so tmp_path cleanup can remove it
+        assert result == {}
+        assert "unreadable" in caplog.text or str(bad_dir) in caplog.text
 
 
 # ---------- Edge-case regression tests (B2) ----------
