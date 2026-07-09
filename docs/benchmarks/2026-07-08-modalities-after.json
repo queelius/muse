@@ -1,0 +1,104 @@
+{
+  "modalities": {
+    "headers": [
+      "case",
+      "model",
+      "median s"
+    ],
+    "rows": [
+      [
+        "image_gen_sd_turbo",
+        "sd-turbo",
+        0.903
+      ],
+      [
+        "image_gen_pixel_lora",
+        "pixelartredmond-1-5v-pixel-art-loras-for-sd-1-5",
+        4.714
+      ],
+      [
+        "tts_kokoro",
+        "kokoro-82m",
+        0.402
+      ],
+      [
+        "tts_supertonic",
+        "supertonic-3",
+        "SKIPPED (not enabled)"
+      ],
+      [
+        "sfx_stable_audio",
+        "stable-audio-open-1.0",
+        17.684
+      ],
+      [
+        "transcribe_whisper-base",
+        "whisper-base",
+        "ERROR HTTPStatusError"
+      ],
+      [
+        "embed_qwen3-embedding-0.6b",
+        "qwen3-embedding-0.6b",
+        0.634
+      ],
+      [
+        "chat_llama-3.2-3b-q4",
+        "llama-3.2-3b-q4",
+        2.816
+      ]
+    ],
+    "raw": {
+      "image_gen_sd_turbo": {
+        "median_s": 0.903,
+        "reps_s": [
+          1.216,
+          0.903,
+          0.738
+        ]
+      },
+      "image_gen_pixel_lora": {
+        "median_s": 4.714,
+        "reps_s": [
+          4.714,
+          4.812,
+          4.571
+        ]
+      },
+      "tts_kokoro": {
+        "median_s": 0.402,
+        "reps_s": [
+          0.319,
+          0.402,
+          0.426
+        ]
+      },
+      "sfx_stable_audio": {
+        "median_s": 17.684,
+        "reps_s": [
+          17.684,
+          17.716,
+          17.075
+        ]
+      },
+      "transcribe_whisper-base": {
+        "error": "Server error '500 Internal Server Error' for url 'http://192.168.0.204:8000/v1/audio/transcriptions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500"
+      },
+      "embed_qwen3-embedding-0.6b": {
+        "median_s": 0.634,
+        "reps_s": [
+          0.799,
+          0.634,
+          0.618
+        ]
+      },
+      "chat_llama-3.2-3b-q4": {
+        "median_s": 2.816,
+        "reps_s": [
+          2.674,
+          3.281,
+          2.816
+        ]
+      }
+    }
+  }
+}
