@@ -1,0 +1,67 @@
+{
+  "protocol": "alternating same-window streaming, 1 warmup each, 4 rounds",
+  "prompt": "List five uses for a brick, one line each.",
+  "max_tokens": 128,
+  "rounds": [
+    {
+      "round": 1,
+      "muse": {
+        "ttft": 0.11882098019123077,
+        "gap_median": 0.11570457904599607,
+        "tokens": 27,
+        "elapsed": 3.5218954728916287
+      },
+      "ollama": {
+        "ttft": 0.3160662390291691,
+        "gap_median": 0.07023545238189399,
+        "tokens": 23,
+        "elapsed": 2.3218532321043313
+      }
+    },
+    {
+      "round": 2,
+      "muse": {
+        "ttft": 0.09860360808670521,
+        "gap_median": 0.06525708711706102,
+        "tokens": 31,
+        "elapsed": 2.1724951453506947
+      },
+      "ollama": {
+        "ttft": 0.2715539438650012,
+        "gap_median": 0.10491442051716149,
+        "tokens": 43,
+        "elapsed": 5.158773196861148
+      }
+    },
+    {
+      "round": 3,
+      "muse": {
+        "ttft": 0.22701632278040051,
+        "gap_median": 0.1246506089810282,
+        "tokens": 31,
+        "elapsed": 4.774374360684305
+      },
+      "ollama": {
+        "ttft": 0.31161926966160536,
+        "gap_median": 0.07650927896611392,
+        "tokens": 43,
+        "elapsed": 3.950451459735632
+      }
+    },
+    {
+      "round": 4,
+      "muse": {
+        "ttft": 0.11458516912534833,
+        "gap_median": 0.10660395491868258,
+        "tokens": 33,
+        "elapsed": 5.679524361155927
+      },
+      "ollama": {
+        "ttft": 0.3231895612552762,
+        "gap_median": 0.10416355589404702,
+        "tokens": 32,
+        "elapsed": 4.225074019283056
+      }
+    }
+  ]
+}

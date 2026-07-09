@@ -1445,7 +1445,9 @@ medians can differ 3x. LlamaCppModel accepts optional perf kwargs
 type_v) via manifest capabilities; defaults match llama-cpp-python (and
 ollama's thread choice) and shipped untuned because the baseline showed
 muse already competitive (non-streaming faster than ollama; streaming
-within 10-20%).
+comparison inconclusive on the noisy laptop test box -- muse 5.8-14.3 vs
+ollama 7.6-10.9 tok/s in the committed alternating run, with muse's
+within-run variance exceeding the delta).
 
 ## Memory accounting
 
