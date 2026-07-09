@@ -236,6 +236,12 @@ class LoadDirector:
 
         self.loaded: dict[str, LoadEntry] = {}
         self.in_flight_loads: dict[str, InFlightLoad] = {}
+        # v0.57.2: model ids whose eviction is mid-flight (victim popped
+        # from `loaded`, disable_fn still shutting the worker down, VRAM
+        # not yet freed). During that multi-second out-of-lock window the
+        # director otherwise looks idle, so concurrent capacity 503s must
+        # consult this set to stay retryable. Guarded by self.lock.
+        self.evicting: set[str] = set()
         self.recent_decisions: collections.deque = collections.deque(maxlen=20)
         self.lock = threading.RLock()
         # Monotonic counter bumped under the lock on every memory-mutating
@@ -962,9 +968,14 @@ class LoadDirector:
                         # distinct models on an empty card mass-503s
                         # instantly instead of queueing behind the first
                         # load.
+                        # v0.57.2: an eviction mid-flight (self.evicting)
+                        # is the third transient state -- its VRAM frees
+                        # when disable_fn completes, so the failure is
+                        # worth parking on too.
                         any_inuse = (
                             any(e.refcount > 0 for e in self.loaded.values())
                             or any(k != model_id for k in self.in_flight_loads)
+                            or bool(self.evicting)
                         )
                         # Lazy import to avoid a cycle: load_director ->
                         # admin.operations -> supervisor -> load_director
@@ -993,6 +1004,12 @@ class LoadDirector:
                     # state is already consistent (no zombie LoadEntry
                     # claiming a worker port that isn't running).
                     self.loaded.pop(victim_id, None)
+                    # Mark the eviction in-flight so concurrent decides that
+                    # fail their fit check during the out-of-lock disable_fn
+                    # window raise retryable=True (capacity WILL free when
+                    # this eviction completes) instead of mass-503ing while
+                    # the director looks idle (v0.57.2 stress finding).
+                    self.evicting.add(victim_id)
                     # Bump the epoch: an eviction frees VRAM, which pollutes any
                     # concurrent load's free_before..free_after delta just like a
                     # concurrent load does. Counting it here lets _load_and_commit's
@@ -1060,7 +1077,11 @@ class LoadDirector:
                 with self.lock:
                     # Re-insert the popped LoadEntry. refcount was 0 at
                     # eviction time (only refcount==0 entries are
-                    # candidates) and we preserve that.
+                    # candidates) and we preserve that. Clear the
+                    # in-flight-eviction marker: nothing is freeing, and a
+                    # leaked marker would make every future capacity 503
+                    # spuriously retryable forever.
+                    self.evicting.discard(victim_id)
                     self.loaded[victim_id] = victim
                     # Update the existing decision entry's reason
                     # in-place. The deque already holds it; mutating
@@ -1086,6 +1107,9 @@ class LoadDirector:
             with self.lock:
                 free_after_gb = self._free_for_device(device)
                 decision.free_after_gb = free_after_gb
+                # Eviction complete (worker down, memory release observed
+                # or timed out): clear the in-flight marker.
+                self.evicting.discard(victim_id)
 
             cumulative_freed_gb += freed_this_round
 

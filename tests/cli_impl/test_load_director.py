@@ -2039,3 +2039,113 @@ class TestStressFindings:
         port = d.acquire("m", manifest=manifest)
         assert port == 9001
         assert fired  # commit fired the listener at least once
+
+
+class TestEvictionWindowRetryable:
+    """v0.57.2: residual gap found by re-running the stress burst on .204
+    AFTER the v0.57.1 fix shipped.
+
+    An eviction is a multi-second out-of-lock operation: the victim is
+    popped from `loaded` under lock, then disable_fn (SIGTERM + worker
+    shutdown) runs with the lock released, and the evictor registers its
+    own in-flight slot only afterwards. During that window the director
+    looks completely idle (loaded empty, in_flight_loads empty) while the
+    victim's VRAM is still physically occupied, so a concurrent burst of
+    decides fails the fit check against stale free memory AND raises with
+    retryable=False -- mass instant-503s exactly like the pre-v0.57.1
+    behavior. Observed live: six 503s at ~0.5s during qwen's eviction of
+    ace-step (decision log 03:19:09Z, 2026-07-09).
+
+    Fix: track evictions-in-progress in `self.evicting`; include it in
+    the retryable condition; fire the capacity listener when an eviction
+    completes so parked waiters re-decide against the real freed memory.
+    """
+
+    def _director(self, *, gpu_free=1.0):
+        return LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=lambda mid: None,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: gpu_free),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+
+    def test_capacity_503_retryable_during_inflight_eviction(self):
+        d = self._director(gpu_free=1.0)
+        # Mid-eviction window: victim already popped from loaded,
+        # disable_fn still shutting the worker down, evictor not yet
+        # registered in in_flight_loads. Director looks idle but capacity
+        # WILL free when the eviction completes.
+        d.evicting.add("victim-model")
+        with pytest.raises(OperationError) as exc:
+            d._evict_lru_until_fits(
+                model_id="new", shortfall_gb=7.0, device="cuda",
+                required_gb=8.0,
+            )
+        assert exc.value.retryable is True
+
+    def test_eviction_fires_listener_before_new_load_starts(self):
+        # The capacity listener must fire when disable_fn completes (VRAM
+        # actually freed), BEFORE the evictor's own cold load runs -- so
+        # capacity-waiters parked on the notifier re-decide as soon as
+        # room exists instead of waiting for the evictor's commit.
+        free = {"gb": 1.0}
+        events = []
+
+        def disable_fn(mid):
+            events.append(("disable", mid))
+            free["gb"] = 12.0
+
+        def enable_fn(mid):
+            events.append(("enable", mid))
+            return 9002
+
+        d = LoadDirector(
+            enable_fn=enable_fn,
+            disable_fn=disable_fn,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: free["gb"]),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        d.capacity_listener = lambda: events.append(("fire",))
+        now = time.monotonic()
+        d.loaded["victim"] = LoadEntry(
+            model_id="victim", worker_port=9001, memory_gb=8.0,
+            refcount=0, last_touched_at=now, loaded_at=now,
+        )
+        port = d.acquire(
+            "new", manifest={"capabilities": {"memory_gb": 6.0, "device": "cuda"}},
+        )
+        assert port == 9002
+        assert ("fire",) in events
+        assert events.index(("fire",)) < events.index(("enable", "new"))
+        assert d.evicting == set()
+
+    def test_evicting_cleared_when_disable_fn_raises(self):
+        def disable_fn(mid):
+            raise RuntimeError("worker refused to die")
+
+        d = LoadDirector(
+            enable_fn=lambda mid: 9001,
+            disable_fn=disable_fn,
+            memory_probe=type("P", (), {
+                "gpu_free_gb": staticmethod(lambda: 1.0),
+                "cpu_free_gb": staticmethod(lambda: 64.0),
+            })(),
+        )
+        now = time.monotonic()
+        d.loaded["victim"] = LoadEntry(
+            model_id="victim", worker_port=9001, memory_gb=8.0,
+            refcount=0, last_touched_at=now, loaded_at=now,
+        )
+        with pytest.raises(OperationError):
+            d.acquire(
+                "new",
+                manifest={"capabilities": {"memory_gb": 6.0, "device": "cuda"}},
+            )
+        # The failed eviction re-inserted the victim; the evicting marker
+        # must not leak (a leaked marker would make every future capacity
+        # 503 spuriously retryable forever).
+        assert d.evicting == set()
