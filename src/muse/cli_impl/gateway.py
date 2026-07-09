@@ -42,7 +42,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
 # models (v0.47.3); it is mtime-cached so per-request reads are cheap.
 from muse.core import config
-from muse.core.catalog import CatalogError, _read_catalog, get_manifest
+from muse.core.catalog import CatalogError, _read_catalog, get_manifest, is_enabled, known_models
+from muse.core.discovery import model_optional_paths
 from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
 
@@ -158,6 +159,26 @@ def _openai_error(
         status_code=status,
         content={"error": {"code": code, "message": message, "type": error_type}},
     )
+
+
+def _resolve_default_model(modality: str) -> str | None:
+    """First ENABLED catalog model whose modality matches `modality`.
+
+    Backs the gateway's MODEL_OPTIONAL_PATHS seam (see `proxy` below):
+    a request to a path like /v1/translate that omits `model` resolves
+    here instead of 400ing model_required. Iterates `known_models()` in
+    its discovery order (bundled scripts first, in glob-sorted order,
+    then persisted resolver entries), so a bundled default (e.g. m2m100
+    for text/translation) wins on a fresh install. `is_enabled` returns
+    False both for a genuinely catalog-disabled model AND for a bundled
+    script that was never pulled (no catalog.json entry at all), so an
+    unpulled bundled model is correctly skipped rather than treated as
+    servable.
+    """
+    for candidate_id, entry in known_models().items():
+        if entry.modality == modality and is_enabled(candidate_id):
+            return candidate_id
+    return None
 
 
 def build_gateway(
@@ -399,10 +420,31 @@ def build_gateway(
 
         model_id = await extract_model_from_request(request)
         if model_id is None:
-            return _openai_error(
-                400, "model_required",
-                "request is missing a `model` field (required for gateway routing)",
+            # MODEL_OPTIONAL_PATHS seam (spec 2026-07-09): a modality
+            # package may declare paths where `model` is optional (e.g.
+            # text_translation's /v1/translate, /translate, /languages --
+            # LibreTranslate clients never send a model field). Any OTHER
+            # path with no model keeps today's 400 model_required exactly.
+            tag = model_optional_paths().get(request.url.path)
+            if tag is None:
+                return _openai_error(
+                    400, "model_required",
+                    "request is missing a `model` field (required for gateway routing)",
+                )
+            default_id = _resolve_default_model(tag)
+            if default_id is None:
+                return _openai_error(
+                    503, "no_default_model",
+                    f"no enabled model of modality {tag!r} is available to "
+                    f"serve {request.url.path!r}; pull and enable one, or "
+                    f"pass an explicit `model` field",
+                    error_type="server_error",
+                )
+            logger.debug(
+                "gateway: resolved default model %r (modality %r) for %r",
+                default_id, tag, request.url.path,
             )
+            model_id = default_id
 
         # Director-driven path (v0.40.0+ lazy load). When the SupervisorState
         # carries a LoadDirector, every request acquires the worker port

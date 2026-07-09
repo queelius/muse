@@ -18,22 +18,10 @@ This is muse's twentieth modality and its first LibreTranslate-compat
 one. See docs/superpowers/specs/2026-07-09-text-translation-design.md
 for the full design.
 
-Task 1 (this file) ships the package skeleton only: protocol, codec,
-client, and the language-name table. `build_router` is a stub; Task 3
-replaces it with the real FastAPI router mounting POST /v1/translate,
-POST /translate, and GET /languages.
-
-The stub returns an empty `APIRouter()` rather than raising
-NotImplementedError. `muse.cli_impl.worker.run_worker` unconditionally
-calls `build_router(registry)` for EVERY discovered modality (not just
-loaded ones) so that an empty registry still gets the OpenAI 404
-envelope instead of FastAPI's default -- so a raising stub would break
-every `run_worker` invocation (and its test coverage) the moment this
-package is discoverable, not just once Task 3's real routes are hit.
-Mirrors the 3d/generation skeleton precedent (model_3d_generation/routes.py,
-commit 8b406bd): a real, callable router object now; NotImplementedError
-deferred to the level that actually needs it (there, per-route handlers;
-here, whichever real route Task 3 adds).
+Task 1 shipped the package skeleton: protocol, codec, client, and the
+language-name table. Task 3 (this revision) adds the real FastAPI router
+mounting POST /v1/translate, POST /translate (alias, identical handler),
+and GET /languages -- see routes.py.
 """
 from fastapi import APIRouter
 
@@ -43,6 +31,7 @@ from muse.modalities.text_translation.protocol import (
     TranslationResult,
     UnsupportedLanguageError,
 )
+from muse.modalities.text_translation.routes import build_router as _build_router
 
 
 MODALITY = "text/translation"
@@ -63,14 +52,13 @@ PROBE_DEFAULTS = {
 
 
 def build_router(registry) -> APIRouter:
-    """Stub for Task 1: an empty router with no routes mounted.
+    """Mount POST /v1/translate, POST /translate (alias), GET /languages.
 
-    Task 3 replaces this with the real router (POST /v1/translate,
-    POST /translate, GET /languages). Kept non-raising so
-    `run_worker`'s unconditional build_router(registry) call over
-    every discovered modality does not break before Task 3 lands.
+    Thin re-export of routes.build_router; kept as the __init__-level
+    name so `discover_modalities` (which imports this package and reads
+    module-level `build_router`) finds it without reaching into routes.py.
     """
-    return APIRouter()
+    return _build_router(registry)
 
 
 __all__ = [

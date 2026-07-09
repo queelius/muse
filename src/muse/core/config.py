@@ -210,6 +210,8 @@ SETTINGS: list[Setting] = [
             "int", 100000, "limits", "Max chars per rerank document."),
     Setting("limits.summarize_max_text_chars", "MUSE_SUMMARIZE_MAX_TEXT_CHARS",
             "int", 100000, "limits", "Max chars per /v1/summarize request."),
+    Setting("limits.translate_max_chars", "MUSE_TRANSLATE_MAX_CHARS",
+            "int", 20000, "limits", "Max total chars across q for /v1/translate."),
     Setting("limits.video_max_frames_b64", "MUSE_VIDEO_MAX_FRAMES_B64",
             "int", 240, "limits", "Max frames returned as base64 from /v1/video/generations."),
 ]

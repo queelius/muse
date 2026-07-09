@@ -14,6 +14,7 @@ from muse.core.discovery import (
     DiscoveredModel,
     discover_models,
     discover_modalities,
+    model_optional_paths,
 )
 
 
@@ -223,6 +224,76 @@ class TestDiscoverModalities:
         assert len(result) == 1
         assert result["collide/tag"](None) == ("bundled",)
         assert "collide/tag" in caplog.text
+
+
+# ---------- MODEL_OPTIONAL_PATHS aggregation (gateway default-model seam) ----------
+
+class TestModelOptionalPaths:
+    def test_no_modalities_yields_empty_map(self, tmp_path):
+        assert model_optional_paths([tmp_path]) == {}
+
+    def test_modality_without_MODEL_OPTIONAL_PATHS_contributes_nothing(self, tmp_path):
+        _write_modality_package(tmp_path, "fake_modality", """
+            MODALITY = "fake/type"
+            def build_router(registry):
+                return None
+        """)
+        assert model_optional_paths([tmp_path]) == {}
+
+    def test_modality_with_MODEL_OPTIONAL_PATHS_is_aggregated(self, tmp_path):
+        _write_modality_package(tmp_path, "fake_translate", """
+            MODALITY = "fake/translate"
+            MODEL_OPTIONAL_PATHS = ("/v1/translate", "/translate", "/languages")
+            def build_router(registry):
+                return None
+        """)
+        result = model_optional_paths([tmp_path])
+        assert result == {
+            "/v1/translate": "fake/translate",
+            "/translate": "fake/translate",
+            "/languages": "fake/translate",
+        }
+
+    def test_paths_from_multiple_modalities_merge(self, tmp_path):
+        _write_modality_package(tmp_path, "fake_a", """
+            MODALITY = "fake/a"
+            MODEL_OPTIONAL_PATHS = ("/a-path",)
+            def build_router(registry):
+                return None
+        """)
+        _write_modality_package(tmp_path, "fake_b", """
+            MODALITY = "fake/b"
+            MODEL_OPTIONAL_PATHS = ("/b-path",)
+            def build_router(registry):
+                return None
+        """)
+        result = model_optional_paths([tmp_path])
+        assert result == {"/a-path": "fake/a", "/b-path": "fake/b"}
+
+    def test_first_found_wins_on_modality_tag_collision(self, tmp_path):
+        d1 = tmp_path / "bundled"
+        d2 = tmp_path / "escape"
+        d1.mkdir()
+        d2.mkdir()
+        _write_modality_package(d1, "my_mod", """
+            MODALITY = "collide/tag"
+            MODEL_OPTIONAL_PATHS = ("/bundled-path",)
+            def build_router(r): return None
+        """)
+        _write_modality_package(d2, "my_mod", """
+            MODALITY = "collide/tag"
+            MODEL_OPTIONAL_PATHS = ("/escape-path",)
+            def build_router(r): return None
+        """)
+        result = model_optional_paths([d1, d2])
+        assert result == {"/bundled-path": "collide/tag"}
+
+    def test_real_bundled_translation_modality_is_discovered(self):
+        """No dirs override: scans the real bundled modalities tree."""
+        result = model_optional_paths()
+        assert result.get("/v1/translate") == "text/translation"
+        assert result.get("/translate") == "text/translation"
+        assert result.get("/languages") == "text/translation"
 
 
 # ---------- Edge-case regression tests (B2) ----------

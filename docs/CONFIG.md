@@ -140,6 +140,7 @@ A snapshot of the defaults:
 | `limits.rerank_max_query_chars` | `MUSE_RERANK_MAX_QUERY_CHARS` | 4000 |
 | `limits.rerank_max_doc_chars` | `MUSE_RERANK_MAX_DOC_CHARS` | 100000 |
 | `limits.summarize_max_text_chars` | `MUSE_SUMMARIZE_MAX_TEXT_CHARS` | 100000 |
+| `limits.translate_max_chars` | `MUSE_TRANSLATE_MAX_CHARS` | 20000 |
 | `limits.video_max_frames_b64` | `MUSE_VIDEO_MAX_FRAMES_B64` | 240 |
 
 The five `limits.*` byte/side caps that have a positivity guard

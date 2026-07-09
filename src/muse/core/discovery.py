@@ -167,6 +167,79 @@ def _ast_extract_modality(init_py: Path) -> str | None:
     return None
 
 
+def _ast_extract_model_optional_paths(init_py: Path) -> tuple[str, ...]:
+    """Pull the `MODEL_OPTIONAL_PATHS = (...)` literal from an __init__.py
+    without exec.
+
+    Mirrors `_ast_extract_modality`: only handles a top-level assignment
+    to a tuple/list of string literals (the convention `text_translation`
+    established). Anything fancier, or no such assignment, returns ().
+    """
+    try:
+        tree = ast.parse(init_py.read_text())
+    except (OSError, SyntaxError):
+        return ()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not (
+                isinstance(target, ast.Name)
+                and target.id == "MODEL_OPTIONAL_PATHS"
+            ):
+                continue
+            if isinstance(node.value, (ast.Tuple, ast.List)):
+                return tuple(
+                    elt.value for elt in node.value.elts
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                )
+    return ()
+
+
+def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
+    """{request_path: modality_tag} for every modality package that
+    exports MODEL_OPTIONAL_PATHS.
+
+    Consumed by the gateway's default-model seam (see
+    `muse.cli_impl.gateway`): a request to one of these paths with no
+    `model` field resolves to the modality's first enabled catalog model
+    instead of 400ing `model_required`. AST-based (no imports), like
+    `modality_tags()`, so it stays cheap enough to call on every gateway
+    request and keeps the bare-install contract (no fastapi import just
+    to compute this map).
+
+    First-found-wins per MODALITY tag, mirroring `discover_modalities`'s
+    collision rule: a duplicate tag discovered in a later dir contributes
+    no paths, even if its own MODEL_OPTIONAL_PATHS differs.
+
+    `dirs` defaults to the same bundled + `$MUSE_MODALITIES_DIR` scan
+    roots as `modality_tags()` / `discover_modalities`.
+    """
+    if dirs is None:
+        bundled = Path(__file__).resolve().parents[1] / "modalities"
+        env = config.get("paths.modalities_dir")
+        dirs = [bundled] + ([Path(env)] if env else [])
+
+    out: dict[str, str] = {}
+    seen_tags: set[str] = set()
+    for d in dirs:
+        if not d or not d.is_dir():
+            continue
+        for sub in sorted(d.iterdir()):
+            if not sub.is_dir() or sub.name.startswith("_"):
+                continue
+            init_py = sub / "__init__.py"
+            if not init_py.exists():
+                continue
+            tag = _ast_extract_modality(init_py)
+            if not tag or tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            for p in _ast_extract_model_optional_paths(init_py):
+                out.setdefault(p, tag)
+    return out
+
+
 def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
     """Scan dirs in order for modality subpackages.
 
