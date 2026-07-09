@@ -227,3 +227,65 @@ class TestLanguages:
         r = client.get("/languages", params={"model": "nonexistent-translator"})
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "model_not_found"
+
+
+class TestFormEncodedRequests:
+    """Live-validation finding (2026-07-09): real LibreTranslate clients
+    (libretranslatepy et al.) POST application/x-www-form-urlencoded, which
+    the reference LT server accepts alongside JSON. Our JSON-only pydantic
+    binding 422'd an unmodified client -- defeating the drop-in claim. Both
+    translate paths must accept form bodies with the same semantics."""
+
+    def test_form_encoded_translate_returns_scalar(self):
+        client = _make_client(_fake_backend())
+        r = client.post(
+            "/translate",
+            data={"q": "Hello.", "source": "en", "target": "es"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"translatedText": "[es]Hello."}
+
+    def test_form_encoded_v1_translate_works_too(self):
+        client = _make_client(_fake_backend())
+        r = client.post(
+            "/v1/translate",
+            data={"q": "Hello.", "source": "en", "target": "es"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"translatedText": "[es]Hello."}
+
+    def test_form_repeated_q_becomes_batch(self):
+        client = _make_client(_fake_backend())
+        # Explicit urlencoded body: exactly what urllib-based LT clients
+        # send (httpx's list-of-tuples data= does not set the form header).
+        r = client.post(
+            "/translate",
+            content="q=One.&q=Two.&source=en&target=es",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"translatedText": ["[es]One.", "[es]Two."]}
+
+    def test_form_api_key_field_is_ignored(self):
+        # LT clients send api_key unconditionally; muse has no LT API keys.
+        client = _make_client(_fake_backend())
+        r = client.post(
+            "/translate",
+            data={"q": "Hello.", "source": "en", "target": "es",
+                  "api_key": "whatever"},
+        )
+        assert r.status_code == 200
+
+    def test_form_missing_required_field_returns_422(self):
+        client = _make_client(_fake_backend())
+        r = client.post("/translate", data={"q": "Hello.", "source": "en"})
+        assert r.status_code == 422
+
+    def test_json_requests_still_work_unchanged(self):
+        client = _make_client(_fake_backend())
+        r = client.post(
+            "/translate",
+            json={"q": "Hello.", "source": "en", "target": "es"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"translatedText": "[es]Hello."}

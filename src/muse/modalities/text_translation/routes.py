@@ -20,9 +20,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from muse.core import config
 from muse.core.errors import ModelNotFoundError, error_response
@@ -161,8 +161,56 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         body = shape_response(result.texts, scalar=scalar)
         return JSONResponse(content=body)
 
-    router.add_api_route("/v1/translate", _translate, methods=["POST"])
-    router.add_api_route("/translate", _translate, methods=["POST"])
+    async def _translate_entry(request: Request):
+        """Content-type-aware entry: real LibreTranslate clients POST
+        application/x-www-form-urlencoded (the reference LT server accepts
+        both form and JSON), so a JSON-only pydantic binding 422s an
+        unmodified client (live-validation finding, 2026-07-09). Form
+        bodies are mapped onto the same _TranslateRequest model: repeated
+        `q` keys become a batch, and LT's `api_key` field (sent
+        unconditionally by some clients) is ignored -- muse has no LT API
+        keys. Validation failures return 422 in FastAPI's {detail: ...}
+        shape either way, so both parse paths degrade identically.
+        """
+        content_type = request.headers.get("content-type", "")
+        if ("application/x-www-form-urlencoded" in content_type
+                or "multipart/form-data" in content_type):
+            form = await request.form()
+            data: dict = {}
+            qs = form.getlist("q")
+            if qs:
+                data["q"] = qs[0] if len(qs) == 1 else list(qs)
+            for key in ("source", "target", "format", "model"):
+                value = form.get(key)
+                if value is not None:
+                    data[key] = value
+        else:
+            try:
+                data = await request.json()
+            except Exception:  # noqa: BLE001
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "request body is not valid JSON"},
+                )
+            if not isinstance(data, dict):
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "request body must be a JSON object"},
+                )
+        try:
+            req = _TranslateRequest(
+                **{k: v for k, v in data.items() if k != "api_key"}
+            )
+        except ValidationError as e:
+            # Mirror FastAPI's default 422 envelope so existing clients
+            # and tests that match on {"detail": [...]} keep working.
+            return JSONResponse(status_code=422, content={"detail": e.errors(
+                include_url=False, include_input=False,
+            )})
+        return await _translate(req)
+
+    router.add_api_route("/v1/translate", _translate_entry, methods=["POST"])
+    router.add_api_route("/translate", _translate_entry, methods=["POST"])
 
     @router.get("/languages")
     async def languages(model: str | None = Query(default=None)):
