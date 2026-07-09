@@ -18,6 +18,25 @@ class TranslationResult:
     texts: list[str]
 
 
+class UnsupportedLanguageError(Exception):
+    """Raised when a requested source/target language isn't supported.
+
+    Raised by `TranslationBackend.translate()` implementations (e.g.
+    `TranslationRuntime`, Task 2) when a requested ISO 639-1 code (or,
+    for single-pair backends like opus-mt, a "source->target" pair
+    string) has no mapping. The route layer (Task 3) catches this and
+    maps it to a 400 `invalid_language` response.
+    """
+
+    code: str
+    supported: list[str] | dict
+
+    def __init__(self, code: str, supported: list[str] | dict) -> None:
+        self.code = code
+        self.supported = supported
+        super().__init__(f"unsupported language: {code!r}")
+
+
 @runtime_checkable
 class TranslationBackend(Protocol):
     """Structural protocol any translation backend satisfies.

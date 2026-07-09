@@ -41,6 +41,7 @@ from muse.modalities.text_translation.client import TranslateClient
 from muse.modalities.text_translation.protocol import (
     TranslationBackend,
     TranslationResult,
+    UnsupportedLanguageError,
 )
 
 
@@ -79,5 +80,6 @@ __all__ = [
     "build_router",
     "TranslationResult",
     "TranslationBackend",
+    "UnsupportedLanguageError",
     "TranslateClient",
 ]
