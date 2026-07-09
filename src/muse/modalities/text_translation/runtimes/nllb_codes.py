@@ -65,7 +65,12 @@ ISO_TO_FLORES: dict[str, str] = {
     "fj": "fij_Latn",
     "fo": "fao_Latn",
     "fr": "fra_Latn",
-    "fy": "fry_Latn",
+    # "fy" (Western Frisian) intentionally has NO entry: real-tokenizer
+    # verification against facebook/nllb-200-distilled-600M on 2026-07-09
+    # confirmed it ships no "fry_Latn" token. NLLB-200 does not cover
+    # Western Frisian; the prior "fy": "fry_Latn" mapping would force an
+    # <unk> BOS token and produce garbage output, so it was removed rather
+    # than left as a plausible-looking but wrong entry.
     "ga": "gle_Latn",
     "gd": "gla_Latn",
     "gl": "glg_Latn",

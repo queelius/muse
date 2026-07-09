@@ -89,7 +89,10 @@ def _build_runtime(
     """
     fake_tok = MagicMock()
     # tokenizer(texts, return_tensors="pt", padding=True) -> BatchEncoding-like
-    fake_tok.return_value = {"input_ids": _fake_tensor(8)}
+    fake_tok.return_value = {
+        "input_ids": _fake_tensor(8),
+        "attention_mask": _fake_tensor(8),
+    }
     fake_tok.decode.side_effect = decode_side_effect or (
         lambda ids, **kw: f"decoded-{ids}"
     )
@@ -206,6 +209,22 @@ def test_nllb_raises_unsupported_language_error_on_unmapped_target():
     assert excinfo.value.code == "xx"
 
 
+def test_nllb_fy_has_no_flores_mapping():
+    # Real-tokenizer verification against facebook/nllb-200-distilled-600M
+    # on 2026-07-09 confirmed it has no "fry_Latn" token: NLLB-200 does not
+    # cover Western Frisian. A prior "fy" -> "fry_Latn" entry would have
+    # forced an <unk> BOS token and produced garbage; "fy" must stay
+    # absent from ISO_TO_FLORES until NLLB actually ships the language.
+    assert "fy" not in ISO_TO_FLORES
+
+
+def test_nllb_raises_unsupported_language_error_for_fy():
+    rt, fake_tok, fake_model = _build_runtime("facebook/nllb-200-distilled-600M")
+    with pytest.raises(UnsupportedLanguageError) as excinfo:
+        rt.translate(["hello"], source="en", target="fy")
+    assert excinfo.value.code == "fy"
+
+
 # ---------------------------------------------------------------------------
 # opus_mt
 # ---------------------------------------------------------------------------
@@ -304,7 +323,10 @@ def test_max_new_tokens_derived_from_longest_input():
 
 def test_max_new_tokens_capped_at_1024():
     fake_tok = MagicMock()
-    fake_tok.return_value = {"input_ids": _fake_tensor(600)}
+    fake_tok.return_value = {
+        "input_ids": _fake_tensor(600),
+        "attention_mask": _fake_tensor(600),
+    }
     fake_tok.decode.side_effect = lambda ids, **kw: f"decoded-{ids}"
     fake_tok.get_lang_id.return_value = 1
     fake_tok_class = MagicMock()
@@ -384,3 +406,65 @@ def test_set_inference_mode_calls_eval_when_method_present():
     m = MagicMock()
     _set_inference_mode(m)
     m.eval.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Q1: padded batches must carry the attention mask into generate()
+# ---------------------------------------------------------------------------
+
+
+def test_generate_passes_device_moved_attention_mask_to_model_generate():
+    """A padded batch's attention_mask must reach model.generate(...),
+    device-moved the same way input_ids is. Uses the shared _build_runtime
+    harness (via tokenizer_extra) with batch-sized (batch=2) input_ids +
+    attention_mask, rather than a bespoke one-off fake tokenizer, so this
+    coverage stays wired to the shared fake (Q4)."""
+    fake_input_ids = _fake_tensor(8, batch=2)
+    fake_attention_mask = _fake_tensor(8, batch=2)
+
+    def extra(tok):
+        tok.return_value = {
+            "input_ids": fake_input_ids,
+            "attention_mask": fake_attention_mask,
+        }
+        tok.get_lang_id.return_value = 1
+
+    rt, fake_tok, fake_model = _build_runtime(
+        "facebook/m2m100_418M",
+        tokenizer_extra=extra,
+        generate_return=["out-0", "out-1"],
+    )
+    rt.translate(["hello", "world"], source="en", target="es")
+
+    _, kwargs = fake_model.generate.call_args
+    assert kwargs["attention_mask"] is fake_attention_mask
+    fake_attention_mask.to.assert_called_once_with("cpu")
+    fake_input_ids.to.assert_called_once_with("cpu")
+
+
+# ---------------------------------------------------------------------------
+# Q2: empty input handling
+# ---------------------------------------------------------------------------
+
+
+def test_translate_empty_list_returns_empty_result_without_touching_tokenizer():
+    rt, fake_tok, fake_model = _build_runtime("facebook/m2m100_418M")
+    fake_tok.reset_mock()
+    fake_model.reset_mock()
+
+    out = rt.translate([], source="en", target="es")
+
+    assert out == TranslationResult(texts=[])
+    fake_tok.assert_not_called()
+    fake_model.generate.assert_not_called()
+
+
+def test_translate_single_empty_string_flows_through_normally():
+    rt, fake_tok, fake_model = _build_runtime(
+        "facebook/m2m100_418M",
+        generate_return=["out-0"],
+        decode_side_effect=lambda ids, **kw: f"decoded-{ids}",
+    )
+    out = rt.translate([""], source="en", target="es")
+    assert out.texts == ["decoded-out-0"]
+    fake_tok.assert_called_once()

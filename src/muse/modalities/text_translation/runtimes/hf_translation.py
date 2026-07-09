@@ -163,6 +163,13 @@ class TranslationRuntime:
     def translate(
         self, texts: list[str], *, source: str, target: str
     ) -> TranslationResult:
+        if not texts:
+            # Early return before any family dispatch: every family branch
+            # touches the tokenizer (src_lang assignment, FLORES lookups,
+            # prefixing) before reaching _generate, so the guard has to sit
+            # here to keep an empty batch from touching the tokenizer/model
+            # at all.
+            return TranslationResult(texts=[])
         if self._family == "m2m100":
             return self._translate_m2m100(texts, source=source, target=target)
         if self._family == "nllb":
@@ -260,10 +267,12 @@ class TranslationRuntime:
     ) -> TranslationResult:
         encoded = self._tokenizer(texts, return_tensors="pt", padding=True)
         input_ids = encoded["input_ids"].to(self._device)
+        attention_mask = encoded["attention_mask"].to(self._device)
         longest = int(input_ids.shape[-1])
         max_new_tokens = min(1024, 2 * longest + 16)
 
         gen_kwargs: dict[str, Any] = {
+            "attention_mask": attention_mask,
             "max_new_tokens": max_new_tokens,
             "num_beams": self._num_beams,
         }
