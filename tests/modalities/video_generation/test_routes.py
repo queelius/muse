@@ -373,4 +373,7 @@ def test_empty_frames_returns_openai_error_envelope():
     body = r.json()
     assert "error" in body
     assert body["error"]["code"]
-    assert "empty" in body["error"]["message"]
+    # Finding 1 (v0.58.1 review): the backend/codec exception text
+    # ("...frames list is empty") must NOT reach the client body; only a
+    # generic message does.
+    assert "empty" not in body["error"]["message"]

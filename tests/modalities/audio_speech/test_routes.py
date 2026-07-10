@@ -155,7 +155,9 @@ def test_encoding_failure_returns_openai_error_envelope(monkeypatch):
     assert "detail" not in body
     err = body["error"]
     assert err["code"] == "encoding_failed"
-    assert "PCM out of range" in err["message"]
+    # Finding 1 (v0.58.1 review): the backend exception text must NOT
+    # reach the client body; only a generic message does.
+    assert "PCM out of range" not in err["message"]
     # 5xx statuses carry type "server_error" (L10: error_type is derived
     # from the status code, not hardcoded to invalid_request_error).
     assert err["type"] == "server_error"

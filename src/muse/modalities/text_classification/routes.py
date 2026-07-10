@@ -165,9 +165,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             results = await asyncio.to_thread(_call_moderation)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("moderations classify failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "moderation backend failed; see server logs",
+            )
         body = encode_moderations(
             results, model_id=effective_id, threshold=threshold,
             safe_labels=safe_labels,
@@ -274,9 +280,16 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
             try:
                 results = await asyncio.to_thread(_call_zs)
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
+                # Log the real exception server-side but never leak it to
+                # the client: str(e) can carry internal filesystem paths,
+                # CUDA driver text, or other backend-implementation detail.
                 logger.exception("classify_zero_shot failed")
-                return error_response(500, "internal_error", str(e))
+                return error_response(
+                    500, "internal_error",
+                    "zero-shot classification backend failed; "
+                    "see server logs",
+                )
         else:
             if not capabilities.get("supports_classification"):
                 return error_response(
@@ -292,9 +305,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
             try:
                 results = await asyncio.to_thread(_call_cls)
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
+                # Log the real exception server-side but never leak it to
+                # the client: str(e) can carry internal filesystem paths,
+                # CUDA driver text, or other backend-implementation detail.
                 logger.exception("classify failed")
-                return error_response(500, "internal_error", str(e))
+                return error_response(
+                    500, "internal_error",
+                    "classification backend failed; see server logs",
+                )
 
         body = encode_classifications(
             results, model_id=effective_id, top_k=req.top_k,

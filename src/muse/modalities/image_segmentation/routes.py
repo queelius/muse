@@ -240,15 +240,19 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", str(e),
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             # Server faults: a bare RuntimeError (e.g. CUDA OOM) or any other
             # unexpected error is NOT the client's fault. Surface a 500 in
             # the OpenAI envelope so clients retry rather than treating a
             # valid request as malformed, and so nothing escapes as a bare
-            # Starlette 500.
+            # Starlette 500. Log the real exception server-side but never
+            # leak it to the client: str(e) can carry internal filesystem
+            # paths, CUDA driver text, or other backend-implementation
+            # detail.
             logger.exception("segmentation inference failed")
             return error_response(
-                500, "internal_error", str(e),
+                500, "internal_error",
+                "segmentation backend failed; see server logs",
             )
 
         return encode_segmentation(

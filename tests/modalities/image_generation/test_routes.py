@@ -734,3 +734,37 @@ def test_lora_scale_out_of_range_is_422(client_with_lora_model):
         "lora_scale": 3.5,
     })
     assert r.status_code == 422
+
+
+# ---------------- Finding 2 (v0.58.1 review): enveloped 500 ----------------
+
+
+def test_backend_error_in_generations_returns_openai_envelope():
+    """The main /v1/images/generations path (routes.py ~129-131) calls
+    model.generate() with no local try/except, so a backend exception used
+    to escape as FastAPI's bare `{"detail": "Internal Server Error"}`.
+    create_app's global exception handler must catch it and return the
+    documented OpenAI envelope instead."""
+
+    class _RaisingModel:
+        model_id = "fake-raising-sd"
+        default_size = (64, 64)
+
+        def generate(self, prompt, **kwargs):
+            raise RuntimeError("secret /internal/weights/path")
+
+    reg = ModalityRegistry()
+    reg.register("image/generation", _RaisingModel())
+    app = create_app(
+        registry=reg, routers={"image/generation": build_router(reg)},
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/images/generations", json={
+        "prompt": "a cat", "model": "fake-raising-sd",
+    })
+    assert r.status_code == 500
+    body = r.json()
+    assert "detail" not in body
+    assert body["error"]["code"] == "internal_error"
+    assert "secret /internal/weights/path" not in r.text

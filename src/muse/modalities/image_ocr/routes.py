@@ -80,9 +80,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("ocr call failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "ocr backend failed; see server logs",
+            )
 
         body = encode_ocr(result)
         # Override result.model_id with the effective registry id in

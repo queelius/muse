@@ -244,7 +244,9 @@ def test_text_route_backend_exception_returns_500():
     assert r.status_code == 500, r.text
     body = r.json()
     assert body["error"]["code"] == "internal_error"
-    assert "boom" in body["error"]["message"]
+    # Finding 1 (v0.58.1 review): the backend exception text must NOT
+    # reach the client body; only a generic message does.
+    assert "boom" not in body["error"]["message"]
 
 
 # ---------------- image route ----------------
@@ -469,7 +471,9 @@ def test_image_route_backend_exception_no_temp_file_left():
     )
     assert r.status_code == 500, r.text
     assert r.json()["error"]["code"] == "internal_error"
-    assert "boom" in r.json()["error"]["message"]
+    # Finding 1 (v0.58.1 review): the backend exception text must NOT
+    # reach the client body; only a generic message does.
+    assert "boom" not in r.json()["error"]["message"]
     # Backend was invoked with a PIL image.
     assert inputs_seen, "backend.image_to_3d was never called"
 
@@ -529,4 +533,6 @@ def test_image_route_backend_exception_returns_500():
     assert r.status_code == 500, r.text
     body = r.json()
     assert body["error"]["code"] == "internal_error"
-    assert "boom" in body["error"]["message"]
+    # Finding 1 (v0.58.1 review): the backend exception text must NOT
+    # reach the client body; only a generic message does.
+    assert "boom" not in body["error"]["message"]

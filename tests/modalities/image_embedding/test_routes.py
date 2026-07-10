@@ -360,3 +360,25 @@ def test_embeddings_indices_are_zero_based_and_ordered():
     body = r.json()
     for i, entry in enumerate(body["data"]):
         assert entry["index"] == i
+
+
+def test_backend_error_returns_openai_envelope():
+    """Finding 2 (v0.58.1 review): routes.py ~117 calls backend.embed()
+    with no local try/except, so a backend exception used to escape as
+    FastAPI's bare `{"detail": "Internal Server Error"}`. create_app's
+    global exception handler must catch it and return the documented
+    OpenAI envelope instead."""
+    backend = MagicMock()
+    backend.model_id = "dinov2-small"
+    backend.embed.side_effect = RuntimeError("secret /internal/weights/path")
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={"model_id": "dinov2-small"})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/images/embeddings", json={"input": [_png_data_url()]})
+    assert r.status_code == 500
+    body = r.json()
+    assert "detail" not in body
+    assert body["error"]["code"] == "internal_error"
+    assert "secret /internal/weights/path" not in r.text

@@ -39,7 +39,11 @@ logger = logging.getLogger(__name__)
 # Defaults are conservative. A request with text=10MB can OOM the worker
 # trying to tokenize it; cap is tunable via env so power users with big
 # GPUs can lift it.
-_MAX_TEXT_CHARS = config.get("limits.summarize_max_text_chars")
+#
+# Read per-request via muse.core.config so changes take effect without
+# a restart (matches the text_classification / text_translation pattern).
+def _max_text_chars() -> int:
+    return config.get("limits.summarize_max_text_chars")
 
 
 _VALID_LENGTHS = ("short", "medium", "long")
@@ -62,10 +66,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", "text must not be empty",
             )
-        if len(req.text) > _MAX_TEXT_CHARS:
+        max_text_chars = _max_text_chars()
+        if len(req.text) > max_text_chars:
             return error_response(
                 400, "invalid_parameter",
-                f"text exceeds MUSE_SUMMARIZE_MAX_TEXT_CHARS={_MAX_TEXT_CHARS}",
+                f"text exceeds MUSE_SUMMARIZE_MAX_TEXT_CHARS={max_text_chars}",
             )
         if req.length not in _VALID_LENGTHS:
             return error_response(
@@ -96,9 +101,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_summarize)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("summarize failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "summarization backend failed; see server logs",
+            )
         body = encode_summarization_response(result)
         return JSONResponse(content=body)
 

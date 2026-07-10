@@ -84,8 +84,15 @@ async def _non_stream(model, req: SpeechRequest) -> Response:
 
     try:
         wav = audio_to_wav_bytes(result.audio, result.sample_rate)
-    except AudioFormatError as e:
-        return error_response(500, "encoding_failed", str(e))
+    except AudioFormatError:
+        # Log the real exception server-side but never leak it to the
+        # client: str(e) can carry internal filesystem paths, CUDA
+        # driver text, or other backend-implementation detail.
+        logger.exception("wav encoding failed")
+        return error_response(
+            500, "encoding_failed",
+            "audio encoding backend failed; see server logs",
+        )
 
     if req.response_format == "opus":
         try:

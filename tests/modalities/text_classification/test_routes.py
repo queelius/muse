@@ -511,4 +511,6 @@ def test_moderations_runtime_exception_returns_500():
     assert r.status_code == 500
     body = r.json()
     assert body["error"]["code"] == "internal_error"
-    assert "simulated" in body["error"]["message"]
+    # Finding 1 (v0.58.1 review): the backend exception text must NOT
+    # reach the client body; only a generic message does.
+    assert "simulated" not in body["error"]["message"]

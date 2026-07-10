@@ -111,9 +111,15 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
 
     try:
         result = await asyncio.to_thread(_call)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        # Log the real exception server-side but never leak it to the
+        # client: str(e) can carry internal filesystem paths, CUDA
+        # driver text, or other backend-implementation detail.
         logger.exception("audio/generation %s call failed", kind)
-        return error_response(500, "internal_error", str(e))
+        return error_response(
+            500, "internal_error",
+            "audio generation backend failed; see server logs",
+        )
 
     try:
         body = _encode(req.response_format, result)

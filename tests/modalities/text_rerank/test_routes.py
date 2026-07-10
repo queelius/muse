@@ -217,31 +217,35 @@ def test_rerank_backend_error_returns_500_envelope():
 # ---------------- config-hierarchy migration (limits.rerank_*, multi-cap file) ----------------
 
 
-def test_rerank_caps_are_import_time_consts_sourced_from_config(monkeypatch):
-    """text_rerank/routes.py declares three import-time cap constants
-    (_MAX_DOCUMENTS, _MAX_QUERY_CHARS, _MAX_DOC_CHARS) from the same
-    limits.rerank_* keys. Prove each is sourced from muse.core.config,
-    not raw os.environ, by reloading the module under a changed env
-    and checking the frozen values."""
+def test_rerank_caps_are_read_live_per_request_not_frozen_at_import(monkeypatch):
+    """Finding 3 (v0.58.1 review): text_rerank/routes.py used to capture
+    _MAX_DOCUMENTS/_MAX_QUERY_CHARS/_MAX_DOC_CHARS as import-time module
+    constants, so a `muse config set` / env change was invisible to an
+    already-running worker until it restarted. The caps must now be read
+    per-request: change the env BETWEEN two requests (no module reload,
+    no process restart) and confirm the second request honors the new,
+    lower MUSE_RERANK_MAX_DOCUMENTS cap."""
     from muse.core import config as cfg
-    monkeypatch.setenv("MUSE_RERANK_MAX_DOCUMENTS", "17")
-    monkeypatch.setenv("MUSE_RERANK_MAX_QUERY_CHARS", "18")
-    monkeypatch.setenv("MUSE_RERANK_MAX_DOC_CHARS", "19")
-    cfg.reset_config()
-    assert cfg.get("limits.rerank_max_documents") == 17
-    assert cfg.get("limits.rerank_max_query_chars") == 18
-    assert cfg.get("limits.rerank_max_doc_chars") == 19
 
-    import importlib
-    from muse.modalities.text_rerank import routes as routes_mod
-    importlib.reload(routes_mod)
+    backend = MagicMock()
+    backend.model_id = "bge-reranker-v2-m3"
+    backend.rerank.return_value = [
+        RerankResult(index=0, relevance_score=0.5, document_text="a"),
+        RerankResult(index=1, relevance_score=0.4, document_text="b"),
+    ]
+    client = _make_client(backend)
+
+    # Before any override: two documents is well under the default cap.
+    r1 = client.post("/v1/rerank", json={"query": "q", "documents": ["a", "b"]})
+    assert r1.status_code == 200, r1.text
+
+    # Live reconfiguration -- no importlib.reload, no new client/app.
+    monkeypatch.setenv("MUSE_RERANK_MAX_DOCUMENTS", "1")
+    cfg.reset_config()
     try:
-        assert routes_mod._MAX_DOCUMENTS == 17
-        assert routes_mod._MAX_QUERY_CHARS == 18
-        assert routes_mod._MAX_DOC_CHARS == 19
+        r2 = client.post("/v1/rerank", json={"query": "q", "documents": ["a", "b"]})
+        assert r2.status_code == 400, r2.text
+        assert "MUSE_RERANK_MAX_DOCUMENTS=1" in r2.json()["error"]["message"]
     finally:
         monkeypatch.delenv("MUSE_RERANK_MAX_DOCUMENTS", raising=False)
-        monkeypatch.delenv("MUSE_RERANK_MAX_QUERY_CHARS", raising=False)
-        monkeypatch.delenv("MUSE_RERANK_MAX_DOC_CHARS", raising=False)
         cfg.reset_config()
-        importlib.reload(routes_mod)

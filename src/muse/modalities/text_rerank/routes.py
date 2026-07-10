@@ -37,9 +37,19 @@ logger = logging.getLogger(__name__)
 # Defaults are conservative. A request with documents=10000 can OOM the
 # worker by trying to materialize a giant batch of pairs. Caps are
 # tunable via env so power users with big GPUs can lift them.
-_MAX_DOCUMENTS = config.get("limits.rerank_max_documents")
-_MAX_QUERY_CHARS = config.get("limits.rerank_max_query_chars")
-_MAX_DOC_CHARS = config.get("limits.rerank_max_doc_chars")
+#
+# Read per-request via muse.core.config so changes take effect without
+# a restart (matches the text_classification / text_translation pattern).
+def _max_documents() -> int:
+    return config.get("limits.rerank_max_documents")
+
+
+def _max_query_chars() -> int:
+    return config.get("limits.rerank_max_query_chars")
+
+
+def _max_doc_chars() -> int:
+    return config.get("limits.rerank_max_doc_chars")
 
 
 class _RerankRequest(BaseModel):
@@ -59,20 +69,22 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", "query must not be empty",
             )
-        if len(req.query) > _MAX_QUERY_CHARS:
+        max_query_chars = _max_query_chars()
+        if len(req.query) > max_query_chars:
             return error_response(
                 400, "invalid_parameter",
-                f"query exceeds MUSE_RERANK_MAX_QUERY_CHARS={_MAX_QUERY_CHARS}",
+                f"query exceeds MUSE_RERANK_MAX_QUERY_CHARS={max_query_chars}",
             )
         if not req.documents:
             return error_response(
                 400, "invalid_parameter", "documents must be a non-empty list",
             )
-        if len(req.documents) > _MAX_DOCUMENTS:
+        max_documents = _max_documents()
+        if len(req.documents) > max_documents:
             return error_response(
                 400, "invalid_parameter",
                 f"documents batch size {len(req.documents)} exceeds "
-                f"MUSE_RERANK_MAX_DOCUMENTS={_MAX_DOCUMENTS}",
+                f"MUSE_RERANK_MAX_DOCUMENTS={max_documents}",
             )
         empty_idx = next(
             (i for i, s in enumerate(req.documents) if not s), None,
@@ -82,15 +94,16 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_parameter",
                 f"documents[{empty_idx}] must not be empty",
             )
+        max_doc_chars = _max_doc_chars()
         too_long = next(
-            (i for i, s in enumerate(req.documents) if len(s) > _MAX_DOC_CHARS),
+            (i for i, s in enumerate(req.documents) if len(s) > max_doc_chars),
             None,
         )
         if too_long is not None:
             return error_response(
                 400, "invalid_parameter",
                 f"documents[{too_long}] exceeds "
-                f"MUSE_RERANK_MAX_DOC_CHARS={_MAX_DOC_CHARS}",
+                f"MUSE_RERANK_MAX_DOC_CHARS={max_doc_chars}",
             )
 
         try:
@@ -113,9 +126,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             results = await asyncio.to_thread(_rerank)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("rerank failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "rerank backend failed; see server logs",
+            )
         body = encode_rerank_response(
             results,
             model_id=effective_id,

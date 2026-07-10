@@ -94,9 +94,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             results = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("audio classify failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "audio classification backend failed; see server logs",
+            )
         finally:
             try:
                 os.unlink(tmp_path)

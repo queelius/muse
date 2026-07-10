@@ -43,8 +43,15 @@ MODALITY = "embedding/text"
 # prevent worker OOM on giant batches). Embedding caps are higher
 # because RAG ingestion legitimately wants thousands at a time, but
 # they're still finite.
-_MAX_BATCH = config.get("limits.embeddings_max_batch")
-_MAX_CHARS_PER_ITEM = config.get("limits.embeddings_max_chars_per_item")
+#
+# Read per-request via muse.core.config so changes take effect without
+# a restart (matches the text_classification / text_translation pattern).
+def _max_batch() -> int:
+    return config.get("limits.embeddings_max_batch")
+
+
+def _max_chars_per_item() -> int:
+    return config.get("limits.embeddings_max_chars_per_item")
 
 
 class EmbeddingsRequest(BaseModel):
@@ -76,21 +83,23 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.post("/embeddings")
     async def embeddings(req: EmbeddingsRequest):
         items = [req.input] if isinstance(req.input, str) else req.input
-        if len(items) > _MAX_BATCH:
+        max_batch = _max_batch()
+        if len(items) > max_batch:
             return error_response(
                 400, "invalid_parameter",
                 f"input batch size {len(items)} exceeds "
-                f"MUSE_EMBEDDINGS_MAX_BATCH={_MAX_BATCH}",
+                f"MUSE_EMBEDDINGS_MAX_BATCH={max_batch}",
             )
+        max_chars_per_item = _max_chars_per_item()
         too_long = next(
-            (i for i, s in enumerate(items) if len(s) > _MAX_CHARS_PER_ITEM),
+            (i for i, s in enumerate(items) if len(s) > max_chars_per_item),
             None,
         )
         if too_long is not None:
             return error_response(
                 400, "invalid_parameter",
                 f"input[{too_long}] exceeds "
-                f"MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM={_MAX_CHARS_PER_ITEM}",
+                f"MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM={max_chars_per_item}",
             )
 
         try:
@@ -106,9 +115,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("embed failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "embedding backend failed; see server logs",
+            )
 
         data = []
         for i, vec in enumerate(result.embeddings):

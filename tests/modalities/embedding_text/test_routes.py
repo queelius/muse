@@ -207,26 +207,41 @@ def test_oversized_item_returns_400(monkeypatch):
 # ---------------- config-hierarchy migration (limits.embeddings_max_batch) ----------------
 
 
-def test_max_batch_is_import_time_const_sourced_from_config(monkeypatch):
-    """_MAX_BATCH is a module-level constant frozen at import time, so
-    the module itself can't observe an env change after import -- but
-    the value it froze must have come from muse.core.config, not raw
-    os.environ. Prove it by comparing what a fresh import captures
-    against what config.get() resolves for the same env value."""
+def test_max_batch_is_read_live_per_request_not_frozen_at_import(monkeypatch):
+    """Finding 3 (v0.58.1 review): embedding_text/routes.py used to
+    capture _MAX_BATCH as an import-time module constant, so a
+    `muse config set` / env change was invisible to an already-running
+    worker until it restarted. The cap must now be read per-request:
+    change the env BETWEEN two requests (no module reload, no process
+    restart) and confirm the second request honors the new, lower
+    MUSE_EMBEDDINGS_MAX_BATCH cap."""
     from muse.core import config as cfg
-    monkeypatch.setenv("MUSE_EMBEDDINGS_MAX_BATCH", "5150")
-    cfg.reset_config()
-    assert cfg.get("limits.embeddings_max_batch") == 5150
 
-    import importlib
-    from muse.modalities.embedding_text import routes as routes_mod
-    importlib.reload(routes_mod)
+    reg = ModalityRegistry()
+    reg.register("embedding/text", FakeEmbeddingsModel())
+    app = create_app(
+        registry=reg, routers={"embedding/text": build_router(reg)},
+    )
+    client = TestClient(app)
+
+    # Before any override: a 2-item batch is well under the default cap.
+    r1 = client.post("/v1/embeddings", json={
+        "input": ["a", "b"], "model": "fake-embed",
+    })
+    assert r1.status_code == 200, r1.text
+
+    # Live reconfiguration -- no importlib.reload, no new client/app.
+    monkeypatch.setenv("MUSE_EMBEDDINGS_MAX_BATCH", "1")
+    cfg.reset_config()
     try:
-        assert routes_mod._MAX_BATCH == 5150
+        r2 = client.post("/v1/embeddings", json={
+            "input": ["a", "b"], "model": "fake-embed",
+        })
+        assert r2.status_code == 400, r2.text
+        assert "MUSE_EMBEDDINGS_MAX_BATCH=1" in r2.json()["error"]["message"]
     finally:
         monkeypatch.delenv("MUSE_EMBEDDINGS_MAX_BATCH", raising=False)
         cfg.reset_config()
-        importlib.reload(routes_mod)
 
 
 def test_embed_backend_error_returns_500_envelope():

@@ -163,3 +163,34 @@ def test_post_frames_out_of_range_rejected(client_text_only):
         "prompt": "x", "model": "fake-anim", "frames": 999,
     })
     assert r.status_code in (400, 422)
+
+
+def test_backend_error_returns_openai_envelope():
+    """Finding 2 (v0.58.1 review): routes.py ~96-98 calls model.generate()
+    with no local try/except, so a backend exception used to escape as
+    FastAPI's bare `{"detail": "Internal Server Error"}`. create_app's
+    global exception handler must catch it and return the documented
+    OpenAI envelope instead."""
+
+    class _RaisingModel:
+        model_id = "fake-anim-raising"
+
+        def generate(self, prompt, **kwargs):
+            raise RuntimeError("secret /internal/weights/path")
+
+    reg = ModalityRegistry()
+    reg.register(MODALITY, _RaisingModel(), manifest={
+        "model_id": "fake-anim-raising",
+        "capabilities": {"supports_text_to_animation": True},
+    })
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.post("/v1/images/animations", json={
+        "prompt": "x", "model": "fake-anim-raising",
+    })
+    assert r.status_code == 500
+    body = r.json()
+    assert "detail" not in body
+    assert body["error"]["code"] == "internal_error"
+    assert "secret /internal/weights/path" not in r.text

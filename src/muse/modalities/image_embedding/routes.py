@@ -46,7 +46,11 @@ MODALITY = "image/embedding"
 # Conservative caps: a request with input=[10MB image] x 100 entries
 # would OOM the worker decoding the batch. Tunable via env so power
 # users with big GPUs can lift them.
-_MAX_BATCH = config.get("limits.image_embeddings_max_batch")
+#
+# Read per-request via muse.core.config so changes take effect without
+# a restart (matches the text_classification / text_translation pattern).
+def _max_batch() -> int:
+    return config.get("limits.image_embeddings_max_batch")
 
 
 class _ImageEmbeddingsRequest(BaseModel):
@@ -82,11 +86,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.post("/v1/images/embeddings")
     async def images_embeddings(req: _ImageEmbeddingsRequest):
         items = [req.input] if isinstance(req.input, str) else req.input
-        if len(items) > _MAX_BATCH:
+        max_batch = _max_batch()
+        if len(items) > max_batch:
             return error_response(
                 400, "invalid_parameter",
                 f"input batch size {len(items)} exceeds "
-                f"MUSE_IMAGE_EMBEDDINGS_MAX_BATCH={_MAX_BATCH}",
+                f"MUSE_IMAGE_EMBEDDINGS_MAX_BATCH={max_batch}",
             )
 
         try:

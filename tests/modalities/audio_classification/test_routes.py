@@ -151,7 +151,9 @@ def test_runtime_exception_returns_500():
     assert r.status_code == 500
     body = r.json()
     assert body["error"]["code"] == "internal_error"
-    assert "boom" in body["error"]["message"]
+    # Finding 1 (v0.58.1 review): the backend exception text must NOT
+    # reach the client body; only a generic message does.
+    assert "boom" not in body["error"]["message"]
 
 
 def test_temp_file_passed_to_backend():

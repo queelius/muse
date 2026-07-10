@@ -135,9 +135,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             results = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("text_to_3d failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "text-to-3d backend failed; see server logs",
+            )
 
         body = encode_3d_response(
             results,
@@ -236,9 +242,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             results = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("image_to_3d failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "image-to-3d backend failed; see server logs",
+            )
 
         body = encode_3d_response(
             results,

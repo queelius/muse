@@ -140,6 +140,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                         "unsupported_media_type",
                         f"audio decode failed: {e}",
                     )
+                # Deliberately re-raise everything else so a real bug
+                # surfaces instead of being masked as a 415. This used to
+                # escape as FastAPI's bare `{"detail": "Internal Server
+                # Error"}`; create_app's global Exception handler (added
+                # v0.58.1) now catches it and returns the OpenAI-shape
+                # 500 envelope, logging the real exception server-side.
                 raise
 
         body, content_type = encode_transcription(

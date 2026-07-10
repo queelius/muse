@@ -22,7 +22,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from muse.core.errors import ModelNotFoundError
+from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,32 @@ def create_app(
                     "type": "invalid_request_error",
                 }
             },
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        # Finding 2 (v0.58.1 review): several routes call a backend
+        # without wrapping the call in their own try/except, so a backend
+        # exception used to escape as FastAPI's bare
+        # `{"detail": "Internal Server Error"}` -- neither the OpenAI
+        # envelope shape muse documents nor a shape that avoids leaking
+        # exception text. This catch-all is the structural fix: log the
+        # real exception server-side (path/CUDA/model detail is
+        # operationally useful) and return a generic OpenAI-shape 500 to
+        # every client, regardless of which route raised.
+        #
+        # `ModelNotFoundError` (an HTTPException subclass) and
+        # `RequestValidationError` are handled by their own
+        # `@app.exception_handler` above; Starlette's ExceptionMiddleware
+        # matches those specific handlers before an unhandled exception
+        # ever reaches this generic one, so this handler only ever sees
+        # genuinely unhandled backend/runtime failures.
+        logger.exception(
+            "unhandled exception in %s %s", request.method, request.url.path,
+        )
+        return error_response(
+            500, "internal_error",
+            "internal server error; see server logs",
         )
 
     @app.get("/health")

@@ -11,6 +11,50 @@ def test_create_app_returns_fastapi():
     assert isinstance(app, FastAPI)
 
 
+def test_unhandled_exception_returns_openai_envelope_not_bare_500():
+    """Finding 2 (v0.58.1 review): a route whose backend call is NOT
+    wrapped in its own try/except must still surface the OpenAI-shape
+    error envelope, not FastAPI's bare `{"detail": "Internal Server
+    Error"}`. create_app installs one global Exception handler so this
+    holds for every mounted router, not just the ones that remembered to
+    catch locally."""
+    router = APIRouter()
+
+    @router.get("/boom")
+    def boom():
+        raise RuntimeError("secret /internal/path detail")
+
+    app = create_app(registry=ModalityRegistry(), routers={"x": router})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.get("/boom")
+    assert r.status_code == 500
+    body = r.json()
+    assert "detail" not in body
+    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["type"] == "server_error"
+    assert "secret /internal/path detail" not in r.text
+
+
+def test_model_not_found_error_handler_still_wins_over_global_handler():
+    """ModelNotFoundError's dedicated handler (404 + its own envelope)
+    must take precedence over the new catch-all Exception handler."""
+    from muse.core.errors import ModelNotFoundError
+
+    router = APIRouter()
+
+    @router.get("/missing")
+    def missing():
+        raise ModelNotFoundError(model_id="nope", modality="audio/speech")
+
+    app = create_app(registry=ModalityRegistry(), routers={"x": router})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r = client.get("/missing")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "model_not_found"
+
+
 def test_root_health_endpoint():
     app = create_app(registry=ModalityRegistry(), routers={})
     client = TestClient(app)

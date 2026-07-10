@@ -100,9 +100,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             for i in range(req.n):
                 r = await asyncio.to_thread(_call_one, i)
                 results.append(r)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("video generation failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "video generation backend failed; see server logs",
+            )
 
         # frames_b64 inlines every frame; guard the response payload size.
         # Checked post-generation because the frame count is only known once
@@ -131,9 +137,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 # empty"). That's a backend/model misbehavior, not a
                 # bad request, so surface it as the OpenAI-shape 500
                 # envelope instead of letting it escape to FastAPI's
-                # bare default handler.
+                # bare default handler. Log the real exception server-side
+                # but never leak it to the client: str(e) can carry
+                # internal filesystem paths or other implementation detail.
                 logger.exception("video encode failed")
-                return error_response(500, "internal_error", str(e))
+                return error_response(
+                    500, "internal_error",
+                    "video encoding backend failed; see server logs",
+                )
             if req.response_format == "frames_b64":
                 # encoded is list[str]; expand into per-frame data entries.
                 # For n>1 the per-result frame lists are appended in order;

@@ -113,9 +113,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("estimate_depth failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "depth estimation backend failed; see server logs",
+            )
 
         try:
             body = encode_depth_envelope(
@@ -160,9 +166,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("detect_keypoints failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "keypoint detection backend failed; see server logs",
+            )
 
         body = encode_keypoints_envelope(result)
         body["model"] = backend.model_id
@@ -210,9 +222,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             result = await asyncio.to_thread(_call)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Log the real exception server-side but never leak it to the
+            # client: str(e) can carry internal filesystem paths, CUDA
+            # driver text, or other backend-implementation detail.
             logger.exception("detect_objects failed")
-            return error_response(500, "internal_error", str(e))
+            return error_response(
+                500, "internal_error",
+                "object detection backend failed; see server logs",
+            )
 
         body = encode_detections_envelope(result)
         body["model"] = backend.model_id
