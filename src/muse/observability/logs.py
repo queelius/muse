@@ -12,6 +12,14 @@ import collections
 import queue
 import threading
 
+# Bounds a stalled subscriber's queue to this many buffered lines. A
+# healthy consumer (the SSE tail polls hub.subscribe() every 250ms, see
+# dashboard.py) drains far faster than workers emit, so this only bites
+# a disconnected-but-not-yet-unsubscribed or genuinely slow client, and
+# caps its memory growth instead of letting it accumulate for the life
+# of the connection.
+SUBSCRIBER_QUEUE_MAXSIZE = 1024
+
 
 class LogHub:
     """Buffers recent log lines per model_id and fans them out to subscribers.
@@ -62,7 +70,7 @@ class LogHub:
             return list(buf) if buf is not None else []
 
     def subscribe(self, model_id: str) -> queue.Queue:
-        q: queue.Queue = queue.Queue()
+        q: queue.Queue = queue.Queue(maxsize=SUBSCRIBER_QUEUE_MAXSIZE)
         with self._lock:
             self._subscribers.setdefault(model_id, set()).add(q)
         return q

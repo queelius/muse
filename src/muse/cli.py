@@ -44,6 +44,30 @@ class LogLevel(str, Enum):
     ERROR = "ERROR"
 
 
+class AdminActionOutcome(str, Enum):
+    """Three-way result of `_try_admin_action`.
+
+    - SUCCESS: the admin API handled the action; caller returns (exit 0).
+    - FAILED: the admin API was consulted and the action definitively
+      failed (job finished non-done, or a non-503 AdminClientError);
+      caller raises `typer.Exit(2)`.
+    - TIMEOUT: a distinguished FAILED sub-case -- the async job's status
+      poll timed out before reaching a terminal state. This is genuinely
+      ambiguous (the job may still complete server-side), so it is NOT
+      folded into FAILED; callers raise `typer.Exit(3)` to give operators
+      a distinct signal from a hard failure.
+    - NOT_HANDLED: no admin token configured, the admin API is
+      unreachable, or it reports 503 admin_disabled -- caller falls
+      through to the catalog-only path exactly as if no admin API
+      existed.
+    """
+
+    SUCCESS = "success"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    NOT_HANDLED = "not_handled"
+
+
 class Device(str, Enum):
     auto = "auto"
     cpu = "cpu"
@@ -561,8 +585,15 @@ def models_enable(
     change live (worker spawn or restart-in-place). Otherwise it falls
     back to mutating catalog.json directly with a warning.
     """
-    if _try_admin_action("enable", model_id):
+    outcome = _try_admin_action("enable", model_id)
+    if outcome is AdminActionOutcome.SUCCESS:
         return
+    if outcome is AdminActionOutcome.FAILED:
+        raise typer.Exit(2)
+    if outcome is AdminActionOutcome.TIMEOUT:
+        raise typer.Exit(3)
+    # NOT_HANDLED: no admin token / admin unreachable / admin disabled
+    # (503) -- fall through to the catalog-only path exactly as today.
 
     from muse.core.catalog import set_enabled
     try:
@@ -584,8 +615,14 @@ def models_disable(
     Stays in catalog, not loaded by `muse serve`. Same admin-API
     routing as `enable`.
     """
-    if _try_admin_action("disable", model_id):
+    outcome = _try_admin_action("disable", model_id)
+    if outcome is AdminActionOutcome.SUCCESS:
         return
+    if outcome is AdminActionOutcome.FAILED:
+        raise typer.Exit(2)
+    if outcome is AdminActionOutcome.TIMEOUT:
+        raise typer.Exit(3)
+    # NOT_HANDLED: fall through to the catalog-only path exactly as today.
 
     from muse.core.catalog import set_enabled
     try:
@@ -1041,15 +1078,23 @@ def _public_loaded_status(model_id: str) -> dict | None:
     return {"loaded": model_id in loaded_ids(data), "detail_source": "public"}
 
 
-def _try_admin_action(action: str, model_id: str) -> bool:
-    """Try the admin-API path for enable/disable; return True iff used."""
+def _try_admin_action(action: str, model_id: str) -> AdminActionOutcome:
+    """Try the admin-API path for enable/disable.
+
+    Returns an `AdminActionOutcome` (see its docstring for the meaning
+    of each value). Callers must NOT collapse this back to a bool: a
+    FAILED or TIMEOUT outcome means the admin API WAS consulted and the
+    action did not cleanly succeed, which is different from NOT_HANDLED
+    (no admin token / unreachable / 503 admin_disabled), where falling
+    through to the catalog-only path is correct.
+    """
     from muse.core import config
     if not config.get("admin.token"):
-        return False
+        return AdminActionOutcome.NOT_HANDLED
     try:
         from muse.admin.client import AdminClient, AdminClientError
     except Exception:  # noqa: BLE001
-        return False
+        return AdminActionOutcome.NOT_HANDLED
     client = AdminClient(timeout=5.0)
     try:
         if action == "enable":
@@ -1063,7 +1108,7 @@ def _try_admin_action(action: str, model_id: str) -> bool:
                 # the catalog-only fallback (which would both re-do the
                 # mutation and print a misleading "catalog only" message).
                 typer.echo(f"enabled {model_id} (admin API accepted)")
-                return True
+                return AdminActionOutcome.SUCCESS
             typer.echo(f"enable job submitted: {job_id}")
             try:
                 final = client.wait(job_id, timeout=120.0, poll=0.5)
@@ -1073,17 +1118,17 @@ def _try_admin_action(action: str, model_id: str) -> bool:
                     if port:
                         msg += f" (worker port {port})"
                     typer.echo(msg)
-                    return True
+                    return AdminActionOutcome.SUCCESS
                 typer.echo(
                     f"error: enable failed: {final.get('error')}", err=True,
                 )
-                return True
+                return AdminActionOutcome.FAILED
             except TimeoutError:
                 typer.echo(
                     f"warning: enable still running; poll job {job_id} for status",
                     err=True,
                 )
-                return True
+                return AdminActionOutcome.TIMEOUT
         elif action == "disable":
             out = client.disable(model_id)
             typer.echo(f"disabled {model_id}")
@@ -1095,19 +1140,19 @@ def _try_admin_action(action: str, model_id: str) -> bool:
                     f"  worker on port {out['worker_port']} restarted; "
                     f"remaining models: {', '.join(remaining)}"
                 )
-            return True
+            return AdminActionOutcome.SUCCESS
     except AdminClientError as e:
         if e.status == 503 or e.code == "admin_disabled":
-            return False
+            return AdminActionOutcome.NOT_HANDLED
         typer.echo(f"error: {e.message}", err=True)
-        return True
+        return AdminActionOutcome.FAILED
     except Exception as e:  # noqa: BLE001
         typer.echo(
             f"warning: admin API unreachable ({e}); falling back to catalog-only update",
             err=True,
         )
-        return False
-    return False
+        return AdminActionOutcome.NOT_HANDLED
+    return AdminActionOutcome.NOT_HANDLED
 
 
 def main(argv: list[str] | None = None) -> int:

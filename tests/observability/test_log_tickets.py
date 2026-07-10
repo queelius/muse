@@ -55,6 +55,20 @@ def test_reusable_within_ttl_not_single_use():
     assert store.validate(ticket) is True
 
 
+def test_validate_prunes_all_expired_tickets_not_just_the_one_checked():
+    """Regression: validate() only pruned the ticket it was checking, so
+    abandoned expired tickets accumulated in the store for process
+    lifetime. validate() must sweep every expired entry on each call.
+    """
+    store = LogTicketStore(0.0)
+    t1, _ = store.mint()
+    t2, _ = store.mint()
+    # Both already expired (0.0 TTL). Validate an unrelated third token.
+    assert store.validate("some-other-unknown-token") is False
+    assert t1 not in store._tickets
+    assert t2 not in store._tickets
+
+
 def test_two_mints_are_distinct():
     store = LogTicketStore(60.0)
     t1, _ = store.mint()

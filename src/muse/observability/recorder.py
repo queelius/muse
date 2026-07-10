@@ -35,15 +35,36 @@ class TelemetryRecorder:
         self._flush_interval = flush_interval
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max_queue)
         self.dropped = 0
+        # Guards `dropped` increments: record() is called from arbitrary
+        # request-handling threads across the process, so a bare `+= 1`
+        # is a cross-thread read-modify-write that can under-report the
+        # true drop count under concurrent callers.
+        self._dropped_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def _mark_dropped(self) -> None:
+        with self._dropped_lock:
+            self.dropped += 1
+
     def record(self, type: str, **fields: Any) -> None:
-        row = event_to_row(type, time.time(), **fields)
+        # event_to_row() raises ValueError on an unknown field name (a
+        # typo'd kwarg). record() must never raise -- treat a bad field
+        # the same as a dropped event rather than letting it escape into
+        # a hot request-handling path.
+        try:
+            row = event_to_row(type, time.time(), **fields)
+        except ValueError:
+            logger.warning(
+                "telemetry recorder: dropping event with unknown field(s) "
+                "type=%r fields=%r", type, sorted(fields), exc_info=True,
+            )
+            self._mark_dropped()
+            return
         try:
             self._queue.put_nowait(row)
         except queue.Full:
-            self.dropped += 1
+            self._mark_dropped()
 
     def flush(self) -> None:
         rows: list[dict[str, Any]] = []

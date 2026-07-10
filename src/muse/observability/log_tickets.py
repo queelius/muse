@@ -54,19 +54,22 @@ class LogTicketStore:
     def validate(self, ticket: str | None) -> bool:
         """True iff `ticket` exists and has not expired.
 
-        Lazily prunes: an expired ticket is dropped from the store as a
-        side effect of being checked, whether or not it was the one
-        found. A non-existent, empty, or None ticket returns False
-        without raising.
+        Lazily prunes: EVERY expired entry in the store (not just the
+        ticket being checked) is dropped as a side effect of calling
+        this method. Without this, tickets that are minted but never
+        re-validated (a client that mints and then never opens the SSE
+        connection, or reconnects with a fresh ticket) would sit in
+        `_tickets` for the lifetime of the process. A non-existent,
+        empty, or None ticket returns False without raising.
         """
         if not ticket:
             return False
         now = time.monotonic()
         with self._lock:
+            expired = [t for t, expiry in self._tickets.items() if expiry <= now]
+            for t in expired:
+                del self._tickets[t]
             expiry = self._tickets.get(ticket)
             if expiry is None:
-                return False
-            if expiry <= now:
-                del self._tickets[ticket]
                 return False
             return True

@@ -36,3 +36,30 @@ def test_disabled_init_is_noop(tmp_path):
     rec.init_recorder(store, enabled=False)
     rec.record("request", model_id="m")
     assert store.summary_counts()["total"] == 0
+
+
+def test_record_with_unknown_field_does_not_raise_and_counts_as_dropped(tmp_path):
+    """Regression: event_to_row() ran BEFORE the try/except in record(),
+    so an unknown kwarg (e.g. a typo'd field name) raised ValueError
+    straight out of record(), violating its never-raises contract.
+    """
+    store = TelemetryStore(tmp_path / "t.db")
+    r = rec.TelemetryRecorder(store)
+    r.record("model_load", bogus_field=1)  # must not raise
+    assert r.dropped == 1
+    r.stop(); store.close()
+
+
+def test_dropped_counter_increments_are_lock_protected(tmp_path):
+    """Sanity check that the dropped counter still increments correctly
+    under normal (single-threaded) use across both drop sites: queue
+    overflow and a bad field name.
+    """
+    store = TelemetryStore(tmp_path / "t.db")
+    r = rec.TelemetryRecorder(store, max_queue=1)
+    assert hasattr(r, "_dropped_lock")
+    r.record("sample", free_vram_gb=1.0)
+    r.record("sample", free_vram_gb=1.0)  # queue full -> dropped
+    r.record("model_load", bogus_field=1)  # bad field -> dropped
+    assert r.dropped == 2
+    r.stop(); store.close()
