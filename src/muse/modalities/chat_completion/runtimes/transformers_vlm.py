@@ -121,6 +121,16 @@ class HFVisionLanguageModel:
         self.supports_multi_image = bool(supports_multi_image)
         self._device = select_device(device, torch_module=torch)
         self._dtype = dtype_for_name(dtype, torch_module=torch)
+        # fp16/bf16 on CPU crashes at generate() with
+        # '"addmm_impl_cpu_" not implemented for Half' (no CPU kernel
+        # for half-precision matmul); coerce to fp32 once the device is
+        # resolved. Mirrors the precedent in bark_small.py and
+        # faster_whisper.py, which pick dtype from the resolved device
+        # rather than trusting the caller's requested dtype verbatim.
+        if self._device == "cpu" and self._dtype in (
+            getattr(torch, "float16", None), getattr(torch, "bfloat16", None),
+        ):
+            self._dtype = torch.float32
         self._default_max_new_tokens = max_new_tokens
         src = local_dir or hf_repo
         with LoadTimer(f"loading VLM from {src}", logger):

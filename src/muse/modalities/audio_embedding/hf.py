@@ -77,12 +77,19 @@ def _infer_defaults(repo_id: str) -> dict[str, Any]:
             "dimensions": 512,
             "sample_rate": 48000,
         }
-    # MERT v1: music understanding, mean-pool over time.
+    # MERT v1: music understanding, mean-pool over time. Needs
+    # trust_remote_code=True (the repo ships a custom feature
+    # extractor); _download already pulls *.py for this reason, so
+    # the capability must actually be set or the runtime's
+    # trust_remote_code=False default raises transformers' error at
+    # load. Only the MERT family gets this flag; every other pattern
+    # stays security-conservative (no trust_remote_code key at all).
     if "mert" in rid:
         return {
             "supports_text_embeddings_too": False,
             "dimensions": 768,
             "sample_rate": 24000,
+            "trust_remote_code": True,
         }
     # wav2vec / wav2vec2: speech foundation models, hidden_size pool.
     if "wav2vec" in rid:

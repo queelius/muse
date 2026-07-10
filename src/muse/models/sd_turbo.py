@@ -96,10 +96,13 @@ MANIFEST = {
     ),
     "system_packages": (),
     "capabilities": {
-        # CUDA-safe: loads on GPU when present (~4GB fp16). "auto" (not
-        # omitted) so the control plane sizes it against the VRAM pool,
-        # not host RAM (else GPU OOM). Default image/generation model.
-        "device": "auto",
+        # Pinned "cuda", not "auto": allow_patterns below downloads ONLY
+        # *.fp16.safetensors (no fp32 weights on disk), so an "auto"
+        # resolution on a CPU-only host would load an fp16 pipeline that
+        # errors at inference (no CPU kernel for half-precision matmul).
+        # CPU diffusion is impractical anyway. Matches the
+        # stable-audio-open / animatediff / x4-upscaler precedent.
+        "device": "cuda",
         "default_size": (512, 512),
         "supports_negative_prompt": True,
         "supports_seeded_generation": True,

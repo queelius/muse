@@ -201,6 +201,33 @@ def _ids_slice(length):
     return s
 
 
+def test_cpu_device_coerces_fp16_default_to_fp32():
+    """Finding 1 (High): fp16-on-CPU crashes at generate() with
+    '"addmm_impl_cpu_" not implemented for Half'. The bundled default
+    VLM (smolvlm-256m-instruct) declares device 'auto' and no dtype
+    override, so on a CPU-only host it must load fp32, not fp16."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+    mod.HFVisionLanguageModel(
+        model_id="m", hf_repo="x", device="cpu",
+    )
+    call_kwargs = mod.AutoModelForImageTextToText.from_pretrained.call_args.kwargs
+    assert call_kwargs["torch_dtype"] == mod.torch.float32
+
+
+def test_cuda_device_keeps_fp16_default():
+    """Companion: a GPU host must still get fp16 by default (no
+    regression to always-fp32)."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+    mod.torch.cuda.is_available.return_value = True
+    mod.HFVisionLanguageModel(
+        model_id="m", hf_repo="x", device="cuda",
+    )
+    call_kwargs = mod.AutoModelForImageTextToText.from_pretrained.call_args.kwargs
+    assert call_kwargs["torch_dtype"] == mod.torch.float16
+
+
 def test_chat_text_only_returns_chat_result():
     import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
     processor, _ = _wire_runtime(mod, decoded_text="text reply")

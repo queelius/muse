@@ -208,6 +208,37 @@ def test_resolve_fallback_when_unknown_pattern():
     assert caps["supports_text_embeddings_too"] is False
 
 
+def test_resolve_mert_repo_sets_trust_remote_code_true():
+    """Finding 3 (Low): _download deliberately pulls *.py 'so
+    trust_remote_code paths can read the custom feature extractor
+    (e.g. MERT)', but _resolve never set the capability, so the
+    runtime's trust_remote_code=False default made a pulled
+    hf://...mert-* repo raise transformers' trust_remote_code error at
+    load. MERT-family repos must carry trust_remote_code=True."""
+    info = _fake_info(
+        "m-a-p/MERT-v1-95M",
+        tags=["feature-extraction"],
+        siblings=["preprocessor_config.json"],
+    )
+    resolved = HF_PLUGIN["resolve"]("m-a-p/MERT-v1-95M", None, info)
+    caps = resolved.manifest["capabilities"]
+    assert caps["trust_remote_code"] is True
+
+
+def test_resolve_wav2vec_repo_does_not_set_trust_remote_code():
+    """Security-conservative: only the MERT family gets
+    trust_remote_code=True. Every other family (wav2vec here) must NOT
+    carry the flag at all (absent, not even False)."""
+    info = _fake_info(
+        "facebook/wav2vec2-base-960h",
+        tags=["feature-extraction"],
+        siblings=["preprocessor_config.json"],
+    )
+    resolved = HF_PLUGIN["resolve"]("facebook/wav2vec2-base-960h", None, info)
+    caps = resolved.manifest["capabilities"]
+    assert "trust_remote_code" not in caps
+
+
 def test_resolve_backend_path_points_to_runtime():
     info = _fake_info(
         "laion/clap-htsat-fused",

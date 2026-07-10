@@ -21,6 +21,18 @@ def test_manifest_has_required_fields():
     assert "pip_extras" in MANIFEST
 
 
+def test_manifest_pins_cuda_device_not_auto():
+    """Finding 2 (Medium): sd-turbo's allow_patterns download ONLY
+    *.fp16.safetensors -- no fp32 weights exist on disk. A device:auto
+    resolution on a CPU-only host would load an fp16 pipeline that
+    errors at inference (no CPU kernel for half-precision matmul).
+    Pin device to 'cuda' (matching stable-audio-open / animatediff /
+    x4-upscaler precedent) so a CPU-only host correctly reports this
+    model unservable instead of silently 500ing on first request."""
+    from muse.models.sd_turbo import MANIFEST
+    assert MANIFEST["capabilities"]["device"] == "cuda"
+
+
 def test_manifest_pip_extras_declares_transformers_and_torch():
     """sd-turbo's pipeline internally needs transformers (CLIP text
     encoder) and torch; both must be explicitly declared so per-model
