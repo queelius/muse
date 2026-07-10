@@ -753,6 +753,39 @@ class TestProbeAndPull:
         assert job.state == "failed"
         assert "timed out" in job.error
 
+    def test_pull_cmd_has_dashdash_terminator_before_identifier(
+        self, tmp_catalog, store,
+    ):
+        """A caller-influenced identifier beginning with '-' must not be
+        parseable as a click option: '--' must appear immediately before
+        the positional identifier."""
+        job = store.create("pull", "--evil-id")
+        with patch("muse.admin.operations.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="pulled", stderr="",
+            )
+            pull_model("--evil-id", store=store, job=job)
+        cmd = mock_run.call_args.args[0]
+        assert cmd[-2:] == ["--", "--evil-id"], cmd
+
+    def test_probe_cmd_has_dashdash_terminator_before_identifier(
+        self, tmp_catalog, store,
+    ):
+        job = store.create("probe", "--evil-id")
+        with patch("muse.admin.operations.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="ok", stderr="",
+            )
+            probe_model(
+                "--evil-id", no_inference=True, device="cpu",
+                store=store, job=job,
+            )
+        cmd = mock_run.call_args.args[0]
+        assert cmd[-2:] == ["--", "--evil-id"], cmd
+        # options must still precede the terminator so they parse as options
+        assert "--no-inference" in cmd[:cmd.index("--")]
+        assert "--device" in cmd[:cmd.index("--")]
+
 
 class TestLaunchAsync:
     def test_creates_job_and_thread(self, store):

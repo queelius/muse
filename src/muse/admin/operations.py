@@ -808,12 +808,20 @@ def probe_model(
     Captures stdout/stderr into job.log_lines.
     """
     store.update(job.job_id, state="running")
-    cmd = [sys.executable, "-m", "muse.cli", "models", "probe", model_id]
+    # "--" terminates option parsing so a caller-influenced model_id that
+    # begins with "-" (e.g. "--evil-id") is always treated as the
+    # positional identifier, never mis-parsed as a click option. Verified
+    # against the real CLI: `muse models probe --no-inference -- --x`
+    # correctly reports "unknown model '--x'" rather than choking on an
+    # unrecognized option. Options must precede "--" so they still parse
+    # as options; only the identifier goes after it.
+    cmd = [sys.executable, "-m", "muse.cli", "models", "probe"]
     if no_inference:
         cmd.append("--no-inference")
     if device is not None:
         cmd.extend(["--device", device])
     cmd.append("--json")
+    cmd.extend(["--", model_id])
     _run_subprocess_into_job(cmd, store=store, job=job, success_op="probe")
 
 
@@ -830,7 +838,9 @@ def pull_model(identifier: str, *, store: JobStore, job: Job) -> None:
     enable 404'd "unknown model" for anything pulled after the freeze.)
     """
     store.update(job.job_id, state="running")
-    cmd = [sys.executable, "-m", "muse.cli", "pull", identifier]
+    # "--" terminates option parsing (see probe_model's comment) so an
+    # identifier beginning with "-" is always treated as positional.
+    cmd = [sys.executable, "-m", "muse.cli", "pull", "--", identifier]
     _run_subprocess_into_job(cmd, store=store, job=job, success_op="pull")
 
 

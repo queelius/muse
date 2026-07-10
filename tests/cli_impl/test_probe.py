@@ -79,6 +79,34 @@ def test_run_probe_not_pulled_returns_error(tmp_catalog, capsys):
     assert "muse pull kokoro-82m" in err
 
 
+def test_run_probe_missing_venv_path_returns_clean_error(tmp_catalog, capsys):
+    """A catalog entry that passes is_pulled (present in catalog.json) but
+    lacks venv_path (partial write / hand-edit) must produce a clean error
+    message + rc 2, not a raw KeyError traceback (mirrors refresh.py's
+    graceful 'skipped: python_path missing' pattern)."""
+    catalog_state = {
+        "kokoro-82m": {
+            "pulled_at": "2026-04-28T00:00:00+00:00",
+            "hf_repo": "hexgrad/Kokoro-82M",
+            "local_dir": str(tmp_catalog / "weights" / "kokoro-82m"),
+            "enabled": True,
+            # no venv_path key
+        },
+    }
+    _write_catalog(catalog_state)
+    rc = run_probe(
+        model_id="kokoro-82m",
+        no_inference=False,
+        device=None,
+        as_json=False,
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "venv_path" in err
+    assert "kokoro-82m" in err
+    assert "re-pull" in err
+
+
 def test_run_probe_subprocess_failure_returns_error(tmp_catalog, capsys):
     _seed_pulled_entry(tmp_catalog)
     fake_completed = MagicMock()

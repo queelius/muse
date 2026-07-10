@@ -57,7 +57,15 @@ def run_probe(
         return 2
 
     catalog = _read_catalog()
-    venv_path = Path(catalog[model_id]["venv_path"])
+    venv_path_raw = catalog.get(model_id, {}).get("venv_path")
+    if not venv_path_raw:
+        print(
+            f"error: catalog entry for {model_id!r} is missing venv_path; "
+            f"re-pull",
+            file=sys.stderr,
+        )
+        return 2
+    venv_path = Path(venv_path_raw)
     py = venv_python(venv_path)
 
     # Resolve the device the worker will pass to load_backend. Capability

@@ -114,3 +114,38 @@ def test_config_path_is_directory_degrades_to_empty(tmp_path):
     c = cfg.Config(path=tmp_path)
     assert c.file_values() == {}
     assert c.get("limits.rerank_max_documents") == 1000
+
+
+# --- bootstrap-key invariant: paths.catalog_dir / paths.config_file are
+# documented as env+default ONLY (the file cannot redirect the path that
+# locates itself). Config.get and .source must never let a config.yaml
+# value win for these two keys.
+
+
+def test_bootstrap_catalog_dir_ignores_file_value(tmp_path, monkeypatch):
+    monkeypatch.delenv("MUSE_CATALOG_DIR", raising=False)
+    c = _cfg(tmp_path, "paths:\n  catalog_dir: /tmp/somewhere-else\n")
+    assert c.get("paths.catalog_dir") == "~/.muse"
+    assert c.source("paths.catalog_dir") == "default"
+
+
+def test_bootstrap_config_file_ignores_file_value(tmp_path, monkeypatch):
+    monkeypatch.delenv("MUSE_CONFIG", raising=False)
+    c = _cfg(tmp_path, "paths:\n  config_file: /tmp/other-config.yaml\n")
+    assert c.get("paths.config_file") is None
+    assert c.source("paths.config_file") == "default"
+
+
+def test_bootstrap_catalog_dir_env_still_wins_over_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSE_CATALOG_DIR", "/env/dir")
+    c = _cfg(tmp_path, "paths:\n  catalog_dir: /tmp/somewhere-else\n")
+    assert c.get("paths.catalog_dir") == "/env/dir"
+    assert c.source("paths.catalog_dir") == "env"
+
+
+def test_non_bootstrap_key_still_reads_file(tmp_path):
+    """Sanity: the bootstrap-key skip must not disable file reads for
+    ordinary settings."""
+    c = _cfg(tmp_path, "limits:\n  rerank_max_documents: 7\n")
+    assert c.get("limits.rerank_max_documents") == 7
+    assert c.source("limits.rerank_max_documents") == "file"

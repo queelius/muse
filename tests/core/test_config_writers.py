@@ -158,6 +158,28 @@ def test_unset_value_default_path_resets_singleton_for_get(
     )
 
 
+def test_set_value_refuses_bootstrap_catalog_dir(tmp_path):
+    p = tmp_path / "config.yaml"
+    with pytest.raises(cfg.ConfigError):
+        cfg.set_value("paths.catalog_dir", "/tmp/x", path=p)
+    assert not p.exists()
+
+
+def test_set_value_refuses_bootstrap_config_file(tmp_path):
+    p = tmp_path / "config.yaml"
+    with pytest.raises(cfg.ConfigError):
+        cfg.set_value("paths.config_file", "/tmp/other.yaml", path=p)
+    assert not p.exists()
+
+
+def test_unset_value_still_allows_bootstrap_key_as_noop(tmp_path):
+    """unset stays allowed: it's harmless cleanup of a stale value that
+    was never able to take effect anyway (no override value exists for
+    "use the lower-precedence default"; unset is the counterpart)."""
+    p = tmp_path / "config.yaml"
+    assert cfg.unset_value("paths.catalog_dir", path=p) is False
+
+
 def test_set_value_explicit_test_path_does_not_reset_singleton(
     tmp_path, monkeypatch, _reset_singleton,
 ):

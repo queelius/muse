@@ -23,6 +23,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,7 +35,7 @@ from huggingface_hub import snapshot_download
 from muse.core import config
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
-from muse.core.install import check_system_packages, install_pip_extras
+from muse.core.install import check_system_packages
 from muse.core.venv import (
     _is_verbose,
     create_venv,
@@ -272,6 +273,75 @@ def _persisted_manifest_to_catalog_entry(manifest: dict) -> CatalogEntry:
     )
 
 
+_MODEL_ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_model_id_for_fs(model_id: str) -> None:
+    """Reject a model_id that is unsafe as a filesystem path component.
+
+    model_id becomes `<catalog_dir>/venvs/<model_id>` (and, for
+    resolver-pulled models, feeds into the weights cache path too).
+    Applied at every pull entry point -- the bare-id branch of pull(),
+    the finalized model_id in `_pull_via_resolver`, and the top of
+    `_pull_bundled` -- covering every identifier shape (bare id,
+    curated alias resolution result, resolver-synthesized id) BEFORE
+    any venv/weights path is constructed. A hostile or malformed
+    identifier (path traversal via "..", a path separator via "/")
+    can therefore never escape the muse-owned catalog directories.
+    """
+    if model_id in (".", ".."):
+        raise ValueError(
+            f"invalid model id {model_id!r}: must not be '.' or '..'"
+        )
+    if not _MODEL_ID_CHARSET_RE.match(model_id):
+        raise ValueError(
+            f"invalid model id {model_id!r}: must match "
+            f"{_MODEL_ID_CHARSET_RE.pattern!r} "
+            f"(letters, digits, '.', '_', '-' only)"
+        )
+
+
+def _apply_manifest_overlays(model_id: str, manifest: dict, entry_data: dict) -> dict:
+    """Apply the curated-capabilities overlay, then base_override, onto a
+    persisted resolver manifest. Returns a fresh dict (never mutates the
+    input).
+
+    Shared by `known_models()` (which feeds `load_backend` via
+    `entry.extra`) and `get_manifest()` (which `worker.py` uses to
+    register/gate the model), so a curated.yaml edit or an operator
+    `--base` pin can never diverge between what CONSTRUCTS the backend
+    and what ADVERTISES/GATES it. Before this helper existed, only
+    known_models() re-applied the curated overlay; get_manifest()
+    returned the raw persisted manifest, so a curated.yaml capability
+    edit + restart left the two read paths disagreeing.
+
+    Order: curated overlay first (curated.yaml is hand-edited and may
+    postdate the persisted manifest, so it wins on capability
+    collision), then base_override (an operator `--base` pin, applied
+    AFTER curated so it wins over both the tag-declared base and a
+    curated base_model -- mirrors `device_override`).
+    """
+    manifest = dict(manifest)
+
+    curated = find_curated(model_id)
+    if curated is None:
+        source = entry_data.get("source")
+        if source:
+            curated = find_curated_by_uri(source)
+    if curated is not None and curated.capabilities:
+        merged_caps = dict(manifest.get("capabilities") or {})
+        merged_caps.update(curated.capabilities)
+        manifest["capabilities"] = merged_caps
+
+    base_override = entry_data.get("base_override")
+    if base_override:
+        merged_caps = dict(manifest.get("capabilities") or {})
+        merged_caps["base_model"] = base_override
+        manifest["capabilities"] = merged_caps
+
+    return manifest
+
+
 def known_models() -> dict[str, CatalogEntry]:
     """Return {model_id: CatalogEntry} for every discovered model.
 
@@ -343,30 +413,12 @@ def known_models() -> dict[str, CatalogEntry]:
                     model_id,
                 )
                 continue
-            # Re-apply curated capabilities overlay so edits to curated.yaml
-            # take effect on next process restart without requiring a re-pull.
-            # Curated wins on key collision: curated.yaml is hand-edited; the
-            # persisted manifest may be stale across muse upgrades. Look up by
-            # id first, fall back to URI (source field).
-            curated = find_curated(model_id)
-            if curated is None:
-                source = entry_data.get("source")
-                if source:
-                    curated = find_curated_by_uri(source)
-            if curated is not None and curated.capabilities:
-                manifest = dict(manifest)
-                merged_caps = dict(manifest.get("capabilities") or {})
-                merged_caps.update(curated.capabilities)
-                manifest["capabilities"] = merged_caps
-            # Operator --base pin (device_override precedent): a top-level
-            # catalog field, applied AFTER the curated overlay so it wins
-            # over both the tag-declared base and a curated base_model.
-            base_override = entry_data.get("base_override")
-            if base_override:
-                manifest = dict(manifest)
-                merged_caps = dict(manifest.get("capabilities") or {})
-                merged_caps["base_model"] = base_override
-                manifest["capabilities"] = merged_caps
+            # Re-apply curated capabilities overlay (+ base_override) so
+            # edits to curated.yaml / operator pins take effect on next
+            # process restart without requiring a re-pull. See
+            # _apply_manifest_overlays for the shared order/rationale
+            # (also used by get_manifest() so the two never diverge).
+            manifest = _apply_manifest_overlays(model_id, manifest, entry_data)
             entries[model_id] = _persisted_manifest_to_catalog_entry(manifest)
         if key is not None:
             _known_models_cache = (key, entries)
@@ -715,6 +767,8 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
     # the same catalog id and re-applying any curated overlay.
     from muse.core.curated import load_curated
 
+    _validate_model_id_for_fs(identifier)
+
     existing = _read_catalog().get(identifier, {}) or {}
     source_uri = existing.get("source")
     if source_uri:
@@ -768,6 +822,7 @@ def _pull_bundled(model_id: str) -> None:
     and produce a user-friendly error for unknown ids; this defensive
     check guards against internal mistakes.
     """
+    _validate_model_id_for_fs(model_id)
     catalog_known = known_models()
     if model_id not in catalog_known:
         raise KeyError(
@@ -904,6 +959,7 @@ def _pull_via_resolver(
     if model_id_override:
         manifest["model_id"] = model_id_override
     model_id = manifest["model_id"]
+    _validate_model_id_for_fs(model_id)
 
     # Preserve a prior operator --base pin across a re-pull that omits
     # --base, so re-pulling never silently reverts operator intent.
@@ -1248,7 +1304,12 @@ def get_manifest(model_id: str) -> dict:
     Two sources, in order of preference:
       1. catalog.json's persisted manifest (resolver-pulled models). The
          resolver synthesized this dict at pull time; it's the source of
-         truth for that entry.
+         truth for that entry. The curated-capabilities overlay and any
+         operator base_override are re-applied here via
+         `_apply_manifest_overlays`, the SAME helper `known_models()`
+         uses, so a curated.yaml edit affects gating (this function) and
+         construction (known_models() -> load_backend) identically --
+         see `_apply_manifest_overlays` for why that matters.
       2. The model script's module-level MANIFEST (bundled scripts).
 
     Returns a copy so callers can mutate without affecting the source.
@@ -1262,13 +1323,7 @@ def get_manifest(model_id: str) -> dict:
     entry_data = catalog.get(model_id, {})
     persisted = entry_data.get("manifest")
     if persisted:
-        manifest = dict(persisted)
-        base_override = entry_data.get("base_override")
-        if base_override:
-            merged_caps = dict(manifest.get("capabilities") or {})
-            merged_caps["base_model"] = base_override
-            manifest["capabilities"] = merged_caps
-        return manifest
+        return _apply_manifest_overlays(model_id, persisted, entry_data)
     entry = catalog_known[model_id]
     module_path, _ = entry.backend_path.split(":", 1)
     module = _import_backend_module(module_path)

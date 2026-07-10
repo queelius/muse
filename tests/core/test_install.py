@@ -1,37 +1,15 @@
 """Tests for pip and system-package helpers."""
-import subprocess
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
-
-from muse.core.install import (
-    install_pip_extras,
-    check_system_packages,
-)
+from muse.core.install import check_system_packages
 
 
-class TestInstallPipExtras:
-    @patch("muse.core.install.subprocess.run")
-    def test_installs_missing_packages(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        with patch("muse.core.install.importlib.util.find_spec", return_value=None):
-            install_pip_extras(["diffusers"])
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert "pip" in args and "install" in args and "diffusers" in args
-
-    @patch("muse.core.install.subprocess.run")
-    def test_skips_already_installed(self, mock_run):
-        with patch("muse.core.install.importlib.util.find_spec", return_value=MagicMock()):
-            install_pip_extras(["numpy"])
-        mock_run.assert_not_called()
-
-    @patch("muse.core.install.subprocess.run")
-    def test_raises_on_pip_failure(self, mock_run):
-        mock_run.side_effect = subprocess.CalledProcessError(1, ["pip"])
-        with patch("muse.core.install.importlib.util.find_spec", return_value=None):
-            with pytest.raises(subprocess.CalledProcessError):
-                install_pip_extras(["bogus-pkg"])
+def test_install_pip_extras_removed():
+    """install_pip_extras was a dead footgun (never called; if called, it
+    would install into sys.executable's env -- the supervisor env --
+    defeating per-venv isolation). It must not exist as a public helper."""
+    import muse.core.install as install_module
+    assert not hasattr(install_module, "install_pip_extras")
 
 
 class TestCheckSystemPackages:

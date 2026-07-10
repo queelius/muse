@@ -519,15 +519,19 @@ def test_pull_records_venv_path_and_python_in_catalog(tmp_catalog):
     assert entry["python_path"] == str(tmp_catalog / "venvs" / "soprano-80m" / "bin" / "python")
 
 
-def test_pull_does_not_call_system_install_pip_extras(tmp_catalog):
-    """The old system-wide install_pip_extras must NOT be called; it's venv-scoped now."""
+def test_catalog_has_no_system_install_pip_extras(tmp_catalog):
+    """The old system-wide install_pip_extras (dead footgun: it would have
+    installed into sys.executable's env, the supervisor env, defeating
+    per-model venv isolation) has been removed entirely -- catalog.py no
+    longer imports or exposes it. pip installs are venv-scoped via
+    `install_into_venv` only."""
+    import muse.core.catalog as catalog_module
+    assert not hasattr(catalog_module, "install_pip_extras")
     with patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.install_pip_extras") as mock_system_install, \
          patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
          patch("muse.core.catalog.check_system_packages", return_value=[]):
         pull("soprano-80m")
-    mock_system_install.assert_not_called()
 
 
 def test_pull_records_enabled_true_by_default(tmp_catalog):
@@ -1862,6 +1866,60 @@ def test_known_models_reapplies_curated_capabilities_overlay_at_runtime(
     assert entry.extra["old_key"] == "old_val"
 
 
+def test_get_manifest_reapplies_curated_capabilities_overlay_at_runtime(
+    tmp_catalog,
+):
+    """get_manifest() must apply the same curated-capabilities overlay as
+    known_models(), so a curated.yaml edit takes effect for BOTH the
+    entry known_models() surfaces (which load_backend/entry.extra reads
+    at construction time) and the manifest get_manifest() returns (which
+    worker.py uses to register/gate the model). Before the fix these two
+    read paths could diverge after a curated.yaml edit + restart.
+    """
+    from unittest.mock import patch
+    from muse.core.catalog import get_manifest, _write_catalog, _reset_known_models_cache
+    from muse.core.curated import CuratedEntry
+
+    catalog_state = {
+        "stale-model": {
+            "pulled_at": "2026-01-01T00:00:00+00:00",
+            "hf_repo": "org/repo",
+            "local_dir": "/fake",
+            "venv_path": "/fake/venv",
+            "python_path": "/fake/py",
+            "enabled": True,
+            "source": "hf://org/repo",
+            "manifest": {
+                "model_id": "stale-model",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "backend_path": "fake.module:Cls",
+                "pip_extras": [],
+                "system_packages": [],
+                "capabilities": {"device": "cuda", "old_key": "old_val"},
+            },
+        },
+    }
+    _write_catalog(catalog_state)
+
+    fake_curated = CuratedEntry(
+        id="stale-model",
+        bundled=False,
+        uri="hf://org/repo",
+        modality="embedding/text",
+        size_gb=None, description=None, tags=(),
+        capabilities={"device": "cpu", "new_key": "new_val"},
+    )
+
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated):
+        _reset_known_models_cache()
+        manifest = get_manifest("stale-model")
+
+    assert manifest["capabilities"]["device"] == "cpu"
+    assert manifest["capabilities"]["new_key"] == "new_val"
+    assert manifest["capabilities"]["old_key"] == "old_val"
+
+
 def test_known_models_uri_based_curated_lookup_when_id_misses(tmp_catalog):
     """If find_curated(id) misses, fall back to find_curated_by_uri(source)."""
     from unittest.mock import patch
@@ -2606,3 +2664,60 @@ class TestGpuLayersOverride:
             load_backend("test-gguf", device="cuda")  # probe-style call
         assert fake_cls.call_args.kwargs["n_gpu_layers"] == 25
         assert fake_cls.call_args.kwargs["device"] == "cuda"
+
+
+class TestModelIdFilesystemSafety:
+    """model_id becomes `<catalog_dir>/venvs/<model_id>` (and, for
+    resolver pulls, feeds the weights cache path too). A hostile or
+    malformed identifier must be refused before any venv/weights path
+    is constructed, for every identifier shape: bare id (this class),
+    the resolver-synthesized id, and a curated alias resolution result.
+    """
+
+    def test_pull_bare_id_rejects_path_traversal(self, tmp_catalog):
+        with pytest.raises(ValueError, match="invalid model id"):
+            pull("../evil")
+        assert not (tmp_catalog / "venvs").exists()
+
+    def test_pull_bare_id_rejects_path_separator(self, tmp_catalog):
+        with pytest.raises(ValueError, match="invalid model id"):
+            pull("a/b")
+        assert not (tmp_catalog / "venvs").exists()
+
+    def test_pull_bare_id_rejects_dot_alone(self, tmp_catalog):
+        with pytest.raises(ValueError, match="invalid model id"):
+            pull(".")
+        assert not (tmp_catalog / "venvs").exists()
+
+    def test_pull_via_resolver_rejects_bad_model_id_override(self, tmp_catalog):
+        """A curated alias / --base override that resolves to a malformed
+        model_id must be refused before venv_path is constructed, not just
+        the raw bare-id shape."""
+        from muse.core.catalog import _pull_via_resolver
+        from muse.core.resolvers import ResolvedModel
+
+        fake_resolved = ResolvedModel(
+            manifest={
+                "model_id": "safe-id",
+                "modality": "embedding/text",
+                "hf_repo": "org/repo",
+                "backend_path": "fake.module:Cls",
+            },
+            backend_path="fake.module:Cls",
+            download=lambda cache_dir: str(cache_dir / "weights"),
+        )
+        with patch("muse.core.resolvers.resolve", return_value=fake_resolved):
+            with pytest.raises(ValueError, match="invalid model id"):
+                _pull_via_resolver(
+                    "hf://org/repo", model_id_override="../evil",
+                )
+        assert not (tmp_catalog / "venvs").exists()
+
+    def test_pull_bundled_rejects_bad_model_id(self, tmp_catalog):
+        """_pull_bundled validates its model_id parameter directly, so a
+        curated-bundled-alias id with unsafe characters is refused too."""
+        from muse.core.catalog import _pull_bundled
+
+        with pytest.raises(ValueError, match="invalid model id"):
+            _pull_bundled("a/b")
+        assert not (tmp_catalog / "venvs").exists()
