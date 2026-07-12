@@ -251,6 +251,18 @@ def test_load_curated_includes_audio_quality_entries():
     assert all(entry.size_gb and entry.size_gb < 0.5 for entry in quality.values())
 
 
+def test_load_curated_includes_qwen3_forced_aligner():
+    entries = load_curated()
+    aligners = {e.id: e for e in entries if e.modality == "audio/alignment"}
+    entry = aligners["qwen3-forced-aligner-0.6b"]
+    assert entry.uri == "hf://Qwen/Qwen3-ForcedAligner-0.6B-hf"
+    assert entry.size_gb == 1.84
+    assert entry.capabilities["max_duration_seconds"] == 300.0
+    assert entry.capabilities["max_input_tokens"] == 8192
+    assert entry.capabilities["max_reference_words"] == 2048
+    assert len(entry.capabilities["supported_languages"]) == 11
+
+
 def test_load_curated_includes_v046_model_refresh():
     """v0.46.0 model-refresh additions across existing modalities. Each is a
     pure resolver-pull entry (no new runtime), verified to resolve to the

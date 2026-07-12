@@ -55,6 +55,7 @@ MODALITY_EXTRAS: dict[str, list[str]] = {
     "audio/transcription": [],
     "audio/embedding": [],
     "audio/quality": [],
+    "audio/alignment": [],
     "audio/generation": [],
     "image/generation": ["images"],
     "image/animation": ["images"],

@@ -363,6 +363,36 @@
   capabilities:
     memory_gb: 1.5
 
+# ---------- audio/alignment (reference transcript -> word timestamps) ----------
+
+# Qwen's 0.6B forced aligner timestamps known transcript words without
+# running ASR. Input is resampled to 16kHz mono and limited to five minutes.
+- id: qwen3-forced-aligner-0.6b
+  uri: hf://Qwen/Qwen3-ForcedAligner-0.6B-hf
+  modality: audio/alignment
+  size_gb: 1.84
+  description: "Qwen3 ForcedAligner 0.6B: reference-text word timestamps for 11 languages, Apache 2.0"
+  capabilities:
+    memory_gb: 4.0
+    sample_rate: 16000
+    max_duration_seconds: 300.0
+    max_input_tokens: 8192
+    max_reference_words: 2048
+    word_timestamps: true
+    confidence: true
+    supported_languages:
+      - English
+      - Chinese
+      - Cantonese
+      - French
+      - German
+      - Italian
+      - Japanese
+      - Korean
+      - Portuguese
+      - Russian
+      - Spanish
+
 # ---------- text/rerank (cross-encoder rerankers) ----------
 
 - id: bge-reranker-v2-m3

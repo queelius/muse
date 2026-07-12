@@ -54,6 +54,8 @@ class TestInferExtras:
 
     def test_modality_with_no_extras_returns_empty(self):
         assert _infer_extras("text/rerank") == []
+        assert "audio/alignment" in MODALITY_EXTRAS
+        assert _infer_extras("audio/alignment") == []
 
 
 class TestPipTarget:

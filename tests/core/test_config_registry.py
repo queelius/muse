@@ -38,6 +38,9 @@ def test_expected_settings_present():
         "limits.upscale_max_input_side",
         "limits.audio_quality_max_bytes",
         "limits.audio_quality_max_duration_seconds",
+        "limits.audio_alignment_max_bytes",
+        "limits.audio_alignment_max_duration_seconds",
+        "limits.audio_alignment_max_text_chars",
         "limits.rerank_max_documents",
     ):
         assert key in cfg.SETTINGS_BY_KEY, key

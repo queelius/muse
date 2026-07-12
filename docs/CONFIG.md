@@ -127,6 +127,9 @@ A snapshot of the defaults:
 | `limits.audio_cls_max_bytes` | `MUSE_AUDIO_CLS_MAX_BYTES` | 52428800 (50 MB) |
 | `limits.audio_quality_max_bytes` | `MUSE_AUDIO_QUALITY_MAX_BYTES` | 52428800 (50 MB) |
 | `limits.audio_quality_max_duration_seconds` | `MUSE_AUDIO_QUALITY_MAX_DURATION_SECONDS` | 600.0 |
+| `limits.audio_alignment_max_bytes` | `MUSE_AUDIO_ALIGNMENT_MAX_BYTES` | 52428800 (50 MB) |
+| `limits.audio_alignment_max_duration_seconds` | `MUSE_AUDIO_ALIGNMENT_MAX_DURATION_SECONDS` | 300.0 |
+| `limits.audio_alignment_max_text_chars` | `MUSE_AUDIO_ALIGNMENT_MAX_TEXT_CHARS` | 50000 |
 | `limits.audio_embeddings_max_bytes` | `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` | 52428800 (50 MB) |
 | `limits.asr_max_mb` | `MUSE_ASR_MAX_MB` | 100 |
 | `limits.embeddings_max_batch` | `MUSE_EMBEDDINGS_MAX_BATCH` | 2048 |

@@ -10,6 +10,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
 - audio event / emotion / language classification on `/v1/audio/classifications`
 - speech naturalness and production-quality scoring on `/v1/audio/quality`
+- reference-transcript word alignment on `/v1/audio/alignments`
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
 - text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - image-to-image super-resolution on `/v1/images/upscale`
@@ -28,7 +29,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text translation (LibreTranslate-compat) on `/v1/translate` (+ bare `/translate` alias, `GET /languages`)
 - image-to-3D and text-to-3D on `/v1/3d/from-image` and `/v1/3d/generations`
 
-Modality tags are MIME-style (`3d/generation`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
+Modality tags are MIME-style (`3d/generation`, `audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -118,6 +119,15 @@ muse pull utmos
 curl -X POST http://localhost:8000/v1/audio/quality \
   -F "file=@narration.wav" \
   -F "model=utmos"
+
+# Forced alignment: timestamp a trusted transcript without running ASR.
+# `language` accepts a supported name or common code and may be omitted.
+muse pull qwen3-forced-aligner-0.6b
+curl -X POST http://localhost:8000/v1/audio/alignments \
+  -F "file=@narration.wav" \
+  -F "text=Once upon a time, there was a curious fox." \
+  -F "language=en" \
+  -F "model=qwen3-forced-aligner-0.6b"
 
 # Chat (OpenAI-compatible incl. tools and streaming)
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -235,6 +245,7 @@ curl -s -X POST http://localhost:8000/v1/video/generations \
 
 ```python
 from muse.modalities.audio_speech import SpeechClient
+from muse.modalities.audio_alignment import AudioAlignmentClient
 from muse.modalities.image_generation import (
     GenerationsClient, ImageEditsClient, ImageVariationsClient,
 )
@@ -243,6 +254,10 @@ from muse.modalities.chat_completion import ChatClient
 
 # MUSE_SERVER env var sets the base URL for remote use; default http://localhost:8000
 wav_bytes = SpeechClient().infer("Hello world")
+alignment = AudioAlignmentClient().align(
+    "narration.wav", "Hello world", language="en",
+    model="qwen3-forced-aligner-0.6b",
+)
 pngs = GenerationsClient().generate("a cat on mars, cinematic", n=1)
 # LoRA adapters: muse pull hf://nerijs/pixel-art-xl (or curated pixel-art-xl),
 # optional --base <muse-id-or-hf-repo>, per-request lora_scale via extra_body.
@@ -305,6 +320,24 @@ mp4_bytes = vid.generate(
 )
 Path("flag.mp4").write_bytes(mp4_bytes)
 ```
+
+### Audio alignment
+
+`audio/alignment` uses the curated Qwen3 ForcedAligner 0.6B model to locate
+words from a known transcript; it does not transcribe or rewrite the text.
+The multipart fields are `file` and `text` (required), plus `model` and
+`language` (optional). English, Chinese, Cantonese, French, German, Italian,
+Japanese, Korean, Portuguese, Russian, and Spanish are supported. Common
+codes such as `en`, `zh`, and `es` are accepted.
+
+The response includes `duration_seconds` and ordered `words` with `word`,
+`start`, `end`, and `confidence`. Confidence is the mean probability of the
+word's start/end timestamp tokens; it is useful for ranking suspicious spans
+but is not a calibrated speech-quality or pronunciation score. Uploads default
+to 50 MB, five decoded minutes, and 50,000 transcript characters; the Qwen
+runtime additionally rejects more than 2,048 alignable words or 8,192 prepared
+input tokens before inference. Configure the corresponding
+`MUSE_AUDIO_ALIGNMENT_MAX_*` variables to lower the request-level caps.
 
 VRAM caveats for `video/generation`: even Wan 1.3B at fp16 is tight on 8GB cards; 12GB+ recommended for headroom. CogVideoX-2b realistically wants 16GB. LTX-Video needs 16GB+. Mochi-1 (24GB+) and HunyuanVideo (60GB+) are documented but not curated; their dedicated runtimes ship in v1.next.
 
@@ -418,6 +451,7 @@ settings inventory and precedence rules.
 | `GET /v1/audio/speech/voices` | list voices for a model |
 | `POST /v1/audio/transcriptions` | transcribe audio to text (OpenAI-compatible) |
 | `POST /v1/audio/translations` | transcribe + translate audio to English (OpenAI-compatible) |
+| `POST /v1/audio/alignments` | align trusted reference text to audio as word timestamps (muse-native multipart) |
 | `POST /v1/images/generations` | generate images (OpenAI-compatible; supports img2img via `image` + `strength`) |
 | `POST /v1/images/edits` | inpaint masked regions (OpenAI-compatible; multipart with image+mask+prompt) |
 | `POST /v1/images/variations` | generate alternates of one image (OpenAI-compatible; multipart, no prompt) |
@@ -587,6 +621,7 @@ See the "Federation" section of `CLAUDE.md` for the full design.
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
 - `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
 - `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
+  - `audio_alignment/` (MODALITY `"audio/alignment"`; Qwen3 ForcedAligner reference text to word timestamps)
   - `audio_classification/` (MODALITY `"audio/classification"`; multipart event/emotion/language classification)
   - `audio_embedding/` (MODALITY `"audio/embedding"`; multipart upload + OpenAI-shape envelope; includes `runtimes/transformers_audio.py`)
   - `audio_generation/` (MODALITY `"audio/generation"`; mounts both `/v1/audio/music` and `/v1/audio/sfx` on one MIME tag with per-route capability gates)

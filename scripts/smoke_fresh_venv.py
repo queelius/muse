@@ -13,7 +13,7 @@ because `pull` installs ONLY `museq[server]` plus the model's declared
 
 This script reproduces the `muse pull` install path against a clean
 venv and then runs the in-venv probe worker. Most models use load-only
-coverage; curated audio-quality models run their short inference probe
+coverage; curated audio-analysis models run their short inference probe
 as well so decoder dependencies are exercised. A failure surfaces the
 missing dep in the worker's stderr and the script exits non-zero with
 an informative label.
@@ -227,7 +227,8 @@ def _smoke_curated_resolver(model_id: str, uri: str, venv_root: Path) -> SmokeRe
     real venv/pip_extras/weight-download machinery instead of a smoke-
     script-only reimplementation. `--no-probe` skips pull's memory probe;
     the isolated worker check below is the smoke assertion. Audio-quality
-    models run representative inference to cover their real decoder path.
+    and audio-alignment models run representative inference to cover their
+    real decoder path.
     """
     t0 = time.monotonic()
     catalog_dir = venv_root / "catalog"
@@ -278,7 +279,9 @@ def _smoke_curated_resolver(model_id: str, uri: str, venv_root: Path) -> SmokeRe
         )
 
     manifest = entry.get("manifest") or {}
-    run_inference = manifest.get("modality") == "audio/quality"
+    run_inference = manifest.get("modality") in {
+        "audio/alignment", "audio/quality",
+    }
     probe = _run_inference_probe if run_inference else _run_load_only
     rc, captured = probe(Path(python_path), model_id, env=env)
     if rc != 0:

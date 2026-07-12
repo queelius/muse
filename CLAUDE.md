@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-twenty-one modalities:
+twenty-two modalities:
 
+- **audio/alignment**: trusted reference transcript to word timestamps via `/v1/audio/alignments` (Qwen3 ForcedAligner 0.6B curated; multipart audio + text; 11 languages; per-word start/end and uncalibrated timestamp confidence)
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0 bundled; ACE-Step v1 3.5B for full songs with optional structured lyrics + instrumentals; per-model capability gates on `supports_music` / `supports_sfx`; optional `lyrics` field on `/v1/audio/music`)
@@ -61,6 +62,27 @@ since its Hub card carries that generic tag. Curated aliases are
 (CC-BY-4.0, primary `production_quality`). Pairwise/text-conditioned
 judges such as SpeechJudge are deferred to a separate comparison
 route/capability rather than overloading this single-ended contract.
+
+`audio/alignment` is muse's twenty-second modality. `POST
+/v1/audio/alignments` accepts multipart `file` + trusted reference `text`,
+plus optional `model` and `language`, and returns `{id, object, model, text,
+language, duration_seconds, words, metadata}`. Each word has `word`, `start`,
+`end`, and an uncalibrated confidence derived from the mean probability of its
+start/end timestamp tokens. This is forced alignment, not ASR: the model
+locates supplied words and does not decide what was spoken. The priority-90 HF
+plugin claims only `Qwen/Qwen3-ForcedAligner-0.6B-hf`, downloads its safe
+safetensors checkpoint, and installs Transformers 5.13+, TorchCodec, Nagisa,
+and SoyNLP. Audio is bounded before inference, resampled to 16kHz mono, and
+limited by `MUSE_AUDIO_ALIGNMENT_MAX_BYTES` (50 MB),
+`MUSE_AUDIO_ALIGNMENT_MAX_DURATION_SECONDS` (300s), and
+`MUSE_AUDIO_ALIGNMENT_MAX_TEXT_CHARS` (50,000). The curated alias is
+`qwen3-forced-aligner-0.6b` (Apache 2.0; 11 languages). Before audio decode,
+the runtime tokenizes the reference and rejects more than 2,048 alignable
+words; after processor preparation it enforces the checkpoint's 8,192-token
+context before moving inputs to the device. Confidence calculation selects
+timestamp-marker logits before its float32 softmax, avoiding a full-sequence
+probability tensor. Only the typed `AudioAlignmentDecodeError` emitted at the
+TorchCodec boundary maps to HTTP 415; model alignment failures remain 500s.
 
 `text/rerank` is muse's first Cohere-compat modality (rather than
 OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is

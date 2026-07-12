@@ -382,16 +382,26 @@ def test_smoke_curated_resolver_load_fails(tmp_path):
     assert "missing dep: sentencepiece" in result.label
 
 
-def test_smoke_curated_audio_quality_runs_inference_probe(tmp_path):
+@pytest.mark.parametrize("model_id,modality,uri", [
+    ("utmos", "audio/quality", "hf://Blinorot/UTMOS-PyTorch"),
+    (
+        "qwen3-forced-aligner-0.6b",
+        "audio/alignment",
+        "hf://Qwen/Qwen3-ForcedAligner-0.6B-hf",
+    ),
+])
+def test_smoke_curated_audio_analysis_runs_inference_probe(
+    tmp_path, model_id, modality, uri,
+):
     def _fake_pull(cmd, capture_output, text, env, cwd):
         catalog_dir = Path(env["MUSE_CATALOG_DIR"])
         catalog_dir.mkdir(parents=True, exist_ok=True)
         (catalog_dir / "catalog.json").write_text(json.dumps({
-            "utmos": {
+            model_id: {
                 "python_path": str(
-                    catalog_dir / "venvs" / "utmos" / "bin" / "python"
+                    catalog_dir / "venvs" / model_id / "bin" / "python"
                 ),
-                "manifest": {"modality": "audio/quality"},
+                "manifest": {"modality": modality},
             },
         }))
         return MagicMock(returncode=0, stdout="", stderr="")
@@ -401,11 +411,9 @@ def test_smoke_curated_audio_quality_runs_inference_probe(tmp_path):
              smoke,
              "_run_inference_probe",
              return_value=(0, '{"ran_inference": true}'),
-         ) as inference, \
+        ) as inference, \
          patch.object(smoke, "_run_load_only") as load_only:
-        result = smoke._smoke_curated_resolver(
-            "utmos", "hf://Blinorot/UTMOS-PyTorch", tmp_path,
-        )
+        result = smoke._smoke_curated_resolver(model_id, uri, tmp_path)
 
     assert result.ok is True
     inference.assert_called_once()
