@@ -125,6 +125,8 @@ A snapshot of the defaults:
 |---|---|---|
 | `limits.image_input_max_bytes` | `MUSE_IMAGE_INPUT_MAX_BYTES` | 10485760 (10 MB) |
 | `limits.audio_cls_max_bytes` | `MUSE_AUDIO_CLS_MAX_BYTES` | 52428800 (50 MB) |
+| `limits.audio_quality_max_bytes` | `MUSE_AUDIO_QUALITY_MAX_BYTES` | 52428800 (50 MB) |
+| `limits.audio_quality_max_duration_seconds` | `MUSE_AUDIO_QUALITY_MAX_DURATION_SECONDS` | 600.0 |
 | `limits.audio_embeddings_max_bytes` | `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` | 52428800 (50 MB) |
 | `limits.asr_max_mb` | `MUSE_ASR_MAX_MB` | 100 |
 | `limits.embeddings_max_batch` | `MUSE_EMBEDDINGS_MAX_BATCH` | 2048 |

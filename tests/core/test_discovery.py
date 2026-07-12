@@ -306,6 +306,10 @@ class TestModelOptionalPaths:
         assert result.get("/translate") == "text/translation"
         assert result.get("/languages") == "text/translation"
 
+    def test_real_bundled_audio_quality_modality_is_discovered(self):
+        result = model_optional_paths()
+        assert result.get("/v1/audio/quality") == "audio/quality"
+
     def test_default_scan_is_memoized_for_process_lifetime(self, monkeypatch):
         """T3 review finding: model_optional_paths() is called with no args
         on the gateway's hot path for every model-less request (LibreTranslate

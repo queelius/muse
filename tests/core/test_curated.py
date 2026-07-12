@@ -240,6 +240,17 @@ def test_load_curated_includes_whisper_entries():
             assert "faster-whisper" in e.uri
 
 
+def test_load_curated_includes_audio_quality_entries():
+    entries = load_curated()
+    quality = {e.id: e for e in entries if e.modality == "audio/quality"}
+    assert set(quality) >= {"utmos", "audiobox-aesthetics"}
+    assert quality["utmos"].uri == "hf://Blinorot/UTMOS-PyTorch"
+    assert quality["audiobox-aesthetics"].uri == (
+        "hf://facebook/audiobox-aesthetics"
+    )
+    assert all(entry.size_gb and entry.size_gb < 0.5 for entry in quality.values())
+
+
 def test_load_curated_includes_v046_model_refresh():
     """v0.46.0 model-refresh additions across existing modalities. Each is a
     pure resolver-pull entry (no new runtime), verified to resolve to the

@@ -12,9 +12,11 @@ because `pull` installs ONLY `museq[server]` plus the model's declared
 `pip_extras`. Transitive holes show up there.
 
 This script reproduces the `muse pull` install path against a clean
-venv and then runs the in-venv probe worker (load-only, no inference).
-A failure surfaces the missing dep in the worker's stderr and the
-script exits non-zero with an informative label.
+venv and then runs the in-venv probe worker. Most models use load-only
+coverage; curated audio-quality models run their short inference probe
+as well so decoder dependencies are exercised. A failure surfaces the
+missing dep in the worker's stderr and the script exits non-zero with
+an informative label.
 
 Usage (local):
     python scripts/smoke_fresh_venv.py --model_id kokoro-82m
@@ -141,6 +143,40 @@ def _run_load_only(
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def _run_inference_probe(
+    venv_python: Path,
+    model_id: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Run representative inference and fail if the worker records an error."""
+    cmd = [
+        str(venv_python), "-m", "muse.cli", "_probe_worker",
+        "--model", model_id,
+        "--device", "cpu",
+    ]
+    logger.info("running inference probe: %s", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    captured = proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        return proc.returncode, captured
+    record = None
+    for line in reversed(proc.stdout.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict):
+            record = candidate
+            break
+    if record is None:
+        return 1, captured + "\ninference probe returned no JSON record"
+    if record.get("inference_error") or not record.get("ran_inference"):
+        reason = record.get("inference_error") or "inference did not run"
+        return 1, captured + f"\ninference probe failed: {reason}"
+    return 0, captured
+
+
 _MODULE_NOT_FOUND_RE = re.compile(
     r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]"
 )
@@ -189,9 +225,9 @@ def _smoke_curated_resolver(model_id: str, uri: str, venv_root: Path) -> SmokeRe
     scoped to an isolated `MUSE_CATALOG_DIR` under `venv_root` -- the
     exact path a user runs, exercising `catalog._pull_via_resolver`'s
     real venv/pip_extras/weight-download machinery instead of a smoke-
-    script-only reimplementation. `--no-probe` skips the (heavier,
-    inference-touching) memory probe; the load-only check below is the
-    smoke assertion, mirroring the bundled-script path.
+    script-only reimplementation. `--no-probe` skips pull's memory probe;
+    the isolated worker check below is the smoke assertion. Audio-quality
+    models run representative inference to cover their real decoder path.
     """
     t0 = time.monotonic()
     catalog_dir = venv_root / "catalog"
@@ -241,14 +277,18 @@ def _smoke_curated_resolver(model_id: str, uri: str, venv_root: Path) -> SmokeRe
             label=f"{model_id}: FAIL (no python_path after pull)",
         )
 
-    rc, captured = _run_load_only(Path(python_path), model_id, env=env)
+    manifest = entry.get("manifest") or {}
+    run_inference = manifest.get("modality") == "audio/quality"
+    probe = _run_inference_probe if run_inference else _run_load_only
+    rc, captured = probe(Path(python_path), model_id, env=env)
     if rc != 0:
         duration = time.monotonic() - t0
         reason = _extract_failure_reason(captured)
+        stage = "inference" if run_inference else "load"
         return SmokeResult(
             model_id=model_id,
             ok=False,
-            error=f"load failed: {reason}",
+            error=f"{stage} failed: {reason}",
             duration_s=duration,
             label=f"{model_id}: FAIL ({reason})",
         )

@@ -13,7 +13,7 @@ version = "0.58.1"
 authors = [
   { name="Alex Towell", email="lex@metafunctor.com" },
 ]
-description = "Self-hostable OpenAI-compatible multi-modality AI server: 20 modalities (chat, image, audio, video, 3D, embeddings, OCR, segmentation), plugin runtimes (PyTorch, diffusers, llama-cpp-python)."
+description = "Self-hostable OpenAI-compatible multi-modality AI server: 21 modalities (chat, image, audio, video, 3D, embeddings, OCR, segmentation), plugin runtimes (PyTorch, diffusers, llama-cpp-python)."
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = [

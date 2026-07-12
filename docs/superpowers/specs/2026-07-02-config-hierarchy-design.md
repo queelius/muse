@@ -203,6 +203,8 @@ Group `limits` (per-modality request caps; keep each site's read timing):
 |---|---|---|---|---|
 | limits.image_input_max_bytes | MUSE_IMAGE_INPUT_MAX_BYTES | opt_int | 10485760 | image_generation/image_input.py:49 |
 | limits.audio_cls_max_bytes | MUSE_AUDIO_CLS_MAX_BYTES | opt_int | 52428800 | audio_classification/routes.py:41 |
+| limits.audio_quality_max_bytes | MUSE_AUDIO_QUALITY_MAX_BYTES | opt_int | 52428800 | audio_quality/routes.py:24 |
+| limits.audio_quality_max_duration_seconds | MUSE_AUDIO_QUALITY_MAX_DURATION_SECONDS | opt_float | 600.0 | audio_quality/routes.py:32 |
 | limits.audio_embeddings_max_bytes | MUSE_AUDIO_EMBEDDINGS_MAX_BYTES | opt_int | 52428800 | audio_embedding/routes.py:49 |
 | limits.asr_max_mb | MUSE_ASR_MAX_MB | int | 100 | audio_transcription/routes.py:48 |
 | limits.embeddings_max_batch | MUSE_EMBEDDINGS_MAX_BATCH | int | 2048 | embedding_text/routes.py:46 |

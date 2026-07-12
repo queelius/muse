@@ -485,6 +485,7 @@ class TestModalityExtrasMap:
         for mod in (
             "audio/speech",
             "audio/transcription",
+            "audio/quality",
             "image/generation",
             "embedding/text",
             "chat/completion",

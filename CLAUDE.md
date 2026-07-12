@@ -5,11 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-twenty modalities:
+twenty-one modalities:
 
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0 bundled; ACE-Step v1 3.5B for full songs with optional structured lyrics + instrumentals; per-model capability gates on `supports_music` / `supports_sfx`; optional `lyrics` field on `/v1/audio/music`)
+- **audio/quality**: single-ended speech naturalness and audio production-quality assessment via `/v1/audio/quality` (UTMOS 1-5 naturalness MOS + Meta Audiobox Aesthetics four-axis 1-10 scoring via curated HF models; multipart upload; named scaled scores with a model-selected `primary_score`)
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark, Supertonic-3: the last is an ONNX on-device CPU engine, 31 languages, preset voice styles)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs AND vision-language models via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming + multimodal `messages` content; powered by llama-cpp-python for GGUF chat; `transformers.AutoModelForImageTextToText` for VLMs; SmolVLM, Qwen2-VL, LLaVA via the resolver)
@@ -38,6 +39,28 @@ REST API under `/v1/admin/*` (v0.28.0+) for runtime model control
 without restarting `muse serve`: enable, disable, probe, pull, remove,
 plus worker introspection and async-job tracking. Closed-by-default
 behind `MUSE_ADMIN_TOKEN`. See "Admin REST API" below.
+
+`audio/quality` is muse's twenty-first modality. `POST
+/v1/audio/quality` accepts multipart `file` plus optional `model` and
+returns `{id, object, model, primary_score, scores, metadata}`. Each
+named score carries `value`, nominal `minimum` / `maximum`, and a
+direction (`higher_is_better`, `lower_is_better`, or `descriptive`),
+because a UTMOS 1-5 naturalness MOS is not numerically interchangeable
+with Audiobox's 1-10 axes. Both runtimes use TorchCodec to decode 16kHz
+mono ranges sequentially (10-second windows), return a duration-weighted
+aggregate plus `metadata.segments` / `metadata.worst_segment`, and reject
+audio over `MUSE_AUDIO_QUALITY_MAX_DURATION_SECONDS` (600s default) with
+413. The priority-100 HF plugin claims only two
+verified custom checkpoint shapes: `Blinorot/UTMOS-PyTorch` routes to
+the local TorchScript runtime and `facebook/audiobox-aesthetics`
+loads the package's official model class from Hub safetensors directly
+onto Muse's selected device. Audiobox must
+win before the broader priority-110 `audio/classification` plugin,
+since its Hub card carries that generic tag. Curated aliases are
+`utmos` (MIT, primary `naturalness`) and `audiobox-aesthetics`
+(CC-BY-4.0, primary `production_quality`). Pairwise/text-conditioned
+judges such as SpeechJudge are deferred to a separate comparison
+route/capability rather than overloading this single-ended contract.
 
 `text/rerank` is muse's first Cohere-compat modality (rather than
 OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is

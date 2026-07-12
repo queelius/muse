@@ -37,6 +37,10 @@ jobs:
           - vitpose-base-simple
           - detr-resnet-50
           - ast-audioset
+          # Resolver curations below run a real 1-second inference probe so
+          # TorchCodec/FFmpeg decoding is tested, not merely model imports.
+          - utmos
+          - audiobox-aesthetics
           - smolvlm-256m-instruct
           # opus-mt-en-es (~300MB, fixed en->es pair) is the lightweight
           # text/translation smoke candidate. The bundled default,
@@ -84,6 +88,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y espeak-ng
+
+      - name: system deps for audio quality
+        if: matrix.model == 'utmos' || matrix.model == 'audiobox-aesthetics'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: smoke-test fresh venv
         env:

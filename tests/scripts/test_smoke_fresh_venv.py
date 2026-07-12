@@ -167,6 +167,34 @@ def test_extract_failure_reason_empty():
     assert smoke._extract_failure_reason("") == "no output"
 
 
+def test_run_inference_probe_requires_successful_inference(tmp_path):
+    proc = MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "ran_inference": False,
+            "inference_error": "TorchCodec is required",
+        }) + "\n",
+        stderr="",
+    )
+    with patch.object(smoke.subprocess, "run", return_value=proc):
+        rc, captured = smoke._run_inference_probe(
+            tmp_path / "python", "utmos",
+        )
+    assert rc == 1
+    assert "TorchCodec is required" in captured
+
+
+def test_run_inference_probe_accepts_completed_inference(tmp_path):
+    proc = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"ran_inference": True}) + "\n",
+        stderr="",
+    )
+    with patch.object(smoke.subprocess, "run", return_value=proc):
+        rc, _ = smoke._run_inference_probe(tmp_path / "python", "utmos")
+    assert rc == 0
+
+
 def test_main_human_output(tmp_path, fake_known_models, capsys):
     """main() without --json prints the SmokeResult.label to stdout."""
     with patch.object(smoke, "_create_venv"), \
@@ -352,6 +380,36 @@ def test_smoke_curated_resolver_load_fails(tmp_path):
 
     assert result.ok is False
     assert "missing dep: sentencepiece" in result.label
+
+
+def test_smoke_curated_audio_quality_runs_inference_probe(tmp_path):
+    def _fake_pull(cmd, capture_output, text, env, cwd):
+        catalog_dir = Path(env["MUSE_CATALOG_DIR"])
+        catalog_dir.mkdir(parents=True, exist_ok=True)
+        (catalog_dir / "catalog.json").write_text(json.dumps({
+            "utmos": {
+                "python_path": str(
+                    catalog_dir / "venvs" / "utmos" / "bin" / "python"
+                ),
+                "manifest": {"modality": "audio/quality"},
+            },
+        }))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(smoke.subprocess, "run", side_effect=_fake_pull), \
+         patch.object(
+             smoke,
+             "_run_inference_probe",
+             return_value=(0, '{"ran_inference": true}'),
+         ) as inference, \
+         patch.object(smoke, "_run_load_only") as load_only:
+        result = smoke._smoke_curated_resolver(
+            "utmos", "hf://Blinorot/UTMOS-PyTorch", tmp_path,
+        )
+
+    assert result.ok is True
+    inference.assert_called_once()
+    load_only.assert_not_called()
 
 
 def test_repo_root_finds_pyproject():

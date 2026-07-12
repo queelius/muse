@@ -8,9 +8,13 @@
 Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the canonical interface:
 - text-to-speech on `/v1/audio/speech`
 - speech-to-text on `/v1/audio/transcriptions` and `/v1/audio/translations`
+- audio event / emotion / language classification on `/v1/audio/classifications`
+- speech naturalness and production-quality scoring on `/v1/audio/quality`
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
 - text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - image-to-image super-resolution on `/v1/images/upscale`
+- image depth, keypoints, and object detection on `/v1/images/depth`, `/v1/images/keypoints`, and `/v1/images/detect`
+- image OCR on `/v1/images/ocr`
 - promptable segmentation on `/v1/images/segment`
 - text-to-animation on `/v1/images/animations`
 - text-to-video on `/v1/video/generations`
@@ -22,8 +26,9 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 - text translation (LibreTranslate-compat) on `/v1/translate` (+ bare `/translate` alias, `GET /languages`)
+- image-to-3D and text-to-3D on `/v1/3d/from-image` and `/v1/3d/generations`
 
-Modality tags are MIME-style (`audio/embedding`, `audio/generation`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/embedding`, `image/generation`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
+Modality tags are MIME-style (`3d/generation`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/segmentation`, `image/upscale`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -104,6 +109,15 @@ curl -X POST http://localhost:8000/v1/images/embeddings \
 curl -X POST http://localhost:8000/v1/audio/embeddings \
   -F "file=@clip.wav" \
   -F "model=mert-v1-95m"
+
+# Speech/audio quality assessment (named, scaled axes)
+# Long clips are scored in bounded 10-second windows; metadata includes
+# every segment and the worst segment. The decoded-duration cap defaults
+# to 600 seconds (MUSE_AUDIO_QUALITY_MAX_DURATION_SECONDS).
+muse pull utmos
+curl -X POST http://localhost:8000/v1/audio/quality \
+  -F "file=@narration.wav" \
+  -F "model=utmos"
 
 # Chat (OpenAI-compatible incl. tools and streaming)
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -573,8 +587,10 @@ See the "Federation" section of `CLAUDE.md` for the full design.
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
 - `muse.cli_impl`: `serve` (supervisor), `worker` (single-venv process), `gateway` (HTTP proxy routing by request's `model` field).
 - `muse.modalities/`: one subpackage per modality (wire contract: protocol + routes + codec + client).
+  - `audio_classification/` (MODALITY `"audio/classification"`; multipart event/emotion/language classification)
   - `audio_embedding/` (MODALITY `"audio/embedding"`; multipart upload + OpenAI-shape envelope; includes `runtimes/transformers_audio.py`)
   - `audio_generation/` (MODALITY `"audio/generation"`; mounts both `/v1/audio/music` and `/v1/audio/sfx` on one MIME tag with per-route capability gates)
+  - `audio_quality/` (MODALITY `"audio/quality"`; bounded windowed UTMOS naturalness MOS + Audiobox Aesthetics quality axes)
   - `audio_speech/` (MODALITY `"audio/speech"`)
   - `audio_transcription/` (MODALITY `"audio/transcription"`; multipart/form-data upload, OpenAI Whisper wire shape)
   - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)

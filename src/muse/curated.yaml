@@ -339,6 +339,30 @@
   capabilities:
     memory_gb: 1.0
 
+# ---------- audio/quality (naturalness + production quality) ----------
+
+# Single-ended speech-naturalness MOS predictor. The fairseq-free
+# TorchScript conversion is MIT licensed and expects 16kHz mono input.
+- id: utmos
+  uri: hf://Blinorot/UTMOS-PyTorch
+  modality: audio/quality
+  size_gb: 0.39
+  description: "UTMOS naturalness MOS: single-ended 1-5 speech-quality score, ~394MB, MIT"
+  capabilities:
+    memory_gb: 1.0
+
+# General audio aesthetics model. Production Quality is the primary
+# ranking axis; Content Enjoyment/Usefulness and Production Complexity
+# are returned alongside it. The resolver downloads the safe HF
+# safetensors representation rather than the legacy pickle checkpoint.
+- id: audiobox-aesthetics
+  uri: hf://facebook/audiobox-aesthetics
+  modality: audio/quality
+  size_gb: 0.39
+  description: "Meta Audiobox Aesthetics: four 1-10 quality axes for speech, music, and sound, ~396MB, CC-BY-4.0"
+  capabilities:
+    memory_gb: 1.5
+
 # ---------- text/rerank (cross-encoder rerankers) ----------
 
 - id: bge-reranker-v2-m3
