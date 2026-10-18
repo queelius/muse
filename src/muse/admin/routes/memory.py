@@ -117,6 +117,10 @@ def _enabled_loaded_model_ids() -> set[str]:
     with state.lock:
         ids = set()
         for spec in state.workers:
+            if spec.status == "dead" or (
+                spec.process is not None and spec.process.poll() is not None
+            ):
+                continue
             ids.update(spec.models)
     return ids
 
@@ -193,6 +197,11 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
     catalog_known = known_models()
     loaded = _enabled_loaded_model_ids()
     refcounts = _loaded_refcounts()
+    director = getattr(get_supervisor_state(), "director", None)
+    resident_pools = {}
+    if director is not None:
+        with director.lock:
+            resident_pools = {mid: resident.pool for mid, resident in director.loaded.items()}
     depths = _queue_depths()
     # #331: a model with parked waiters but no live worker yet (its own
     # cold start -- exactly when the queue is deepest) must still appear,
@@ -209,7 +218,9 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
         if model_id in catalog_known:
             cap_device = (catalog_known[model_id].extra or {}).get("device", "auto")
         cap_device = (cap_device or "auto").lower()
-        if cap_device == "auto":
+        if model_id in resident_pools:
+            cap_device = resident_pools[model_id]
+        elif cap_device == "auto":
             # Resolve to the side this model actually loads on so an
             # auto-device model is accounted under GPU on a GPU host and
             # CPU on a CPU-only host (mirrors runtime select_device).

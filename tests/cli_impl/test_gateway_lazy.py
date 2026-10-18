@@ -178,6 +178,103 @@ async def test_gateway_lifespan_signals_supervisor_shutdown_before_cleanup():
     store.shutdown.assert_called_once_with(timeout=5.0)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+@pytest.mark.parametrize("blocked_phase", ["backfill", "revalidate"])
+async def test_native_manifest_preparation_is_shared_off_loop_and_shielded(cancel_waiter, blocked_phase):
+    from muse.cli_impl.gateway import _route_via_director
+    from fastapi.responses import JSONResponse
+
+    state = _make_state_with_director()
+    if blocked_phase == "revalidate":
+        state.unservable_reasons["fake-model"] = "stale placement"
+    manifest = _manifest(device="auto")
+    manifest["backend_path"] = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
+    loop_thread = threading.get_ident()
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_preparation(value, model_id, **kwargs):
+        assert threading.get_ident() != loop_thread, "native query blocked the ASGI loop"
+        calls.append(model_id)
+        started.set()
+        assert release.wait(2)
+        return value if blocked_phase == "backfill" else None
+
+    with patch("muse.cli_impl.gateway._read_catalog", return_value={"fake-model": {"manifest": manifest}}), \
+         _patch_get_manifest(manifest), \
+         patch("muse.cli_impl.gateway.revalidate_servability", side_effect=slow_preparation if blocked_phase == "revalidate" else None, return_value=None), \
+         patch("muse.cli_impl.gateway.backfill_manifest_memory", side_effect=slow_preparation if blocked_phase == "backfill" else lambda value, *args, **kwargs: value), \
+         patch("muse.cli_impl.gateway._forward_with_release", new=AsyncMock(return_value=JSONResponse({"ok": True}))):
+        tasks = [asyncio.create_task(_route_via_director(
+            MagicMock(), "v1/chat/completions", "fake-model", state, 1.0,
+        )) for _ in range(3)]
+        try:
+            # The loop remains responsive while the bounded native query waits.
+            for _ in range(20):
+                if started.is_set() or any(task.done() for task in tasks):
+                    break
+                await asyncio.sleep(0.01)
+            assert started.is_set(), "manifest preparation did not run off-loop"
+            if cancel_waiter:
+                tasks[0].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[0]
+            assert len(calls) == 1
+            release.set()
+            responses = await asyncio.gather(*tasks[1:] if cancel_waiter else tasks)
+            assert [response.status_code for response in responses] == [200] * len(responses)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    assert calls == ["fake-model"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_capability_returns_actionable_503():
+    from muse.cli_impl.gateway import _route_via_director
+    state = _make_state_with_director()
+    with _patch_get_manifest(), patch(
+        "muse.cli_impl.gateway.backfill_manifest_memory",
+        side_effect=RuntimeError("could not query native GGUF GPU offload; retry"),
+    ):
+        response = await _route_via_director(
+            MagicMock(), "v1/chat/completions", "fake-model", state, 1.0,
+        )
+    assert response.status_code == 503
+    assert b'"code":"model_unservable"' in response.body
+    assert b"could not query native GGUF GPU offload" in response.body
+    state.director.acquire.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_native_resident_survives_changed_unsupported_preferences():
+    from muse.cli_impl.gateway import _route_via_director
+    from fastapi.responses import JSONResponse
+    from types import SimpleNamespace
+
+    state = _make_state_with_director()
+    state.director.loaded = {"fake-model": SimpleNamespace(pool="cpu")}
+    manifest = _manifest(device="auto")
+    manifest["backend_path"] = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
+
+    def changed_preferences(value, model_id, **kwargs):
+        if not kwargs.get("resolve_placement", True):
+            return value
+        raise RuntimeError("native GGUF GPU offload unavailable")
+
+    with patch("muse.cli_impl.gateway._read_catalog", return_value={"fake-model": {"device_override": "cuda"}}), \
+         _patch_get_manifest(manifest), \
+         patch("muse.cli_impl.gateway.backfill_manifest_memory", side_effect=changed_preferences), \
+         patch("muse.cli_impl.gateway._forward_with_release", new=AsyncMock(return_value=JSONResponse({"ok": True}))):
+        response = await _route_via_director(
+            MagicMock(), "v1/chat/completions", "fake-model", state, 1.0,
+        )
+    assert response.status_code == 200
+    assert state.director.loaded["fake-model"].pool == "cpu"
+
+
 # =============================================================================
 # F1: per-request acquire + release wrap
 # =============================================================================

@@ -1034,6 +1034,54 @@ def _cold_model_needs_servability_check(director: Any, model_id: str) -> bool:
         return model_id not in loaded
 
 
+_manifest_preparations: dict[tuple, asyncio.Task] = {}
+
+
+async def _prepare_director_manifest(
+    state: Any, model_id: str, catalog_entry: dict | None, *, check_servability: bool,
+) -> tuple[str | None, dict]:
+    """Share one off-loop placement check; request cancellation owns no child."""
+    headroom = _director_headroom(state.director)
+    requested = state.device
+    key = (
+        asyncio.get_running_loop(), id(state), id(state.director), model_id, requested,
+        json.dumps(catalog_entry, sort_keys=True), tuple(sorted(headroom.items())),
+        repr(getattr(state.director, "gpu_budget_gb", None)),
+        repr(getattr(state.director, "cpu_budget_gb", None)), check_servability,
+    )
+
+    def prepare() -> tuple[str | None, dict]:
+        if check_servability:
+            reason = revalidate_servability(state, model_id, **headroom)
+            if reason is not None:
+                return reason, {}
+        manifest = get_manifest(model_id)
+        from muse.core.placement import is_native_gguf
+        if (
+            is_native_gguf(manifest)
+            and isinstance(getattr(state.director, "loaded", None), dict)
+            and not _cold_model_needs_servability_check(state.director, model_id)
+        ):
+            return None, backfill_manifest_memory(
+                manifest, model_id, supervisor_device=requested, resolve_placement=False,
+            )
+        return None, backfill_manifest_memory(manifest, model_id, supervisor_device=requested)
+
+    pending = _manifest_preparations.get(key)
+    if pending is None:
+        pending = asyncio.create_task(asyncio.to_thread(prepare))
+        _manifest_preparations[key] = pending
+
+        def finished(task: asyncio.Task) -> None:
+            _manifest_preparations.pop(key, None)
+            # Retrieve an orphaned exception if every HTTP waiter disconnected.
+            if not task.cancelled():
+                task.exception()
+
+        pending.add_done_callback(finished)
+    return await asyncio.shield(pending)
+
+
 async def _route_via_director(
     request: Request,
     full_path: str,
@@ -1113,65 +1161,21 @@ async def _route_via_director(
         unservable_reason is not None
         or _cold_model_needs_servability_check(state.director, model_id)
     )
-    if needs_servability_check:
-        # Thread the SAME headroom state.director was built with, not
-        # revalidate_servability's hardcoded 1.0/2.0 defaults. Otherwise an
-        # operator-configured server.gpu_headroom_gb / cpu_headroom_gb
-        # (MUSE_GPU_HEADROOM_GB / MUSE_CPU_HEADROOM_GB) makes this gate use
-        # a DIFFERENT headroom than the director's own admit/evict fit
-        # check, so the gate can falsely 503 a model the director would
-        # actually admit (or vice versa). state.director is guaranteed
-        # non-None here (checked by the caller before dispatching to this
-        # function).
-        try:
-            unservable_reason = revalidate_servability(
-                state, model_id, **_director_headroom(state.director),
-            )
-        except CatalogError as exc:
-            logger.error(
-                "servability check for %r failed: catalog is unavailable: %s",
-                model_id, exc,
-            )
-            return _openai_error(
-                503,
-                "catalog_unavailable",
-                f"model catalog is temporarily unavailable: {exc}",
-                error_type="server_error",
-            )
-    if unservable_reason is not None:
-        return _openai_error(
-            503,
-            "model_unservable",
-            f"model {model_id!r} cannot be served: {unservable_reason}",
-            error_type="server_error",
-        )
-
-    # 2. Resolve manifest. Per-request lookup is cheap: `known_models()`
-    # memoizes its merge against catalog.json's (path, mtime_ns) and
-    # `_read_catalog()` is mtime-cached the same way, so unchanged
-    # catalogs return immediately. Any catalog write -- including the
-    # admin pull endpoint's `muse pull` subprocess or an operator's CLI
-    # pull beside this supervisor -- bumps the mtime and both re-read, so
-    # models pulled after boot route without a restart. KeyError -> 404
-    # model_not_found.
+    # Native placement can require a bounded interpreter query. Keep both
+    # validation and backfill off-loop, with one task per model/configuration
+    # so concurrent HTTP waiters do not occupy one executor thread each.
     try:
-        manifest = get_manifest(model_id)
+        unservable_reason, manifest = await _prepare_director_manifest(
+            state, model_id, catalog_entry, check_servability=needs_servability_check,
+        )
     except KeyError:
         return _openai_error(
             404, "model_not_found",
             f"model {model_id!r} is not in the catalog",
         )
     except CatalogError as exc:
-        # catalog.json is corrupt and no last-known-good cache exists
-        # (muse.core.catalog._read_catalog's corrupt-guard). Pre-fix this
-        # propagated uncaught to FastAPI's default handler, surfacing a
-        # bare {"detail": "Internal Server Error"} instead of muse's
-        # OpenAI-shaped envelope. Log once here (no traceback needed;
-        # _read_catalog already logged the underlying corruption) and
-        # degrade to a clean 503, matching the model_unservable shape
-        # used elsewhere in this function.
         logger.error(
-            "get_manifest(%r) failed: catalog is unavailable: %s",
+            "manifest preparation for %r failed: catalog is unavailable: %s",
             model_id, exc,
         )
         return _openai_error(
@@ -1180,27 +1184,13 @@ async def _route_via_director(
             f"model catalog is temporarily unavailable: {exc}",
             error_type="server_error",
         )
-
-    # 2b. Size the load. The director sizes loads + drives LRU eviction
-    # from capabilities.memory_gb; a probed-only or never-probed model
-    # declares none, so backfill it from the catalog (probe measurement,
-    # else on-disk weights) -- otherwise the director treats the model as
-    # 0 GB and never evicts to make room for it.
-    try:
-        manifest = backfill_manifest_memory(
-            manifest, model_id, supervisor_device=state.device,
-        )
-    except CatalogError as exc:
-        # The catalog can change between get_manifest() and the sizing
-        # backfill. Preserve the same clean failure contract at both reads.
-        logger.error(
-            "capacity backfill for %r failed: catalog is unavailable: %s",
-            model_id, exc,
-        )
+    except RuntimeError as exc:
+        unservable_reason = str(exc)
+    if unservable_reason is not None:
         return _openai_error(
             503,
-            "catalog_unavailable",
-            f"model catalog is temporarily unavailable: {exc}",
+            "model_unservable",
+            f"model {model_id!r} cannot be served: {unservable_reason}",
             error_type="server_error",
         )
 

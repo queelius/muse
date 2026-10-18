@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
+from muse.core.placement import native_gpu_backend, native_gpu_offload, native_placement
 from muse.modalities.chat_completion.protocol import (
     ChatChoice,
     ChatChunk,
@@ -102,6 +103,13 @@ class LlamaCppModel:
         gguf_path = base / gguf_file
         if not gguf_path.exists():
             raise FileNotFoundError(f"GGUF file not found: {gguf_path}")
+        offload = native_gpu_offload() if device != "cpu" and n_gpu_layers != 0 else False
+        placement = native_placement(
+            device, n_gpu_layers, gpu_offload=offload,
+            gpu_backend=native_gpu_backend() if offload else None,
+        )
+        self.device = placement.device
+        n_gpu_layers = placement.n_gpu_layers
         logger.info(
             "loading GGUF %s (ctx=%d, gpu_layers=%d, chat_format=%s)",
             gguf_path, context_length, n_gpu_layers, effective_chat_format,

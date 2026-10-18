@@ -195,6 +195,7 @@ class InFlightLoad:
     # records) are reclaimable once the lease expires.
     claimed_at: float = field(default_factory=time.monotonic)
     owner_thread: threading.Thread | None = field(default=None, repr=False)
+    device: str | None = None  # resolved measurement bucket; MPS still pools on CPU
 
 
 @dataclass(eq=False)
@@ -1111,6 +1112,9 @@ class LoadDirector:
             # we don't strand an Event.
             memory_gb = self._memory_requirement_gb(manifest, model_id)
             device = declared_device(manifest.get("capabilities"))
+            from muse.core.placement import is_native_gguf, resolve_model_placement
+            if is_native_gguf(manifest):
+                device = resolve_model_placement(model_id, manifest).device
             pool = self._resolve_pool_device(device)
 
             # Defense in depth for non-gateway callers (notably admin
@@ -1169,6 +1173,7 @@ class LoadDirector:
                 memory_gb=memory_gb,
                 pool=pool,
                 owner_thread=threading.current_thread(),
+                device=pool if device in ("", "auto", "gpu") else device,
             )
             self.in_flight_loads[model_id] = claim
             self._inflight_epoch += 1
@@ -1268,7 +1273,9 @@ class LoadDirector:
         OFF the request hot path so the caller is unaffected by catalog
         IO latency or filesystem failures.
         """
-        device = declared_device(manifest.get("capabilities"))
+        # The claim records actual admission placement. Do not recompute it
+        # from preferences that an operator may have edited while loading.
+        device = claim.device or declared_device(manifest.get("capabilities"))
 
         try:
             with self.lock:

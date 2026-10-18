@@ -1,7 +1,50 @@
 """Tests for LlamaCppModel (mocks llama_cpp.Llama; no real GGUF loaded)."""
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+import sys
 
 import pytest
+
+
+@pytest.mark.parametrize("device", ["cpu", "auto"])
+def test_cpu_only_runtime_disables_gpu_layers(tmp_path, monkeypatch, device):
+    local_dir, gguf = _with_existing_gguf(tmp_path)
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(
+        llama_backend_init=lambda: None, llama_supports_gpu_offload=lambda: False,
+    ))
+    with patch("muse.modalities.chat_completion.runtimes.llama_cpp.Llama") as model:
+        from muse.modalities.chat_completion.runtimes.llama_cpp import LlamaCppModel
+        backend = LlamaCppModel(model_id="test", hf_repo="test/model", local_dir=str(local_dir), gguf_file=gguf, device=device)
+        assert model.call_args.kwargs["n_gpu_layers"] == 0
+        assert backend.device == "cpu"
+
+
+def test_explicit_cuda_rejects_cpu_only_native_build(tmp_path, monkeypatch):
+    local_dir, gguf = _with_existing_gguf(tmp_path)
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(
+        llama_backend_init=lambda: None, llama_supports_gpu_offload=lambda: False,
+    ))
+    with patch("muse.modalities.chat_completion.runtimes.llama_cpp.Llama") as model:
+        from muse.modalities.chat_completion.runtimes.llama_cpp import LlamaCppModel
+        with pytest.raises(RuntimeError, match="offload"):
+            LlamaCppModel(model_id="test", hf_repo="test/model", local_dir=str(local_dir), gguf_file=gguf, device="cuda")
+        model.assert_not_called()
+
+
+def test_metal_native_auto_uses_mps(tmp_path, monkeypatch):
+    local_dir, gguf = _with_existing_gguf(tmp_path)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(
+        llama_backend_init=lambda: None, llama_supports_gpu_offload=lambda: True,
+        llama_print_system_info=lambda: b"Metal : EMBED_LIBRARY = 1",
+    ))
+    with patch("muse.modalities.chat_completion.runtimes.llama_cpp.Llama") as model:
+        from muse.modalities.chat_completion.runtimes.llama_cpp import LlamaCppModel
+        backend = LlamaCppModel(
+            model_id="test", hf_repo="test/model", local_dir=str(local_dir), gguf_file=gguf,
+        )
+        assert backend.device == "mps"
+        assert model.call_args.kwargs["n_gpu_layers"] == -1
 
 
 def _with_existing_gguf(tmp_path, filename="fake.gguf"):
@@ -195,7 +238,10 @@ def test_llama_cpp_does_not_forward_supports_tools_to_llama(tmp_path):
     assert "supports_tools" not in mock_cls.call_args.kwargs
 
 
-def test_llama_cpp_n_gpu_layers_default_is_all(tmp_path):
+def test_llama_cpp_n_gpu_layers_default_is_all(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(
+        llama_backend_init=lambda: None, llama_supports_gpu_offload=lambda: True,
+    ))
     local_dir, gguf = _with_existing_gguf(tmp_path)
     with patch("muse.modalities.chat_completion.runtimes.llama_cpp.Llama") as mock_cls:
         mock_cls.return_value = MagicMock()

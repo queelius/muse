@@ -1663,6 +1663,13 @@ def _effective_model_device(
     supervisor_device: str = "auto",
 ) -> str:
     """Resolve placement using the same precedence as ``load_backend``."""
+    from muse.core.placement import is_native_gguf, resolve_model_placement
+    manifest = catalog_entry.get("manifest") or {}
+    if is_native_gguf(manifest):
+        return resolve_model_placement(
+            manifest.get("model_id", ""), manifest,
+            requested=supervisor_device, entry=catalog_entry,
+        ).device
     override = str(catalog_entry.get("device_override") or "").lower()
     if override:
         return override
@@ -1905,11 +1912,14 @@ def _servability_reason(
                 "finite non-negative number"
             )
         return "no memory estimate; run `muse models probe` to populate"
-    device = _effective_model_device(
-        entry,
-        measured_device=measured_device,
-        supervisor_device=supervisor_device,
-    )
+    try:
+        device = _effective_model_device(
+            entry,
+            measured_device=measured_device,
+            supervisor_device=supervisor_device,
+        )
+    except RuntimeError as exc:
+        return str(exc)
     # Preserve the private helper's historical standalone behavior when a
     # caller does not provide the explicit detector verdict.
     if auto_cuda_available is None:
@@ -2114,6 +2124,7 @@ def backfill_manifest_memory(
     model_id: str,
     *,
     supervisor_device: str = "auto",
+    resolve_placement: bool = True,
 ) -> dict:
     """Return a copy of `manifest` sized (and device-pinned) from the catalog.
 
@@ -2137,6 +2148,10 @@ def backfill_manifest_memory(
 
     The input is never mutated; a copy is made lazily only when a backfill
     actually changes something.
+
+    Resident native models may skip placement resolution: their existing
+    director entry owns accounting until unload. Memory sizing still runs
+    so a concurrent unload cannot turn a subsequent cold acquire into 0 GB.
     """
     catalog = _read_catalog()
     entry = catalog.get(model_id)
@@ -2168,6 +2183,19 @@ def backfill_manifest_memory(
             out_caps = dict(caps)
             out_caps["memory_gb"] = gb
             out["capabilities"] = out_caps
+
+    from muse.core.placement import is_native_gguf, resolve_model_placement
+    if is_native_gguf(manifest):
+        if not resolve_placement:
+            return out
+        placement = resolve_model_placement(
+            model_id, manifest, requested=supervisor_device, entry=entry or {},
+        )
+        out = dict(out)
+        out_caps = dict(out.get("capabilities", {}) or {})
+        out_caps.update(device=placement.device, n_gpu_layers=placement.n_gpu_layers)
+        out["capabilities"] = out_caps
+        return out
 
     override = (entry or {}).get("device_override")
     if override:

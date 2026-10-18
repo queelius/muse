@@ -124,8 +124,11 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
     # not part of the manifest; read it live so the probe resolves the same
     # device load_backend will, keeping the memory measurement on the right
     # pool.
-    override = _read_catalog().get(model_id, {}).get("device_override")
-    actual_device = _resolve_device(device, entry, override)
+    catalog_entry = _read_catalog().get(model_id, {})
+    override = catalog_entry.get("device_override")
+    actual_device = _resolve_device(
+        device, entry, override, gpu_layers_override=catalog_entry.get("gpu_layers_override"),
+    )
 
     # Pre-load baseline. CUDA peak counter must be reset BEFORE loading
     # so reset_peak_memory_stats and the load both see the same epoch.
@@ -222,7 +225,9 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
     return 0
 
 
-def _resolve_device(requested: str, entry, override: str | None = None) -> str:
+def _resolve_device(
+    requested: str, entry, override: str | None = None, *, gpu_layers_override: int | None = None,
+) -> str:
     """Mirror catalog.load_backend's device resolution, most authoritative first.
 
       1. catalog device_override (operator `muse models set-device` pin)
@@ -245,6 +250,17 @@ def _resolve_device(requested: str, entry, override: str | None = None) -> str:
         chosen = cap
     else:
         chosen = requested
+    from muse.core.placement import is_native_gguf, native_gpu_backend, native_gpu_offload, native_placement
+    if is_native_gguf({"backend_path": getattr(entry, "backend_path", "")}):
+        layers = int(
+            gpu_layers_override if gpu_layers_override is not None
+            else entry.extra.get("n_gpu_layers", -1)
+        )
+        offload = native_gpu_offload() if chosen != "cpu" and layers != 0 else False
+        return native_placement(
+            chosen, layers, gpu_offload=offload,
+            gpu_backend=native_gpu_backend() if offload else None,
+        ).device
     if chosen and chosen != "auto":
         return chosen
     try:
