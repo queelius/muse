@@ -275,6 +275,62 @@ async def test_native_resident_survives_changed_unsupported_preferences():
     assert state.director.loaded["fake-model"].pool == "cpu"
 
 
+@pytest.mark.asyncio
+async def test_cold_native_admission_does_not_stall_unrelated_gateway_request(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi.responses import JSONResponse
+    from muse.cli_impl.gateway import _route_via_director
+    from muse.cli_impl.load_director import LoadDirector, LoadEntry
+    from muse.core import placement
+    import time
+
+    class Probe:
+        def cpu_free_gb(self):
+            return 16.0
+
+        def gpu_free_gb(self):
+            return None
+
+    director = LoadDirector(enable_fn=lambda _: 9001, disable_fn=lambda _: None, memory_probe=Probe())
+    now = time.monotonic()
+    director.loaded["fake-model"] = LoadEntry("fake-model", 9002, 0.5, 0, now, now, pool="cpu")
+    state = SupervisorState(device="cpu")
+    state.director = director
+    started = threading.Event()
+    release = threading.Event()
+
+    def prepare(*args, **kwargs):
+        started.set()
+        assert release.wait(3)
+        return placement.Placement("cpu", "cpu", 0)
+
+    monkeypatch.setattr(placement, "resolve_model_placement", prepare)
+    native = _manifest(device="auto")
+    native["backend_path"] = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
+    watchdog = threading.Timer(2, release.set)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        cold = executor.submit(director._decide, "cold-native", manifest=native)
+        assert await asyncio.to_thread(started.wait, 1)
+        watchdog.start()
+        try:
+            with _patch_get_manifest(), patch(
+                "muse.cli_impl.gateway._forward_with_release",
+                new=AsyncMock(return_value=JSONResponse({"ok": True})),
+            ):
+                response = await _route_via_director(
+                    MagicMock(), "v1/audio/speech", "fake-model", state, 1.0,
+                )
+            assert response.status_code == 200
+            # The request must finish while the native capability gate is
+            # still closed; the owned watchdog only bounds a failing test.
+            assert not release.is_set(), "unrelated request waited for the native capability query"
+        finally:
+            release.set()
+            watchdog.cancel()
+            watchdog.join(timeout=1)
+        assert cold.result(timeout=2)[0] == "load"
+
+
 # =============================================================================
 # F1: per-request acquire + release wrap
 # =============================================================================

@@ -443,3 +443,74 @@ def test_native_query_wait_deadline_is_actionable(native_entry, monkeypatch):
         finally:
             release.set()
         assert owner.result(timeout=2)["capabilities"]["device"] == "cpu"
+
+
+@pytest.mark.parametrize("change", ["blocked", "evicting", "resident", "resident_error", "claim", "claim_error", "manifest", "catalog", "budget"])
+def test_native_admission_rechecks_after_unlocked_preparation(native_entry, monkeypatch, change):
+    from muse.admin.operations import OperationError
+    from muse.cli_impl.load_director import InFlightLoad
+    from muse.core import placement
+
+    entry, _, _ = native_entry
+    manifest = entry["manifest"]
+    director = LoadDirector(
+        enable_fn=lambda _: 9001, disable_fn=lambda _: None, memory_probe=Probe(),
+        cpu_headroom_gb=0,
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def prepare(*args, **kwargs):
+        started.set()
+        assert release.wait(3)
+        if change.endswith("_error"):
+            raise RuntimeError("native capability became unavailable")
+        return placement.Placement("cpu", "cpu", 0)
+
+    monkeypatch.setattr(placement, "resolve_model_placement", prepare)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(director._decide, MODEL, manifest=manifest)
+        assert started.wait(1)
+        try:
+            assert director.lock.acquire(timeout=1), "native query retained the admission lock"
+            try:
+                if change == "blocked":
+                    director._blocked_models.add(MODEL)
+                elif change == "evicting":
+                    director.evicting.add(MODEL)
+                elif change.startswith("resident"):
+                    now = time.monotonic()
+                    director.loaded[MODEL] = LoadEntry(MODEL, 9003, 1.0, 0, now, now, pool="cuda")
+                elif change.startswith("claim"):
+                    claim = InFlightLoad(threading.Event(), 1.0, "cuda")
+                    director.in_flight_loads[MODEL] = claim
+                elif change == "manifest":
+                    manifest["capabilities"]["memory_gb"] = 2.0
+                elif change == "catalog":
+                    entry["device_override"] = "cpu"
+                    catalog._write_catalog({MODEL: entry})
+                elif change == "budget":
+                    director.cpu_budget_gb = 0.25
+            finally:
+                director.lock.release()
+        finally:
+            release.set()
+
+        if change.startswith(("resident", "claim")):
+            decision = pending.result(timeout=2)
+            if change.startswith("resident"):
+                assert decision == ("hot", 9003)
+                assert director.loaded[MODEL].pool == "cuda"
+                assert director.loaded[MODEL].refcount == 1
+            else:
+                assert decision == ("wait", claim)
+        else:
+            expected = {
+                "blocked": "model_disabled", "evicting": "model_eviction_in_progress",
+                "manifest": "model_placement_changed", "catalog": "model_placement_changed",
+                "budget": "model_too_large_for_device",
+            }
+            with pytest.raises(OperationError) as caught:
+                pending.result(timeout=2)
+            assert caught.value.code == expected[change]
+            assert MODEL not in director.in_flight_loads

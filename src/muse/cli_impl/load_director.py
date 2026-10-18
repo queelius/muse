@@ -63,6 +63,7 @@ import logging
 import math
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
@@ -1042,7 +1043,35 @@ class LoadDirector:
     def _decide(
         self, model_id: str, *, manifest: dict, bump_refcount: bool = True,
     ) -> tuple:
-        """First phase, under the lock.
+        """Prepare native placement unlocked, then recheck before admission."""
+        decision = self._decide_locked(
+            model_id, manifest=manifest, bump_refcount=bump_refcount,
+        )
+        if decision[0] != "prepare_native":
+            return decision
+
+        from muse.core.placement import resolve_model_placement
+        snapshot = decision[1]
+        entry = deepcopy(_read_catalog().get(model_id, {}))
+        device = None
+        failure = None
+        try:
+            # No director lock may span native I/O or a shared-query wait:
+            # the ASGI loop also reads resident state under this lock.
+            device = resolve_model_placement(model_id, snapshot, entry=entry).device
+        except Exception as exc:
+            failure = exc
+        return self._decide_locked(
+            model_id, manifest=manifest, bump_refcount=bump_refcount,
+            native_device=device, prepared=(snapshot, entry), placement_error=failure,
+        )
+
+    def _decide_locked(
+        self, model_id: str, *, manifest: dict, bump_refcount: bool,
+        native_device: str | None = None, prepared: tuple[dict, dict] | None = None,
+        placement_error: Exception | None = None,
+    ) -> tuple:
+        """Classify current ownership and admit only under the lock.
 
         Returns one of these tuple shapes:
           ("hot", port): entry already loaded; refcount + last_touched
@@ -1051,6 +1080,8 @@ class LoadDirector:
             an evictor to race in).
           ("wait",): another thread owns the load; caller awaits the Event.
           ("load",): we just claimed ownership; run load phase + commit.
+          ("prepare_native", manifest): prepare a native cold load outside
+            this lock, then repeat classification and configuration checks.
           ("evict_and_retry", shortfall_gb, device, required_gb): the
             model does not fit live free minus headroom. Caller runs
             eviction OUTSIDE the lock and re-calls _decide. No in-flight
@@ -1107,14 +1138,27 @@ class LoadDirector:
             if existing_claim is not None:
                 return ("wait", existing_claim)
 
+            from muse.core.placement import is_native_gguf
+            if prepared is not None:
+                saved_manifest, saved_entry = prepared
+                if manifest != saved_manifest or _read_catalog().get(model_id, {}) != saved_entry:
+                    from muse.admin.operations import OperationError
+                    raise OperationError(
+                        "model_placement_changed",
+                        f"model {model_id!r} changed during native placement preparation; retry",
+                        status=503,
+                        retryable=True,
+                    )
+                if placement_error is not None:
+                    raise placement_error
+            elif is_native_gguf(manifest):
+                return ("prepare_native", deepcopy(manifest))
+
             # We're going to do this load. Decide whether it fits before
             # we claim the in-flight slot, so that if the answer is "no"
             # we don't strand an Event.
             memory_gb = self._memory_requirement_gb(manifest, model_id)
-            device = declared_device(manifest.get("capabilities"))
-            from muse.core.placement import is_native_gguf, resolve_model_placement
-            if is_native_gguf(manifest):
-                device = resolve_model_placement(model_id, manifest).device
+            device = native_device or declared_device(manifest.get("capabilities"))
             pool = self._resolve_pool_device(device)
 
             # Defense in depth for non-gateway callers (notably admin
