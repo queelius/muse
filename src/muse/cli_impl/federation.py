@@ -25,6 +25,10 @@ import target has no effect on the gateway module's own callers, and
 this module always calls its OWN `_forward` name (not
 `gateway._forward`), so the patch takes effect.
 
+Every proxied request requires an explicit model, including translation:
+the coordinator has no cluster-wide default-model policy. LibreTranslate
+clients that omit `model` must connect to a node gateway directly.
+
 Failover: a `_forward` call that fails at CONNECT time (the node is
 unreachable/down -- never a mid-stream failure, and never a request the
 node already accepted; `_forward` only raises those exceptions
@@ -58,7 +62,14 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from muse.cli_impl.gateway import _forward, _openai_error, extract_model_from_request
+from muse.cli_impl.gateway import (
+    RequestBodyLimitMiddleware,
+    _forward,
+    _openai_error,
+    _valid_model_id,
+    extract_model_from_request,
+)
+from muse.core import config
 from muse.cli_impl.serve_util import run_uvicorn
 from muse.federation.nodes import load_nodes
 from muse.federation.registry import NodeRegistry
@@ -141,6 +152,10 @@ def build_coordinator(
             await registry.aclose()
 
     app = FastAPI(title="Muse Federation Coordinator", lifespan=_lifespan)
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        limit=int(config.get("server.max_request_body_mb")) * 1024 * 1024,
+    )
     app.state.registry = registry
     app.state.timeout = timeout
     app.state.rr_counter = rr_counter
@@ -214,6 +229,13 @@ def build_coordinator(
                 400, "model_required",
                 "request is missing a `model` field (required for "
                 "federation routing)",
+            )
+
+        if not _valid_model_id(model_id):
+            return _openai_error(
+                400, "invalid_model",
+                "`model` must be a non-empty string of at most "
+                "512 characters without control characters",
             )
 
         states: list[NodeState] = registry.snapshot()

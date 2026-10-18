@@ -8,6 +8,7 @@ error, second candidate succeeds).
 """
 
 import httpx
+import pytest
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 
@@ -25,6 +26,51 @@ def _snap():
 class FakeReg:
     def snapshot(self):
         return _snap()
+
+
+@pytest.mark.parametrize("model", [[], {}, 1, True, "", "   ", "x" * 513, "bad\nname"])
+def test_invalid_model_returns_structured_400(model):
+    app = fed.build_coordinator(FakeReg(), timeout=5)
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/v1/chat/completions", json={"model": model, "messages": []},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_model"
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/health"])
+def test_coordinator_rejects_oversized_body_before_dispatch(monkeypatch, path):
+    monkeypatch.setenv("MUSE_MAX_REQUEST_BODY_MB", "1")
+    app = fed.build_coordinator(FakeReg(), timeout=5)
+    response = TestClient(app).request("GET", path, content=b"x" * (1024 * 1024 + 1))
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "request_too_large"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_rejects_chunked_body_without_content_length(monkeypatch):
+    monkeypatch.setenv("MUSE_MAX_REQUEST_BODY_MB", "1")
+
+    async def forward_in_memory(request, target_url, timeout):
+        return JSONResponse({"unexpected_forward": True})
+
+    monkeypatch.setattr(fed, "_forward", forward_in_memory)
+    app = fed.build_coordinator(FakeReg(), timeout=5)
+
+    async def chunks():
+        yield b'{"model":"m1","padding":"'
+        yield b"x" * (1024 * 1024)
+        yield b'"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://coordinator",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions", content=chunks(),
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "request_too_large"
 
 
 def test_routes_to_node_with_model(monkeypatch):
