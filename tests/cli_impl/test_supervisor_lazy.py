@@ -2505,6 +2505,26 @@ class TestWeightsSizeFallback:
         # Only the 2.6 MB active variant, not the ~15.6 MB tree sum.
         assert gb == pytest.approx(2_600_000 / 1024 ** 3, rel=1e-6)
 
+    def test_gguf_split_variant_sizes_every_shard(self, tmp_path):
+        """A split GGUF declares its first shard as `gguf_file`, but
+        llama.cpp loads all of them; counting one shard would under-size
+        a 32B Q8_0 by half."""
+        from muse.cli_impl.supervisor import _weights_size_gb
+
+        d = tmp_path / "snapshot" / "Q8_0"
+        d.mkdir(parents=True)
+        (d / "M-Q8_0-00001-of-00002.gguf").write_bytes(b"\0" * 3_000_000)
+        (d / "M-Q8_0-00002-of-00002.gguf").write_bytes(b"\0" * 2_000_000)
+        (d.parent / "M-Q4_K_M.gguf").write_bytes(b"\0" * 9_000_000)
+
+        gb = _weights_size_gb({
+            "local_dir": str(d.parent),
+            "manifest": {"capabilities": {
+                "gguf_file": "Q8_0/M-Q8_0-00001-of-00002.gguf",
+            }},
+        })
+        assert gb == pytest.approx(5_000_000 / 1024 ** 3, rel=1e-6)
+
     def test_gguf_missing_declared_file_falls_back_to_tree(self, tmp_path):
         """A declared `gguf_file` that is absent on disk (stale path) must
         fall back to the tree walk rather than returning 0.0 and stamping

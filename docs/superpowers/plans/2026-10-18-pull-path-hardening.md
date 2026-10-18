@@ -56,13 +56,15 @@ The GGUF, VLM and other resolver plugins derive the catalog id from the repo bas
 
 ### Task 3: Download Every Shard of a Split GGUF
 
+**Done 2026-10-18.** As built: shard naming lives in a new stdlib-only `src/muse/core/gguf.py` shared by the plugin and the sizer; the runtime needed no change; tests in `tests/modalities/chat_completion/test_hf_plugin_split_gguf.py`, `tests/core/test_gguf_shards.py` and `tests/cli_impl/test_supervisor_lazy.py`.
+
 **Files:** Modify `src/muse/modalities/chat_completion/hf.py` (`_match_gguf_variant`, `_resolve`'s `_download`), the llama.cpp runtime if it needs the first-shard path; test `tests/modalities/chat_completion/test_hf_plugin.py`.
 
 `_match_gguf_variant` returns the first file whose variant matches, and `_download` allow-lists only that file, so a `*-00001-of-00003.gguf` variant pulls one third of the weights.
 
-- [ ] Write tests against sibling lists modeled on Qwen3-32B-GGUF's split layout: a sharded variant allow-lists all `-0000N-of-0000M` files; `capabilities.gguf_file` is the first shard (what llama.cpp loads); a missing or extra shard count is a resolve-time error; a single-file variant is unchanged; search still emits one row per variant.
-- [ ] Make the weights-on-disk sizer (`supervisor.py`, GGUF exception) count every shard of the declared variant, not only `gguf_file`; add a test.
-- [ ] Implement, then run `pytest tests/modalities/chat_completion/ tests/cli_impl/test_supervisor*.py -q`; require GREEN.
+- [x] Write tests against sibling lists modeled on Qwen3-32B-GGUF's split layout: a sharded variant allow-lists all `-0000N-of-0000M` files; `capabilities.gguf_file` is the first shard (what llama.cpp loads); a missing or extra shard count is a resolve-time error; a single-file variant is unchanged; search still emits one row per variant.
+- [x] Make the weights-on-disk sizer (`supervisor.py`, GGUF exception) count every shard of the declared variant, not only `gguf_file`; add a test.
+- [x] Implement, then run `pytest tests/modalities/chat_completion/ tests/cli_impl/test_supervisor*.py -q`; require GREEN.
 
 ### Task 4: Include SentencePiece Tokenizer Files
 

@@ -21,6 +21,7 @@ from typing import Any, Iterable
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 from muse.core.chat_formats import lookup_chat_format
+from muse.core.gguf import gguf_shard_files
 from muse.core.resolvers import (
     ResolvedModel,
     ResolverError,
@@ -59,6 +60,24 @@ def _match_gguf_variant(files: list[str], variant: str) -> str | None:
         if _extract_variant(f) == norm:
             return f
     return None
+
+
+def _variant_files(repo_id: str, siblings: list[str], matched: str) -> tuple[str, ...]:
+    """All files of `matched`'s variant: itself, or every shard of a split.
+
+    The first shard is what llama.cpp opens; a missing shard is a resolve
+    error rather than a half-downloaded model.
+    """
+    try:
+        shards = gguf_shard_files(matched)
+    except ValueError as e:
+        raise ResolverError(f"{repo_id}: {e}") from None
+    missing = [f for f in shards if f not in set(siblings)]
+    if missing:
+        raise ResolverError(
+            f"{repo_id} is missing GGUF shard(s) {missing} of {matched!r}"
+        )
+    return shards
 
 
 def _gguf_model_id(repo_id: str, variant: str) -> str:
@@ -191,6 +210,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
             f"variant {variant!r} not found in {repo_id}; available: {variants}"
         )
 
+    variant_files = _variant_files(repo_id, gguf_files, matched)
+    matched = variant_files[0]
+
     supports_tools = _try_sniff_tools_from_repo(repo_id, revision=revision)
     ctx_length = _try_sniff_context_length_from_repo(repo_id, revision=revision)
 
@@ -220,7 +242,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         manifest["revision"] = revision
 
     def _download(cache_root: Path) -> Path:
-        allow_patterns = [matched, "tokenizer*", "config.json", "*.md"]
+        allow_patterns = [*variant_files, "tokenizer*", "config.json", "*.md"]
         return Path(snapshot_download(
             repo_id=repo_id, allow_patterns=allow_patterns,
             cache_dir=str(cache_root) if cache_root else None,

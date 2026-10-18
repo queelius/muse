@@ -1525,8 +1525,9 @@ def _weights_size_gb(catalog_entry: dict) -> float:
     OVERestimate wildly (a 4B q4 whose repo ships six quants sums to ~15 GB
     vs its ~2.6 GB weight), and overestimation is the dangerous direction:
     it 503s a servable model as "exceeds device capacity". So when a
-    specific `gguf_file` is declared, size from that one file, falling back
-    to the tree walk only when it is absent on disk (stale path).
+    specific `gguf_file` is declared, size from that one file (every shard,
+    when it is the first shard of a split GGUF), falling back to the tree
+    walk only when it is absent on disk (stale path).
     """
     local_dir = catalog_entry.get("local_dir")
     if not isinstance(local_dir, (str, os.PathLike)) or not local_dir:
@@ -1539,9 +1540,14 @@ def _weights_size_gb(catalog_entry: dict) -> float:
         capabilities = {}
     gguf_file = capabilities.get("gguf_file")
     if isinstance(gguf_file, (str, os.PathLike)) and gguf_file:
+        from muse.core.gguf import gguf_shard_files
+
         try:
-            return os.path.getsize(os.path.join(local_dir, gguf_file)) / (1024 ** 3)
-        except OSError:
+            return sum(
+                os.path.getsize(os.path.join(local_dir, shard))
+                for shard in gguf_shard_files(os.fspath(gguf_file))
+            ) / (1024 ** 3)
+        except (OSError, ValueError):
             # Declared file missing/unreadable: fall through to the tree walk
             # rather than returning 0.0 and stamping the model unservable.
             pass

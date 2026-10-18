@@ -341,7 +341,10 @@ Modality backends implementing modality-specific protocols
   dispatch for `muse pull hf://...`. `HFResolver` sniffs each HF repo
   (`.gguf` siblings -> `chat/completion` / LlamaCppModel; sentence-
   transformers tag -> `embedding/text` / SentenceTransformerModel).
-  GGUF `@variant` is required; no magic default. Search implemented for
+  GGUF `@variant` is required; no magic default. A split variant
+  (`*-00001-of-0000N.gguf`) downloads every shard, records the first as
+  `gguf_file` (what llama.cpp opens), and fails to resolve if a shard is
+  missing from the repo (`muse.core.gguf.gguf_shard_files`). Search implemented for
   both modalities with per-variant deduping (sharded GGUFs don't emit
   one row per shard). Registers `hf://` scheme on import.
 - `muse.core.curated`: loads `src/muse/curated.yaml` (hand-edited
@@ -670,8 +673,8 @@ A model's load size comes from a three-tier sizing ladder (in
    OVERestimate wildly (a 4B q4 whose repo ships six quants sums to ~15 GB
    vs its ~2.6 GB weight) and 503 a servable model as "exceeds device
    capacity", so when a specific `gguf_file` is declared the sizer counts
-   that one file, falling back to the tree walk only if it is absent on
-   disk. This bug stayed hidden until v0.50.1 routed undeclared-device
+   that one file (every shard of it, for a split GGUF), falling back to
+   the tree walk only if it is absent on disk. This bug stayed hidden until v0.50.1 routed undeclared-device
    models to the cuda pool, where the inflated estimate first exceeded the
    card. *Diffusers/transformers dedup (v0.54.3):* the same over-count bites
    any snapshot that ships redundant encodings of one component -- fp16 AND
