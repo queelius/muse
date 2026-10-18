@@ -68,11 +68,13 @@ The GGUF, VLM and other resolver plugins derive the catalog id from the repo bas
 
 ### Task 4: Include SentencePiece Tokenizer Files
 
+**Done 2026-10-18.** As built: `*.model` added to `embedding_text`, `text_classification` (DeBERTa-v3 `spm.model`) and `text_rerank` (previously only `spiece.model`, missing XLM-R's `sentencepiece.bpe.model`), and `*/*.model` to the `image_generation` and `image_upscale` diffusers filters (T5 `tokenizer_2/spiece.model`). Summarization, translation, OCR and the embedding modalities already listed their SentencePiece files; video and 3D download whole repos. One test, `tests/modalities/test_sentencepiece_allow_patterns.py`, checks the patterns with huggingface_hub's own filter.
+
 **Files:** Modify `src/muse/modalities/embedding_text/hf.py` (allow-patterns around lines 67–73); test `tests/modalities/embedding_text/test_hf_plugin.py`.
 
-- [ ] Write a test that a repo shipping `sentencepiece.bpe.model` / `tokenizer.model` gets it in the allow-list, in both fp16 and non-fp16 branches.
-- [ ] Add `*.model` to the allow-list. Grep the other plugins' allow-patterns (`grep -n allow_patterns src/muse/modalities/*/hf.py`) for the same omission on text-tokenizing modalities (summarization, translation, classification, rerank); fix and test each one that filters with explicit globs and omits it.
-- [ ] Run `pytest tests/modalities/ -q -k hf`; require GREEN.
+- [x] Write a test that a repo shipping `sentencepiece.bpe.model` / `tokenizer.model` gets it in the allow-list, in both fp16 and non-fp16 branches.
+- [x] Add `*.model` to the allow-list. Grep the other plugins' allow-patterns (`grep -n allow_patterns src/muse/modalities/*/hf.py`) for the same omission on text-tokenizing modalities (summarization, translation, classification, rerank); fix and test each one that filters with explicit globs and omits it.
+- [x] Run `pytest tests/modalities/ -q -k hf`; require GREEN.
 
 ### Task 5: A Failed Post-Pull Probe Fails the Pull
 

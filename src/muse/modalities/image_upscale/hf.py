@@ -127,6 +127,8 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
             "model_index.json",
             "*/*.json",
             "*/*.txt",
+            # T5 text encoders' SentencePiece tokenizer (tokenizer_2/spiece.model).
+            "*/*.model",
         ]
         if has_fp16_variants:
             allow_patterns.extend([

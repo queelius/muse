@@ -112,6 +112,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         else:
             allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
         allow_patterns.append("pytorch_model.bin")
+        # SentencePiece tokenizers (DeBERTa-v3 spm.model, XLM-R
+        # sentencepiece.bpe.model) often ship without a tokenizer.json.
+        allow_patterns.append("*.model")
         return Path(snapshot_download(
             repo_id=repo_id,
             allow_patterns=allow_patterns,

@@ -92,8 +92,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
             allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
         # Some rerankers still ship pytorch_model.bin (no safetensors).
         allow_patterns.append("pytorch_model.bin")
-        # spiece.model + tokenizer files for tokenization.
-        allow_patterns.extend(["tokenizer*", "spiece.model", "*.py"])
+        # Tokenizer files, including any SentencePiece model (spiece.model,
+        # XLM-R's sentencepiece.bpe.model for bge-reranker-v2-m3 et al).
+        allow_patterns.extend(["tokenizer*", "*.model", "*.py"])
         download_kwargs = {
             "repo_id": repo_id,
             "allow_patterns": allow_patterns,

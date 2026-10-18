@@ -68,6 +68,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         else:
             allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
         allow_patterns.append("pytorch_model.bin")
+        # SentencePiece tokenizers (XLM-R sentencepiece.bpe.model,
+        # Llama-style tokenizer.model, T5 spiece.model).
+        allow_patterns.append("*.model")
         # Inert unless trust_remote_code is enabled by a curated overlay,
         # but required locally when it is (Nomic/Jina-style repositories).
         allow_patterns.append("*.py")
