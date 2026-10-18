@@ -74,6 +74,9 @@ muse pull sd-turbo
 # Or pull anything resolvable from HuggingFace by URI
 muse pull hf://Qwen/Qwen3-8B-GGUF@q4_k_m
 muse pull hf://sentence-transformers/all-MiniLM-L6-v2
+# Two publishers' same-named repos share a synthesized id; the second
+# pull is refused, so give it its own id
+muse pull hf://someone-else/Qwen3-8B-GGUF@q4_k_m --id qwen3-8b-alt-q4
 
 # Admin: list what's in the catalog
 muse models list

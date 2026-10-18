@@ -137,6 +137,10 @@ class ModelInUseError(CatalogError):
     """Raised when a live worker/probe owns a model's mutable resources."""
 
 
+class ModelIdConflictError(CatalogError):
+    """Raised when a pull would replace a catalog entry owned by another source."""
+
+
 class StorageBusyError(CatalogError):
     """Raised when another process is mutating Muse's weights cache."""
 
@@ -1613,7 +1617,12 @@ def _run_automatic_storage_maintenance() -> None:
         )
 
 
-def pull(identifier: str, *, base_override: str | None = None) -> None:
+def pull(
+    identifier: str,
+    *,
+    base_override: str | None = None,
+    model_id: str | None = None,
+) -> None:
     """Pull a model. Dispatch by identifier shape, with curated alias resolution.
 
     Resolution order:
@@ -1638,7 +1647,16 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
     merged into the capabilities overlay: see `_pull_via_resolver` for
     why that durability matters. It is warned-and-ignored only for true
     bundled-script pulls, which have no LoRA base to set.
+
+    `model_id` (`muse pull --id`) installs a resolver URI under an explicit
+    catalog id, e.g. a second publisher's repo whose synthesized id is
+    already taken. It applies only to resolver URIs; the id must not name
+    a bundled script or a different curated entry.
     """
+    if model_id is not None:
+        _pull_uri_as(identifier, model_id, base_override=base_override)
+        return
+
     curated = find_curated(identifier)
     if curated is not None:
         _run_automatic_storage_maintenance()
@@ -1659,6 +1677,7 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
                     base_override=base_override,
                     revision_override=curated.revision,
                     code_revision_override=curated.code_revision,
+                    allow_source_change=True,
                 )
             return
         # Bundled curated entry: id equals an existing bundled script's
@@ -1704,6 +1723,7 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
                     base_override=base_override,
                     revision_override=uri_curated.revision,
                     code_revision_override=uri_curated.code_revision,
+                    allow_source_change=True,
                 )
             else:
                 _pull_via_resolver(identifier, base_override=base_override)
@@ -1775,6 +1795,111 @@ def pull(identifier: str, *, base_override: str | None = None) -> None:
     else:
         msg += " (run `muse models list` to see all model ids)"
     raise KeyError(msg)
+
+
+def _pull_uri_as(uri: str, model_id: str, *, base_override: str | None) -> None:
+    """`pull(uri, model_id=...)`: install a resolver URI under an explicit id."""
+    if "://" not in uri:
+        raise ValueError(
+            f"--id only applies to resolver URIs (hf://...), not {uri!r}"
+        )
+    _validate_model_id_for_fs(model_id)
+    curated_owner = find_curated(model_id)
+    if curated_owner is not None and not (
+        curated_owner.uri and _same_source(curated_owner.uri, uri)
+    ):
+        raise ModelIdConflictError(
+            f"model id {model_id!r} is a curated id for "
+            f"{curated_owner.uri or 'a bundled model'}; choose another --id"
+        )
+    uri_curated = find_curated_by_uri(uri)
+    _run_automatic_storage_maintenance()
+    with _model_pull_lock(model_id):
+        _pull_via_resolver(
+            uri,
+            model_id_override=model_id,
+            capabilities_overlay=(
+                dict(uri_curated.capabilities or {}) or None
+                if uri_curated is not None else None
+            ),
+            modality_override=uri_curated.modality if uri_curated else None,
+            base_override=base_override,
+            revision_override=uri_curated.revision if uri_curated else None,
+            code_revision_override=(
+                uri_curated.code_revision if uri_curated else None
+            ),
+        )
+
+
+def _source_key(uri: str) -> tuple[str, str]:
+    """Case-insensitive (scheme, repo) of a resolver URI (Hub ids are).
+
+    The variant is ignored: switching one repo's variant under the same id
+    is an update, not another publisher taking the id.
+    """
+    from muse.core.resolvers import parse_uri
+
+    scheme, ref, _variant = parse_uri(uri)
+    return scheme.lower(), ref.lower()
+
+
+def _same_source(a: str, b: str) -> bool:
+    try:
+        return _source_key(a) == _source_key(b)
+    except Exception:  # noqa: BLE001 - unparseable legacy value
+        return a == b
+
+
+def _script_model_ids() -> set[str]:
+    """Ids of discovered model scripts (bundled or user-dropped)."""
+    known_models()  # populates the discovery cache
+    return set(_discovered_entries_cache or ())
+
+
+def _check_resolver_target(
+    model_id: str, uri: str, *, allow_source_change: bool,
+) -> None:
+    """Refuse a resolver pull that would replace another source's entry.
+
+    Resolver plugins derive ids from repo basenames, so two publishers'
+    same-named repos collide. A script id is never a valid target: the
+    script shadows the persisted manifest but would load the new weights.
+    A curated pull owns its id and may follow a changed curated URI.
+    """
+    if model_id in _script_model_ids():
+        raise ModelIdConflictError(
+            f"{uri} resolves to model id {model_id!r}, which is a bundled "
+            f"model script; pull it with `muse pull {uri} --id <new-id>`"
+        )
+    if allow_source_change:
+        return
+    existing = _read_catalog().get(model_id)
+    if not isinstance(existing, dict):
+        return
+    existing_source = existing.get("source")
+    if isinstance(existing_source, str) and existing_source:
+        if _same_source(existing_source, uri):
+            return
+        owner = existing_source
+    elif "manifest" in existing:
+        # Legacy resolver entry without a recorded source URI.
+        repo = str(existing.get("hf_repo") or "")
+        try:
+            new_repo = _source_key(uri)[1]
+        except Exception:  # noqa: BLE001
+            new_repo = uri
+        if repo.lower() == new_repo:
+            return
+        owner = repo or "another source"
+    else:
+        # Bundled-shaped entry whose script is gone: nothing to protect.
+        return
+    raise ModelIdConflictError(
+        f"model id {model_id!r} is already installed from {owner}; "
+        f"refusing to replace it with {uri}. Install it under another id "
+        f"with `muse pull {uri} --id <new-id>`, or `muse models remove "
+        f"{model_id}` first"
+    )
 
 
 def _pull_bundled(model_id: str) -> None:
@@ -2062,6 +2187,7 @@ def _pull_via_resolver(
     base_override: str | None = None,
     revision_override: str | None = None,
     code_revision_override: str | None = None,
+    allow_source_change: bool = False,
     _resolved: object | None = None,
 ) -> None:
     """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
@@ -2098,6 +2224,11 @@ def _pull_via_resolver(
     curated entry. `code_revision_override` separately pins a repository
     referenced by Transformers `auto_map`; it is persisted as a runtime
     capability so the loader can pass `code_revision` to Transformers.
+
+    `allow_source_change` is set by curated pulls, which own their id: when
+    a curated row's URI changes, re-pulling it replaces the old source.
+    Every other pull refuses to replace an entry from a different source
+    (see `_check_resolver_target`).
 
     `base_override` is the operator's `--base` pin for a LoRA adapter
     pull. Modeled on `device_override`: it is stored as a TOP-LEVEL
@@ -2151,6 +2282,10 @@ def _pull_via_resolver(
     _validate_model_id_for_fs(model_id)
 
     if _resolved is None:
+        # Fail fast before taking the lease; re-checked under it below.
+        _check_resolver_target(
+            model_id, uri, allow_source_change=allow_source_change,
+        )
         # Resolver URIs do not reveal their synthesized model id until after
         # resolution. Re-enter with that immutable result so the complete
         # venv/download/catalog mutation runs under the model's lifetime
@@ -2164,8 +2299,11 @@ def _pull_via_resolver(
                 base_override=base_override,
                 revision_override=revision_override,
                 code_revision_override=code_revision_override,
+                allow_source_change=allow_source_change,
                 _resolved=resolved,
             )
+
+    _check_resolver_target(model_id, uri, allow_source_change=allow_source_change)
 
     # Preserve a prior operator --base pin across a re-pull that omits
     # --base, so re-pulling never silently reverts operator intent.

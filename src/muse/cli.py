@@ -324,6 +324,17 @@ def pull(
             ),
         ),
     ] = None,
+    model_id: Annotated[
+        str | None,
+        typer.Option(
+            "--id",
+            help=(
+                "(resolver URIs) catalog id to install under, e.g. when "
+                "another publisher's same-named repo already took the "
+                "synthesized id"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Download weights + install deps for a model.
 
@@ -340,7 +351,13 @@ def pull(
     supervisor flags the model as unservable. `--no-probe` opts out
     for cross-device scenarios.
     """
-    from muse.core.catalog import ModelInUseError, _read_catalog, pull as _pull
+    from muse.core.catalog import (
+        ModelIdConflictError,
+        ModelInUseError,
+        _read_catalog,
+        _validate_model_id_for_fs,
+        pull as _pull,
+    )
     from muse.core.venv import install_output_mode
     # Always register the HF resolver before dispatching. The arg may
     # be a URI directly, OR a curated alias that expands to a URI
@@ -349,6 +366,18 @@ def pull(
     # for scheme 'hf'". Importing is near-free (heavy huggingface_hub
     # imports happen on actual resolve(), not on module import).
     import muse.core.resolvers_hf  # noqa: F401  (registers HFResolver on import)
+
+    if model_id is not None:
+        if "://" not in identifier:
+            typer.echo(
+                "error: --id only applies to resolver URIs (hf://...)", err=True,
+            )
+            raise typer.Exit(2)
+        try:
+            _validate_model_id_for_fs(model_id)
+        except ValueError as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(2)
 
     # Capture the catalog state pre-pull so the post-pull probe can
     # identify which entry is new. URIs and curated aliases that synth
@@ -361,11 +390,11 @@ def pull(
 
     with install_output_mode(verbose=verbose):
         try:
-            _pull(identifier, base_override=base)
+            _pull(identifier, base_override=base, model_id=model_id)
         except KeyError as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(2)
-        except ModelInUseError as e:
+        except (ModelIdConflictError, ModelInUseError) as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(2)
         except Exception as e:  # noqa: BLE001
@@ -389,7 +418,7 @@ def pull(
         # but do not raise; we keep the exit code as the pull's success.
         try:
             from muse.cli_impl.probe import run_probe_for_pull
-            run_probe_for_pull(identifier, before_keys=before_keys)
+            run_probe_for_pull(model_id or identifier, before_keys=before_keys)
         except Exception as e:  # noqa: BLE001
             typer.echo(
                 f"warning: probe-on-pull skipped due to internal error: {e}",

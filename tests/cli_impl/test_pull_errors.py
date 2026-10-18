@@ -104,7 +104,7 @@ class TestPullCommandWiring:
         exc = _make(GatedRepoError, "Access to model X is restricted", status=401)
         exc.repo_id = "black-forest-labs/FLUX.1-schnell"
 
-        def _boom(identifier, *, base_override=None):
+        def _boom(identifier, *, base_override=None, model_id=None):
             raise exc
 
         monkeypatch.setattr(catalog, "pull", _boom)
@@ -122,7 +122,7 @@ class TestPullCommandWiring:
         import muse.core.catalog as catalog
         from muse.cli import app
 
-        def _boom(identifier, *, base_override=None):
+        def _boom(identifier, *, base_override=None, model_id=None):
             raise RuntimeError("some genuinely unexpected bug")
 
         monkeypatch.setattr(catalog, "pull", _boom)

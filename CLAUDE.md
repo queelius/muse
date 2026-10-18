@@ -1632,8 +1632,16 @@ bundled model requires no catalog edits, no registry changes, and no
 worker changes: discovery just finds it.
 
 Collision precedence: bundled scripts > resolver-pulled (persisted
-manifest). A user pulling `hf://malicious/fake` that claims an
-existing bundled id gets shadowed by the bundled script.
+manifest). A resolver pull whose id names a model script is refused
+outright (`ModelIdConflictError`), since the script would otherwise load
+the new weights. A resolver pull whose synthesized id (the repo basename)
+is already installed from a *different* repo is also refused before any
+download, so `hf://alice/Foo-GGUF` and `hf://bob/Foo-GGUF` can't replace
+each other; install the second with `muse pull <uri> --id <new-id>`.
+Same-repo re-pulls (any case, any variant) and curated pulls, which own
+their curated id, proceed as before. The check runs in
+`catalog._check_resolver_target`, once before and once under the model's
+resource lease.
 
 ## Adding a new modality (rare)
 

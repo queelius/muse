@@ -43,14 +43,16 @@ The work for those lives, unmerged, on `codex/safe-install-and-decisions` (Tasks
 
 ### Task 2: Refuse Cross-Publisher Catalog Id Collisions
 
+**Done 2026-10-18.** As built: tests in `tests/core/test_catalog_source_conflict.py`; the comparison is (scheme, repo) case-insensitively, ignoring variant (a variant switch on one repo is an update); a resolver pull onto a model-script id is now refused too, because the script would otherwise load the new weights (the plan originally kept that shadowing).
+
 **Files:** Modify `src/muse/core/catalog.py` (`_pull_via_resolver`), `src/muse/cli.py` (`pull`); test `tests/core/test_catalog.py`, `tests/test_cli.py`.
 
 The GGUF, VLM and other resolver plugins derive the catalog id from the repo basename (`chat_completion/hf.py:65`, `:150`), so `hf://alice/Foo-GGUF@q4_k_m` and `hf://bob/Foo-GGUF@q4_k_m` both become `foo-gguf-q4-k-m`, and the second pull overwrites the first.
 
-- [ ] Write tests: pulling a resolver URI whose synthesized id already exists for a *different* source (compare `hf_repo` case-insensitively, plus variant) fails before any download or venv work, leaves the existing entry byte-identical, and the error names both sources. Re-pulling the *same* source keeps today's behavior. A bundled-id collision keeps today's shadowing behavior.
-- [ ] Add `muse pull --id <model_id>` so the user can install the second source under an explicit id; the error message suggests it. Validate the id with the existing model-id rules and apply the same collision check to it.
-- [ ] Implement the check once in the shared resolver-pull path, not per plugin.
-- [ ] Run the new tests plus `pytest tests/core/ -q -k "catalog or resolver or pull"`; require GREEN.
+- [x] Write tests: pulling a resolver URI whose synthesized id already exists for a *different* source (compare `hf_repo` case-insensitively, plus variant) fails before any download or venv work, leaves the existing entry byte-identical, and the error names both sources. Re-pulling the *same* source keeps today's behavior. A bundled-id collision keeps today's shadowing behavior.
+- [x] Add `muse pull --id <model_id>` so the user can install the second source under an explicit id; the error message suggests it. Validate the id with the existing model-id rules and apply the same collision check to it.
+- [x] Implement the check once in the shared resolver-pull path, not per plugin.
+- [x] Run the new tests plus `pytest tests/core/ -q -k "catalog or resolver or pull"`; require GREEN.
 
 ### Task 3: Download Every Shard of a Split GGUF
 
