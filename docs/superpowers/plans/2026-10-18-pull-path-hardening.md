@@ -91,8 +91,10 @@ Today the pull exits 0 and leaves the model `enabled: true` even when the probe 
 
 ### Task 6: Release Gate
 
-- [ ] Run `python scripts/preflight.py` and `pytest tests/ -q`; require zero unexpected failures (known flakes: `test_e2e_supervisor_vlm`, order-dependent `test_memory_probe`).
-- [ ] Commit the pending `pyproject.toml` bump to 0.61.0 with a changelog/README note covering the hardening commits and Tasks 1–5.
+**Done 2026-10-18.** Preflight: all 31 fast-lane deps present. Full lane: 5346 passed, 116 skipped, 1 failed (the known `test_e2e_supervisor_vlm`). There is no changelog file; the bump commit message carries the release summary.
+
+- [x] Run `python scripts/preflight.py` and `pytest tests/ -q`; require zero unexpected failures (known flakes: `test_e2e_supervisor_vlm`, order-dependent `test_memory_probe`).
+- [x] Commit the pending `pyproject.toml` bump to 0.61.0 with a changelog/README note covering the hardening commits and Tasks 1–5.
 - [ ] Ask before pushing or tagging.
 
 ## Out of scope here
