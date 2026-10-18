@@ -1,8 +1,10 @@
 # Safe model installation design
 
 **Date:** 2026-10-18
-**Status:** Approved by user on 2026-10-18
+**Status:** Approved by user on 2026-10-18; deferred 2026-10-18 (see note)
 **Companion:** [Decision API and curated models](2026-10-18-decision-api-design.md)
+
+> **Deferred 2026-10-18.** Superseded for now by the [pull path hardening plan](../plans/2026-10-18-pull-path-hardening.md), which fixes the audit's five defects in the existing pull path so the Decision API can ship without this foundation. Tasks 1–4 and half of Task 5 exist unmerged on branch `codex/safe-install-and-decisions` (Task 1 was cherry-picked to `main`). Revisit if rollback, full transitive locks, frozen worker code or verification leases become necessary.
 
 ## Purpose and contract
 

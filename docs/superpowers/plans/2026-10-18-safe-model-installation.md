@@ -1,5 +1,7 @@
 # Safe Model Installation Implementation Plan
 
+> **Deferred 2026-10-18.** Superseded for now by the [pull path hardening plan](2026-10-18-pull-path-hardening.md), which fixes the audit's five defects in the existing pull path so the Decision API can ship without this foundation. Tasks 1–4 and half of Task 5 exist unmerged on branch `codex/safe-install-and-decisions` (Task 1 was cherry-picked to `main`). Revisit if rollback, full transitive locks, frozen worker code or verification leases become necessary.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make supported model pulls complete, verified, atomic and recoverable without breaking existing installations.

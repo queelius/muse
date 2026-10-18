@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-18
 **Status:** Approved by user on 2026-10-18
-**Dependency:** [Safe model installation](2026-10-18-safe-model-installation-design.md)
+**Dependency:** [Pull path hardening plan](../plans/2026-10-18-pull-path-hardening.md) (revised 2026-10-18; the [safe model installation](2026-10-18-safe-model-installation-design.md) foundation is deferred). Where this spec says recipe, installer or verified generation, read: pinned curated entry, existing `muse pull`, and a passing post-pull probe.
 
 ## Purpose and scope
 
