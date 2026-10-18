@@ -15,6 +15,7 @@ else.
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,36 +38,35 @@ from muse.cli_impl.supervisor import (
 # ----------------------------------------------------------------------
 
 
+@pytest.fixture
+def pulled_model(tmp_path):
+    from muse.core.catalog import _write_catalog
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    _write_catalog({
+        "fake-model": {
+            "local_dir": str(weights), "python_path": sys.executable,
+            "enabled": True,
+            "manifest": {
+                "model_id": "fake-model", "modality": "audio/speech",
+                "hf_repo": "test/model", "backend_path": "muse.fake:Model",
+                "capabilities": {"memory_gb": 0.5, "device": "cpu"},
+            },
+        },
+    })
+
+
 class TestWarmupOperation:
     """warmup_model wraps director.warmup with the standard error mapping."""
 
-    def test_returns_model_id_and_worker_port_on_success(self):
+    def test_returns_model_id_and_worker_port_on_success(self, pulled_model):
         director = MagicMock()
         director.warmup.return_value = 9001
         state = SupervisorState(workers=[], device="cpu")
         state.director = director
 
-        # Need a manifest in the catalog; patch get_manifest at the
-        # operations module's import site so the call inside warmup_model
-        # resolves cleanly without touching the real catalog.
-        with patch(
-            "muse.admin.operations.known_models",
-            return_value={"fake-model": MagicMock()},
-        ), patch(
-            "muse.admin.operations.is_pulled",
-            return_value=True,
-        ), patch(
-            "muse.admin.operations.is_enabled",
-            return_value=True,
-        ), patch(
-            "muse.admin.operations.get_manifest",
-            return_value={
-                "model_id": "fake-model",
-                "modality": "audio/speech",
-                "capabilities": {"memory_gb": 0.5, "device": "cpu"},
-            },
-        ):
-            result = warmup_model("fake-model", state=state)
+        result = warmup_model("fake-model", state=state)
 
         assert result == {"model_id": "fake-model", "worker_port": 9001}
         director.warmup.assert_called_once()
@@ -110,7 +110,7 @@ class TestWarmupOperation:
         # Director must not have been touched; the upfront check fired.
         director.warmup.assert_not_called()
 
-    def test_propagates_director_OperationError(self):
+    def test_propagates_director_OperationError(self, pulled_model):
         # When director.warmup raises (e.g. model_too_large_for_device),
         # warmup_model should let the exception propagate so the route
         # handler can map it to the right HTTP status.
@@ -123,25 +123,8 @@ class TestWarmupOperation:
         state = SupervisorState(workers=[], device="cpu")
         state.director = director
 
-        with patch(
-            "muse.admin.operations.known_models",
-            return_value={"fake-model": MagicMock()},
-        ), patch(
-            "muse.admin.operations.is_pulled",
-            return_value=True,
-        ), patch(
-            "muse.admin.operations.is_enabled",
-            return_value=True,
-        ), patch(
-            "muse.admin.operations.get_manifest",
-            return_value={
-                "model_id": "fake-model",
-                "modality": "audio/speech",
-                "capabilities": {"memory_gb": 100.0, "device": "cuda"},
-            },
-        ):
-            with pytest.raises(OperationError) as exc_info:
-                warmup_model("fake-model", state=state)
+        with pytest.raises(OperationError) as exc_info:
+            warmup_model("fake-model", state=state)
 
         assert exc_info.value.code == "model_too_large_for_device"
         assert exc_info.value.status == 503
@@ -200,7 +183,7 @@ class TestWarmupBackfillsMemory:
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         catalog_path.write_text(json.dumps({
             "fake-model": {
-                "python_path": "/v/bin/python",
+                "python_path": sys.executable,
                 "enabled": True,
                 "local_dir": str(weights_dir),
                 "manifest": {

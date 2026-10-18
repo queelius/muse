@@ -3,8 +3,8 @@
 Responsibilities (v0.40.0+, lazy load):
   1. Read catalog at boot (only for validation, not for eager spawning).
   2. Construct a LoadDirector and hang it off SupervisorState.
-  3. Stamp `unservable_reasons` for enabled catalog rows that lack memory
-     data or whose declared memory_gb exceeds device capacity at boot.
+  3. Stamp `unservable_reasons` for enabled catalog rows with stale artifact
+     provenance, missing environments, or missing/excessive memory estimates.
   4. Start gateway immediately (zero workers initially). First request
      to a model triggers `LoadDirector.acquire`, which calls back into
      this module's `load_model_into_worker` to spawn the worker.
@@ -37,7 +37,7 @@ from muse.cli_impl.serve_util import run_uvicorn
 
 from muse.cli_impl.idle_sweeper import IdleSweeper
 from muse.core import config
-from muse.core.catalog import CatalogError, _read_catalog, get_manifest
+from muse.core.catalog import CatalogError, _read_catalog, get_manifest, model_load_blocker
 
 from muse.core.memory_probe import (
     available_capacity_gb,
@@ -1951,6 +1951,8 @@ def validate_catalog_at_boot(
     """Walk the enabled catalog and stamp unservable_reasons.
 
     For each `enabled: true` row in the catalog:
+      - Apply the loader's reviewed artifact-provenance policy and check
+        the recorded model directory and executable worker interpreter.
       - If the row has neither `manifest.capabilities.memory_gb` nor
         `measurements.<device>.peak_bytes`, mark it
         "no memory estimate; run muse models probe".
@@ -2002,11 +2004,7 @@ def validate_catalog_at_boot(
     for model_id, entry in catalog.items():
         if not entry.get("enabled", True):
             continue
-        # Skip pre-worker entries; they cannot load anyway.
-        if not entry.get("python_path"):
-            continue
-
-        reason = _servability_reason(
+        reason = model_load_blocker(model_id, entry) or _servability_reason(
             _entry_with_live_manifest(model_id, entry),
             cpu_available_gb=cpu_available_gb,
             gpu_available_gb=gpu_available_gb,
@@ -2024,8 +2022,8 @@ def revalidate_servability(
     memory_probe: "Any | None" = None,
     gpu_budget_gb: "float | None" = None,
     cpu_budget_gb: "float | None" = None,
-    gpu_headroom_gb: float = 1.0,
-    cpu_headroom_gb: float = 2.0,
+    gpu_headroom_gb: float | None = None,
+    cpu_headroom_gb: float | None = None,
 ) -> str | None:
     """Re-derive one model's unservable verdict against the LIVE catalog.
 
@@ -2033,9 +2031,10 @@ def revalidate_servability(
     boot. That snapshot goes stale when a `muse models probe`, manifest edit,
     weights landing on disk, placement change, or budget change makes a
     previously unservable model valid. This re-reads the (mtime-cached)
-    catalog for ONE model and re-runs the SAME `_servability_reason` boot
-    uses -- the estimate and the permanent capacity ceiling -- then updates
-    the stamp, so the gateway reflects reality WITHOUT a supervisor restart.
+    catalog for ONE model and re-runs the SAME provenance, environment, and
+    `_servability_reason` checks boot uses, then updates the stamp, so the
+    gateway reflects reality WITHOUT a supervisor restart. Omitted budgets
+    and headroom inherit the director's configuration.
 
     Crucially this preserves a genuine "exceeds device capacity" stamp: a
     model that cannot fit even an empty working set is NOT cleared just
@@ -2051,9 +2050,23 @@ def revalidate_servability(
     """
     if memory_probe is None:
         memory_probe = _MemoryProbeAdapter()
-    # Gateway callers historically pass only headroom. Recover numeric
-    # budgets from the same director instance so revalidation cannot drift
-    # from its subsequent admission decision. Avoid loose MagicMock attrs.
+    # Omitted knobs inherit the director's configuration so listings,
+    # admin status and request admission cannot disagree. Explicit values
+    # still win. Ignore fabricated/non-numeric attributes on test doubles.
+    if gpu_headroom_gb is None:
+        configured = getattr(state.director, "gpu_headroom_gb", None)
+        gpu_headroom_gb = (
+            float(configured)
+            if isinstance(configured, (int, float)) and not isinstance(configured, bool)
+            else 1.0
+        )
+    if cpu_headroom_gb is None:
+        configured = getattr(state.director, "cpu_headroom_gb", None)
+        cpu_headroom_gb = (
+            float(configured)
+            if isinstance(configured, (int, float)) and not isinstance(configured, bool)
+            else 2.0
+        )
     if state.director is not None:
         if gpu_budget_gb is None:
             configured = getattr(state.director, "gpu_budget_gb", None)
@@ -2081,7 +2094,7 @@ def revalidate_servability(
         gpu_budget_gb=gpu_budget_gb,
         cpu_budget_gb=cpu_budget_gb,
     )
-    reason = _servability_reason(
+    reason = model_load_blocker(model_id, entry) or _servability_reason(
         _entry_with_live_manifest(model_id, entry),
         cpu_available_gb=cpu_available_gb,
         gpu_available_gb=gpu_available_gb,

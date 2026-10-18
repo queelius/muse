@@ -37,6 +37,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -85,7 +86,19 @@ def _seed_catalog(data: dict) -> None:
     from muse.core.catalog import _catalog_path, _reset_known_models_cache
     p = _catalog_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data))
+    normalized = {}
+    for model_id, raw in data.items():
+        entry = dict(raw)
+        # These integration tests isolate sizing/admission, so their
+        # worker environments must satisfy the independent readiness gate.
+        weights = Path(entry.get("local_dir", "/missing"))
+        if not weights.is_relative_to(p.parent) or not weights.is_dir():
+            weights = p.parent / "test-weights" / model_id
+            weights.mkdir(parents=True, exist_ok=True)
+        entry["local_dir"] = str(weights)
+        entry["python_path"] = sys.executable
+        normalized[model_id] = entry
+    p.write_text(json.dumps(normalized))
     _reset_known_models_cache()
 
 

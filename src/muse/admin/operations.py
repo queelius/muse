@@ -44,6 +44,7 @@ from muse.core.catalog import (
     is_enabled,
     is_pulled,
     known_models,
+    model_load_blocker,
     remove as catalog_remove,
     set_enabled,
 )
@@ -943,6 +944,10 @@ def warmup_model(model_id: str, *, state: SupervisorState) -> dict:
             "supervisor director is not initialized; warmup requires a running `muse serve`",
             status=503,
         )
+
+    blocker = model_load_blocker(model_id, _read_catalog().get(model_id, {}))
+    if blocker is not None:
+        raise OperationError("model_unservable", blocker, status=503)
 
     manifest = get_manifest(model_id)
     # Backfill capabilities.memory_gb (and any device_override) from the

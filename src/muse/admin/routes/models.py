@@ -35,7 +35,11 @@ from muse.admin.operations import (
     remove_model,
     warmup_model,
 )
-from muse.cli_impl.supervisor import get_supervisor_state
+from muse.cli_impl.supervisor import (
+    _worker_process_state_locked,
+    get_supervisor_state,
+    revalidate_servability,
+)
 from muse.core.catalog import _read_catalog, known_models
 from muse.core.errors import error_response
 
@@ -188,19 +192,30 @@ def build_models_router() -> APIRouter:
         modality = (
             catalog_known[model_id].modality if model_id in catalog_known else None
         )
-        spec = find_worker_for_model(state, model_id)
+        reason = revalidate_servability(state, model_id)
+        # A retained spec is ownership/diagnostic state, not proof that a
+        # ready worker still exists. Observe without reaping a POSIX leader,
+        # preserving the process-group identity held by shutdown.
+        with state.lock:
+            spec = find_worker_for_model(state, model_id)
+            loaded = False
+            if spec is not None:
+                with spec.process_lock:
+                    if spec.status == "running" and spec.process is not None:
+                        loaded = _worker_process_state_locked(spec, spec.process) is True
 
         out: dict[str, Any] = {
             "model_id": model_id,
             "modality": modality,
             "enabled": entry.get("enabled", True) if entry else False,
-            "loaded": spec is not None,
+            "loaded": loaded,
             "worker_port": spec.port if spec is not None else None,
             "worker_pid": _get_pid(spec),
             "worker_uptime_seconds": _get_uptime(spec),
             "worker_status": spec.status if spec is not None else None,
             "restart_count": spec.restart_count if spec is not None else 0,
             "last_error": None,
+            "unservable_reason": reason,
             "measurements": entry.get("measurements") or {},
         }
         return out

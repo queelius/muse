@@ -946,9 +946,10 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
     """Build /v1/models entries for enabled-but-unloaded catalog models.
 
     `loaded` is the entries already aggregated from resident workers; their
-    ids are skipped. Returns one entry per enabled catalog row with a
-    `python_path` that isn't already loaded, marked loaded=False with its
-    boot `unservable_reason` (if any). Best-effort: a catalog read failure
+    ids are skipped. Returns one entry per enabled catalog row that isn't
+    already loaded, marked loaded=False with a freshly revalidated
+    `unservable_reason` (if any). Missing environments remain visible.
+    Best-effort: a catalog read failure
     yields no extra entries rather than failing the endpoint.
     """
     loaded_ids = {e.get("id") for e in loaded}
@@ -957,25 +958,36 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
     except Exception as e:  # noqa: BLE001
         logger.warning("/v1/models: catalog read failed: %s", e)
         return []
-    with state.lock:
-        reasons = dict(getattr(state, "unservable_reasons", {}) or {})
     out: list[dict] = []
     for model_id, entry in catalog.items():
         if model_id in loaded_ids:
             continue
         if not entry.get("enabled", True):
             continue
-        if not entry.get("python_path"):
-            continue  # pre-worker entry; cannot load
+        reason = revalidate_servability(
+            state, model_id, **_director_headroom(state.director),
+        )
         try:
             manifest = get_manifest(model_id)
-        except KeyError:
-            manifest = entry.get("manifest", {}) or {}
+        except (CatalogError, KeyError):
+            # Invalid legacy/operator metadata must not break the whole
+            # listing. Keep only safe descriptive strings; in particular,
+            # never splat unvalidated capabilities into build_model_entry.
+            stored = entry.get("manifest")
+            manifest = {}
+            if isinstance(stored, dict):
+                manifest = {
+                    key: stored[key]
+                    for key in ("modality", "description", "license", "hf_repo")
+                    if isinstance(stored.get(key), str)
+                }
         modality = manifest.get("modality") or entry.get("modality", "")
+        if not isinstance(modality, str):
+            modality = ""
         out.append(build_model_entry(
             model_id, modality, manifest,
             loaded=False, last_loaded_at=None,
-            unservable_reason=reasons.get(model_id),
+            unservable_reason=reason,
         ))
     return out
 

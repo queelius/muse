@@ -153,7 +153,11 @@ class TestEnableDisableLifecycle:
         set_supervisor_state(state)
 
         # Stub supervisor calls so enable doesn't fork a real process.
-        with patch("muse.admin.operations.spawn_worker") as mock_spawn, \
+        def spawn(spec, **kwargs):
+            spec.process = MagicMock(pid=4242, returncode=None)
+            spec.process.poll.return_value = None
+
+        with patch("muse.admin.operations.spawn_worker", side_effect=spawn) as mock_spawn, \
              patch("muse.admin.operations.wait_for_ready"), \
              patch("muse.admin.operations.find_free_port", return_value=9123):
             r = client.post(

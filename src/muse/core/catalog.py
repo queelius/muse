@@ -2839,6 +2839,50 @@ def _validate_resolver_catalog_provenance(
         )
 
 
+def _validate_model_provenance(
+    model_id: str, entry: CatalogEntry, entry_data: dict, manifest: dict,
+) -> None:
+    """One artifact policy for loader execution and serve preflight."""
+    _validate_remote_code_catalog_pins(model_id, manifest, entry_data)
+    _validate_resolver_catalog_provenance(model_id, manifest, entry_data)
+    _validate_bundled_catalog_provenance(model_id, entry, entry_data)
+
+
+def model_load_blocker(model_id: str, entry_data: dict) -> str | None:
+    """Return a local cold-load prerequisite failure without loading a model.
+
+    This checks reviewed provenance and the recorded worker environment,
+    not dependency imports, inference, or memory capacity. It neither
+    downloads nor rewrites artifacts. Legacy embedded ``load_backend``
+    callers need not use a per-model interpreter; serving does.
+    """
+    try:
+        manifest = get_manifest(model_id)
+        entry = known_models()[model_id]
+        _validate_model_provenance(model_id, entry, entry_data, manifest)
+    except KeyError:
+        return f"model {model_id!r} is not discoverable; re-run `muse pull {model_id}`"
+    except (RuntimeError, ValueError, OSError) as exc:
+        return str(exc)
+
+    try:
+        local_dir = entry_data.get("local_dir")
+        if not local_dir or not Path(local_dir).is_dir():
+            return f"model files are missing; re-run `muse pull {model_id}`"
+        python_path = entry_data.get("python_path")
+        if (
+            not python_path or not Path(python_path).is_file()
+            or not os.access(python_path, os.X_OK)
+        ):
+            return f"worker interpreter is missing or not executable; re-run `muse pull {model_id}`"
+    except OSError:
+        return (
+            "model environment is inaccessible; check filesystem permissions "
+            f"and mounts or re-run `muse pull {model_id}`"
+        )
+    return None
+
+
 def load_backend(model_id: str, **kwargs) -> Any:
     """Import backend class and instantiate it.
 
@@ -2861,13 +2905,7 @@ def load_backend(model_id: str, **kwargs) -> Any:
     catalog = _read_catalog()
     entry_data = catalog[model_id]
     manifest = get_manifest(model_id)
-    _validate_remote_code_catalog_pins(
-        model_id,
-        manifest,
-        entry_data,
-    )
-    _validate_resolver_catalog_provenance(model_id, manifest, entry_data)
-    _validate_bundled_catalog_provenance(model_id, entry, entry_data)
+    _validate_model_provenance(model_id, entry, entry_data, manifest)
     module_path, class_name = entry.backend_path.split(":", 1)
     module = _import_backend_module(module_path)
     cls = getattr(module, class_name)

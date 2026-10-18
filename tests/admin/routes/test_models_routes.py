@@ -365,7 +365,8 @@ class TestStatusRoute:
         spec.last_spawn_at = 0.0  # uptime is None when unset
         # Simulate a process with a pid
         from unittest.mock import MagicMock
-        spec.process = MagicMock(pid=4711)
+        spec.process = MagicMock(pid=4711, returncode=None)
+        spec.process.poll.return_value = None
         state = SupervisorState(workers=[spec], device="cpu")
         set_supervisor_state(state)
         r = client.get("/v1/admin/models/kokoro-82m/status", headers=headers)

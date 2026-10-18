@@ -17,6 +17,8 @@ These tests verify:
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -86,10 +88,18 @@ def tmp_catalog(tmp_path, monkeypatch):
 
 
 def _seed_catalog(data: dict) -> None:
-    from muse.core.catalog import _reset_known_models_cache, _write_catalog
+    from muse.core.catalog import _catalog_path, _reset_known_models_cache, _write_catalog
     normalized: dict = {}
     for model_id, raw_entry in data.items():
         entry = dict(raw_entry)
+        # Capacity tests need an intact environment now that boot also
+        # checks prerequisites. All synthetic paths stay inside the fixture.
+        if entry.get("python_path") == "/v/bin/python":
+            entry["python_path"] = sys.executable
+        if not Path(entry.get("local_dir", "/missing")).is_dir():
+            weights = _catalog_path().parent / "test-weights" / model_id
+            weights.mkdir(parents=True, exist_ok=True)
+            entry["local_dir"] = str(weights)
         raw_manifest = entry.get("manifest")
         if isinstance(raw_manifest, dict):
             manifest = dict(raw_manifest)
@@ -380,7 +390,7 @@ class TestValidateCatalogAtBoot:
         validate_catalog_at_boot(state, memory_probe=probe)
         assert "probed-model" not in state.unservable_reasons
 
-    def test_does_not_flag_bundled_model_probed_on_other_device(self, tmp_catalog):
+    def test_does_not_flag_bundled_model_probed_on_other_device(self, tmp_catalog, monkeypatch):
         """Bundled models have no persisted manifest in catalog.json, so the
         manifest-derived device defaults to 'cpu'. A probe records under the
         real device (e.g. 'cuda'). Boot validation must consult the probe
@@ -389,6 +399,13 @@ class TestValidateCatalogAtBoot:
         on a bundled GPU model never cleared the flag (probe writes
         measurements.cuda; the lookup read measurements.cpu).
         """
+        scripts = tmp_catalog / "scripts"
+        scripts.mkdir()
+        (scripts / "bundled_gpu.py").write_text(
+            'MANIFEST = {"model_id": "bundled-gpu", "modality": "embedding/text", "hf_repo": "x/y"}\n'
+            'class Model: pass\n'
+        )
+        monkeypatch.setenv("MUSE_MODELS_DIR", str(scripts))
         _seed_catalog({
             "bundled-gpu": {
                 "pulled_at": "...",

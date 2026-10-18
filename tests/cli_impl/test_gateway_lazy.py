@@ -19,7 +19,11 @@ These tests cover that contract and verify the SSE release-timing.
 from __future__ import annotations
 
 import asyncio
+import copy
+import sys
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -46,6 +50,26 @@ def _isolate_catalog(tmp_path, monkeypatch):
     _reset_known_models_cache()
     _reset_read_catalog_cache()
 from muse.core.catalog import CatalogError
+
+
+@contextmanager
+def _catalog_snapshot(data):
+    """Publish complete, locally intact synthetic rows for servability tests."""
+    from muse.core.catalog import _catalog_path, _write_catalog
+
+    normalized = copy.deepcopy(data)
+    for model_id, entry in normalized.items():
+        weights = _catalog_path().parent / "test-weights" / model_id
+        weights.mkdir(parents=True, exist_ok=True)
+        entry["local_dir"] = str(weights)
+        entry["python_path"] = sys.executable
+        manifest = entry.setdefault("manifest", {})
+        manifest.setdefault("model_id", model_id)
+        manifest.setdefault("modality", "audio/speech")
+        manifest.setdefault("hf_repo", "test/model")
+        manifest.setdefault("backend_path", "muse.fake:Model")
+    _write_catalog(normalized)
+    yield
 
 
 def _manifest(memory_gb: float = 0.5, device: str = "cpu") -> dict:
@@ -373,10 +397,7 @@ class TestUnservableShortCircuit:
         app = build_gateway(state=state)
         client = TestClient(app)
 
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog",
-            return_value=self._UNSERVABLE_CATALOG,
-        ), _patch_get_manifest():
+        with _catalog_snapshot(self._UNSERVABLE_CATALOG), _patch_get_manifest():
             r = client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -396,10 +417,7 @@ class TestUnservableShortCircuit:
         app = build_gateway(state=state)
         client = TestClient(app)
 
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog",
-            return_value=self._UNSERVABLE_CATALOG,
-        ), _patch_get_manifest():
+        with _catalog_snapshot(self._UNSERVABLE_CATALOG), _patch_get_manifest():
             client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -765,9 +783,7 @@ class TestStaleUnservableRevalidation:
                 "manifest": {"capabilities": {"memory_gb": 0.5, "device": "cpu"}},
             },
         }
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
-        ), _patch_get_manifest(), \
+        with _catalog_snapshot(fresh_catalog), _patch_get_manifest(), \
              patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
             _wire_async_client_json(mock_cls)
             r = client.post(
@@ -795,9 +811,7 @@ class TestStaleUnservableRevalidation:
                 "manifest": {"capabilities": {"device": "cpu"}},  # no estimate
             },
         }
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
-        ), _patch_get_manifest():
+        with _catalog_snapshot(fresh_catalog), _patch_get_manifest():
             r = client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -844,9 +858,7 @@ class TestColdModelServability:
             },
         }
 
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
-        ), patch(
+        with _catalog_snapshot(fresh_catalog), patch(
             "muse.cli_impl.supervisor._MemoryProbeAdapter",
             return_value=self._BusyHostProbe(),
         ), _patch_get_manifest(manifest):
@@ -878,9 +890,7 @@ class TestColdModelServability:
             },
         }
 
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
-        ), patch(
+        with _catalog_snapshot(fresh_catalog), patch(
             "muse.cli_impl.supervisor._MemoryProbeAdapter",
             return_value=self._BusyHostProbe(),
         ), _patch_get_manifest(manifest), patch(
@@ -957,9 +967,7 @@ class TestRevalidationHonorsDirectorHeadroom:
                 "manifest": {"capabilities": {"memory_gb": 8.5, "device": "cpu"}},
             },
         }
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
-        ), patch(
+        with _catalog_snapshot(fresh_catalog), patch(
             "muse.cli_impl.supervisor._MemoryProbeAdapter",
             return_value=self._FakeProbe(),
         ), _patch_get_manifest(), \
@@ -990,9 +998,7 @@ class TestRevalidationHonorsDirectorHeadroom:
                 "manifest": {"capabilities": {"device": "cpu"}},  # no estimate
             },
         }
-        with patch(
-            "muse.cli_impl.supervisor._read_catalog", return_value=fresh_catalog,
-        ), _patch_get_manifest():
+        with _catalog_snapshot(fresh_catalog), _patch_get_manifest():
             r = client.post(
                 "/v1/audio/speech",
                 json={"input": "hi", "model": "fake-model"},
@@ -1114,12 +1120,13 @@ class TestV1ModelsListsUnloaded:
                 "manifest": {
                     "model_id": "cold-model",
                     "modality": "embedding/text",
-                    "capabilities": {"device": "cpu"},
+                    "capabilities": {"device": "cpu", "memory_gb": 20.0},
                 },
             },
         }
-        with patch(
-            "muse.cli_impl.gateway._read_catalog", return_value=fresh_catalog,
+        with _catalog_snapshot(fresh_catalog), patch(
+            "muse.cli_impl.supervisor._MemoryProbeAdapter",
+            return_value=TestRevalidationHonorsDirectorHeadroom._FakeProbe(),
         ), patch(
             "muse.cli_impl.gateway.get_manifest",
             side_effect=lambda mid: fresh_catalog[mid]["manifest"],
@@ -1127,7 +1134,7 @@ class TestV1ModelsListsUnloaded:
             r = client.get("/v1/models")
 
         by_id = {e["id"]: e for e in r.json()["data"]}
-        assert by_id["cold-model"]["unservable_reason"] == "exceeds device capacity"
+        assert "exceeds device capacity" in by_id["cold-model"]["unservable_reason"]
 
     def test_empty_catalog_returns_empty_list(self):
         state = _make_state_with_director()

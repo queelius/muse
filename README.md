@@ -426,6 +426,19 @@ are tunable via `MUSE_GPU_HEADROOM_GB` (default 1.0) and
 physical capacity remains the hard ceiling, while current free memory
 governs each load's admission and any same-pool eviction.
 
+Enabled means eligible for lazy loading, not that a model has passed a
+live inference check. `/v1/models` keeps enabled models visible and reports
+an actionable `unservable_reason` for stale artifact provenance, missing
+model directories/interpreters, missing sizing data, or permanent capacity limits.
+These prerequisites are rechecked on listing and cold requests, so repairing
+or re-pulling a model updates its status without restarting Muse. Blocked
+cold requests fail before admission or eviction; Muse never silently
+downloads replacements or bypasses provenance checks. `/health` remains
+gateway health, not a guarantee that every catalogued model can load.
+Admin model status exposes the same `unservable_reason`; `loaded` requires
+a ready, verified-live worker, while retained worker fields remain available
+for diagnosis. A null reason is not a dependency or inference smoke test.
+
 ## CLI (admin-only)
 
 | Command | Description |
