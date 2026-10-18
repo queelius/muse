@@ -1,7 +1,7 @@
 # Decision API and curated models design
 
 **Date:** 2026-10-18
-**Status:** Draft for user review
+**Status:** Approved by user on 2026-10-18
 **Dependency:** [Safe model installation](2026-10-18-safe-model-installation-design.md)
 
 ## Purpose and scope

@@ -1,7 +1,7 @@
 # Safe model installation design
 
 **Date:** 2026-10-18
-**Status:** Draft for user review
+**Status:** Approved by user on 2026-10-18
 **Companion:** [Decision API and curated models](2026-10-18-decision-api-design.md)
 
 ## Purpose and contract

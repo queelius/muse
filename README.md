@@ -735,4 +735,4 @@ See `CLAUDE.md` for implementation details and contribution guide,
 
 ## License
 
-MIT
+Apache License 2.0; see [LICENSE](LICENSE).
