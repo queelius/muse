@@ -106,3 +106,31 @@ def test_run_uvicorn_swallows_keyboardinterrupt():
         # Must NOT raise.
         serve_util.run_uvicorn(object(), host="127.0.0.1", port=8000)
     fake_server.run.assert_called_once()
+
+
+def test_background_server_does_not_install_signal_handlers():
+    server = serve_util.build_uvicorn_server(object(), host="127.0.0.1", port=8000)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    observations = []
+
+    def run_scope():
+        try:
+            with server.capture_signals():
+                observations.append({sig: signal.getsignal(sig) for sig in previous})
+        except Exception as exc:
+            observations.append(exc)
+
+    thread = threading.Thread(target=run_scope, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert observations == [previous]
+
+
+def test_signal_handlers_are_restored_when_serving_raises():
+    server = serve_util.build_uvicorn_server(object(), host="127.0.0.1", port=8000)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    with pytest.raises(RuntimeError, match="serving failed"):
+        with server.capture_signals():
+            raise RuntimeError("serving failed")
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous

@@ -21,7 +21,10 @@ second Ctrl-C remains an immediate force-quit, unchanged.
 from __future__ import annotations
 
 import math
+import signal
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import uvicorn
 
@@ -36,7 +39,7 @@ _DEFAULT_GRACE_SECONDS = 10.0
 
 
 class _ShutdownAwareServer(uvicorn.Server):
-    """Uvicorn server that exposes signal receipt to supervisor threads."""
+    """Own handled signals until Uvicorn returns to Muse's cleanup."""
 
     def __init__(
         self,
@@ -50,6 +53,28 @@ class _ShutdownAwareServer(uvicorn.Server):
         if self._muse_shutdown_event is not None:
             self._muse_shutdown_event.set()
         super().handle_exit(sig, frame)
+
+    @contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        # Embedded/background-thread servers cannot install signal handlers.
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+
+        previous = {
+            sig: signal.signal(sig, self.handle_exit)
+            for sig in uvicorn.server.HANDLED_SIGNALS
+        }
+        try:
+            yield
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+        # Uvicorn normally replays captured signals here. Replaying SIGTERM
+        # with its default handler terminates Python before the supervisor's
+        # finally can stop workers, release leases, and unregister resources.
+        # handle_exit already requested bounded shutdown (including the
+        # existing second-SIGINT force-exit behavior), so consume the signal.
 
 
 def shutdown_grace_seconds() -> float:
@@ -79,9 +104,9 @@ def build_uvicorn_server(
 ) -> uvicorn.Server:
     """Construct a uvicorn.Server with a bounded graceful-shutdown timeout.
 
-    Callers run it with ``.run()`` (blocking, installs SIGINT/SIGTERM
-    handlers exactly like ``uvicorn.run``). When supplied, `shutdown_event`
-    is set directly from Uvicorn's signal handler before graceful draining.
+    Callers run it with ``.run()`` (blocking, owns SIGINT/SIGTERM while
+    serving). Handled signals are not replayed before caller cleanup.
+    When supplied, `shutdown_event` is set before graceful draining.
     """
     config = uvicorn.Config(
         app,
@@ -115,8 +140,7 @@ def run_uvicorn(
             shutdown_event=shutdown_event,
         ).run()
     except KeyboardInterrupt:
-        # uvicorn re-raises the SIGINT it captured once the graceful
-        # shutdown completes. uvicorn.run() swallows that KeyboardInterrupt
-        # and returns normally; mirror it so this stays a true drop-in and
-        # a clean Ctrl-C never surfaces as an exception to the caller.
+        # Defensive compatibility for runners that still raise on Ctrl-C.
+        # Our capture_signals consumes handled SIGINT, but keep the same
+        # quiet KeyboardInterrupt behavior as uvicorn.run().
         pass
