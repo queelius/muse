@@ -78,14 +78,16 @@ The GGUF, VLM and other resolver plugins derive the catalog id from the repo bas
 
 ### Task 5: A Failed Post-Pull Probe Fails the Pull
 
+**Done 2026-10-18.** As built: `catalog.pull()` now returns the installed id so the probe targets the right entry (a URI re-pull previously could not be identified, which would have become a false failure); tests in `tests/cli_impl/test_pull_probe_failure.py`; the admin job needed no change.
+
 **Files:** Modify `src/muse/cli.py` (`pull`, ~lines 385–397), `src/muse/cli_impl/probe.py` (`run_probe_for_pull`); test `tests/cli_impl/test_probe.py`, `tests/test_cli.py`.
 
 Today the pull exits 0 and leaves the model `enabled: true` even when the probe could not load it or run inference.
 
-- [ ] Write tests: when the probe fails, `muse pull` exits nonzero, the catalog entry and weights remain (so a retry needs no re-download), the entry is set `enabled: false`, and stderr says to run `muse models probe <id>` then `muse models enable <id>`. A probe that could not identify the new entry is reported as a failure, not silently skipped. `--no-probe` keeps exit 0 and leaves the entry enabled, as today. An internal error in the probe helper also exits nonzero.
-- [ ] Add a test that the admin pull job (`POST /v1/admin/models/_/pull`, which runs `muse pull` as a subprocess in `admin/operations.py`) now ends `failed` with the probe reason; no admin code change should be needed.
-- [ ] Implement; run `pytest tests/cli_impl/ tests/admin/ tests/test_cli.py -q`; require GREEN.
-- [ ] Update the "`muse pull` runs probe at the end" paragraph in `CLAUDE.md` and the README pull section to describe the new exit behavior.
+- [x] Write tests: when the probe fails, `muse pull` exits nonzero, the catalog entry and weights remain (so a retry needs no re-download), the entry is set `enabled: false`, and stderr says to run `muse models probe <id>` then `muse models enable <id>`. A probe that could not identify the new entry is reported as a failure, not silently skipped. `--no-probe` keeps exit 0 and leaves the entry enabled, as today. An internal error in the probe helper also exits nonzero.
+- [x] Add a test that the admin pull job (`POST /v1/admin/models/_/pull`, which runs `muse pull` as a subprocess in `admin/operations.py`) now ends `failed` with the probe reason; no admin code change should be needed.
+- [x] Implement; run `pytest tests/cli_impl/ tests/admin/ tests/test_cli.py -q`; require GREEN.
+- [x] Update the "`muse pull` runs probe at the end" paragraph in `CLAUDE.md` and the README pull section to describe the new exit behavior.
 
 ### Task 6: Release Gate
 

@@ -1622,8 +1622,10 @@ def pull(
     *,
     base_override: str | None = None,
     model_id: str | None = None,
-) -> None:
-    """Pull a model. Dispatch by identifier shape, with curated alias resolution.
+) -> str:
+    """Pull a model and return the catalog id it was installed under.
+
+    Dispatch by identifier shape, with curated alias resolution.
 
     Resolution order:
       1. Curated alias (e.g. "qwen3-8b-q4" from src/muse/curated.yaml):
@@ -1654,8 +1656,7 @@ def pull(
     a bundled script or a different curated entry.
     """
     if model_id is not None:
-        _pull_uri_as(identifier, model_id, base_override=base_override)
-        return
+        return _pull_uri_as(identifier, model_id, base_override=base_override)
 
     curated = find_curated(identifier)
     if curated is not None:
@@ -1669,7 +1670,7 @@ def pull(
             # context_length) land in the persisted manifest.
             overlay = dict(curated.capabilities or {})
             with _model_pull_lock(curated.id):
-                _pull_via_resolver(
+                return _pull_via_resolver(
                     curated.uri,
                     model_id_override=curated.id,
                     capabilities_overlay=overlay or None,
@@ -1679,12 +1680,10 @@ def pull(
                     code_revision_override=curated.code_revision,
                     allow_source_change=True,
                 )
-            return
         # Bundled curated entry: id equals an existing bundled script's
         # model_id. Fall through to the bundled path with that id.
         with _model_pull_lock(curated.id):
-            _pull_bundled(curated.id)
-        return
+            return _pull_bundled(curated.id)
 
     if "://" in identifier:
         # Inherit curated capabilities for this URI even when the user
@@ -1715,7 +1714,7 @@ def pull(
         with _model_pull_lock(lock_identity):
             if uri_curated is not None:
                 overlay = dict(uri_curated.capabilities or {})
-                _pull_via_resolver(
+                return _pull_via_resolver(
                     identifier,
                     model_id_override=uri_curated.id,
                     capabilities_overlay=overlay or None,
@@ -1725,9 +1724,7 @@ def pull(
                     code_revision_override=uri_curated.code_revision,
                     allow_source_change=True,
                 )
-            else:
-                _pull_via_resolver(identifier, base_override=base_override)
-        return
+            return _pull_via_resolver(identifier, base_override=base_override)
 
     # Bare id: could be a bundled script OR a resolver-pulled model
     # (resolver-pulled ids also show up in known_models() via their
@@ -1753,7 +1750,7 @@ def pull(
         _run_automatic_storage_maintenance()
         with _model_pull_lock(identifier):
             if uri_curated is not None:
-                _pull_via_resolver(
+                return _pull_via_resolver(
                     source_uri,
                     model_id_override=identifier,
                     capabilities_overlay=uri_curated.capabilities or None,
@@ -1762,15 +1759,13 @@ def pull(
                     revision_override=uri_curated.revision,
                     code_revision_override=uri_curated.code_revision,
                 )
-            else:
-                _pull_via_resolver(
-                    source_uri,
-                    model_id_override=identifier,
-                    base_override=base_override,
-                    revision_override=existing.get("revision"),
-                    code_revision_override=existing.get("code_revision"),
-                )
-        return
+            return _pull_via_resolver(
+                source_uri,
+                model_id_override=identifier,
+                base_override=base_override,
+                revision_override=existing.get("revision"),
+                code_revision_override=existing.get("code_revision"),
+            )
 
     if base_override:
         logger.warning(
@@ -1782,8 +1777,7 @@ def pull(
     if identifier in catalog_known:
         _run_automatic_storage_maintenance()
         with _model_pull_lock(identifier):
-            _pull_bundled(identifier)
-        return
+            return _pull_bundled(identifier)
 
     curated_ids = [c.id for c in load_curated()]
     all_known = sorted(set(list(catalog_known) + curated_ids))
@@ -1797,7 +1791,7 @@ def pull(
     raise KeyError(msg)
 
 
-def _pull_uri_as(uri: str, model_id: str, *, base_override: str | None) -> None:
+def _pull_uri_as(uri: str, model_id: str, *, base_override: str | None) -> str:
     """`pull(uri, model_id=...)`: install a resolver URI under an explicit id."""
     if "://" not in uri:
         raise ValueError(
@@ -1815,7 +1809,7 @@ def _pull_uri_as(uri: str, model_id: str, *, base_override: str | None) -> None:
     uri_curated = find_curated_by_uri(uri)
     _run_automatic_storage_maintenance()
     with _model_pull_lock(model_id):
-        _pull_via_resolver(
+        return _pull_via_resolver(
             uri,
             model_id_override=model_id,
             capabilities_overlay=(
@@ -1902,10 +1896,11 @@ def _check_resolver_target(
     )
 
 
-def _pull_bundled(model_id: str) -> None:
+def _pull_bundled(model_id: str) -> str:
     """Pull one bundled model while excluding live resource users."""
     with _model_resource_lease(model_id):
         _pull_bundled_with_lease(model_id)
+    return model_id
 
 
 def _pull_bundled_with_lease(model_id: str) -> None:
@@ -2189,7 +2184,7 @@ def _pull_via_resolver(
     code_revision_override: str | None = None,
     allow_source_change: bool = False,
     _resolved: object | None = None,
-) -> None:
+) -> str:
     """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
 
     Looks up the resolver for the URI's scheme, calls `resolve(uri)` to
@@ -2371,6 +2366,7 @@ def _pull_via_resolver(
             venv_path=tx.path,
         )
         tx.commit()
+    return model_id
 
 
 def _pull_resolved_transaction(

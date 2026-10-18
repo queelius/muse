@@ -269,12 +269,11 @@ def run_probe_for_pull(
 ) -> int:
     """Probe the model that `pull(identifier)` just installed.
 
-    Resolves the post-pull model_id and dispatches run_probe in
-    fail-soft mode: subprocess failures, missing identifiers, or
-    catalog-state surprises do NOT raise. The intent is to populate the
-    new entry's `measurements.<device>.peak_bytes` so the supervisor's
-    boot validation does not flag it as unservable for "no memory
-    estimate."
+    Resolves the post-pull model_id and dispatches run_probe without
+    raising: subprocess failures, missing identifiers, or catalog-state
+    surprises become a nonzero return. The probe proves the model loads
+    and runs a representative inference, and records its
+    `measurements.<device>.peak_bytes`.
 
     Identifier resolution order (mirrors `catalog.pull` dispatch):
       1. If `identifier` is a curated id present in the post-pull
@@ -290,9 +289,8 @@ def run_probe_for_pull(
     by the caller. The CLI's pull command snapshots this immediately
     before calling catalog.pull(); the probe-on-pull happens after.
 
-    Returns 0 on probe success; non-zero on any failure mode (the
-    caller may surface this as a warning but should not propagate
-    because the pull itself already succeeded).
+    Returns 0 on probe success; non-zero on any failure mode. `muse pull`
+    treats nonzero as a failed pull and disables the model.
     """
     catalog = _read_catalog()
 
@@ -308,8 +306,8 @@ def run_probe_for_pull(
             resolved_id = next(iter(new_keys))
         elif len(new_keys) == 0:
             print(
-                f"warning: could not identify which model {identifier!r} just "
-                f"pulled; skipping probe (run `muse models probe <id>` manually)",
+                f"error: could not identify which model {identifier!r} just "
+                f"pulled, so it was not probed",
                 file=sys.stderr,
             )
             return 1
@@ -335,9 +333,7 @@ def run_probe_for_pull(
         )
     except Exception as e:  # noqa: BLE001
         print(
-            f"warning: probe-on-pull failed for {resolved_id!r}: {e}; "
-            f"the pull itself succeeded. Run `muse models probe {resolved_id}` "
-            f"manually when convenient.",
+            f"error: probe-on-pull failed for {resolved_id!r}: {e}",
             file=sys.stderr,
         )
         return 5

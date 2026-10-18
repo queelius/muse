@@ -346,10 +346,10 @@ def pull(
     diagnosable. Use `-v` / `--verbose` to stream the full pip +
     HF firehose (the v0.40.2 default).
 
-    The post-pull probe runs by default to populate the new entry's
-    `measurements.<device>.peak_bytes`; without that data the v0.40.0
-    supervisor flags the model as unservable. `--no-probe` opts out
-    for cross-device scenarios.
+    The post-pull probe runs by default: it loads the model, runs a
+    representative inference, and records `measurements.<device>`. If it
+    fails, the pull exits 1 and the model is left installed but disabled.
+    `--no-probe` opts out for cross-device scenarios.
     """
     from muse.core.catalog import (
         ModelIdConflictError,
@@ -390,7 +390,7 @@ def pull(
 
     with install_output_mode(verbose=verbose):
         try:
-            _pull(identifier, base_override=base, model_id=model_id)
+            pulled_id = _pull(identifier, base_override=base, model_id=model_id)
         except KeyError as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(2)
@@ -414,16 +414,48 @@ def pull(
         if no_probe:
             return
 
-        # Probe-on-pull. Failures are logged to stderr by run_probe_for_pull
-        # but do not raise; we keep the exit code as the pull's success.
+        # Probe-on-pull: a successful pull means the model loads and runs a
+        # representative inference. A failed probe leaves the weights and
+        # venv in place (a retry needs no re-download) but disables the model.
+        probe_id = pulled_id if isinstance(pulled_id, str) else (model_id or identifier)
         try:
             from muse.cli_impl.probe import run_probe_for_pull
-            run_probe_for_pull(model_id or identifier, before_keys=before_keys)
+            rc = run_probe_for_pull(probe_id, before_keys=before_keys)
         except Exception as e:  # noqa: BLE001
-            typer.echo(
-                f"warning: probe-on-pull skipped due to internal error: {e}",
-                err=True,
-            )
+            typer.echo(f"error: probe-on-pull failed: {e}", err=True)
+            rc = 5
+        if rc != 0:
+            _fail_pull_probe(probe_id)
+            raise typer.Exit(1)
+
+
+def _fail_pull_probe(model_id: str) -> None:
+    """Disable a model whose post-pull probe failed and say how to recover."""
+    from muse.core.catalog import _read_catalog, set_enabled
+
+    try:
+        installed = model_id in _read_catalog()
+    except Exception:  # noqa: BLE001
+        installed = False
+    if not installed:
+        typer.echo(
+            "error: the pull finished but its post-pull probe could not run; "
+            "run `muse models probe <id>` to verify the model before serving it",
+            err=True,
+        )
+        return
+    try:
+        set_enabled(model_id, False)
+        state = "has been disabled"
+    except Exception as e:  # noqa: BLE001
+        state = f"could not be disabled ({e})"
+    typer.echo(
+        f"error: {model_id} was installed but failed its post-pull probe, so it "
+        f"{state}. Fix the cause above, then run `muse models probe {model_id}` "
+        f"and `muse models enable {model_id}`. (Pulling for another device? "
+        f"Use --no-probe.)",
+        err=True,
+    )
 
 
 @app.command("search")

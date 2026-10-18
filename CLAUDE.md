@@ -745,10 +745,19 @@ to serve: even a `--no-probe` pull (or a probe that was skipped) loads
 on demand, because the supervisor falls back to sizing the model from
 its on-disk weights (tier 2 of the sizing ladder above). Probe still
 matters -- it yields a more honest peak than raw weights size, and it
-self-heals on every subsequent load -- but it is an optimization, not a
-gate. Pulled models still need an explicit `muse models enable <id>` to
-start serving traffic, since enabling is a separate operator decision
-from "have weights on disk."
+self-heals on every subsequent load -- but for sizing it is an
+optimization, not a gate.
+
+The probe IS a gate on the pull itself (v0.61.0): it proves the model
+loads and runs a representative inference. A successful pull leaves the
+model `enabled: true`. If the probe fails (load error, inference error,
+timeout, or the pulled id cannot be identified), `muse pull` exits 1 and
+the entry is kept but set `enabled: false`, so weights and venv survive
+for a retry; the message points at `muse models probe <id>` then
+`muse models enable <id>`. `catalog.pull()` returns the id it installed,
+so the probe targets the right entry even on a URI re-pull. The admin
+pull job runs `muse pull` as a subprocess and therefore ends `failed`.
+A `--no-probe` pull exits 0 and stays enabled.
 
 Decoupling principle: `enabled` is catalog state; `loaded` is runtime
 state. Two new admin operations, `load_model_into_worker` and

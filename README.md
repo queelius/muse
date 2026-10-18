@@ -447,7 +447,7 @@ for diagnosis. A null reason is not a dependency or inference smoke test.
 | Command | Description |
 |---|---|
 | `muse serve` | start the HTTP server (instant boot; lazy-load on first request) |
-| `muse pull <model-id-or-uri>` | download weights + install deps + run probe (accepts bundled id OR resolver URI like `hf://org/repo@variant`; `--no-probe` opts out) |
+| `muse pull <model-id-or-uri>` | download weights + install deps + run probe (accepts bundled id OR resolver URI like `hf://org/repo@variant`; a failed probe exits 1 and leaves the model disabled; `--no-probe` opts out; `--id` names the catalog entry for a URI) |
 | `muse search <query> [--modality M]` | search HuggingFace for pullable GGUF / sentence-transformers models |
 | `muse models list [--modality X]` | list known/pulled models with five-state status (enabled_loaded / enabled_unloaded / disabled / recommended / available) |
 | `muse models info <model-id>` | show catalog entry |
