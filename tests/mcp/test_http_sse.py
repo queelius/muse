@@ -125,6 +125,19 @@ class TestHttpAuth:
         body = resp.json()
         assert body["error"]["code"] == "invalid_token"
 
+    def test_non_ascii_bearer_returns_403_not_500(self, mcp_server):
+        app = mcp_server.build_http_app(admin_token="correct-token")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/mcp", headers={b"authorization": b"Bearer caf\xe9"})
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "invalid_token"
+
+    def test_configured_token_is_trimmed_like_admin_auth(self, mcp_server):
+        app = mcp_server.build_http_app(admin_token=" correct-token\n")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/mcp", headers={"Authorization": "Bearer correct-token"})
+        assert resp.status_code not in (401, 403, 500)
+
     def test_correct_token_passes_through(self, mcp_server):
         """Correct bearer token passes the middleware (MCP layer responds)."""
         token = "my-valid-token"

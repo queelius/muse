@@ -150,7 +150,7 @@ class TestCallToolOffLoop:
                     ticks += 1
 
             ticker_task = asyncio.create_task(ticker())
-            await self._drive_call_tool(server, "muse_speak", {"input": "hi"})
+            await self._drive_call_tool(server, "muse_speak", {"model": "test-tts", "input": "hi"})
             ticker_task.cancel()
             return ticks
 
@@ -176,7 +176,7 @@ class TestCallToolOffLoop:
         server = MCPServer(client=client, filter_kind="inference")
 
         result = asyncio.run(
-            self._drive_call_tool(server, "muse_speak", {"input": "hi"})
+            self._drive_call_tool(server, "muse_speak", {"model": "test-tts", "input": "hi"})
         )
         out = result.root if hasattr(result, "root") else result
         blocks = out.content

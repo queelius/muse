@@ -630,6 +630,10 @@ Tools split into two groups:
 
 **Inference (20):** `muse_chat`, `muse_summarize`, `muse_rerank`, `muse_classify`, `muse_embed_text`, `muse_translate`, `muse_generate_image`, `muse_edit_image`, `muse_vary_image`, `muse_upscale_image`, `muse_segment_image`, `muse_vectorize_image`, `muse_generate_animation`, `muse_embed_image`, `muse_speak`, `muse_transcribe`, `muse_generate_music`, `muse_generate_sfx`, `muse_embed_audio`, `muse_generate_video`.
 
+Inference tools require an explicit catalog `model` id, matching the gateway's
+routing contract. `muse_translate` can omit it when connected directly to
+`muse serve`, which selects an enabled translation model.
+
 Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or `<name>_path` (local file). Image and audio outputs return as MCP `ImageContent` / `AudioContent` blocks plus a JSON summary.
 
 ## Federation

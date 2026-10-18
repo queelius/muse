@@ -84,8 +84,8 @@ INFERENCE_TOOLS.extend([
                     "model": {
                         "type": "string",
                         "description": (
-                            "Catalog id (e.g. 'qwen3.5-9b-q4'); omit to "
-                            "use the default chat/completion model."
+                            "Required catalog id (e.g. 'qwen3.5-9b-q4'); "
+                            "use muse_list_models to discover available models."
                         ),
                     },
                     "messages": {
@@ -114,7 +114,7 @@ INFERENCE_TOOLS.extend([
                     },
                     "response_format": {"type": "object"},
                 },
-                "required": ["messages"],
+                "required": ["model", "messages"],
             },
         ),
         handler=_handle_chat,
@@ -145,7 +145,7 @@ INFERENCE_TOOLS.extend([
                         "enum": ["auto", "paragraph", "bullets"],
                     },
                 },
-                "required": ["text"],
+                "required": ["model", "text"],
             },
         ),
         handler=_handle_summarize,
@@ -173,7 +173,7 @@ INFERENCE_TOOLS.extend([
                     "top_n": {"type": "integer", "minimum": 1},
                     "return_documents": {"type": "boolean", "default": False},
                 },
-                "required": ["query", "documents"],
+                "required": ["model", "query", "documents"],
             },
         ),
         handler=_handle_rerank,
@@ -203,7 +203,7 @@ INFERENCE_TOOLS.extend([
                         "maximum": 1.0,
                     },
                 },
-                "required": ["input"],
+                "required": ["model", "input"],
             },
         ),
         handler=_handle_classify,
@@ -233,7 +233,7 @@ INFERENCE_TOOLS.extend([
                         "default": "float",
                     },
                 },
-                "required": ["input"],
+                "required": ["model", "input"],
             },
         ),
         handler=_handle_embed_text,

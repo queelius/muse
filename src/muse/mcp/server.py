@@ -205,7 +205,7 @@ class MCPServer:
 
         from muse.core import config
 
-        token = admin_token or config.get("admin.token") or ""
+        token = (admin_token or config.get("admin.token") or "").strip()
 
         manager = StreamableHTTPSessionManager(app=self._server, stateless=True)
 
@@ -233,7 +233,9 @@ class MCPServer:
                     await resp(scope, receive, send)
                     return
                 presented = auth[len("Bearer "):]
-                if not _secrets.compare_digest(presented, token):
+                if not _secrets.compare_digest(
+                    presented.encode("utf-8"), token.encode("utf-8"),
+                ):
                     resp = Response(
                         content='{"error":{"code":"invalid_token","message":"Bad MCP token"}}',
                         status_code=403,

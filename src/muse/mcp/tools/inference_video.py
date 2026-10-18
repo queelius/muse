@@ -77,7 +77,7 @@ INFERENCE_TOOLS.extend([
                     },
                     "n": {"type": "integer", "default": 1},
                 },
-                "required": ["prompt"],
+                "required": ["model", "prompt"],
             },
         ),
         handler=_handle_generate_video,
