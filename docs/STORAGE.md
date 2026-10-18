@@ -60,9 +60,20 @@ future re-pull.
 
 Cleanup and pulls coordinate through process and filesystem locks. Before a
 planned path is deleted, Muse checks its filesystem identity, newest descendant
-timestamp, and current catalog references again. A venv transaction workspace
-is preserved when the canonical venv is missing or incomplete because that
-workspace may contain the only recoverable prior environment.
+timestamp, and current catalog references again. Catalog references take priority
+over staging-like names, including custom model IDs, and references through
+symlinked parent directories identify the same owned resource. Venv cleanup
+also respects the candidate's actual model lifetime lease rather than trusting
+the owner recorded in an earlier cleanup plan.
+
+Venv transaction workspaces are always preserved for manual recovery. There is
+no durable commit receipt that lets a later cleanup distinguish an interrupted
+update from a successfully committed update whose backup cleanup failed. Even
+an executable Python in the canonical venv does not prove its packages are
+complete. Normal successful transactions remove their own backups; leftover
+`.MODEL.transaction-*` directories are never bulk-pruned, even with
+`--include-unreferenced`. Inspect them and verify the canonical environment
+before manually recovering or removing a backup.
 
 ## Automatic maintenance
 
@@ -103,6 +114,12 @@ python -m pip cache purge
 `hf cache prune` targets detached revisions and incomplete downloads; use
 `hf cache rm` for explicitly selected repositories or revisions. Pip's purge
 removes the whole pip download/wheel cache, not installed packages.
+
+Hugging Face's cache tools do not consult Muse's catalog. A detached snapshot
+can still be pinned by a cataloged Muse model, especially a legacy model using
+the shared cache. Compare proposed removals with `muse doctor storage` and the
+catalog's `local_dir` paths before pruning; do not assume "detached" means
+unused by Muse. This also applies when pointing HF tools at Muse's owned cache.
 
 ## Removing one model
 

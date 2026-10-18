@@ -14,9 +14,10 @@ import shutil
 import stat
 import subprocess
 import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from muse.core.catalog import (
     _CATALOG_WRITE_LOCK,
@@ -292,7 +293,10 @@ def _direct_items(
 
 
 def _path_key(path: str | os.PathLike[str] | Path) -> str:
-    return os.path.abspath(os.path.expanduser(os.fspath(path)))
+    # Normalize aliases in ancestors, but never follow the entry being
+    # inspected/deleted: a substituted leaf symlink must stay a single entry.
+    absolute = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    return str(absolute.parent.resolve() / absolute.name)
 
 
 def _top_level_owned_path(raw_path: object, root: Path) -> Path | None:
@@ -412,17 +416,6 @@ def _find_incomplete_files(root: Path, warnings: list[str]) -> list[StorageItem]
                     reason="unfinished download in Muse's owned weights cache",
                 ))
     return sorted(items, key=lambda item: str(item.path))
-
-
-def _complete_venv(path: Path) -> bool:
-    try:
-        mode = path.lstat().st_mode
-    except OSError:
-        return False
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        return False
-    python = path / "bin" / "python"
-    return python.is_file() and os.access(python, os.X_OK)
 
 
 def _shared_cache_roots() -> tuple[Path | None, Path | None]:
@@ -571,6 +564,14 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
             mode = item.path.lstat().st_mode
         except OSError:
             continue
+        if (
+            stat.S_ISDIR(mode)
+            and _path_key(item.path) in venv_refs
+        ):
+            referenced_venvs.append(_replace_item(
+                item, status="referenced", reason="referenced by catalog",
+            ))
+            continue
         staging_match = _VENV_STAGING_RE.fullmatch(item.path.name)
         if staging_match and stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
             model_id = staging_match.group("model")
@@ -583,7 +584,9 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
             if item is None:
                 continue
             transaction = staging_match.group("transaction") == "transaction"
-            safe = not transaction or _complete_venv(venvs_root / model_id)
+            # An executable Python cannot prove that a clone or pip update
+            # completed. Without a durable commit receipt, retain the backup.
+            safe = not transaction
             classified = StorageItem(
                 kind="venv-staging",
                 status="safe-garbage" if safe else "recovery",
@@ -595,7 +598,7 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
                 reason=(
                     "abandoned venv staging workspace"
                     if safe else
-                    "transaction may contain the only recoverable prior venv"
+                    "transaction has no proven commit; preserve for recovery"
                 ),
             )
             (abandoned_staging if safe else recovery_workspaces).append(classified)
@@ -631,6 +634,14 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
         try:
             mode = item.path.lstat().st_mode
         except OSError:
+            continue
+        if (
+            stat.S_ISDIR(mode)
+            and _path_key(item.path) in weight_refs
+        ):
+            referenced_weights.append(_replace_item(
+                item, status="referenced", reason="referenced by catalog",
+            ))
             continue
         if (
             _WEIGHTS_STAGING_RE.fullmatch(item.path.name)
@@ -886,6 +897,29 @@ def _delete_item(item: StorageItem) -> int:
     return item.physical_bytes
 
 
+@contextmanager
+def _venv_prune_ownership(path: Path) -> Iterator[None]:
+    """Protect both a staging owner and its potentially canonical name."""
+    if _path_key(path.parent) != _path_key(_catalog_dir() / "venvs"):
+        raise StorageInspectionError(f"refusing venv cleanup outside owned root: {path}")
+    model_ids = {path.name}
+    match = _VENV_STAGING_RE.fullmatch(path.name)
+    if match is not None:
+        model_ids.add(match.group("model"))
+    try:
+        for model_id in model_ids:
+            _validate_model_id_for_fs(model_id)
+    except ValueError as exc:
+        raise StorageInspectionError(f"unsafe venv cleanup name: {path}") from exc
+    # Derive ownership from the real candidate name, not mutable plan metadata.
+    with ExitStack() as owners:
+        for model_id in sorted(model_ids):
+            owners.enter_context(_model_pull_lock(model_id, wait=False))
+        for model_id in sorted(model_ids):
+            owners.enter_context(_model_resource_lease(model_id, wait=False))
+        yield
+
+
 def execute_prune(plan: PrunePlan, *, dry_run: bool = False) -> PruneResult:
     """Apply a plan after lock-, catalog-, age-, and inode revalidation."""
     if dry_run:
@@ -909,10 +943,9 @@ def execute_prune(plan: PrunePlan, *, dry_run: bool = False) -> PruneResult:
     ]
 
     for original in venv_candidates:
-        model_id = original.model_id or original.path.name
         try:
-            with _model_pull_lock(model_id, wait=False):
-                with _model_resource_lease(model_id, wait=False):
+            with _venv_prune_ownership(original.path):
+                with _CATALOG_WRITE_LOCK:
                     current = _refresh_item(original)
                     if current is None:
                         outcomes.append(PruneOutcome(
@@ -924,30 +957,26 @@ def execute_prune(plan: PrunePlan, *, dry_run: bool = False) -> PruneResult:
                             current, "skipped", "path changed inside the age grace period",
                         ))
                         continue
+                    venv_refs, _ = _current_owned_references()
+                    if _path_key(current.path) in venv_refs:
+                        outcomes.append(PruneOutcome(
+                            current, "skipped", "catalog acquired a reference",
+                        ))
+                        continue
+                    # Recheck the name even if an old/crafted plan labels a
+                    # transaction backup as an ordinary unreferenced venv.
+                    match = _VENV_STAGING_RE.fullmatch(current.path.name)
+                    if match is not None and match.group("transaction") == "transaction":
+                        outcomes.append(PruneOutcome(
+                            current, "skipped", "workspace may be needed for recovery",
+                        ))
+                        continue
                     if current.kind == "venv-staging":
-                        match = _VENV_STAGING_RE.fullmatch(current.path.name)
                         if match is None:
                             outcomes.append(PruneOutcome(
                                 current, "skipped", "staging name no longer validates",
                             ))
                             continue
-                        if (
-                            match.group("transaction") == "transaction"
-                            and not _complete_venv(_catalog_dir() / "venvs" / model_id)
-                        ):
-                            outcomes.append(PruneOutcome(
-                                current, "skipped", "workspace may be needed for recovery",
-                            ))
-                            continue
-                    venv_refs, _ = _current_owned_references()
-                    if (
-                        current.kind == "venv"
-                        and _path_key(current.path) in venv_refs
-                    ):
-                        outcomes.append(PruneOutcome(
-                            current, "skipped", "catalog acquired a reference",
-                        ))
-                        continue
                     reclaimed = _delete_item(current)
                     outcomes.append(PruneOutcome(
                         current, "deleted", current.reason, reclaimed,
@@ -975,7 +1004,7 @@ def execute_prune(plan: PrunePlan, *, dry_run: bool = False) -> PruneResult:
                             ))
                             continue
                         if (
-                            current.kind == "weights"
+                            current.kind in {"weights", "weights-staging"}
                             and _path_key(current.path) in weight_refs
                         ):
                             outcomes.append(PruneOutcome(

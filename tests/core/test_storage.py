@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ import pytest
 from muse.core import config
 from muse.core.catalog import (
     CatalogError,
+    _model_resource_lease,
     _reset_known_models_cache,
     _reset_read_catalog_cache,
     _write_catalog,
@@ -255,6 +257,132 @@ def test_referenced_dot_prefixed_venv_is_not_hidden_from_inventory(storage_root)
     report = inspect_storage(include_shared=False)
 
     assert [item.path for item in report.referenced_venvs] == [venv]
+
+
+def test_cataloged_staging_shaped_resources_are_not_garbage(storage_root):
+    model_id = ".demo.staging-abc"
+    venv = storage_root / "venvs" / model_id
+    weights = storage_root / "weights" / ".bundle.staging-abc"
+    _complete_venv(venv)
+    weights.mkdir(parents=True)
+    (weights / "model.bin").write_bytes(b"cataloged weights")
+    _age_tree(venv)
+    _age_tree(weights)
+    _write_catalog({model_id: {
+        "venv_path": str(venv), "local_dir": str(weights),
+    }})
+
+    report = inspect_storage(include_shared=False)
+
+    assert [item.path for item in report.referenced_venvs] == [venv]
+    assert [item.path for item in report.referenced_weights] == [weights]
+    assert plan_prune(report, include_unreferenced=True).candidates == ()
+
+
+@pytest.mark.parametrize("kind", ["venv", "weights"])
+def test_staging_plan_preserves_new_catalog_reference(storage_root, kind):
+    model_id = ".demo.staging-abc"
+    venv = storage_root / "venvs" / model_id
+    weights = storage_root / "weights" / ".bundle.staging-abc"
+    if kind == "venv":
+        _complete_venv(venv)
+        target = venv
+    else:
+        weights.mkdir(parents=True)
+        (weights / "model.bin").write_bytes(b"weights")
+        target = weights
+    _age_tree(target)
+    plan = plan_prune(inspect_storage(include_shared=False))
+    assert [item.path for item in plan.candidates] == [target]
+    _write_catalog({model_id: {
+        "venv_path": str(venv), "local_dir": str(weights),
+    }})
+
+    result = execute_prune(plan)
+
+    assert target.exists()
+    assert [outcome.action for outcome in result.outcomes] == ["skipped"]
+
+
+@pytest.mark.parametrize("staging_shaped", [False, True])
+def test_prune_uses_actual_venv_lease_not_plan_model_id(storage_root, staging_shaped):
+    model_id = ".demo.staging-abc" if staging_shaped else "retained"
+    venv = storage_root / "venvs" / model_id
+    _complete_venv(venv)
+    _age_tree(venv)
+    plan = plan_prune(
+        inspect_storage(include_shared=False), include_unreferenced=True,
+    )
+    assert [item.path for item in plan.candidates] == [venv]
+    # Plans are snapshots, not authority for choosing another model's lease.
+    plan = replace(plan, candidates=(replace(plan.candidates[0], model_id="other"),))
+
+    with _model_resource_lease(model_id):
+        result = execute_prune(plan)
+
+    assert venv.exists()
+    assert [outcome.action for outcome in result.outcomes] == ["busy"]
+
+
+@pytest.mark.parametrize("hf_snapshot", [False, True])
+def test_cataloged_weights_below_symlinked_ancestor_are_preserved(
+    storage_root, tmp_path, monkeypatch, hf_snapshot,
+):
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    alias_parent = tmp_path / "alias-parent"
+    try:
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    alias_root = alias_parent / "muse"
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(alias_root))
+    venv = alias_root / "venvs" / "demo"
+    _complete_venv(venv)
+    weight_unit = alias_root / "weights" / (
+        "models--org--demo" if hf_snapshot else "bundle"
+    )
+    local_dir = weight_unit / "snapshots" / ("a" * 40) if hf_snapshot else weight_unit
+    local_dir.mkdir(parents=True)
+    (local_dir / "model.bin").write_bytes(b"cataloged weights")
+    _age_tree(weight_unit)
+    # Form the stale unreferenced plan before the catalog acquires its ref.
+    stale_plan = plan_prune(
+        inspect_storage(include_shared=False), include_unreferenced=True,
+    )
+    _write_catalog({"demo": {
+        "venv_path": str(venv), "local_dir": str(local_dir),
+    }})
+
+    report = inspect_storage(include_shared=False)
+    result = execute_prune(stale_plan)
+
+    assert [item.path for item in report.referenced_weights] == [weight_unit]
+    assert plan_prune(report, include_unreferenced=True).candidates == ()
+    assert (local_dir / "model.bin").read_bytes() == b"cataloged weights"
+    assert all(outcome.action == "skipped" for outcome in result.outcomes)
+
+
+def test_transaction_backup_survives_partial_canonical_with_python(storage_root):
+    transaction = storage_root / "venvs" / ".demo.transaction-abc"
+    _complete_venv(transaction / "prior")
+    prior_payload = transaction / "prior" / "working-package.py"
+    prior_payload.write_bytes(b"only intact prior environment")
+    # An interrupted clone/install can have Python but not its packages.
+    _complete_venv(storage_root / "venvs" / "demo")
+    _age_tree(transaction)
+
+    report = inspect_storage(include_shared=False)
+
+    assert [item.path for item in report.recovery_workspaces] == [transaction]
+    assert plan_prune(report).candidates == ()
+    # Even an old/crafted plan may not authorize deletion of recovery data.
+    plan = replace(plan_prune(report), candidates=(replace(
+        report.recovery_workspaces[0], kind="venv", status="safe-garbage",
+    ),))
+    result = execute_prune(plan)
+    assert prior_payload.read_bytes() == b"only intact prior environment"
+    assert [outcome.action for outcome in result.outcomes] == ["skipped"]
 
 
 def test_hf_cache_tag_is_known_metadata_not_an_unsafe_path(storage_root):
