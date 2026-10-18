@@ -96,6 +96,18 @@ class OperationError(Exception):
         self.retryable = retryable
 
 
+class WorkerCleanupError(OperationError):
+    """Startup failed while its worker still owns resources or memory."""
+
+    def __init__(self, worker_port: int):
+        super().__init__(
+            "worker_shutdown_incomplete",
+            f"worker on port {worker_port} could not be fully released",
+            status=503,
+        )
+        self.worker_port = worker_port
+
+
 def _ensure_server_running(state: SupervisorState) -> None:
     """Reject new worker starts once gateway shutdown has begun."""
     if state.stop_event.is_set():
@@ -104,6 +116,25 @@ def _ensure_server_running(state: SupervisorState) -> None:
             "server shutdown is in progress; worker startup cancelled",
             status=503,
         )
+
+
+def _cleanup_failed_worker_start(spec: WorkerSpec) -> None:
+    """Report retained startup ownership even when teardown itself raises."""
+    try:
+        result = _shutdown_workers([spec])
+    except Exception as exc:
+        with spec.process_lock:
+            retained = (
+                spec.process is not None
+                or spec.log_thread is not None
+                or spec.resource_id is not None
+                or bool(spec.retained_resource_ids)
+            )
+        if retained:
+            raise WorkerCleanupError(spec.port) from exc
+        raise
+    if isinstance(result, WorkerShutdownResult) and result.retained_spec(spec):
+        raise WorkerCleanupError(spec.port)
 
 
 def find_worker_for_model(state: SupervisorState, model_id: str) -> WorkerSpec | None:
@@ -136,6 +167,36 @@ def _allow_director_model(state: SupervisorState, model_id: str) -> None:
     allow = _director_method(state, "allow_model")
     if allow is not None:
         allow(model_id)
+
+
+def _claim_worker_siblings(
+    state: SupervisorState, python_path: str, model_id: str, *, loading: bool = False,
+) -> object | None:
+    """Claim idle siblings before changing a worker's immutable model plan."""
+    begin = _director_method(state, "begin_worker_transition")
+    if begin is None:
+        return None
+    with state.lock:
+        if loading and any(
+            model_id in spec.models and spec.status == "running"
+            for spec in state.workers
+        ):
+            return None  # Idempotent enable does not restart anything.
+        siblings = sorted({
+            sibling
+            for spec in state.workers if spec.python_path == python_path
+            for sibling in spec.models if sibling != model_id
+        })
+    return begin(siblings) if siblings else None
+
+
+def _finish_worker_siblings(
+    state: SupervisorState, token: object | None, *, success: bool = True,
+) -> None:
+    if token is not None:
+        finish = _director_method(state, "finish_worker_transition")
+        if finish is not None:
+            finish(token, success=success)
 
 
 def _require_model_python_path(model_id: str) -> str:
@@ -225,6 +286,8 @@ def _load_model_with_ownership(
             _wait_for_worker_operation(state, operation)
             continue
 
+        transition = None
+        transition_failed = False
         try:
             # Removal or repull may have won immediately before our claim.
             # Revalidate only after ownership; never spawn from the stale
@@ -266,6 +329,9 @@ def _load_model_with_ownership(
                         status=409,
                     )
 
+            transition = _claim_worker_siblings(
+                state, python_path, model_id, loading=True,
+            )
             with state.lock:
                 worker_positions = {
                     id(worker): index
@@ -376,6 +442,7 @@ def _load_model_with_ownership(
 
             if plan == "restart_sibling":
                 assert planned_models is not None
+                transition_failed = True
                 try:
                     _restart_worker_inplace(
                         spec_ref,
@@ -389,6 +456,7 @@ def _load_model_with_ownership(
                         spec_ref.status = "dead"
                         spec_ref.job_id = None
                     raise
+                transition_failed = False
                 with state.lock:
                     spec_ref.job_id = None
                 return _LoadOutcome(
@@ -413,10 +481,12 @@ def _load_model_with_ownership(
                     worker=spec_ref,
                 )
             except Exception:
-                _shutdown_workers([spec_ref])
-                with state.lock:
-                    spec_ref.status = "dead"
-                    spec_ref.job_id = None
+                try:
+                    _cleanup_failed_worker_start(spec_ref)
+                finally:
+                    with state.lock:
+                        spec_ref.status = "dead"
+                        spec_ref.job_id = None
                 _ensure_server_running(state)
                 raise
             with state.lock:
@@ -428,7 +498,43 @@ def _load_model_with_ownership(
                 coalesced_owner=coalesced_owner,
             )
         finally:
+            _finish_worker_siblings(state, transition, success=not transition_failed)
             finish_worker_operation(state, operation)
+
+
+def _enable_model_accounted(
+    model_id: str, *, state: SupervisorState, owner: str,
+) -> _LoadOutcome:
+    """Activate under venv ownership, then admit without holding that owner."""
+    coalesced_owner = None
+    while True:
+        _ensure_server_running(state)
+        python_path = _require_model_python_path(model_id)
+        operation, claimed = claim_worker_operation(
+            state, python_path=python_path, owner=owner,
+        )
+        if not claimed:
+            coalesced_owner = coalesced_owner or operation.owner
+            _wait_for_worker_operation(state, operation)
+            continue
+        try:
+            if _require_model_python_path(model_id) != python_path:
+                continue
+            set_enabled(model_id, True)
+            _allow_director_model(state, model_id)
+            with state.lock:
+                spawned_new = not any(
+                    spec.python_path == python_path and spec.status == "running"
+                    for spec in state.workers
+                )
+        finally:
+            finish_worker_operation(state, operation)
+        break
+
+    # warmup's enable callback takes the same per-venv operation; never hold
+    # it across admission, which may also need to evict a same-venv worker.
+    result = warmup_model(model_id, state=state)
+    return _LoadOutcome(result["worker_port"], spawned_new, coalesced_owner)
 
 
 def enable_model(
@@ -441,12 +547,18 @@ def enable_model(
     """Async operation: load ``model_id`` or await its current owner."""
     store.update(job.job_id, state="running")
     try:
-        outcome = _load_model_with_ownership(
-            model_id,
-            state=state,
-            owner=job.job_id,
-            enable_in_catalog=True,
-        )
+        if _director_method(state, "warmup") is not None:
+            outcome = _enable_model_accounted(
+                model_id, state=state, owner=job.job_id,
+            )
+        else:
+            # Preserve bare-state/legacy callers without a running director.
+            outcome = _load_model_with_ownership(
+                model_id,
+                state=state,
+                owner=job.job_id,
+                enable_in_catalog=True,
+            )
         result: dict[str, Any] = {
             "model_id": model_id,
             "worker_port": outcome.port,
@@ -551,7 +663,10 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
             _wait_for_worker_operation(state, operation)
             continue
 
+        transition = None
+        transition_failed = False
         try:
+            transition = _claim_worker_siblings(state, python_path, model_id)
             spec_to_shutdown: WorkerSpec | None = None
             shutdown_index: int | None = None
             spec_to_restart: WorkerSpec | None = None
@@ -614,6 +729,7 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
                 return
 
             assert spec_to_restart is not None
+            transition_failed = True
             try:
                 _restart_worker_inplace(
                     spec_to_restart,
@@ -627,10 +743,12 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
                     spec_to_restart.status = "dead"
                     spec_to_restart.job_id = None
                 raise
+            transition_failed = False
             with state.lock:
                 spec_to_restart.job_id = None
             return
         finally:
+            _finish_worker_siblings(state, transition, success=not transition_failed)
             finish_worker_operation(state, operation)
 
 
@@ -738,6 +856,8 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
             _wait_for_worker_operation(state, operation)
             continue
 
+        transition = None
+        transition_failed = False
         try:
             spec_to_shutdown: WorkerSpec | None = None
             shutdown_index: int | None = None
@@ -756,6 +876,7 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
             if current_python_path is not None and current_python_path != python_path:
                 continue
 
+            transition = _claim_worker_siblings(state, python_path, model_id)
             try:
                 set_enabled(model_id, False)
             except KeyError:
@@ -828,6 +949,7 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
                 }
 
             assert spec_to_restart is not None
+            transition_failed = True
             try:
                 _restart_worker_inplace(
                     spec_to_restart,
@@ -874,6 +996,7 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
                         state, [(former_index, spec_to_restart)],
                     )
                 raise
+            transition_failed = False
             with state.lock:
                 spec_to_restart.job_id = None
             return {
@@ -884,6 +1007,7 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
                 "remaining_models_in_worker": list(planned_models),
             }
         finally:
+            _finish_worker_siblings(state, transition, success=not transition_failed)
             finish_worker_operation(state, operation)
 
 
@@ -1458,7 +1582,7 @@ def _restart_worker_inplace(
             worker=spec,
         )
     except Exception:
-        _shutdown_workers([spec])
+        _cleanup_failed_worker_start(spec)
         if stop_event is not None and stop_event.is_set():
             raise OperationError(
                 "server_shutting_down",

@@ -10,6 +10,7 @@ import io
 import json
 import signal
 import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -89,6 +90,297 @@ class TestFindWorkerForModel:
 
     def test_returns_none_when_unhosted(self, state):
         assert find_worker_for_model(state, "unknown") is None
+
+
+@pytest.fixture
+def accounted_workers(tmp_catalog, state, monkeypatch):
+    """Real catalog/director; replace only worker I/O with inert generations."""
+    from muse.admin import operations
+    from muse.cli_impl.load_director import LoadDirector
+
+    manifests = {
+        name: {
+            "model_id": name,
+            "modality": "audio/speech",
+            "backend_path": "muse.models.kokoro:Model",
+            "hf_repo": "test/runtime",
+            "capabilities": {"memory_gb": memory, "device": "cpu"},
+        }
+        for name, memory in (("runtime-a", 4.0), ("runtime-b", 4.0))
+    }
+    for name in manifests:
+        interpreter = tmp_catalog / name / "venv/bin/python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.symlink_to(sys.executable)
+    _seed_catalog({
+        name: {
+            "pulled_at": "...", "local_dir": str(tmp_catalog / name),
+            "venv_path": str(tmp_catalog / name / "venv"),
+            "python_path": str(tmp_catalog / name / "venv/bin/python"),
+            "enabled": True, "manifest": manifest,
+        }
+        for name, manifest in manifests.items()
+    })
+
+    class Probe:
+        def cpu_free_gb(self):
+            return 64.0
+
+        def gpu_free_gb(self):
+            return None
+
+    director = LoadDirector(
+        enable_fn=lambda model: operations.load_model_into_worker(model, state=state),
+        disable_fn=lambda model: operations.unload_model_from_worker(model, state=state),
+        memory_probe=Probe(), cpu_budget_gb=6.0, cpu_headroom_gb=0.0,
+    )
+    state.director = director
+    ports = iter(range(9200, 9300))
+    monkeypatch.setattr(operations, "find_free_port", lambda **kwargs: next(ports))
+
+    def spawn(spec, **kwargs):
+        spec.process = object()
+
+    def shutdown(specs, *args, **kwargs):
+        for spec in specs:
+            spec.process = None
+        from muse.cli_impl.supervisor import WorkerShutdownResult
+        return WorkerShutdownResult(tuple(specs), ())
+
+    monkeypatch.setattr(operations, "spawn_worker", spawn)
+    monkeypatch.setattr(operations, "wait_for_ready", lambda **kwargs: None)
+    monkeypatch.setattr(operations, "_shutdown_workers", shutdown)
+    return state, manifests
+
+
+class TestDirectorWorkerAccounting:
+    def test_admin_enable_registers_idle_resident_with_director(self, accounted_workers, store):
+        # Bypassing director warmup leaves a real worker absent from residency.
+        from muse.core.catalog import set_enabled
+        state, _ = accounted_workers
+        set_enabled("runtime-a", False)
+        claim = state.director.begin_model_disable("runtime-a")
+        state.director.finish_eviction(claim, success=True)
+        job = store.create("enable", "runtime-a")
+
+        enable_model("runtime-a", state=state, store=store, job=job)
+
+        assert job.state == "done", job.error
+        assert state.director.loaded["runtime-a"].memory_gb == 4.0
+        assert state.director.status()["runtime-a"]["refcount"] == 0
+        assert job.result["worker_port"] == state.workers[0].port
+
+    def test_admin_enable_evicts_idle_resident_without_disabling_it(
+        self, accounted_workers, store,
+    ):
+        from muse.core.catalog import is_enabled
+        state, manifests = accounted_workers
+        state.director.warmup("runtime-a", manifest=manifests["runtime-a"])
+        job = store.create("enable", "runtime-b")
+
+        enable_model("runtime-b", state=state, store=store, job=job)
+
+        assert job.state == "done", job.error
+        assert list(state.director.status()) == ["runtime-b"]
+        assert [spec.models for spec in state.workers] == [["runtime-b"]]
+        assert is_enabled("runtime-a") is True
+
+    def test_admin_enable_cannot_bypass_busy_working_set_budget(self, accounted_workers, store):
+        # Direct admin spawning would admit 8 GB into a 6 GB working set.
+        state, manifests = accounted_workers
+        state.director.acquire("runtime-a", manifest=manifests["runtime-a"])
+        job = store.create("enable", "runtime-b")
+
+        enable_model("runtime-b", state=state, store=store, job=job)
+
+        assert job.state == "failed"
+        assert [spec.models for spec in state.workers] == [["runtime-a"]]
+        assert state.director.status()["runtime-a"]["refcount"] == 1
+
+    @pytest.mark.parametrize("cleanup", ["retained", "raises"])
+    def test_failed_start_with_retained_process_keeps_budget_reserved(
+        self, accounted_workers, monkeypatch, cleanup,
+    ):
+        # A callback raising before returning its port must not forget residency.
+        from muse.admin import operations
+        from muse.cli_impl.supervisor import WorkerShutdownResult
+        state, manifests = accounted_workers
+
+        def timeout(**kwargs):
+            raise TimeoutError("worker readiness timed out")
+
+        monkeypatch.setattr(operations, "wait_for_ready", timeout)
+        def incomplete_shutdown(specs):
+            if cleanup == "raises":
+                raise RuntimeError("worker teardown failed")
+            return WorkerShutdownResult((), tuple(specs))
+
+        monkeypatch.setattr(operations, "_shutdown_workers", incomplete_shutdown)
+        with pytest.raises(OperationError):
+            state.director.acquire("runtime-a", manifest=manifests["runtime-a"])
+
+        assert state.workers[0].process is not None
+        assert state.director.loaded["runtime-a"].memory_gb == 4.0
+        with pytest.raises(OperationError) as cleanup:
+            state.director.allow_model("runtime-a")
+        assert cleanup.value.code == "model_cleanup_required"
+        with pytest.raises(OperationError):
+            state.director.acquire("runtime-b", manifest=manifests["runtime-b"])
+        assert [spec.models for spec in state.workers] == [["runtime-a"]]
+
+    @pytest.mark.parametrize("transition", ["load", "unload", "disable"])
+    def test_shared_worker_transition_preserves_busy_sibling(
+        self, accounted_workers, transition,
+    ):
+        # Per-model refcounts must protect every tenant of the restarted process.
+        from muse.admin.operations import unload_model_from_worker
+        from muse.core.catalog import _read_catalog
+        state, manifests = accounted_workers
+        catalog = _read_catalog()
+        catalog["runtime-b"]["python_path"] = catalog["runtime-a"]["python_path"]
+        _seed_catalog(catalog)
+        state.director.cpu_budget_gb = 32.0
+        state.director.warmup("runtime-a", manifest=manifests["runtime-a"])
+        if transition != "load":
+            state.director.warmup("runtime-b", manifest=manifests["runtime-b"])
+        state.director.acquire("runtime-a", manifest=manifests["runtime-a"])
+        spec = state.workers[0]
+        generation, models = spec.process, list(spec.models)
+
+        with pytest.raises(OperationError) as busy:
+            if transition == "load":
+                state.director.warmup("runtime-b", manifest=manifests["runtime-b"])
+            elif transition == "unload":
+                unload_model_from_worker("runtime-b", state=state)
+            else:
+                disable_model("runtime-b", state=state)
+
+        # This failed cold claim itself notifies capacity; gateway retries
+        # would self-wake. Surface 503 for the client to retry after draining.
+        assert busy.value.status == 503
+        assert busy.value.retryable is False
+        assert spec.process is generation
+        assert spec.models == models
+        assert spec.status == "running"
+        assert state.director.status()["runtime-a"]["refcount"] == 1
+        assert state.worker_operations == {}
+
+    @pytest.mark.parametrize("cleanup", ["retained", "raises"])
+    def test_failed_shared_restart_keeps_new_model_memory_accounted(
+        self, accounted_workers, monkeypatch, cleanup,
+    ):
+        # Restart failure after allocation must preserve the new tenant's budget.
+        from muse.admin import operations
+        from muse.cli_impl.supervisor import WorkerShutdownResult
+        from muse.core.catalog import _read_catalog
+        state, manifests = accounted_workers
+        catalog = _read_catalog()
+        catalog["runtime-b"]["python_path"] = catalog["runtime-a"]["python_path"]
+        _seed_catalog(catalog)
+        state.director.cpu_budget_gb = 32.0
+        state.director.warmup("runtime-a", manifest=manifests["runtime-a"])
+
+        def timeout(**kwargs):
+            raise TimeoutError("replacement worker readiness timed out")
+
+        shutdown_count = 0
+
+        def shutdown(specs):
+            nonlocal shutdown_count
+            shutdown_count += 1
+            if shutdown_count == 1:
+                for spec in specs:
+                    spec.process = None
+                return WorkerShutdownResult(tuple(specs), ())
+            if cleanup == "raises":
+                raise RuntimeError("replacement teardown failed")
+            return WorkerShutdownResult((), tuple(specs))
+
+        monkeypatch.setattr(operations, "wait_for_ready", timeout)
+        monkeypatch.setattr(operations, "_shutdown_workers", shutdown)
+        with pytest.raises(OperationError):
+            state.director.warmup("runtime-b", manifest=manifests["runtime-b"])
+
+        assert state.workers[0].process is not None
+        assert state.director.loaded["runtime-b"].memory_gb == 4.0
+        with pytest.raises(OperationError) as cleanup_required:
+            state.director.allow_model("runtime-b")
+        assert cleanup_required.value.code == "model_cleanup_required"
+        assert state.worker_operations == {}
+
+    def test_shared_restart_excludes_new_sibling_acquires_until_settled(
+        self, accounted_workers, monkeypatch,
+    ):
+        # Checking idle once without excluding new acquires permits a kill race.
+        from muse.admin import operations
+        from muse.core.catalog import _read_catalog
+        state, manifests = accounted_workers
+        catalog = _read_catalog()
+        catalog["runtime-b"]["python_path"] = catalog["runtime-a"]["python_path"]
+        _seed_catalog(catalog)
+        state.director.cpu_budget_gb = 32.0
+        state.director.warmup("runtime-a", manifest=manifests["runtime-a"])
+        rejected = []
+
+        def readiness(**kwargs):
+            with pytest.raises(OperationError) as busy:
+                state.director.acquire("runtime-a", manifest=manifests["runtime-a"])
+            rejected.append(busy.value.retryable)
+
+        monkeypatch.setattr(operations, "wait_for_ready", readiness)
+        state.director.warmup("runtime-b", manifest=manifests["runtime-b"])
+
+        assert rejected == [True]
+        assert state.director.acquire("runtime-a", manifest=manifests["runtime-a"]) == 9200
+
+    @pytest.mark.parametrize("transition", ["load", "unload", "disable"])
+    @pytest.mark.parametrize("cleanup", ["complete", "retained"])
+    def test_failed_shared_restart_never_routes_sibling_to_old_hot_entry(
+        self, accounted_workers, monkeypatch, transition, cleanup,
+    ):
+        # Removing the transition exclusion must not expose a dead generation.
+        from muse.admin import operations
+        from muse.cli_impl.supervisor import WorkerShutdownResult
+        from muse.core.catalog import _read_catalog
+        state, manifests = accounted_workers
+        catalog = _read_catalog()
+        catalog["runtime-b"]["python_path"] = catalog["runtime-a"]["python_path"]
+        _seed_catalog(catalog)
+        state.director.cpu_budget_gb = 32.0
+        state.director.warmup("runtime-a", manifest=manifests["runtime-a"])
+        if transition != "load":
+            state.director.warmup("runtime-b", manifest=manifests["runtime-b"])
+        shutdown_count = 0
+
+        def shutdown(specs):
+            nonlocal shutdown_count
+            shutdown_count += 1
+            if shutdown_count > 1 and cleanup == "retained":
+                return WorkerShutdownResult((), tuple(specs))
+            for spec in specs:
+                spec.process = None
+            return WorkerShutdownResult(tuple(specs), ())
+
+        def timeout(**kwargs):
+            raise TimeoutError("replacement readiness failed")
+
+        monkeypatch.setattr(operations, "_shutdown_workers", shutdown)
+        monkeypatch.setattr(operations, "wait_for_ready", timeout)
+        with pytest.raises((OperationError, TimeoutError)):
+            if transition == "load":
+                state.director.warmup("runtime-b", manifest=manifests["runtime-b"])
+            elif transition == "unload":
+                operations.unload_model_from_worker("runtime-b", state=state)
+            else:
+                disable_model("runtime-b", state=state)
+
+        with pytest.raises(OperationError):
+            state.director.acquire("runtime-a", manifest=manifests["runtime-a"])
+        with pytest.raises(OperationError) as repair:
+            state.director.allow_model("runtime-a")
+        assert repair.value.code == "model_cleanup_required"
+        assert state.director.loaded["runtime-a"].memory_gb == 4.0
+        assert state.worker_operations == {}
 
 
 class TestEnableModel:

@@ -243,6 +243,23 @@ def test_admin_warmup_refuses_stale_provenance_before_admission(entry):
     assert failure.value.status == 503
 
 
+def test_admin_enable_refuses_stale_provenance_before_admission(entry):
+    from muse.admin.jobs import JobStore
+    from muse.admin.operations import enable_model
+
+    entry["revision"] = "2" * 40
+    catalog._write_catalog({MODEL: entry})
+    state = _state()
+    calls = []
+    state.director.enable_fn = lambda model_id: calls.append(model_id) or 9001
+    store = JobStore()
+    job = store.create("enable", MODEL)
+    enable_model(MODEL, state=state, store=store, job=job)
+    assert job.state == "failed"
+    assert "provenance" in job.error
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     ("worker_status", "process_state", "loaded"),
     [

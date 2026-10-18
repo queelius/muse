@@ -309,6 +309,9 @@ class LoadDirector:
         # Exact claim identity prevents a stale finally block from clearing a
         # newer teardown generation's markers or restoring its old LoadEntry.
         self._eviction_claims: dict[str, ModelEviction] = {}
+        # Shared workers restart as a unit. A transition claims every idle
+        # sibling before I/O so new requests cannot race the idle check.
+        self._worker_transitions: dict[str, object] = {}
         self.recent_decisions: collections.deque = collections.deque(maxlen=20)
         self.lock = threading.RLock()
         # Monotonic counter bumped under the lock on every memory-mutating
@@ -593,6 +596,48 @@ class LoadDirector:
         if removed:
             self._fire_capacity_listener()
 
+    def begin_worker_transition(self, model_ids: list[str]) -> object:
+        """Exclude idle siblings for one shared-worker transition, or fail busy."""
+        from muse.admin.operations import OperationError
+
+        with self.lock:
+            for model_id in model_ids:
+                entry = self.loaded.get(model_id)
+                if (
+                    model_id in self._worker_transitions
+                    or model_id in self.in_flight_loads
+                    or model_id in self.evicting
+                    or (entry is not None and entry.refcount > 0)
+                ):
+                    raise OperationError(
+                        "model_in_use",
+                        f"shared worker sibling {model_id!r} is in use",
+                        # The rejected cold load will abort its reservation
+                        # and notify capacity. Gateway auto-retry would then
+                        # self-wake until its deadline; let the client retry.
+                        status=503,
+                    )
+            token = object()
+            for model_id in model_ids:
+                self._worker_transitions[model_id] = token
+            return token
+
+    def finish_worker_transition(self, token: object, *, success: bool = True) -> None:
+        """Reconcile siblings before releasing the exact transition exclusion.
+
+        A failed restart invalidates every sibling's old worker generation.
+        Keep its memory conservatively resident and require explicit cleanup;
+        merely clearing the exclusion would expose a dead port as a hot entry.
+        """
+        with self.lock:
+            for model_id in list(self._worker_transitions):
+                if self._worker_transitions[model_id] is token:
+                    if not success:
+                        self._blocked_models.add(model_id)
+                        self._failed_rollbacks.add(model_id)
+                    self._worker_transitions.pop(model_id)
+        self._fire_capacity_listener()
+
     def begin_model_disable(self, model_id: str) -> ModelEviction:
         """Atomically block new acquires and claim an idle model for disable.
 
@@ -610,6 +655,7 @@ class LoadDirector:
             entry = self.loaded.get(model_id)
             busy = (
                 model_id in self.evicting
+                or model_id in self._worker_transitions
                 or model_id in self._eviction_claims
                 or model_id in self.in_flight_loads
                 or (entry is not None and entry.refcount > 0)
@@ -645,7 +691,11 @@ class LoadDirector:
         that publishes the evicting reservation and removes the entry.
         """
         with self.lock:
-            if model_id in self._blocked_models or model_id in self.evicting:
+            if (
+                model_id in self._blocked_models
+                or model_id in self.evicting
+                or model_id in self._worker_transitions
+            ):
                 return None
             entry = self.loaded.get(model_id)
             if (
@@ -1034,6 +1084,14 @@ class LoadDirector:
                     status=503,
                     retryable=True,
                 )
+            if model_id in self._worker_transitions:
+                from muse.admin.operations import OperationError
+                raise OperationError(
+                    "model_worker_transition",
+                    f"shared worker for {model_id!r} is restarting",
+                    status=503,
+                    retryable=True,
+                )
             entry = self.loaded.get(model_id)
             if entry is not None:
                 if bump_refcount:
@@ -1318,7 +1376,10 @@ class LoadDirector:
             # If startup returned successfully but validation/commit failed,
             # keep the exact claim reserved while disabling the worker. This
             # prevents a waiter from enabling a replacement during rollback.
-            rollback_error: BaseException | None = None
+            from muse.admin.operations import WorkerCleanupError
+            rollback_error: BaseException | None = (
+                e if isinstance(e, WorkerCleanupError) else None
+            )
             if enabled:
                 try:
                     self.disable_fn(model_id)
@@ -1342,7 +1403,10 @@ class LoadDirector:
                     # explicit disable retries cleanup. Port 0 is a deliberate
                     # non-routable placeholder when enable_fn returned an
                     # invalid value before commit.
-                    rollback_port = locals().get("worker_port")
+                    rollback_port = (
+                        e.worker_port if isinstance(e, WorkerCleanupError)
+                        else locals().get("worker_port")
+                    )
                     if (
                         type(rollback_port) is not int
                         or rollback_port < 1
@@ -1560,6 +1624,7 @@ class LoadDirector:
                         e.pool == target_pool
                         and e.refcount == 0
                         and e.model_id not in failed_victims
+                        and e.model_id not in self._worker_transitions
                     )
                 ]
                 if not candidates:
@@ -1616,6 +1681,11 @@ class LoadDirector:
                                 for k, rec in self.in_flight_loads.items()
                             )
                             or evicting_in_pool
+                            or any(
+                                mid in self._worker_transitions
+                                and e.pool == target_pool
+                                for mid, e in self.loaded.items()
+                            )
                         )
                         # Lazy import to avoid a cycle: load_director ->
                         # admin.operations -> supervisor -> load_director

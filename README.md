@@ -598,6 +598,12 @@ print(admin.memory())
 
 The `muse models enable/disable` CLI commands route through this admin API automatically when `MUSE_ADMIN_TOKEN` is set and the supervisor is reachable, falling back to a catalog-only mutation (effective on next `muse serve`) otherwise.
 
+Online enable warms the model through the same memory admission and eviction
+policy used by inference requests. If a shared worker must restart, an active
+sibling request makes the operation fail with `503 model_in_use`; retry after
+that request finishes. An incompletely cleaned-up startup remains accounted
+and blocked until an explicit disable successfully releases it.
+
 ### Observability dashboard
 
 `muse serve` also ships a lightweight `/dashboard` page: loaded models, request-rate and latency charts, and a live per-model log tail, all served from a single self-contained HTML file with no build step. It is on by default (`telemetry.enabled` / `MUSE_TELEMETRY_ENABLED`, default `true`); set it to `false` to turn recording off entirely. The dashboard's data endpoints are closed-by-default and reuse the same `MUSE_ADMIN_TOKEN` as the admin API above; the page itself always loads and prompts for a token.

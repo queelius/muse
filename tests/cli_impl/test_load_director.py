@@ -52,6 +52,80 @@ def _manifest(memory_gb: float = 0.5, device: str = "cpu") -> dict:
     }
 
 
+class TestWorkerTransitionClaims:
+    def _director(self):
+        return LoadDirector(
+            enable_fn=lambda model: 9001 if model == "sibling" else 9002,
+            disable_fn=lambda model: None,
+            memory_probe=_make_probe(), cpu_budget_gb=8.0, cpu_headroom_gb=0.0,
+        )
+
+    def test_transition_excludes_hot_acquire_and_every_eviction_path(self):
+        director = self._director()
+        director.warmup("sibling", manifest=_manifest(4.0))
+        entry = director.loaded["sibling"]
+        token = director.begin_worker_transition(["sibling"])
+
+        with pytest.raises(OperationError) as request:
+            director.acquire("sibling", manifest=_manifest(4.0))
+        assert request.value.retryable is True
+        assert entry.refcount == 0
+        with pytest.raises(OperationError) as disable:
+            director.begin_model_disable("sibling")
+        assert disable.value.code == "model_in_use"
+        assert director.begin_idle_eviction(
+            "sibling", expected_entry=entry, idle_before=time.monotonic(), reason="idle",
+        ) is None
+        with pytest.raises(OperationError) as pressure:
+            director.acquire("incoming", manifest=_manifest(8.0))
+        assert pressure.value.retryable is True
+        assert list(director.status()) == ["sibling"]
+
+        director.finish_worker_transition(token)
+        assert director.acquire("incoming", manifest=_manifest(8.0)) == 9002
+        assert list(director.status()) == ["incoming"]
+
+    @pytest.mark.parametrize("owner", ["load", "eviction"])
+    def test_transition_refuses_sibling_owned_by_load_or_eviction(self, owner):
+        director = self._director()
+        if owner == "load":
+            claim = director._decide("sibling", manifest=_manifest(4.0))[1]
+        else:
+            director.warmup("sibling", manifest=_manifest(4.0))
+            claim = director.begin_idle_eviction(
+                "sibling", expected_entry=director.loaded["sibling"],
+                idle_before=time.monotonic(), reason="idle",
+            )
+
+        with pytest.raises(OperationError) as busy:
+            director.begin_worker_transition(["sibling"])
+        assert busy.value.status == 503
+        assert busy.value.retryable is False
+
+        if owner == "load":
+            director._abort("sibling", expected=claim)
+        else:
+            director.finish_eviction(claim, success=False)
+        token = director.begin_worker_transition(["sibling"])
+        director.finish_worker_transition(token)
+        assert director.acquire("sibling", manifest=_manifest(4.0)) == 9001
+
+    def test_stale_transition_cleanup_cannot_unblock_new_owner(self):
+        director = self._director()
+        director.warmup("sibling", manifest=_manifest(4.0))
+        old = director.begin_worker_transition(["sibling"])
+        director.finish_worker_transition(old)
+        current = director.begin_worker_transition(["sibling"])
+
+        director.finish_worker_transition(old)
+
+        with pytest.raises(OperationError) as busy:
+            director.acquire("sibling", manifest=_manifest(4.0))
+        assert busy.value.code == "model_worker_transition"
+        director.finish_worker_transition(current)
+        assert director.acquire("sibling", manifest=_manifest(4.0)) == 9001
+
+
 # ----------------------------------------------------------------------
 # B3: hot path
 # ----------------------------------------------------------------------
