@@ -38,14 +38,23 @@ class ConcurrencyGate:
     A model with cap None/<=0 is UNLIMITED: no semaphore is created and
     slot() is a no-op context (today's behavior, zero overhead).
     CPython asyncio.Semaphore wakes waiters FIFO, so fairness is free.
-    Semaphores are created lazily and sized once per process lifetime;
-    cap changes apply on supervisor restart (documented in the spec).
+    Semaphores are created lazily. A LOWER cap takes effect live: the
+    surplus permits are retired (free ones at once, held ones as their
+    holders release), so no new permit is granted until the active count
+    is under the new cap. A HIGHER cap applies on supervisor restart
+    (documented in the spec).
+
+    max_queue_depth (per call) is a ceiling on waiters beyond the cap,
+    combined with server.max_queue_depth by taking the smaller positive
+    value; a global 0 (unbounded) does not remove a per-call ceiling.
     """
 
     def __init__(self) -> None:
         self._sems: dict[str, asyncio.Semaphore] = {}
         self._caps: dict[str, int] = {}
         self._entered: dict[str, int] = {}
+        # Permits still to retire after a live cap decrease (see class doc).
+        self._retire: dict[str, int] = {}
         # Captured on the first acquire_slot / slot entry so release_slot can
         # schedule its (loop-affine) decrement + semaphore release from a
         # non-loop thread via call_soon_threadsafe. asyncio primitives are NOT
@@ -88,9 +97,40 @@ class ConcurrencyGate:
             self._sems[model_id] = sem
             with self._mutex:
                 self._caps[model_id] = cap
+            return sem
+        with self._mutex:
+            current = self._caps.get(model_id, cap)
+            if cap < current:
+                self._caps[model_id] = cap
+                self._retire[model_id] = self._retire.get(model_id, 0) + current - cap
         return sem
 
-    def _check_and_enter_locked(self, model_id: str, cap: int) -> None:
+    async def _retire_free_permits(self, model_id: str, sem: asyncio.Semaphore) -> None:
+        """Withdraw free permits owed to a cap decrease.
+
+        A free permit exists only when no waiter is queued (FIFO), so
+        taking it cannot starve anyone, and acquire() on an unlocked
+        semaphore returns without suspending (see _acquire_permit), so no
+        other task can interleave with this loop.
+        """
+        while True:
+            with self._mutex:
+                owed = self._retire.get(model_id, 0)
+            if owed <= 0 or sem.locked():
+                return
+            await sem.acquire()
+            with self._mutex:
+                self._set_retire_locked(model_id, self._retire.get(model_id, 0) - 1)
+
+    def _set_retire_locked(self, model_id: str, owed: int) -> None:
+        if owed > 0:
+            self._retire[model_id] = owed
+        else:
+            self._retire.pop(model_id, None)
+
+    def _check_and_enter_locked(
+        self, model_id: str, cap: int, max_queue_depth: int | None = None,
+    ) -> None:
         """Synchronous check-then-increment for one caller's entry.
 
         Caller MUST already hold self._mutex. No await anywhere in this
@@ -102,8 +142,11 @@ class ConcurrencyGate:
         """
         entered = self._entered.get(model_id, 0)
         excess = entered - cap
-        max_depth = config.get("server.max_queue_depth") or 0
-        if max_depth > 0 and excess >= max_depth:
+        limits = [
+            n for n in (config.get("server.max_queue_depth") or 0, max_queue_depth or 0)
+            if n > 0
+        ]
+        if limits and excess >= min(limits):
             raise QueueFull(model_id, excess)
         self._entered[model_id] = entered + 1
 
@@ -139,23 +182,27 @@ class ConcurrencyGate:
             raise QueueTimeout(model_id) from None
 
     @asynccontextmanager
-    async def slot(self, model_id: str, cap: int | None, *, deadline: float):
+    async def slot(
+        self, model_id: str, cap: int | None, *, deadline: float,
+        max_queue_depth: int | None = None,
+    ):
         if not cap or cap <= 0:
             yield  # unlimited: no gating at all
             return
         sem = self._sem(model_id, cap)
+        await self._retire_free_permits(model_id, sem)
         # Synchronous entry check: no await between the read and the
         # increment, so this is accurate even under a concurrent burst
         # of arrivals on one event loop (no interleaving is possible
         # between here and the increment below).
         with self._mutex:
-            self._check_and_enter_locked(model_id, cap)
+            self._check_and_enter_locked(model_id, cap, max_queue_depth)
         try:
             await self._acquire_permit(sem, model_id, deadline)
             try:
                 yield
             finally:
-                sem.release()
+                self._release_permit(model_id, sem)
         finally:
             self._decr_entered(model_id)
 
@@ -173,6 +220,7 @@ class ConcurrencyGate:
 
     async def acquire_slot(
         self, model_id: str, cap: int | None, *, deadline: float,
+        max_queue_depth: int | None = None,
     ) -> bool:
         """Acquire one concurrency slot (no context manager).
 
@@ -201,11 +249,12 @@ class ConcurrencyGate:
         if not cap or cap <= 0:
             return False  # unlimited: no gating, nothing to release
         sem = self._sem(model_id, cap)
+        await self._retire_free_permits(model_id, sem)
         # Synchronous compare-and-increment (no await between the read and the
         # increment), so a concurrent burst on one loop cannot slip past the
         # depth bound -- mirrors slot()'s entry check exactly.
         with self._mutex:
-            self._check_and_enter_locked(model_id, cap)
+            self._check_and_enter_locked(model_id, cap, max_queue_depth)
         try:
             await self._acquire_permit(sem, model_id, deadline)
         except BaseException:
@@ -272,6 +321,15 @@ class ConcurrencyGate:
             if self._entered.get(model_id, 0) <= 0:
                 return  # over-release guard: nothing held
             self._decr_entered_locked(model_id)
+        self._release_permit(model_id, sem)
+
+    def _release_permit(self, model_id: str, sem: asyncio.Semaphore) -> None:
+        """Return a held permit, or retire it if a cap decrease is owed one."""
+        with self._mutex:
+            owed = self._retire.get(model_id, 0)
+            if owed > 0:
+                self._set_retire_locked(model_id, owed - 1)
+                return
         sem.release()
 
     def _decr_entered_locked(self, model_id: str) -> None:

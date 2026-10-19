@@ -225,6 +225,12 @@ class DecisionLlamaCppModel:
         self._llama.reset()
         self._llama._ctx.kv_cache_clear()
 
+    @property
+    def usable(self) -> bool:
+        """False once native state is uncertain; the worker's /health
+        then reports 503 so the supervisor replaces the worker."""
+        return not self._unusable
+
     def _check_usable(self) -> None:
         if self._unusable or self._llama is None:
             raise DecisionBackendError("backend_unusable")

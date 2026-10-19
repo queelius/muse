@@ -295,6 +295,12 @@ class DecimaOnnxModel:
         self._cache.clear()
         self._unusable = True
 
+    @property
+    def usable(self) -> bool:
+        """False once native state is uncertain; the worker's /health
+        then reports 503 so the supervisor replaces the worker."""
+        return not self._unusable
+
     def _check_usable(self) -> None:
         if self._unusable or self._rt is None:
             raise DecisionBackendError("backend_unusable")

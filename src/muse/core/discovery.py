@@ -215,10 +215,12 @@ def _reset_model_optional_paths_cache() -> None:
     Mirrors `muse.core.chat_formats._reset_cache_for_tests` /
     `muse.core.curated._reset_curated_cache_for_tests`. Call this between
     test cases that rely on model_optional_paths()'s default (dirs=None)
-    scan picking up a freshly-constructed temp modality tree.
+    scan picking up a freshly-constructed temp modality tree. Also clears
+    the concurrency_ceilings() / strict_request_parsers() caches.
     """
     global _MODEL_OPTIONAL_PATHS_CACHE
     _MODEL_OPTIONAL_PATHS_CACHE = None
+    _DECLARATION_CACHE.clear()
 
 
 def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
@@ -286,6 +288,109 @@ def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
 
     if use_cache:
         _MODEL_OPTIONAL_PATHS_CACHE = out
+    return out
+
+
+def _ast_extract_literal(init_py: Path, name: str) -> Any:
+    """The literal value of a top-level `NAME = <literal>` in an __init__.py,
+    without exec; None when absent, computed, or unparsable."""
+    try:
+        tree = ast.parse(init_py.read_text())
+    except (OSError, SyntaxError):
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            try:
+                return ast.literal_eval(node.value)
+            except (ValueError, SyntaxError):
+                return None
+    return None
+
+
+def _declarations(name: str, dirs: list[Path] | None) -> list[tuple[str, Any]]:
+    """[(modality tag, literal NAME)] per modality package, first-found-wins
+    per tag (the `model_optional_paths` rules, including its memoized
+    default scan and its tolerance of unreadable scan roots)."""
+    use_cache = dirs is None
+    if use_cache and name in _DECLARATION_CACHE:
+        return _DECLARATION_CACHE[name]
+    if dirs is None:
+        bundled = Path(__file__).resolve().parents[1] / "modalities"
+        env = config.get("paths.modalities_dir")
+        dirs = [bundled] + ([Path(env)] if env else [])
+    out: list[tuple[str, Any]] = []
+    seen_tags: set[str] = set()
+    for d in dirs:
+        if not d or not d.is_dir():
+            continue
+        try:
+            entries = sorted(d.iterdir())
+        except OSError as e:
+            logger.warning("%s: cannot list directory %s: %s", name, d, e)
+            continue
+        for sub in entries:
+            init_py = sub / "__init__.py"
+            if not sub.is_dir() or sub.name.startswith("_") or not init_py.exists():
+                continue
+            tag = _ast_extract_modality(init_py)
+            if not tag or tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            value = _ast_extract_literal(init_py, name)
+            if value is not None:
+                out.append((tag, value))
+    if use_cache:
+        _DECLARATION_CACHE[name] = out
+    return out
+
+
+_DECLARATION_CACHE: dict[str, list[tuple[str, Any]]] = {}
+_CEILING_KEYS = ("max_concurrency", "max_queue_depth")
+
+
+def concurrency_ceilings(dirs: list[Path] | None = None) -> dict[str, dict[str, int]]:
+    """{modality tag: {"max_concurrency": n, "max_queue_depth": n}} for every
+    modality package that exports CONCURRENCY_CEILING.
+
+    A ceiling is a hard upper bound the gateway applies to every model of
+    that modality, whatever its manifest or catalog entry says (a catalog
+    edit cannot raise it). Positive global limits may still lower it.
+    Malformed declarations are logged and ignored.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for tag, value in _declarations("CONCURRENCY_CEILING", dirs):
+        if (
+            isinstance(value, dict)
+            and set(value) <= set(_CEILING_KEYS)
+            and all(type(v) is int and v > 0 for v in value.values())
+        ):
+            out[tag] = dict(value)
+        else:
+            logger.warning("ignoring malformed CONCURRENCY_CEILING for %s", tag)
+    return out
+
+
+def strict_request_parsers(dirs: list[Path] | None = None) -> dict[str, str]:
+    """{request path: "module:callable"} for every modality package that
+    exports STRICT_REQUEST_PARSERS.
+
+    The gateway calls the parser on the raw body of a request to that path
+    BEFORE model selection, and routes by the parsed result's `.model`
+    instead of its own lenient JSON read. A parser raises an exception
+    carrying safe `.status`, `.code` and `.message` to reject the request.
+    """
+    out: dict[str, str] = {}
+    for tag, value in _declarations("STRICT_REQUEST_PARSERS", dirs):
+        if not isinstance(value, dict) or not all(
+            isinstance(k, str) and k.startswith("/") and isinstance(v, str) and ":" in v
+            for k, v in value.items()
+        ):
+            logger.warning("ignoring malformed STRICT_REQUEST_PARSERS for %s", tag)
+            continue
+        for path, target in value.items():
+            out.setdefault(path, target)
     return out
 
 

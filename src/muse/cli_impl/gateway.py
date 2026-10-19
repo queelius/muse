@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import importlib
 import json
 import logging
 import time
@@ -43,7 +45,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # models (v0.47.3); it is mtime-cached so per-request reads are cheap.
 from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, is_enabled, known_models
-from muse.core.discovery import model_optional_paths
+from muse.core.discovery import (
+    concurrency_ceilings,
+    model_optional_paths,
+    strict_request_parsers,
+)
 from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
 
@@ -808,7 +814,7 @@ def build_gateway(
         # via FastAPI's registration order.
 
         try:
-            await cache_bounded_request_body(
+            body = await cache_bounded_request_body(
                 request, limit=app.state.max_request_body_bytes,
             )
         except RequestBodyTooLarge as exc:
@@ -818,7 +824,21 @@ def build_gateway(
                 f"request body exceeds the configured {exc.limit} byte limit",
             )
 
-        model_id = await extract_model_from_request(request)
+        # A modality may declare a strict parser for its paths (decision's
+        # /v1/systemone). It runs on the raw body BEFORE model selection, so
+        # a malformed, oversized or duplicate-`model` body is rejected before
+        # any catalog lookup or cold load, and routing uses the parser's
+        # `.model` rather than the lenient read below.
+        strict = (
+            strict_request_parsers().get(request.url.path)
+            if request.method == "POST" else None
+        )
+        if strict is not None:
+            rejected, model_id = _strict_model(strict, body)
+            if rejected is not None:
+                return rejected
+        else:
+            model_id = await extract_model_from_request(request)
         if model_id is not None and not _valid_model_id(model_id):
             return _openai_error(
                 400,
@@ -1220,7 +1240,10 @@ async def _route_via_director(
     # capacity-wait measurement below for the matching discipline).
     gate_wait_t0 = time.monotonic()
     try:
-        slot_taken = await gate.acquire_slot(model_id, cap, deadline=deadline)
+        slot_taken = await gate.acquire_slot(
+            model_id, cap, deadline=deadline,
+            max_queue_depth=_effective_max_queue_depth(manifest),
+        )
     except QueueTimeout:
         # Report the ACTUAL elapsed wait, not the configured budget: an
         # early fast-fail would otherwise claim "waited 300s" (v0.57.3).
@@ -1393,6 +1416,45 @@ def _modality_from_path(full_path: str) -> str:
     return "/".join(parts[:2]) if parts else "unknown"
 
 
+@functools.lru_cache(maxsize=None)
+def _load_strict_parser(target: str) -> Callable[[bytes], Any]:
+    module, _, attr = target.partition(":")
+    return getattr(importlib.import_module(module), attr)
+
+
+def _strict_model(target: str, body: bytes) -> tuple[Response | None, Any]:
+    """(error response, None) or (None, model id) from a strict parser."""
+    try:
+        parser = _load_strict_parser(target)
+    except Exception:  # noqa: BLE001
+        logger.error("strict request parser %s is unavailable", target, exc_info=True)
+        return _openai_error(
+            500, "internal_error", "request parser unavailable; see server logs",
+            error_type="server_error",
+        ), None
+    try:
+        parsed = parser(body)
+    except Exception as exc:  # noqa: BLE001
+        status, code, message = (
+            getattr(exc, "status", None), getattr(exc, "code", None),
+            getattr(exc, "message", None),
+        )
+        if isinstance(status, int) and 400 <= status < 500 and isinstance(code, str) \
+                and isinstance(message, str):
+            return _openai_error(status, code, message), None
+        logger.error("strict request parser %s failed", target, exc_info=True)
+        return _openai_error(
+            500, "internal_error", "request parsing failed; see server logs",
+            error_type="server_error",
+        ), None
+    return None, getattr(parsed, "model", None)
+
+
+def _modality_ceiling(manifest: dict) -> dict[str, int]:
+    """The modality's CONCURRENCY_CEILING (empty when it declares none)."""
+    return concurrency_ceilings().get((manifest or {}).get("modality"), {})
+
+
 def _effective_max_concurrency(manifest: dict) -> int | None:
     """Per-model concurrency cap: capabilities.max_concurrency, else the
     config default, else None (unlimited). Lenient: junk values -> next tier.
@@ -1402,7 +1464,24 @@ def _effective_max_concurrency(manifest: dict) -> int | None:
       2. server.default_max_concurrency (env MUSE_DEFAULT_MAX_CONCURRENCY)
       3. None -> unlimited (the gate no-ops, today's behavior)
     A non-positive or non-int value at any tier falls through to the next.
+
+    The result is then clamped to the modality's CONCURRENCY_CEILING, a
+    hard bound no manifest, catalog edit or global setting can raise.
     """
+    ceiling = _modality_ceiling(manifest).get("max_concurrency")
+    cap = _configured_max_concurrency(manifest)
+    if ceiling is None:
+        return cap
+    return ceiling if cap is None else min(cap, ceiling)
+
+
+def _effective_max_queue_depth(manifest: dict) -> int | None:
+    """The modality's queue-depth ceiling, if any (the gate combines it
+    with server.max_queue_depth, taking the smaller positive value)."""
+    return _modality_ceiling(manifest).get("max_queue_depth")
+
+
+def _configured_max_concurrency(manifest: dict) -> int | None:
     caps = (manifest or {}).get("capabilities") or {}
     declared = caps.get("max_concurrency")
     if declared is not None:
