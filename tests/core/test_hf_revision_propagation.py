@@ -23,6 +23,7 @@ def _case(
     tags: tuple[str, ...] = (),
     config: dict | None = None,
     case_id: str | None = None,
+    revision: str = _REVISION,
 ):
     return pytest.param(
         module,
@@ -31,6 +32,7 @@ def _case(
         files,
         tags,
         config or {},
+        revision,
         id=case_id or module.rsplit(".", 2)[-2],
     )
 
@@ -88,6 +90,29 @@ _PLUGIN_CASES = (
         tags=("image-text-to-text",),
         config={"model_type": "idefics3"},
         case_id="chat-vlm",
+    ),
+    # Exact-repo plugin: it resolves only its pinned commits.
+    _case(
+        "muse.modalities.decision_evaluation.hf",
+        "evalengine/decision-0.8b-gguf",
+        files=(
+            "decision-0.8b-Q8_0.gguf", "LICENSE", "NOTICE",
+            "licenses/QWEN-LICENSE", "licenses/TEV-LICENSE",
+        ),
+        revision="ce993792ad283053004bf0230b1709ff7351bb24",
+        case_id="decision-gguf",
+    ),
+    _case(
+        "muse.modalities.decision_evaluation.hf",
+        "amyrmahdy/decima-base",
+        files=(
+            "config.json", "LICENSE", "onnx/int8/decima.json",
+            "onnx/int8/encoder.onnx", "onnx/int8/scorer.onnx",
+            "onnx/int8/tokenizer/tokenizer.json",
+            "onnx/int8/tokenizer/tokenizer_config.json",
+        ),
+        revision="e5d84ab3a8436cedc45b0daefa91979f68319455",
+        case_id="decision-decima",
     ),
     _case(
         "muse.modalities.embedding_text.hf",
@@ -185,7 +210,7 @@ def test_revision_cases_cover_every_modality_hf_plugin():
 
 
 @pytest.mark.parametrize(
-    "module_name,repo_id,variant,files,tags,config",
+    "module_name,repo_id,variant,files,tags,config,revision",
     _PLUGIN_CASES,
 )
 def test_plugin_manifest_and_snapshot_use_same_immutable_revision(
@@ -197,6 +222,7 @@ def test_plugin_manifest_and_snapshot_use_same_immutable_revision(
     files: tuple[str, ...],
     tags: tuple[str, ...],
     config: dict,
+    revision: str,
 ):
     module = importlib.import_module(module_name)
     download_calls: list[dict] = []
@@ -221,6 +247,10 @@ def test_plugin_manifest_and_snapshot_use_same_immutable_revision(
         return str(tmp_path / "snapshot")
 
     monkeypatch.setattr(module, "snapshot_download", _snapshot_download)
+    if module_name.endswith("decision_evaluation.hf"):
+        # Pinned-file size/hash checks have their own tests; nothing is
+        # actually downloaded here.
+        monkeypatch.setattr(module, "verify_files", lambda *a, **k: None)
     if module_name.endswith("chat_completion.hf"):
         # The metadata helpers have their own pinned hf_hub_download test below.
         monkeypatch.setattr(module, "_try_sniff_tools_from_repo", lambda *a, **k: False)
@@ -232,7 +262,7 @@ def test_plugin_manifest_and_snapshot_use_same_immutable_revision(
 
     info = SimpleNamespace(
         id=repo_id,
-        sha=_REVISION,
+        sha=revision,
         siblings=[SimpleNamespace(rfilename=name) for name in files],
         tags=list(tags),
         config=dict(config),
@@ -241,12 +271,12 @@ def test_plugin_manifest_and_snapshot_use_same_immutable_revision(
     resolved = module.HF_PLUGIN["resolve"](repo_id, variant, info)
     resolved.download(tmp_path)
 
-    assert resolved.manifest["revision"] == _REVISION
+    assert resolved.manifest["revision"] == revision
     primary_calls = [
         call for call in download_calls if call.get("repo_id") == repo_id
     ]
     assert len(primary_calls) == 1
-    assert primary_calls[0]["revision"] == _REVISION
+    assert primary_calls[0]["revision"] == revision
     assert all(
         isinstance(call.get("revision"), str)
         and len(call["revision"]) == 40
