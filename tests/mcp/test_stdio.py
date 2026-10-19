@@ -44,7 +44,7 @@ class TestServerStdioBasics:
         assert types.ListToolsRequest in rh
         assert types.CallToolRequest in rh
 
-    def test_list_tools_handler_returns_31_tools(self, server):
+    def test_list_tools_handler_returns_32_tools(self, server):
         # Assert the public handler result instead of an SDK-private cache
         # attribute, which is not part of the compatibility contract.
         import asyncio
@@ -57,7 +57,7 @@ class TestServerStdioBasics:
 
         result = asyncio.run(run_handler())
         out = result.root if hasattr(result, "root") else result
-        assert len(out.tools) == 31
+        assert len(out.tools) == 32
 
     def test_call_tool_dispatches(self, server, monkeypatch):
         # Drive the call_tool handler with a fake list_models response.

@@ -9,6 +9,7 @@ Public surface:
     every decision model, whatever its manifest says
   - STRICT_REQUEST_PARSERS: the gateway parses /v1/systemone bodies with
     the strict parser before selecting a model
+  - DecisionClient (HTTP client returning the full envelope)
   - the protocol records and errors
 
 Wire contract: a text-only subset of TypeSafe's System One API (Choice,
@@ -17,6 +18,7 @@ docs/superpowers/specs/2026-10-18-decision-api-design.md.
 """
 from fastapi import APIRouter
 
+from muse.modalities.decision_evaluation.client import DecisionClient
 from muse.modalities.decision_evaluation.probe import PROBE_SHAPE, probe_backend
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
@@ -56,6 +58,7 @@ __all__ = [
     "STRICT_REQUEST_PARSERS",
     "PROBE_DEFAULTS",
     "build_router",
+    "DecisionClient",
     "DecisionBackendError",
     "DecisionBatch",
     "DecisionInputError",

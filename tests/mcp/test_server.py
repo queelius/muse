@@ -2,7 +2,7 @@
 
 Smoke-level tests: server constructs, tool registry is empty in Task A,
 filter_kind validates, run_http raises NotImplementedError pre-Task B.
-The full tool count (31 as of the image/vectorization modality, v0.59.0)
+The full tool count (32 as of the decision/evaluation modality's muse_decide)
 is asserted here once all tool modules have populated their lists.
 """
 from __future__ import annotations
@@ -24,18 +24,18 @@ def fake_client(monkeypatch):
 
 
 class TestBuildTools:
-    def test_default_filter_returns_31_tools(self):
+    def test_default_filter_returns_32_tools(self):
         tools = build_tools("all")
         assert isinstance(tools, list)
-        assert len(tools) == 31
+        assert len(tools) == 32
 
     def test_admin_filter_returns_11(self):
         tools = build_tools("admin")
         assert len(tools) == 11
 
-    def test_inference_filter_returns_20(self):
+    def test_inference_filter_returns_21(self):
         tools = build_tools("inference")
-        assert len(tools) == 20
+        assert len(tools) == 21
 
     def test_unknown_filter_raises(self):
         with pytest.raises(ValueError, match="unknown filter_kind"):
