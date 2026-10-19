@@ -48,6 +48,7 @@ from muse.core import config
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.install import check_system_packages
+from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.venv import (
     _is_verbose,
     create_venv,
@@ -1926,6 +1927,7 @@ def _pull_bundled_with_lease(model_id: str) -> None:
     with venv_transaction(venv_path) as tx:
         _pull_bundled_transaction(model_id, entry, tx.path)
         tx.commit()
+    dedupe_after_install(venv_path)
 
 
 @dataclass(frozen=True)
@@ -2366,6 +2368,7 @@ def _pull_via_resolver(
             venv_path=tx.path,
         )
         tx.commit()
+    dedupe_after_install(venv_path)
     return model_id
 
 

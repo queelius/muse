@@ -537,7 +537,9 @@ makes `muse pull` / `muse models refresh` install llama-cpp-python
 binary-only from the abetlen cu130 index, capped at the verified version in
 `muse.core.llama_cuda.WHEELS`, plus `nvidia-cuda-runtime`/`nvidia-cublas`
 (`venv.pip_install_commands`; a same-version CPU build is force-reinstalled
-`--no-deps`). The wheel does not ship libcudart/libcublas and its RPATH is
+`--no-deps`). The cap is folded into the requirement (`>=0.2.90,<=0.3.33`): a separate
+`<=` requirement makes pip download the newest ~800 MB wheel first. The wheel step
+uses `--no-cache-dir` because the index serves signed one-off URLs pip never reuses. The wheel does not ship libcudart/libcublas and its RPATH is
 `$ORIGIN`, so `llama_cuda.prepare_llama_cpp()` dlopens them RTLD_GLOBAL from
 `site-packages/nvidia/*/lib` before `import llama_cpp` (both GGUF runtimes'
 `_ensure_deps`, `placement.native_gpu_offload/backend`, and the supervisor's
@@ -546,6 +548,18 @@ With `cpu_only=True` (a cpu placement or 0 GPU layers) it first sets
 `CUDA_VISIBLE_DEVICES=""`: a CUDA build otherwise allocates VRAM and offloads
 host matmuls even at `n_gpu_layers=0`. No-op for CPU builds. See
 docs/CHAT_COMPLETION.md "GPU builds of llama-cpp-python".
+**Venv dedupe (v0.63.0).** `muse.core.venv_dedupe` hardlinks content-identical
+(SHA-256 + size + mode + uid) regular files >= 1 MiB under each model venv's
+`site-packages` (never `bin/`, `__pycache__`, dot-prefixed transaction
+workspaces, or files changed in the last 60s), via link-to-temp + rename after
+re-checking both files. Safe because pip unlinks before writing installed files.
+`muse storage dedupe [--dry-run]` does every venv; `dedupe_after_install` runs an
+`only=<venv>` pass after each successful pull/refresh (`storage.dedupe_venvs`,
+default true; never fails the install). Saves disk and shared-library page
+cache, not VRAM. First pass on the dev host: 118.5 GiB of 154 GiB.
+The chat HF resolver caps the active `context_length` at 8192 and records the
+trained maximum as `max_context_length` (it used to size the KV cache for the
+full trained context: Qwen3-0.6B 6.65 GB -> 1.66 GB VRAM).
 Known limitation: a split model occupies both VRAM and host RAM, but the
 director accounts it against its resolved device's pool only -- the
 Tier-1 static-offload simplification (automatic offload was evaluated and

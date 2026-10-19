@@ -36,6 +36,11 @@ _VARIANT_RE = re.compile(
 
 _RUNTIME_PATH = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
 _PIP_EXTRAS = ("llama-cpp-python>=0.2.90",)
+# Active context (KV cache) for resolver-pulled GGUFs; LlamaCppModel's own
+# default. The trained maximum is recorded as max_context_length: sizing the
+# cache for it costs gigabytes (Qwen3-0.6B: 40,960 tokens ~= 4.7 GB of f16
+# KV for 0.5 GB of weights) that most requests never use.
+_DEFAULT_CONTEXT_LENGTH = 8192
 
 # VLM detection constants
 _VLM_MULTI_IMAGE_MODEL_TYPES = frozenset({
@@ -226,7 +231,8 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     if "chat_format" in hints:
         capabilities["chat_format"] = hints["chat_format"]
     if ctx_length:
-        capabilities["context_length"] = ctx_length
+        capabilities["context_length"] = min(ctx_length, _DEFAULT_CONTEXT_LENGTH)
+        capabilities["max_context_length"] = ctx_length
 
     manifest = {
         "model_id": model_id,

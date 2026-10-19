@@ -299,3 +299,37 @@ def run_storage_prune(
         print(f"{verb} {_human_size(amount)}")
 
     return 2 if result.failures else 0
+
+
+def run_storage_dedupe(*, dry_run: bool = False, json_output: bool = False) -> int:
+    """Hardlink identical package files across every model venv."""
+    from pathlib import Path
+
+    from muse.core.venv_dedupe import dedupe_venvs
+
+    root = Path(config.get("paths.catalog_dir")).expanduser() / "venvs"
+    try:
+        result = dedupe_venvs(root, dry_run=dry_run)
+    except OSError as exc:
+        print(f"storage dedupe failed: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps({
+            "root": str(root),
+            "dry_run": result.dry_run,
+            "scanned_files": result.scanned_files,
+            "linked_files": result.linked_files,
+            "reclaimed_bytes": result.reclaimed_bytes,
+            "skipped_files": result.skipped_files,
+        }, indent=2, sort_keys=True))
+        return 0
+    verb = "would link" if dry_run else "linked"
+    print(
+        f"{verb} {result.linked_files} of {result.scanned_files} large package "
+        f"file(s) in {root}"
+    )
+    if result.skipped_files:
+        print(f"skipped {result.skipped_files} file(s) that changed recently or could not be linked")
+    reclaim = "would reclaim" if dry_run else "reclaimed"
+    print(f"{reclaim} {_human_size(result.reclaimed_bytes)}")
+    return 0

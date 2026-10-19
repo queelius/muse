@@ -54,7 +54,8 @@
   size_gb: 0.5
   description: "Qwen3 0.6B (Q4_K_M): tiny, CPU-friendly, hybrid thinking, Apache 2.0"
   capabilities:
-    memory_gb: 1.0
+    # Measured 1.66 GB on CUDA at the default 8192-token context (2026-10-19).
+    memory_gb: 2.0
 
 - id: qwen3-4b-q4
   uri: hf://unsloth/Qwen3-4B-GGUF@q4_k_m

@@ -320,3 +320,9 @@ back to source builds on the next pull or refresh.
 - Default `context_length` is 8192 if the manifest doesn't override
   it. The GGUF header carries its own context length and llama-cpp
   respects it; the manifest value just sets the active KV-cache size.
+- The HF resolver records a repo's trained maximum (`config.json`
+  `max_position_embeddings`) as `capabilities.max_context_length` and
+  sets the active `context_length` to at most 8192. Before 0.63.0 it used
+  the full trained maximum, which sized the KV cache for it: Qwen3-0.6B at
+  40,960 tokens took 6.65 GB of VRAM instead of 1.66 GB. Re-pull an older
+  entry to pick up the cap, or raise `context_length` for long-context work.

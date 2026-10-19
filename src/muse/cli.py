@@ -248,6 +248,23 @@ def storage_prune(
     ))
 
 
+@storage_app.command("dedupe")
+def storage_dedupe(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="report what would be linked without changing files"),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="emit machine-readable results"),
+    ] = False,
+) -> None:
+    """Hardlink identical package files (>= 1 MiB) across model venvs."""
+    from muse.cli_impl.storage import run_storage_dedupe
+
+    raise typer.Exit(run_storage_dedupe(dry_run=dry_run, json_output=json_output))
+
+
 def _resolve_serve_device(cli_device: "Device | None") -> str:
     """Resolve the effective `muse serve` device.
 

@@ -274,6 +274,10 @@ SETTINGS: list[Setting] = [
             "float", 5.0, "storage",
             "Automatic cleanup threshold in filesystem free percent; crossing either low-space threshold triggers maintenance.",
             minimum=0, maximum=100),
+    Setting("storage.dedupe_venvs", "MUSE_STORAGE_DEDUPE_VENVS",
+            "bool", True, "storage",
+            "After each pull/refresh, hardlink that venv's large package files to identical "
+            "copies in other model venvs (`muse storage dedupe` does all venvs)."),
     # --- install ---
     Setting("install.llama_cpp_wheel", "MUSE_LLAMA_CPP_WHEEL",
             "opt_str", None, "install",

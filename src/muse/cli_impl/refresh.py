@@ -41,6 +41,7 @@ from muse.core.catalog import (
     get_manifest,
     is_enabled,
 )
+from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.venv import (
     install_python_sources,
     pip_install_commands,
@@ -260,7 +261,6 @@ def _refresh_one_locked(
             )
             if result.state == "ok":
                 tx.commit()
-            return result
     except (OSError, RuntimeError, ValueError) as exc:
         return RefreshResult(
             model_id,
@@ -268,6 +268,9 @@ def _refresh_one_locked(
             f"transactional venv refresh failed: {exc}",
             extras=muse_extras,
         )
+    if result.state == "ok":
+        dedupe_after_install(venv_path)
+    return result
 
 
 def _refresh_staged_venv(

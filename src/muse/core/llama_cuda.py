@@ -37,12 +37,29 @@ WHEELS: dict[str, tuple[str, str, tuple[str, ...]]] = {
 # Load order matters: cuBLAS needs cuBLASLt, both need the runtime.
 _LIBRARIES = ("libcudart.so", "libcublasLt.so", "libcublas.so")
 _REQUIREMENT = re.compile(r"^\s*llama[-_.]cpp[-_.]python(?![\w.-])", re.IGNORECASE)
+_PARTS = re.compile(
+    r"^(\s*llama[-_.]cpp[-_.]python(?:\[[^\]]*\])?)\s*([^;]*?)\s*(;.*)?$", re.IGNORECASE,
+)
 
 _prepared: list[str] | None = None
 
 
 def is_llama_cpp_requirement(requirement: str) -> bool:
     return bool(_REQUIREMENT.match(requirement))
+
+
+def _capped(requirement: str, verified: str) -> str:
+    """Fold the cap into the requirement's own specifier.
+
+    A separate `llama-cpp-python<=X` requirement still makes pip download
+    the newest wheel first (hundreds of MB) before it intersects the two.
+    """
+    match = _PARTS.match(requirement)
+    if match is None or "@" in match.group(2):
+        return requirement  # a direct URL pins its own build
+    name, spec, marker = match.groups()
+    spec = f"{spec},<={verified}" if spec else f"<={verified}"
+    return f"{name}{spec}{marker or ''}"
 
 
 def install_plan(packages: list[str], wheel: str | None) -> list[list[str]]:
@@ -52,7 +69,9 @@ def install_plan(packages: list[str], wheel: str | None) -> list[list[str]]:
     packages install as one list, unchanged. Otherwise the CUDA runtimes join
     the other packages and llama-cpp-python installs on its own, binary-only
     from the wheel index (capped at the verified version), so pip never falls
-    back to a source build.
+    back to a source build. That step skips pip's cache: the index serves
+    each wheel from a fresh signed URL, so a cached copy is never reused and
+    every install would leave another ~800 MB entry behind.
     """
     llama = [p for p in packages if is_llama_cpp_requirement(p)]
     if not wheel or not llama:
@@ -64,8 +83,8 @@ def install_plan(packages: list[str], wheel: str | None) -> list[list[str]]:
     return [
         [*rest, *runtimes],
         [
-            "--only-binary=llama-cpp-python", "--extra-index-url", index,
-            *llama, f"llama-cpp-python<={verified}",
+            "--no-cache-dir", "--only-binary=llama-cpp-python", "--extra-index-url", index,
+            *(_capped(p, verified) for p in llama),
         ],
     ]
 

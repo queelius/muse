@@ -119,3 +119,14 @@ def test_search_yields_search_results_with_modality_tag():
     assert len(rows) >= 1
     assert all(r.modality == "chat/completion" for r in rows)
     assert all(r.uri.startswith("hf://") for r in rows)
+
+
+@pytest.mark.parametrize("trained, active", [(40960, 8192), (4096, 4096)])
+def test_active_context_is_capped_and_the_trained_maximum_recorded(trained, active):
+    info = _fake_info(siblings=["model-q4_k_m.gguf"])
+    with patch("muse.modalities.chat_completion.hf._try_sniff_tools_from_repo", return_value=False), \
+         patch("muse.modalities.chat_completion.hf._try_sniff_context_length_from_repo", return_value=trained), \
+         patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={}):
+        caps = HF_PLUGIN["resolve"]("org/Model-GGUF", "q4_k_m", info).manifest["capabilities"]
+    assert caps["context_length"] == active
+    assert caps["max_context_length"] == trained

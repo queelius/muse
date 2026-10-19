@@ -75,6 +75,42 @@ complete. Normal successful transactions remove their own backups; leftover
 `--include-unreferenced`. Inspect them and verify the canonical environment
 before manually recovering or removing a backup.
 
+## Deduplicating venvs
+
+Every model venv carries its own copy of the same large payloads: Torch,
+Triton, the CUDA runtime libraries, llama.cpp builds. `muse storage dedupe`
+replaces content-identical copies with hardlinks to one file:
+
+```bash
+muse storage dedupe --dry-run   # report only (it still reads and hashes)
+muse storage dedupe
+```
+
+- **What it links.** Regular files of at least 1 MiB under each venv's
+  `lib/python*/site-packages`, when SHA-256, size, permissions and owner all
+  match. `bin/` scripts, `__pycache__`, transaction workspaces
+  (`.MODEL.transaction-*`) and files changed in the last minute are skipped.
+- **Why it is safe.** pip never edits an installed file in place: its wheel
+  installer unlinks a path before writing new contents, and uninstall moves
+  files aside. An upgrade in one venv therefore breaks that venv's link and
+  leaves every other copy alone.
+- **How it swaps.** Each replacement re-checks both files, links to a
+  temporary name and renames it over the target. A running worker keeps
+  the file it already has open.
+- **Memory too.** Workers that load the same shared library from one inode
+  share its page-cache pages, so host RAM use drops when several venvs load
+  the same Torch or CUDA libraries. VRAM is unaffected: CUDA loads kernels
+  into each process.
+- **Automatic after installs.** After every successful pull or refresh,
+  Muse links that venv's files to identical copies in the others
+  (`storage.dedupe_venvs`, default `true`). A refresh first clones the venv,
+  so the clone is full size until this pass relinks it. Nothing else ever
+  needs a manual pass, except a venv built before this feature.
+
+On the 2026-10-19 development host, the first pass linked 2,341 of 2,762
+large files across 33 venvs and reclaimed 118.5 GiB (the venvs went from
+154 GiB to 36 GiB on disk).
+
 ## Automatic maintenance
 
 Before a model pull, Muse checks filesystem headroom. By default, if free space
@@ -135,11 +171,10 @@ directory is reclaimed; a repository is preserved while any other catalog
 entry references one of its revisions. Legacy shared-cache weights are always
 preserved.
 
-## Why venvs are still large
+## Why venvs are still separate
 
-Cleanup removes stale data but does not change the current isolation model:
-each model has a dedicated environment, often including its own Torch, Triton,
-and CUDA runtime packages. A future environment-store migration can preserve
-dependency isolation while deduplicating identical immutable package payloads.
-A shared mutable base environment is intentionally avoided because one model's
-upgrade could break another model's runtime.
+Each model keeps a dedicated environment, so one model's upgrade can never
+break another model's runtime. A shared mutable base environment is
+intentionally avoided. Hardlink deduplication (above) recovers the disk cost
+of identical payloads without giving up that isolation: a venv that installs
+a different version simply gets its own file.

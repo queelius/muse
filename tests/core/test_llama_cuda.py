@@ -36,9 +36,20 @@ def test_plan_installs_llama_binary_only_from_the_wheel_index():
     plan = llama_cuda.install_plan(["a", "llama-cpp-python==0.3.33"], "cu130")
     assert plan == [
         ["a", *RUNTIMES],
-        ["--only-binary=llama-cpp-python", "--extra-index-url", CU130, "llama-cpp-python==0.3.33",
-         f"llama-cpp-python<={VERIFIED}"],
+        ["--no-cache-dir", "--only-binary=llama-cpp-python", "--extra-index-url", CU130,
+         f"llama-cpp-python==0.3.33,<={VERIFIED}"],
     ]
+
+
+@pytest.mark.parametrize("req, capped", [
+    ("llama-cpp-python", "llama-cpp-python<=V"),
+    ("llama-cpp-python>=0.2.90", "llama-cpp-python>=0.2.90,<=V"),
+    ("llama_cpp_python[server] >= 0.3", "llama_cpp_python[server]>= 0.3,<=V"),
+    ('llama-cpp-python>=0.3; sys_platform == "linux"', 'llama-cpp-python>=0.3,<=V; sys_platform == "linux"'),
+    ("llama-cpp-python @ https://example.invalid/x.whl", "llama-cpp-python @ https://example.invalid/x.whl"),
+])
+def test_cap_joins_the_requirement_so_pip_never_fetches_newer_wheels(req, capped):
+    assert llama_cuda._capped(req, "V") == capped
 
 
 def test_unknown_wheel_is_refused():
@@ -55,8 +66,8 @@ def _commands(monkeypatch, packages, *, cuda_build, upgrade=False):
 def test_commands_replace_a_cpu_build_without_touching_deps(monkeypatch):
     cmds = _commands(monkeypatch, ["llama-cpp-python==0.3.33"], cuda_build=False, upgrade=True)
     base = ["/v/bin/python", "-m", "pip", "install", "--upgrade"]
-    wheel = ["--only-binary=llama-cpp-python", "--extra-index-url", CU130, "llama-cpp-python==0.3.33",
-             f"llama-cpp-python<={VERIFIED}"]
+    wheel = ["--no-cache-dir", "--only-binary=llama-cpp-python", "--extra-index-url", CU130,
+             f"llama-cpp-python==0.3.33,<={VERIFIED}"]
     assert cmds == [
         [*base, *RUNTIMES],
         [*base, *wheel],

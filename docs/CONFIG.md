@@ -112,6 +112,16 @@ A snapshot of the defaults:
 | `paths.modalities_dir` | `MUSE_MODALITIES_DIR` | null |
 | `paths.config_file` | `MUSE_CONFIG` | null (-> catalog_dir/config.yaml) |
 
+### storage (see docs/STORAGE.md)
+
+| key | env | default |
+|---|---|---|
+| `storage.auto_prune_before_pull` | `MUSE_STORAGE_AUTO_PRUNE_BEFORE_PULL` | true |
+| `storage.auto_prune_grace_hours` | `MUSE_STORAGE_AUTO_PRUNE_GRACE_HOURS` | 24 |
+| `storage.auto_prune_min_free_gb` | `MUSE_STORAGE_AUTO_PRUNE_MIN_FREE_GB` | 50 |
+| `storage.auto_prune_min_free_percent` | `MUSE_STORAGE_AUTO_PRUNE_MIN_FREE_PERCENT` | 5 |
+| `storage.dedupe_venvs` | `MUSE_STORAGE_DEDUPE_VENVS` | true (hardlink a pulled/refreshed venv's large package files to identical copies in other venvs) |
+
 ### install (applied by `muse pull` / `muse models refresh`)
 
 | key | env | default |

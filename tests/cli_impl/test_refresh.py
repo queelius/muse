@@ -940,6 +940,27 @@ def test_cuda_wheel_setting_splits_the_extras_step(tmp_catalog, tmp_path, monkey
     extras = [c.args[0][5:] for c in mock_run.call_args_list[1:]]
     index, verified, runtimes = llama_cuda.WHEELS["cu130"]
     assert extras[0] == list(runtimes)
-    assert extras[1] == ["--only-binary=llama-cpp-python", "--extra-index-url", index,
-                         "llama-cpp-python>=0.2.90", f"llama-cpp-python<={verified}"]
+    assert extras[1] == ["--no-cache-dir", "--only-binary=llama-cpp-python", "--extra-index-url",
+                         index, f"llama-cpp-python>=0.2.90,<={verified}"]
     assert extras[2][:2] == ["--force-reinstall", "--no-deps"]
+
+
+@pytest.mark.parametrize("returncode, deduped", [(0, True), (1, False)])
+def test_successful_refresh_dedupes_its_venv(tmp_catalog, tmp_path, returncode, deduped):
+    py = _make_python_path(tmp_path, "x")
+    venv = tmp_path / "venvs" / "x"
+    _seed_catalog({
+        "x": {
+            "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
+            "venv_path": str(venv), "python_path": py, "enabled": True,
+        },
+    })
+    manifest = {"model_id": "x", "modality": "audio/speech", "pip_extras": ()}
+    with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
+         patch("muse.cli_impl.refresh.dedupe_after_install") as hook, \
+         patch("muse.cli_impl.refresh.run_owned_command") as mock_run:
+        mock_run.return_value = MagicMock(returncode=returncode, stdout="", stderr="")
+        refresh_one("x")
+    assert hook.called is deduped
+    if deduped:
+        assert Path(hook.call_args.args[0]).name == "x"
