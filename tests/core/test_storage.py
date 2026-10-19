@@ -613,3 +613,22 @@ def test_automatic_prune_can_be_disabled(storage_root, monkeypatch):
 
     assert maintenance is None
     assert partial.exists()
+
+
+def test_models_loading_from_the_shared_hf_cache_are_named(storage_root, tmp_path):
+    shared = tmp_path / "home" / ".cache" / "huggingface" / "hub"
+    snapshot = shared / "models--org--old" / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").write_bytes(b"w")
+    owned = storage_root / "weights" / "models--org--new"
+    owned.mkdir(parents=True)
+    venv = storage_root / "venvs"
+    for name in ("old", "new"):
+        _complete_venv(venv / name)
+    _write_catalog({
+        "old": {"venv_path": str(venv / "old"), "local_dir": str(snapshot), "enabled": True},
+        "new": {"venv_path": str(venv / "new"), "local_dir": str(owned), "enabled": True},
+    })
+    with patch("muse.core.storage._shared_cache_roots", return_value=(shared, None)):
+        report = inspect_storage()
+    assert report.shared_hf_models == ("old",)

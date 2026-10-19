@@ -557,6 +557,13 @@ re-checking both files. Safe because pip unlinks before writing installed files.
 `only=<venv>` pass after each successful pull/refresh (`storage.dedupe_venvs`,
 default true; never fails the install). Saves disk and shared-library page
 cache, not VRAM. First pass on the dev host: 118.5 GiB of 154 GiB.
+`muse.core.hf_seed.seed_repo` hardlinks SHA-verified shared-HF-cache blobs
+(`HF_HUB_CACHE`) into `<catalog_dir>/weights` before cache-mode downloads (bundled
+`snapshot_download` and resolver `resolved.download`), so huggingface_hub reuses
+them by etag name instead of re-downloading; `drop_unused_seeds` removes the ones
+the snapshot did not reference. `muse doctor storage` names catalog models still
+loading from the shared cache (`StorageReport.shared_hf_models`): pre-0.61 pulls
+with no provenance receipt, which are unservable until re-pulled.
 The chat HF resolver caps the active `context_length` at 8192 and records the
 trained maximum as `max_context_length` (it used to size the KV cache for the
 full trained context: Qwen3-0.6B 6.65 GB -> 1.66 GB VRAM).
@@ -1685,7 +1692,10 @@ full curve.
 
 Each modality declares its representative inference via a
 `PROBE_DEFAULTS = {"shape": ..., "call": lambda m: ...}` dict in its
-`__init__.py`. The probe worker imports the modality at run time and
+`__init__.py`. The probe subprocess gets 600 s unless the modality exports a
+literal `PROBE_TIMEOUT_SECONDS` (AST-read by `discovery.probe_timeouts`; the
+larger wins): video/generation declares 2700, because Wan's 2-second probe clip
+under sequential CPU offload takes ~16 min including load on a 12 GB card. The probe worker imports the modality at run time and
 calls the shape-default lambda against the loaded backend.
 
 ## Adding a new model (the common case)

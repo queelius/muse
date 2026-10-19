@@ -537,3 +537,21 @@ class TestDiscoveryEdgeCases:
             assert k.startswith("_muse_discover_"), (
                 f"discovery leaked non-mangled module name into sys.modules: {k}"
             )
+
+
+def test_probe_timeouts_reads_the_video_declaration():
+    from muse.core.discovery import probe_timeouts
+    from muse.cli_impl.probe import DEFAULT_PROBE_TIMEOUT_SECONDS, _probe_timeout
+
+    assert probe_timeouts()["video/generation"] == 2700.0
+    assert _probe_timeout("video/generation") == 2700.0
+    assert _probe_timeout("audio/speech") == DEFAULT_PROBE_TIMEOUT_SECONDS
+
+
+def test_malformed_probe_timeout_is_ignored(tmp_path):
+    from muse.core.discovery import probe_timeouts
+
+    pkg = tmp_path / "fake_mod"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text('MODALITY = "fake/mod"\nPROBE_TIMEOUT_SECONDS = "long"\n')
+    assert probe_timeouts([tmp_path]) == {}

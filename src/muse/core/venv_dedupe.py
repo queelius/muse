@@ -22,9 +22,11 @@ file, and a running worker keeps the inode it already has open.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import stat
+import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -101,6 +103,49 @@ def _package_files(venv: Path) -> list[_File]:
     return out
 
 
+class _DigestCache:
+    """SHA-256 per (device, inode, size, mtime) across runs.
+
+    After a pass, most content is one shared inode, so a later pass (after
+    every pull) would otherwise re-hash gigabytes of unchanged Torch and
+    CUDA libraries just to compare them with one new venv. Stored next to
+    the venvs root; a missing or unreadable file only costs re-hashing.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self.entries: dict[str, list] = {}
+        self.used: dict[str, list] = {}
+        if path is not None:
+            try:
+                data = json.loads(path.read_text())
+                if isinstance(data, dict):
+                    self.entries = data
+            except (OSError, ValueError):
+                pass
+
+    def digest(self, f: _File) -> str:
+        key = f"{f.dev}:{f.ino}"
+        hit = self.entries.get(key)
+        if isinstance(hit, list) and hit[:2] == [f.size, f.mtime_ns] and len(hit) == 3:
+            value = hit[2]
+        else:
+            value = _digest(f.path)
+        self.used[key] = [f.size, f.mtime_ns, value]
+        return value
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+            with os.fdopen(fd, "w") as fh:
+                json.dump({**self.entries, **self.used}, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            logger.debug("could not save the dedupe digest cache", exc_info=True)
+
+
 def _digest(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -140,7 +185,7 @@ def _replace_with_link(keeper: _File, target: _File) -> bool:
 
 def dedupe_venvs(
     root: Path, *, only: Path | None = None, dry_run: bool = False,
-    now: float | None = None,
+    now: float | None = None, cache: Path | None = None,
 ) -> DedupeResult:
     """Link identical package files across the venvs under root.
 
@@ -148,8 +193,10 @@ def dedupe_venvs(
     identical files in the others), which is cheap enough to run after
     every pull or refresh. The caller vouches that `only` is fully
     installed, so its files skip the settle check; other venvs' files
-    changed in the last SETTLE_SECONDS are left alone.
+    changed in the last SETTLE_SECONDS are left alone. `cache` is a digest
+    cache file (see _DigestCache).
     """
+    digests = _DigestCache(cache)
     now = time.time() if now is None else now
     settled_before = int((now - SETTLE_SECONDS) * 1e9)
     venvs = model_venvs(root)
@@ -178,7 +225,7 @@ def dedupe_venvs(
                 skipped += len(paths)
                 continue
             try:
-                digest = _digest(rep.path)
+                digest = digests.digest(rep)
             except OSError:
                 skipped += len(paths)
                 continue
@@ -206,7 +253,13 @@ def dedupe_venvs(
                 # Space comes back only once no other name holds the inode.
                 if done and done == paths[0].nlink:
                     reclaimed += size
+    digests.save()
     return DedupeResult(len(files), linked, reclaimed, skipped, dry_run)
+
+
+def digest_cache_path(root: Path) -> Path:
+    """The digest cache for a venvs root: beside it, not inside it."""
+    return Path(root).parent / "venv-digests.json"
 
 
 def dedupe_after_install(venv: Path) -> None:
@@ -216,7 +269,8 @@ def dedupe_after_install(venv: Path) -> None:
     if not config.get("storage.dedupe_venvs"):
         return
     try:
-        result = dedupe_venvs(Path(venv).parent, only=Path(venv))
+        root = Path(venv).parent
+        result = dedupe_venvs(root, only=Path(venv), cache=digest_cache_path(root))
     except Exception:  # noqa: BLE001 - an optimization must not fail the install
         logger.warning("venv dedupe after install of %s failed", venv, exc_info=True)
         return

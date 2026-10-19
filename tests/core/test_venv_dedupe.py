@@ -139,7 +139,7 @@ def test_after_install_hook_respects_the_setting_and_never_raises(tmp_path, monk
     monkeypatch.setenv("MUSE_STORAGE_DEDUPE_VENVS", "true")
     with patch.object(venv_dedupe, "dedupe_venvs", side_effect=OSError("boom")) as run:
         dedupe_after_install(a)
-    run.assert_called_once_with(tmp_path, only=a)
+    run.assert_called_once_with(tmp_path, only=a, cache=tmp_path.parent / "venv-digests.json")
 
 
 def test_cli_reports_and_links(tmp_path, monkeypatch, capsys):
@@ -155,3 +155,26 @@ def test_cli_reports_and_links(tmp_path, monkeypatch, capsys):
     assert report["dry_run"] and report["linked_files"] == 1 and not _same(x, y)
     assert run_storage_dedupe() == 0
     assert "linked 1 of 2" in capsys.readouterr().out and _same(x, y)
+
+
+def test_digest_cache_skips_rehashing_unchanged_inodes(tmp_path):
+    root = tmp_path / "venvs"
+    a, b = _venv(root, "a"), _venv(root, "b")
+    _put(a, "lib.so", b"payload"), _put(b, "lib.so", b"payload")
+    cache = tmp_path / "venv-digests.json"
+    assert dedupe_venvs(root, cache=cache).linked_files == 1
+    c = _venv(root, "c")
+    _put(c, "lib.so", b"payload")
+    real = venv_dedupe._digest
+    with patch.object(venv_dedupe, "_digest", side_effect=real) as hashed:
+        assert dedupe_venvs(root, cache=cache).linked_files == 1
+    assert [call.args[0].parent.parent.parent.parent.name for call in hashed.call_args_list] == ["c"]
+
+
+def test_a_corrupt_digest_cache_only_costs_rehashing(tmp_path):
+    root = tmp_path / "venvs"
+    a, b = _venv(root, "a"), _venv(root, "b")
+    _put(a, "lib.so", b"payload"), _put(b, "lib.so", b"payload")
+    cache = tmp_path / "venv-digests.json"
+    cache.write_text("{not json")
+    assert dedupe_venvs(root, cache=cache).linked_files == 1

@@ -39,6 +39,16 @@ from muse.core.venv import (
 log = logging.getLogger("muse.probe")
 
 
+DEFAULT_PROBE_TIMEOUT_SECONDS = 600.0
+
+
+def _probe_timeout(modality: str) -> float:
+    """The modality's declared PROBE_TIMEOUT_SECONDS, never below the default."""
+    from muse.core.discovery import probe_timeouts
+
+    return max(DEFAULT_PROBE_TIMEOUT_SECONDS, probe_timeouts().get(modality, 0.0))
+
+
 def run_probe(
     *,
     model_id: str,
@@ -130,12 +140,13 @@ def _run_probe_locked(
             print("  (load only; --no-inference)")
         print()
 
+    timeout = _probe_timeout(entry.modality)
     try:
         result = run_owned_command(
-            cmd, capture_output=True, timeout=600, check=False,
+            cmd, capture_output=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
-        print("error: probe timed out (>10 min)", file=sys.stderr)
+        print(f"error: probe timed out (>{timeout / 60:g} min)", file=sys.stderr)
         return 3
     except _OwnedProcessCleanupError as exc:
         print(f"error: probe subprocess cleanup failed: {exc}", file=sys.stderr)

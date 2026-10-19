@@ -394,6 +394,19 @@ def strict_request_parsers(dirs: list[Path] | None = None) -> dict[str, str]:
     return out
 
 
+def probe_timeouts(dirs: list[Path] | None = None) -> dict[str, float]:
+    """{modality tag: seconds} for every modality exporting a literal
+    PROBE_TIMEOUT_SECONDS, for modalities whose representative inference
+    legitimately outlasts the default probe budget (video generation)."""
+    out: dict[str, float] = {}
+    for tag, value in _declarations("PROBE_TIMEOUT_SECONDS", dirs):
+        if type(value) in (int, float) and value > 0:
+            out[tag] = float(value)
+        else:
+            logger.warning("ignoring malformed PROBE_TIMEOUT_SECONDS for %s", tag)
+    return out
+
+
 def disconnect_cancellable_paths(dirs: list[Path] | None = None) -> frozenset[str]:
     """Request paths whose modality exports CANCEL_ON_DISCONNECT_PATHS.
 

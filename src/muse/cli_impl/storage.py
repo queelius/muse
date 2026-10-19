@@ -86,6 +86,7 @@ def _report_payload(report: StorageReport) -> dict:
             "huggingface_catalog_referenced_bytes": (
                 report.shared_hf_referenced_bytes
             ),
+            "huggingface_dependent_models": list(report.shared_hf_models),
             "pip_cache": str(report.pip_cache) if report.pip_cache else None,
             "pip_bytes": report.pip_cache_bytes,
         },
@@ -189,6 +190,13 @@ def _print_report(report: StorageReport) -> None:
                 f"    catalog-referenced repositories: "
                 f"{_human_size(report.shared_hf_referenced_bytes)}"
             )
+        if report.shared_hf_models:
+            print(
+                f"    {len(report.shared_hf_models)} model(s) load weights from this "
+                "shared cache, which other tools may change or delete; "
+                "`muse pull <id>` moves them into Muse's store:"
+            )
+            print(f"      {', '.join(report.shared_hf_models)}")
     if report.pip_cache is not None:
         print(
             f"  pip:               {_human_size(report.pip_cache_bytes)} at "
@@ -305,11 +313,11 @@ def run_storage_dedupe(*, dry_run: bool = False, json_output: bool = False) -> i
     """Hardlink identical package files across every model venv."""
     from pathlib import Path
 
-    from muse.core.venv_dedupe import dedupe_venvs
+    from muse.core.venv_dedupe import dedupe_venvs, digest_cache_path
 
     root = Path(config.get("paths.catalog_dir")).expanduser() / "venvs"
     try:
-        result = dedupe_venvs(root, dry_run=dry_run)
+        result = dedupe_venvs(root, dry_run=dry_run, cache=digest_cache_path(root))
     except OSError as exc:
         print(f"storage dedupe failed: {exc}", file=sys.stderr)
         return 2

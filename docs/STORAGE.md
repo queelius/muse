@@ -157,6 +157,23 @@ the shared cache. Compare proposed removals with `muse doctor storage` and the
 catalog's `local_dir` paths before pruning; do not assume "detached" means
 unused by Muse. This also applies when pointing HF tools at Muse's owned cache.
 
+**Legacy models in the shared cache.** Models pulled before 0.61.0 loaded
+their weights straight from the shared Hugging Face cache and carry no pinned
+revision or download receipt, so current Muse refuses to serve them
+(`model_unservable`, "does not match the current immutable artifact
+provenance"). `muse doctor storage` lists them under the Hugging Face cache.
+`muse pull <id>` fixes one, moving its weights into Muse's own store.
+
+**Pulls reuse the shared cache.** Before a cache-mode download (bundled
+scripts and resolver pulls), Muse hardlinks the shared cache's blobs for that
+repo into `<catalog_dir>/weights` (`muse.core.hf_seed`). Each blob is verified
+first: an LFS blob against the SHA-256 in its name, a regular blob against its
+git blob SHA-1. huggingface_hub then finds what it needs under the same names,
+so nothing already on disk is downloaded again and the two caches share the
+same disk blocks. Seeded blobs the download did not use are removed afterwards.
+Once the shared copy is deleted, Muse's link keeps the data. (Artifact-bundle
+downloads already copy files from the shared cache when they match.)
+
 ## Removing one model
 
 ```bash

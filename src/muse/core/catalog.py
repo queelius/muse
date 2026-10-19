@@ -48,6 +48,7 @@ from muse.core import config
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.install import check_system_packages
+from muse.core.hf_seed import drop_unused_seeds, seed_repo
 from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.venv import (
     _is_verbose,
@@ -2146,8 +2147,12 @@ def _pull_bundled_transaction(
                 download_kwargs["allow_patterns"] = list(allow_patterns)
             if revision:
                 download_kwargs["revision"] = revision
-            with _hf_quiet_if_needed():
-                local_dir = snapshot_download(**download_kwargs)
+            seeded = seed_repo(weights_cache, entry.hf_repo, allow_patterns=allow_patterns)
+            try:
+                with _hf_quiet_if_needed():
+                    local_dir = snapshot_download(**download_kwargs)
+            finally:
+                drop_unused_seeds(seeded)
         # Keep the storage lock through the catalog commit. Otherwise a
         # concurrent cleaner can observe a fully-downloaded repository before
         # its catalog reference exists and misclassify it as unreferenced.
@@ -2433,8 +2438,12 @@ def _pull_resolved_transaction(
     weights_cache = _catalog_dir() / "weights"
     _ensure_owned_directory(weights_cache, private=True)
     with _storage_cache_lock():
-        with _hf_quiet_if_needed():
-            local_dir = resolved.download(weights_cache)
+        seeded = seed_repo(weights_cache, manifest["hf_repo"])
+        try:
+            with _hf_quiet_if_needed():
+                local_dir = resolved.download(weights_cache)
+        finally:
+            drop_unused_seeds(seeded)
         # Commit the reference before releasing the storage lock; see the
         # bundled path above for the cleaner race this prevents.
         with _CATALOG_WRITE_LOCK:

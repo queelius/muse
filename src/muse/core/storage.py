@@ -97,6 +97,9 @@ class StorageReport:
     shared_hf_referenced_bytes: int
     pip_cache: Path | None
     pip_cache_bytes: int
+    # Catalog models whose weights live in the shared HF cache, which other
+    # tools may change or delete; a re-pull moves them into Muse's store.
+    shared_hf_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -493,6 +496,7 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
     weights_references_safe = True
     hf_cache, pip_cache = _shared_cache_roots()
     shared_repo_refs: set[Path] = set()
+    shared_hf_models: list[str] = []
 
     for model_id, entry in sorted(catalog.items()):
         raw_venv = entry.get("venv_path") if isinstance(entry, dict) else None
@@ -549,6 +553,7 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
                 shared_root = _top_level_owned_path(raw_weights, hf_cache)
                 if shared_root is not None and shared_root.name.startswith("models--"):
                     shared_repo_refs.add(shared_root)
+                    shared_hf_models.append(model_id)
         if not raw_weights_path.exists():
             issues.append(StorageIssue(
                 "missing-reference", model_id, raw_weights_path,
@@ -750,6 +755,7 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
         shared_hf_referenced_bytes=shared_hf_referenced_bytes,
         pip_cache=pip_cache,
         pip_cache_bytes=pip_cache_bytes,
+        shared_hf_models=tuple(shared_hf_models),
     )
 
 

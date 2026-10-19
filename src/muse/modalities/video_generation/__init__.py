@@ -21,6 +21,11 @@ MODALITY = "video/generation"
 # short duration + few steps so the measurement is bounded; real
 # inference still reveals true VRAM peak. On a 12GB GPU the probe
 # should complete in ~30-60s for Wan 1.3B.
+# Read by muse.core.discovery via AST. With sequential CPU offload (the
+# bundled Wan default on 8-12 GB cards) the 2-second probe clip alone takes
+# more than the default 10-minute probe budget.
+PROBE_TIMEOUT_SECONDS = 2700
+
 PROBE_DEFAULTS = {
     "shape": "2-second clip at default size, steps=10",
     "call": lambda m: m.generate(
