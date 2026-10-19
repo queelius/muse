@@ -95,7 +95,7 @@ Today the pull exits 0 and leaves the model `enabled: true` even when the probe 
 
 - [x] Run `python scripts/preflight.py` and `pytest tests/ -q`; require zero unexpected failures (known flakes: `test_e2e_supervisor_vlm`, order-dependent `test_memory_probe`).
 - [x] Commit the pending `pyproject.toml` bump to 0.61.0 with a changelog/README note covering the hardening commits and Tasks 1–5.
-- [ ] Ask before pushing or tagging.
+- [x] Ask before pushing or tagging. (Pushed and tagged `v0.61.0` 2026-10-18.)
 
 ## Out of scope here
 
