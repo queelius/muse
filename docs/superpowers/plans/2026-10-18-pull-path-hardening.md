@@ -78,7 +78,7 @@ The GGUF, VLM and other resolver plugins derive the catalog id from the repo bas
 
 ### Task 5: A Failed Post-Pull Probe Fails the Pull
 
-**Done 2026-10-18.** As built: `catalog.pull()` now returns the installed id so the probe targets the right entry (a URI re-pull previously could not be identified, which would have become a false failure); tests in `tests/cli_impl/test_pull_probe_failure.py`; the admin job needed no change.
+**Done 2026-10-18.** As built: `catalog.pull()` now returns the installed id so the probe targets the right entry (a URI re-pull previously could not be identified, which would have become a false failure); tests in `tests/cli_impl/test_pull_probe_failure.py`; the admin job needed no change. Follow-up after the 0.61.0 push: the probe worker exits 0 when the model loads but its inference raises (the record carries `inference_error`), so `run_probe` now returns 6 for that record; before the fix a model that loaded but could not infer still pulled enabled.
 
 **Files:** Modify `src/muse/cli.py` (`pull`, ~lines 385–397), `src/muse/cli_impl/probe.py` (`run_probe_for_pull`); test `tests/cli_impl/test_probe.py`, `tests/test_cli.py`.
 

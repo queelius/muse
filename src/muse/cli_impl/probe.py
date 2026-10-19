@@ -49,7 +49,8 @@ def run_probe(
     """Spawn an in-venv probe; persist the resulting measurement.
 
     Returns 0 on success, non-zero on the various failure modes
-    (unknown model / not pulled / subprocess crash / non-JSON output).
+    (unknown model / not pulled / subprocess crash / non-JSON output /
+    a load that succeeded but whose inference probe raised).
     """
     catalog_known = known_models()
     if model_id not in catalog_known:
@@ -196,6 +197,15 @@ def _run_probe_locked(
         print(json.dumps(record, indent=2))
     else:
         _print_human(record)
+    # The worker exits 0 when the model loads but its representative
+    # inference raises (the record carries the load measurement plus
+    # `inference_error`). That is still a failed probe.
+    if record.get("inference_error"):
+        print(
+            f"error: {model_id} loaded, but its inference probe failed",
+            file=sys.stderr,
+        )
+        return 6
     return 0
 
 

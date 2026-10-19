@@ -610,3 +610,36 @@ class TestPynvmlFallback:
         from muse.cli_impl import probe_worker
         assert probe_worker._inference_peak_bytes(5, 3, None) == 5
         assert probe_worker._inference_peak_bytes(2, 3, None) == 3
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_run_probe_inference_error_is_a_failure(tmp_catalog, capsys, as_json):
+    """A model that loads but cannot run its representative inference
+    failed its probe: the worker exits 0 with `inference_error` in the
+    record, and run_probe must not report that as success (muse pull
+    disables the model on a nonzero probe)."""
+    _seed_pulled_entry(tmp_catalog)
+    record = {
+        "model_id": "kokoro-82m",
+        "modality": "audio/speech",
+        "device": "cpu",
+        "weights_bytes": 500_000_000,
+        "peak_bytes": 500_000_000,
+        "load_seconds": 1.5,
+        "ran_inference": False,
+        "inference_error": "RuntimeError: espeak not found",
+        "probed_at": "2026-04-28T00:00:00+00:00",
+    }
+    fake_completed = MagicMock()
+    fake_completed.returncode = 0
+    fake_completed.stdout = json.dumps(record) + "\n"
+    fake_completed.stderr = ""
+    with patch("muse.cli_impl.probe.run_owned_command", return_value=fake_completed):
+        rc = run_probe(
+            model_id="kokoro-82m", no_inference=False, device=None, as_json=as_json,
+        )
+    assert rc != 0
+    assert "inference" in capsys.readouterr().err
+    # The load measurement is still recorded for diagnosis.
+    persisted = _read_catalog()["kokoro-82m"]["measurements"]["cpu"]
+    assert persisted["inference_error"] == "RuntimeError: espeak not found"
