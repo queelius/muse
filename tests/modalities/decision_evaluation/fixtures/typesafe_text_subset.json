@@ -1,0 +1,151 @@
+{
+  "provenance": {
+    "source": "TypeSafe documentation, read 2026-10-18",
+    "urls": [
+      "https://docs.typesafe.ai/primitives/choice",
+      "https://docs.typesafe.ai/primitives/score",
+      "https://docs.typesafe.ai/primitives/noul",
+      "https://docs.typesafe.ai/confidence"
+    ],
+    "contract_date": "2026-10-18",
+    "sdk": "typesafe_sdk (version not published on these pages); fixtures are the documented wire examples, not captured SDK output",
+    "notes": [
+      "Only the text subset Muse supports: string state/instructions, string or null criteria descriptions.",
+      "TypeSafe also accepts structured (object/array) instructions and criteria; Muse rejects them.",
+      "Muse requires an explicit catalog `model`; the documented requests omit it, so the tests add one.",
+      "Documented probabilities are rounded to 2 decimals and their answer keys are not always in request order; Muse keeps request order and full precision.",
+      "Documented usage.output_tokens is nonzero; Muse reports 0 because it scores candidates without generating."
+    ]
+  },
+  "cases": [
+    {
+      "name": "choice-basic",
+      "request": {
+        "state": "My running shoes arrived in the wrong size. Can I swap them for a size 10?",
+        "questions": {
+          "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+              "returns": "Exchanges, wrong or damaged items",
+              "shipping": "Delivery status, delays, lost packages",
+              "billing": "Charges, invoices, payment problems"
+            }
+          }
+        }
+      },
+      "answers": {
+        "department": {"type": "choice", "choice": "returns", "confidence": 1.0,
+                       "probabilities": {"shipping": 0.0, "returns": 1.0, "billing": 0.0}}
+      }
+    },
+    {
+      "name": "choice-null-descriptions",
+      "request": {
+        "state": "Shoes arrived two weeks late and in the wrong size. Also I see two charges of $120 on my card. What are you going to do about this?",
+        "questions": {
+          "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+              "returns": "Exchanges, wrong or damaged items",
+              "shipping": "Delivery status, delays, lost packages",
+              "billing": "Charges, invoices, payment problems"
+            }
+          },
+          "tone": {
+            "type": "choice",
+            "instructions": "What is the customer's tone?",
+            "criteria": {"calm": null, "frustrated": null, "angry": null}
+          }
+        }
+      },
+      "answers": {
+        "department": {"type": "choice", "choice": "returns", "confidence": 0.42,
+                       "probabilities": {"shipping": 0.04, "billing": 0.35, "returns": 0.61}},
+        "tone": {"type": "choice", "choice": "frustrated", "confidence": 0.76,
+                 "probabilities": {"frustrated": 0.84, "angry": 0.16, "calm": 0.0}}
+      }
+    },
+    {
+      "name": "score-bug-severity",
+      "request": {
+        "state": "The export button crashes the settings page in Safari. It works in Chrome, but a few of our customers only use Safari.",
+        "questions": {
+          "bug_severity": {
+            "type": "score",
+            "instructions": "How severe is the reported issue?",
+            "criteria": [
+              "Cosmetic; no impact to functionality",
+              "Broken or degraded feature, but workaround exists",
+              "Blocking issue; no workaround exists"
+            ]
+          }
+        }
+      },
+      "answers": {
+        "bug_severity": {
+          "type": "score", "score": 1.43, "confidence": 0.35,
+          "legend": {
+            "0": "Cosmetic; no impact to functionality",
+            "1": "Broken or degraded feature, but workaround exists",
+            "2": "Blocking issue; no workaround exists"
+          },
+          "probabilities": {"0": 0.0, "1": 0.57, "2": 0.43}
+        }
+      }
+    },
+    {
+      "name": "score-four-levels",
+      "request": {
+        "state": "Export to PDF fails with a spinner that never finishes. Steps: open any report, click Export, choose PDF. Chrome 128 on macOS.",
+        "questions": {
+          "severity": {
+            "type": "score",
+            "instructions": "How severe is the reported issue?",
+            "criteria": [
+              "Cosmetic; no impact to functionality",
+              "Broken or degraded feature, but workaround exists",
+              "Blocking issue; no workaround exists"
+            ]
+          },
+          "report_quality": {
+            "type": "score",
+            "instructions": "How much does the report give an engineer to work with?",
+            "criteria": [
+              "No detail; just says something is broken",
+              "Names the feature but no steps or environment",
+              "Steps to reproduce or environment, but not both",
+              "Steps to reproduce and environment"
+            ]
+          }
+        }
+      },
+      "answers": {
+        "severity": {"type": "score", "score": 1.24, "confidence": 0.64,
+                     "probabilities": {"0": 0.0, "1": 0.76, "2": 0.24}},
+        "report_quality": {"type": "score", "score": 3.0, "confidence": 1.0,
+                           "probabilities": {"0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0}}
+      }
+    },
+    {
+      "name": "noul-with-criteria",
+      "comment": "Constructed from the documented Noul schema (the page's examples could not be copied verbatim).",
+      "request": {
+        "state": {"message": "Please cancel my order, I bought the wrong one."},
+        "questions": {
+          "cancel": {
+            "type": "noul",
+            "instructions": "The customer wants to cancel an order.",
+            "criteria": {"true": "They ask to stop or cancel", "false": "Anything else"}
+          }
+        }
+      },
+      "answers": {"cancel": {"type": "noul", "noul": 0.93}}
+    }
+  ],
+  "confidence_examples": {
+    "choice": [[[0.6, 0.3, 0.1], 0.4], [[0.6, 0.2, 0.2], 0.4]],
+    "score": [[[0.0, 0.5, 0.5], 0.25], [[0.5, 0.0, 0.5], 0.0], [[0.0, 0.57, 0.43], 0.355]]
+  }
+}

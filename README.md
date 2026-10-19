@@ -28,9 +28,10 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - text rerank (Cohere-compat) on `/v1/rerank`
 - text summarization (Cohere-compat) on `/v1/summarize`
 - text translation (LibreTranslate-compat) on `/v1/translate` (+ bare `/translate` alias, `GET /languages`)
+- typed decisions (Choice / Score / Noul, a text subset of TypeSafe's System One) on `/v1/systemone`; see [docs/DECISIONS.md](docs/DECISIONS.md)
 - image-to-3D and text-to-3D on `/v1/3d/from-image` and `/v1/3d/generations`
 
-Modality tags are MIME-style (`3d/generation`, `audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/segmentation`, `image/upscale`, `image/vectorization`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
+Modality tags are MIME-style (`3d/generation`, `audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `decision/evaluation`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/segmentation`, `image/upscale`, `image/vectorization`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -460,7 +461,7 @@ for diagnosis. A null reason is not a dependency or inference smoke test.
 | `muse doctor resources [--repair]` | inspect Muse's owned-resource registry; optionally clean verified stale/orphan records after an unclean exit |
 | `muse doctor storage [--json]` | report Muse-owned storage, shared caches, broken references, and reclaimable space without changing files |
 | `muse storage prune [--dry-run] [--include-unreferenced]` | reclaim old partial/staging data; optionally include unregistered retained model files |
-| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (31 tools) |
+| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (32 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.
 
@@ -522,6 +523,7 @@ settings inventory and precedence rules.
 | `POST /v1/summarize` | text summarization (Cohere-compat) |
 | `POST /v1/translate` (+ bare `/translate` alias) | text translation (LibreTranslate-compat) |
 | `GET /languages` | supported translation languages (LibreTranslate-compat) |
+| `POST /v1/systemone` | typed Choice / Score / Noul decisions with complete probability distributions (explicit `model` required) |
 | `POST /v1/audio/music` | music generation (capability-gated; muse-native shape) |
 | `POST /v1/audio/sfx` | sound-effect generation (capability-gated; muse-native shape) |
 | `POST /v1/video/generations` | text-to-video generation (mp4/webm/frames_b64; GPU-required) |
@@ -619,7 +621,7 @@ muse serve
 
 ## MCP server (since v0.29.0)
 
-`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 31 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 20 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
+`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 32 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 21 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
 
 ```bash
 muse mcp                                  # stdio mode
@@ -701,6 +703,7 @@ See the "Federation" section of `CLAUDE.md` for the full design.
   - `audio_speech/` (MODALITY `"audio/speech"`)
   - `audio_transcription/` (MODALITY `"audio/transcription"`; multipart/form-data upload, OpenAI Whisper wire shape)
   - `chat_completion/` (MODALITY `"chat/completion"`; includes `runtimes/llama_cpp.py`)
+  - `decision_evaluation/` (MODALITY `"decision/evaluation"`; `/v1/systemone`; `runtimes/llama_cpp.py` Decision GGUF scorer and `runtimes/decima_onnx.py`)
   - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
   - `image_embedding/` (MODALITY `"image/embedding"`; includes `runtimes/transformers_image.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
