@@ -90,11 +90,24 @@ def create_app(
 
     @app.get("/health")
     def health():
-        return {
+        body = {
             "status": "ok",
             "modalities": registry.modalities(),
             "models": [info.model_id for info in registry.list_all()],
         }
+        # A backend may expose `usable`; False means its native state is
+        # uncertain (e.g. a native call failed mid-inference). Reporting
+        # 503 lets the supervisor's monitor replace this worker instead of
+        # serving from that state.
+        unusable = [
+            info.model_id for info in registry.list_all()
+            if getattr(registry.get(info.modality, info.model_id), "usable", True) is False
+        ]
+        if unusable:
+            body["status"] = "unusable"
+            body["unusable_models"] = unusable
+            return JSONResponse(status_code=503, content=body)
+        return body
 
     @app.get("/v1/models")
     def list_models():

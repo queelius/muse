@@ -1,7 +1,8 @@
 """MuseClient: thin httpx wrapper aggregating muse's HTTP routes.
 
 Wraps /v1/chat/completions, /v1/audio/*, /v1/images/*, /v1/embeddings,
-/v1/rerank, /v1/summarize, /v1/moderations, /v1/translate, /health,
+/v1/rerank, /v1/summarize, /v1/moderations, /v1/translate,
+/v1/systemone, /health,
 /v1/models, plus delegates admin operations to ``AdminClient``.
 
 Each method returns either parsed JSON (for non-binary modalities) or
@@ -111,6 +112,21 @@ class MuseClient:
 
     def translate(self, **body: Any) -> dict:
         return self._post_json("/v1/translate", body)
+
+    def decide(self, *, model: str, state: Any, questions: dict) -> dict:
+        """POST /v1/systemone; the full envelope. The body is strictly
+        validated first (DecisionInputError before any HTTP) and sent as
+        exactly those bytes."""
+        from muse.modalities.decision_evaluation.client import encode_request
+
+        body = encode_request(model=model, state=state, questions=questions)
+        with httpx.Client(timeout=self.timeout) as c:
+            r = c.post(
+                f"{self.server_url}/v1/systemone",
+                content=body, headers={"content-type": "application/json"},
+            )
+        r.raise_for_status()
+        return r.json()
 
     # Image routes
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Muse is a multi-modality generation server and client. It currently supports
-twenty-three modalities:
+twenty-four modalities:
 
 - **audio/alignment**: trusted reference transcript to word timestamps via `/v1/audio/alignments` (Qwen3 ForcedAligner 0.6B curated; multipart audio + text; 11 languages; per-word start/end and uncalibrated timestamp confidence)
 - **audio/classification**: audio event / emotion / language classification via `/v1/audio/classifications` (ast-audioset bundled, 527-class multi-label; emotion + speech-commands + language-ID via the resolver; multipart upload + per-input list of `{label, score}` pairs mirroring `/v1/text/classifications`)
@@ -15,6 +15,7 @@ twenty-three modalities:
 - **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark, Supertonic-3: the last is an ONNX on-device CPU engine, 31 languages, preset voice styles)
 - **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs AND vision-language models via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming + multimodal `messages` content; powered by llama-cpp-python for GGUF chat; `transformers.AutoModelForImageTextToText` for VLMs; SmolVLM, Qwen2-VL, LLaVA via the resolver)
+- **decision/evaluation**: typed Choice / Score / Noul decisions via `/v1/systemone` (a text-only subset of TypeSafe's System One wire shape; explicit `model` required; Decision-0.8B Q8 GGUF scored by option-letter logits and Decima-base INT8 ONNX on CPU, both exact-repo and commit-pinned; complete probability distributions, never generated text; see docs/DECISIONS.md)
 - **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
 - **image/animation**: text-to-animation via `/v1/images/animations` (AnimateDiff: 16-frame loops, animated WebP/GIF/MP4 output)
 - **image/embedding**: image-to-vector via `/v1/images/embeddings` (dinov2-small bundled; CLIP, SigLIP, DINOv2 family via the resolver; OpenAI-shape wire envelope mirroring `/v1/embeddings`)
@@ -86,6 +87,43 @@ context before moving inputs to the device. Confidence calculation selects
 timestamp-marker logits before its float32 softmax, avoiding a full-sequence
 probability tensor. Only the typed `AudioAlignmentDecodeError` emitted at the
 TorchCodec boundary maps to HTTP 415; model alignment failures remain 500s.
+
+`decision/evaluation` is muse's twenty-fourth modality (docs/DECISIONS.md).
+`POST /v1/systemone` takes `{model, state, questions}` (a text-only subset of
+TypeSafe's System One: Choice, Score, Noul; `model` is always required, no
+default) and returns `{model, answers, usage}` built by the shared codec from
+complete per-question distributions; confidence is concentration (Choice
+`(max p - 1/K)/(1 - 1/K)`, Score an ordered-spread statistic), never
+correctness, and `output_tokens` is 0. `validation.parse_request` is the one
+strict parser (raw bytes, duplicate keys at any depth, non-finite numbers,
+unknown/media fields, UTF-8 byte limits); the package exports
+`STRICT_REQUEST_PARSERS = {"/v1/systemone": "...:parse_request"}`, a generic
+AST-read seam the gateway runs on the raw body BEFORE model selection (its
+lenient `json.loads` would keep the last of two `model` keys), routing by the
+parsed `.model`. Two runtimes: `DecisionLlamaCppModel` renders
+evalengine/decision-0.8b-gguf's published no-thinking prompt (framing parsed
+for special tokens, user JSON as literal text), rejects any question over
+2,048 tokens before evaluating any, and softmaxes `get_logits_ith(-1)` over the
+option letters A-X (never `Llama.scores`, empty with `logits_all=False`);
+`DecimaOnnxModel` uses decima-ai 2.2.0's sessions/tokenizer/ordinal head but
+not its `decide*`/System One paths (they truncate, shorten options and may
+download), and rejects state+question over 512 tokens or an option over 64.
+Both reset/isolate per question and mark themselves `usable = False` after a
+native failure; `muse.core.server`'s `/health` returns 503 when any registered
+backend reports `usable is False`, so the supervisor's monitor replaces the
+worker (a generic hook). The decision GGUF runtime is in
+`muse.core.placement.NATIVE_GGUF_BACKENDS`, so admission resolves it on the
+native-GGUF pool. The priority-80 HF plugin claims exactly the two repos in
+its `SOURCES` table at their pinned commits (a moved Hub head is refused; the
+curated ids carry the pin), downloads exact allow-lists and checks each pinned
+file's size and the large files' SHA-256; this fixed the old misdispatch of
+Decima (card tag zero-shot-classification) to the NLI classifier and of the
+Decision GGUF to the chat runtime. In the worker, one `DecisionExecutor` per
+model runs batches on its own thread behind a cap-1/32-deep `ConcurrencyGate`
+and releases the slot from the native call's completion callback, so a
+cancelled request cannot free the backend while native work continues.
+PROBE_DEFAULTS runs one Choice, Score and Noul question. No per-model
+inference authorization exists in muse, so there is no 403 path.
 
 `text/rerank` is muse's first Cohere-compat modality (rather than
 OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is
@@ -757,6 +795,9 @@ for a retry; the message points at `muse models probe <id>` then
 `muse models enable <id>`. `catalog.pull()` returns the id it installed,
 so the probe targets the right entry even on a URI re-pull. The admin
 pull job runs `muse pull` as a subprocess and therefore ends `failed`.
+The in-venv probe worker exits 0 when the model loads but its inference
+raises (the record carries `inference_error`); `run_probe` treats that
+record as a failure (returns 6), so it fails the pull too.
 A `--no-probe` pull exits 0 and stays enabled.
 
 Decoupling principle: `enabled` is catalog state; `loaded` is runtime
@@ -885,6 +926,8 @@ Two gateway-side mechanisms (spec docs/superpowers/specs/2026-07-08-request-queu
 
 - **Per-model concurrency cap:** `capabilities.max_concurrency` (else `server.default_max_concurrency`, default 0 = unlimited = no gating). Excess requests park FIFO on a per-model asyncio.Semaphore in `muse.cli_impl.queueing.ConcurrencyGate`. The CPU box's 32B runs with `max_concurrency: 1`.
 - **Capacity-wait:** the LoadDirector tags its capacity 503 `retryable=True` when the failure is TRANSIENT -- any of the three in-flight states holds: an in-use loaded model (refcount > 0) blocks eviction, another model's cold load is in flight (its reservation made the fit fail; v0.57.1), or an eviction is mid-flight (`director.evicting`: victim popped from `loaded` but disable_fn still shutting the worker down, so the director looks idle while VRAM is still occupied; v0.57.2). The gateway parks on `CapacityNotifier` (generation asyncio.Event, fired threadsafe by the director on release-to-zero, post-eviction, and load commit/abort) and retries under the shared deadline. Only a truly idle-and-empty device that still cannot fit the model 503s immediately.
+
+A modality may export a literal `CONCURRENCY_CEILING = {"max_concurrency": n, "max_queue_depth": n}` (AST-read by `muse.core.discovery.concurrency_ceilings`, like `MODEL_OPTIONAL_PATHS`). The gateway clamps every model of that modality to it, so no manifest, catalog edit or `server.default_max_concurrency` can raise it; `acquire_slot(..., max_queue_depth=)` takes the smaller positive of the ceiling and `server.max_queue_depth`, so a global 0 does not remove it. The gate applies a LOWERED cap live (surplus permits are retired: free ones at once, held ones as their holders release, never over-issuing); a raised cap still applies on restart. decision/evaluation declares 1 / 32.
 
 One budget covers both: `server.queue_timeout_seconds` (default 300; 0 = today's immediate-503). `server.max_queue_depth` (default 0 = unbounded) fast-fails 503 `queue_full`. Timeout -> 503 `queue_timeout` (message reports actual elapsed wait). Telemetry `request` events carry `queued_ms`; `/v1/admin/memory` and `/v1/telemetry/summary` expose per-model `queue_depth` (the seam a future queue-aware federation router consumes). `/v1/admin/memory` omits queue_depth when no gate is bound (unknown is never rendered as 0), while `/v1/telemetry/summary` always includes it (0 when unbound). Cold-starting models with parked waiters (not yet loaded) are visible too (v0.57.4): the summary lists them in a separate always-present `queued` array, and the admin per-model breakdown includes them as rows marked `loaded: false`. `acquire_slot` returns whether a slot was actually taken and the gateway releases only on True, so a live `server.default_max_concurrency` change can no longer desync the gate's accounting.
 
@@ -1278,7 +1321,7 @@ api_key="not-used")`.
 
 `muse mcp` runs an MCP (Model Context Protocol) server that exposes
 muse's capabilities to LLM clients (Claude Desktop, Cursor, etc.) as
-31 structured tools: 11 admin tools (wrap `/v1/admin/*`) and 20
+32 structured tools: 11 admin tools (wrap `/v1/admin/*`) and 21
 inference tools (one per generation route).
 
 The package layout:
@@ -1294,6 +1337,7 @@ src/muse/mcp/
     inference_image.py   generate / edit / vary / upscale / segment / animation / embed_image
     inference_audio.py   speak / transcribe / music / sfx / embed_audio
     inference_video.py   video generation
+    inference_decision.py  muse_decide (/v1/systemone)
 src/muse/cli_impl/mcp_server.py  CLI entry (boots stdio or HTTP+SSE transport)
 ```
 
@@ -1306,9 +1350,9 @@ Two transport modes:
   for remote / web embedders.
 
 Filter mode pins the tool surface:
-- `--filter all` (default): 31 tools.
+- `--filter all` (default): 32 tools.
 - `--filter admin`: 11 tools, only useful with `MUSE_ADMIN_TOKEN`.
-- `--filter inference`: 20 tools, no admin-token needed.
+- `--filter inference`: 21 tools, no admin-token needed.
 
 Auth: `--admin-token` (or `$MUSE_ADMIN_TOKEN`) is forwarded as the
 bearer token for admin tool calls. Inference tools don't need a token.
@@ -1429,7 +1473,7 @@ muse serve --device cuda
 muse mcp                                       # MCP server for LLM clients (stdio mode)
 muse mcp --http --port 8088                    # MCP server in HTTP+SSE mode
 muse mcp --filter admin                        # only the 11 admin tools
-muse mcp --filter inference                    # only the 20 inference tools
+muse mcp --filter inference                    # only the 21 inference tools
 
 # Python clients (HTTP)
 python - <<'PY'

@@ -58,6 +58,7 @@ def _eager_import_subpackages() -> None:
     from muse.mcp.tools import inference_image  # noqa: F401
     from muse.mcp.tools import inference_audio  # noqa: F401
     from muse.mcp.tools import inference_video  # noqa: F401
+    from muse.mcp.tools import inference_decision  # noqa: F401
 
 
 _eager_import_subpackages()

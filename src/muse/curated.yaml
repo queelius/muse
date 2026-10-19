@@ -682,6 +682,27 @@
     source_language: en
     target_language: de
 
+# ---------- decision/evaluation (typed Choice / Score / Noul) ----------
+#
+# POST /v1/systemone with an explicit `model`. Both are exact-repo,
+# commit-pinned sources (decision_evaluation/hf.py checks every file's
+# size and hash). Probabilities are complete distributions over the
+# caller's options, not generated text; neither model is a safety gate.
+
+- id: decision-0.8b-q8
+  uri: hf://evalengine/decision-0.8b-gguf
+  revision: ce993792ad283053004bf0230b1709ff7351bb24
+  modality: decision/evaluation
+  size_gb: 0.81
+  description: "Decision-0.8B Q8_0 (Eval Engine, Apache 2.0): option-letter logits on Qwen3.5-0.8B; uncalibrated probabilities, English, 2,048-token questions"
+
+- id: decima-base
+  uri: hf://amyrmahdy/decima-base
+  revision: e5d84ab3a8436cedc45b0daefa91979f68319455
+  modality: decision/evaluation
+  size_gb: 0.37
+  description: "Decima-base INT8 ONNX (Apache 2.0; see its training-data licensing note): temperature-calibrated late-interaction scorer, CPU, multilingual"
+
 # ---------- audio/embedding (CLAP / MERT / wav2vec family) ----------
 
 - id: mert-v1-95m

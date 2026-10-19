@@ -18,6 +18,7 @@ MODEL_REQUIRED_TOOLS = [
     "muse_vectorize_image", "muse_generate_animation", "muse_embed_image",
     "muse_speak", "muse_transcribe", "muse_generate_music",
     "muse_generate_sfx", "muse_embed_audio", "muse_generate_video",
+    "muse_decide",
 ]
 
 

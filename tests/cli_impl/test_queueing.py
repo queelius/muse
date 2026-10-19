@@ -368,6 +368,112 @@ class TestAcquireReleaseSlot:
         h.cancel()
 
 
+class TestQueueDepthCeiling:
+    """Per-call max_queue_depth (a modality ceiling) combines with the
+    global server.max_queue_depth by taking the smaller positive value."""
+
+    async def _fill(self, gate, n_waiters, **kw):
+        """Hold the one slot, park n_waiters, return (tasks, release)."""
+        assert await gate.acquire_slot("m", 1, deadline=_deadline(5), **kw)
+        tasks = [
+            asyncio.ensure_future(gate.acquire_slot("m", 1, deadline=_deadline(5), **kw))
+            for _ in range(n_waiters)
+        ]
+        await asyncio.sleep(0)
+        return tasks
+
+    async def _drain(self, gate, tasks):
+        for t in tasks:
+            gate.release_slot("m")
+            await t
+        gate.release_slot("m")
+        assert gate._entered.get("m", 0) == 0
+
+    async def test_ceiling_applies_when_global_is_unbounded(self, monkeypatch):
+        monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "0")
+        gate = ConcurrencyGate()
+        tasks = await self._fill(gate, 3, max_queue_depth=3)
+        with pytest.raises(QueueFull):
+            await gate.acquire_slot("m", 1, deadline=_deadline(5), max_queue_depth=3)
+        await self._drain(gate, tasks)
+
+    async def test_smaller_global_limit_lowers_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "2")
+        gate = ConcurrencyGate()
+        tasks = await self._fill(gate, 2, max_queue_depth=32)
+        with pytest.raises(QueueFull):
+            await gate.acquire_slot("m", 1, deadline=_deadline(5), max_queue_depth=32)
+        await self._drain(gate, tasks)
+
+    async def test_larger_global_limit_does_not_raise_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "100")
+        gate = ConcurrencyGate()
+        tasks = await self._fill(gate, 2, max_queue_depth=2)
+        with pytest.raises(QueueFull):
+            await gate.acquire_slot("m", 1, deadline=_deadline(5), max_queue_depth=2)
+        await self._drain(gate, tasks)
+
+    async def test_slot_context_honors_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv("MUSE_MAX_QUEUE_DEPTH", "0")
+        gate = ConcurrencyGate()
+        tasks = await self._fill(gate, 1, max_queue_depth=1)
+        with pytest.raises(QueueFull):
+            async with gate.slot("m", 1, deadline=_deadline(5), max_queue_depth=1):
+                pass
+        await self._drain(gate, tasks)
+
+
+class TestLiveCapDecrease:
+    """A surviving gate lowered from cap 4 to 1 never over-issues permits."""
+
+    async def test_no_new_permit_until_active_drops_below_the_new_cap(self):
+        gate = ConcurrencyGate()
+        for _ in range(4):
+            assert await gate.acquire_slot("m", 4, deadline=_deadline(5))
+        waiter = asyncio.ensure_future(gate.acquire_slot("m", 1, deadline=_deadline(5)))
+        await asyncio.sleep(0)
+        active = 4
+        for _ in range(3):  # three holders leave; the cap-1 waiter must keep waiting
+            gate.release_slot("m")
+            active -= 1
+            await asyncio.sleep(0)
+            assert not waiter.done(), f"granted with {active} still active"
+        gate.release_slot("m")  # the last original holder leaves
+        assert await asyncio.wait_for(waiter, 1) is True
+        # At most one holder from now on.
+        second = asyncio.ensure_future(gate.acquire_slot("m", 1, deadline=_deadline(5)))
+        third = asyncio.ensure_future(gate.acquire_slot("m", 4, deadline=_deadline(5)))
+        await asyncio.sleep(0)
+        assert not second.done() and not third.done()
+        gate.release_slot("m")
+        await asyncio.wait_for(second, 1)
+        await asyncio.sleep(0)
+        assert not third.done()
+        gate.release_slot("m")
+        await asyncio.wait_for(third, 1)
+        gate.release_slot("m")
+        assert gate._entered.get("m", 0) == 0 and gate._retire == {}
+
+    async def test_free_permits_are_retired_immediately(self):
+        gate = ConcurrencyGate()
+        assert await gate.acquire_slot("m", 4, deadline=_deadline(5))
+        gate.release_slot("m")                     # 4 free permits
+        assert await gate.acquire_slot("m", 1, deadline=_deadline(5))
+        with pytest.raises(QueueTimeout):
+            await gate.acquire_slot("m", 1, deadline=_deadline(0))
+        gate.release_slot("m")
+        assert await gate.acquire_slot("m", 1, deadline=_deadline(0))
+        gate.release_slot("m")
+        assert gate._retire == {}
+
+    async def test_higher_cap_keeps_the_original_size(self):
+        gate = ConcurrencyGate()
+        assert await gate.acquire_slot("m", 1, deadline=_deadline(5))
+        with pytest.raises(QueueTimeout):
+            await gate.acquire_slot("m", 4, deadline=_deadline(0))
+        gate.release_slot("m")
+
+
 class TestConcurrencyGateCrossThreadReads:
     """Regression coverage for the depths()/depth() cross-thread race.
 
