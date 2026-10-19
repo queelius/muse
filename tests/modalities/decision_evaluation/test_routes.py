@@ -37,7 +37,7 @@ class FakeBackend:
             PreparedQuestion(qid, q.keys, None, 7) for qid, q in request.questions
         ), 7 * len(request.questions))
 
-    def evaluate(self, batch):
+    def evaluate(self, batch, *, should_stop=None):
         self.calls += 1
         if self.evaluate_exc:
             raise self.evaluate_exc
@@ -188,7 +188,7 @@ def test_unusable_backend_is_503_and_fails_health(mixed_payload):
 
 def test_poisoning_failure_turns_health_red(mixed_payload):
     class Poisoning(FakeBackend):
-        def evaluate(self, batch):
+        def evaluate(self, batch, *, should_stop=None):
             self.usable = False
             raise DecisionBackendError("inference_failed")
 
@@ -208,3 +208,61 @@ def test_health_is_unaffected_for_backends_without_the_attribute():
     registry.register("audio/speech", Plain(), manifest={"model_id": "plain", "modality": "audio/speech"})
     client = TestClient(create_app(registry=registry, routers={}))
     assert client.get("/health").status_code == 200
+
+
+async def test_client_disconnect_stops_the_batch_between_questions():
+    import asyncio
+    import threading
+
+    from muse.modalities.decision_evaluation.protocol import DecisionCancelled
+
+    class Slow(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.evaluated = 0
+
+        def evaluate(self, batch, *, should_stop=None):
+            for _ in batch.questions:
+                if should_stop():
+                    raise DecisionCancelled()
+                self.started.set()
+                self.evaluated += 1
+                threading.Event().wait(0.05)
+            return super().evaluate(batch)
+
+    backend = Slow()
+    registry = ModalityRegistry()
+    registry.register(MODALITY, backend, manifest={"model_id": backend.model_id, "modality": MODALITY})
+    app = create_app(registry=registry, routers={MODALITY: build_router(registry)})
+    body = json.dumps({"model": backend.model_id, "state": "s", "questions": {
+        f"q{i}": {"type": "noul", "instructions": "i"} for i in range(16)
+    }}).encode()
+    gone = asyncio.Event()
+    sent = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive():
+        if sent:
+            return sent.pop()
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    responses = []
+
+    async def send(message):
+        responses.append(message)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/v1/systemone", "raw_path": b"/v1/systemone",
+        "root_path": "", "query_string": b"", "server": ("test", 80), "client": ("test", 1),
+        "headers": [(b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode())],
+    }
+    call = asyncio.ensure_future(app(scope, receive, send))
+    while not backend.started.is_set():
+        await asyncio.sleep(0.005)
+    gone.set()
+    await asyncio.wait_for(call, 10)
+    assert responses[0]["status"] == 499
+    assert 1 <= backend.evaluated < 16

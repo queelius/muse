@@ -9,6 +9,8 @@ Public surface:
     every decision model, whatever its manifest says
   - STRICT_REQUEST_PARSERS: the gateway parses /v1/systemone bodies with
     the strict parser before selecting a model
+  - CANCEL_ON_DISCONNECT_PATHS: the gateway drops its worker connection
+    when a /v1/systemone client disconnects, so the worker stops the batch
   - DecisionClient (HTTP client returning the full envelope)
   - the protocol records and errors
 
@@ -23,6 +25,7 @@ from muse.modalities.decision_evaluation.probe import PROBE_SHAPE, probe_backend
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
     DecisionBatch,
+    DecisionCancelled,
     DecisionInputError,
     DecisionModel,
     DecisionQuestion,
@@ -34,11 +37,12 @@ from muse.modalities.decision_evaluation.routes import build_router as _build_ro
 
 MODALITY = "decision/evaluation"
 
-# Literal dicts: read by muse.core.discovery via AST, without importing.
+# Literals: read by muse.core.discovery via AST, without importing.
 CONCURRENCY_CEILING = {"max_concurrency": 1, "max_queue_depth": 32}
 STRICT_REQUEST_PARSERS = {
     "/v1/systemone": "muse.modalities.decision_evaluation.validation:parse_request",
 }
+CANCEL_ON_DISCONNECT_PATHS = ("/v1/systemone",)
 
 # Per-modality probe defaults read by `muse models probe`.
 PROBE_DEFAULTS = {
@@ -56,11 +60,13 @@ __all__ = [
     "MODALITY",
     "CONCURRENCY_CEILING",
     "STRICT_REQUEST_PARSERS",
+    "CANCEL_ON_DISCONNECT_PATHS",
     "PROBE_DEFAULTS",
     "build_router",
     "DecisionClient",
     "DecisionBackendError",
     "DecisionBatch",
+    "DecisionCancelled",
     "DecisionInputError",
     "DecisionModel",
     "DecisionQuestion",

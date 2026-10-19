@@ -6,8 +6,9 @@ gateway. Execution goes through one DecisionExecutor per model.
 
 Errors use the OpenAI envelope: 400 invalid request or input-token
 limit, 413 body/state size, 404 unknown model, 503 queue full/timeout or
-an unusable backend, 500 invalid backend output. No response carries
-user text, local paths or native exception text.
+an unusable backend, 500 invalid backend output, and 499 (never seen by
+the departed client) when it disconnected and the batch was stopped. No
+response carries user text, local paths or native exception text.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from muse.cli_impl.queueing import QueueFull, QueueTimeout
 from muse.core import config
+from muse.core.disconnect import ClientDisconnected, unless_disconnected
 from muse.core.errors import ModelNotFoundError, error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.decision_evaluation.codec import encode_response
@@ -94,8 +96,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         budget = config.get("server.queue_timeout_seconds") or 0.0
         deadline = time.monotonic() + max(0.0, float(budget))
         try:
-            batch = await _executor(backend.model_id).execute(backend, req, deadline=deadline)
+            # A client that gives up stops the batch before its next question.
+            batch = await unless_disconnected(
+                request,
+                _executor(backend.model_id).execute(backend, req, deadline=deadline),
+            )
             body = encode_response(req, batch, model_id=backend.model_id)
+        except ClientDisconnected:
+            return error_response(499, "client_disconnected", "the client disconnected")
         except DecisionInputError as exc:
             return error_response(exc.status, exc.code, exc.message)
         except QueueFull:

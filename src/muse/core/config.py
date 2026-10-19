@@ -274,6 +274,13 @@ SETTINGS: list[Setting] = [
             "float", 5.0, "storage",
             "Automatic cleanup threshold in filesystem free percent; crossing either low-space threshold triggers maintenance.",
             minimum=0, maximum=100),
+    # --- install ---
+    Setting("install.llama_cpp_wheel", "MUSE_LLAMA_CPP_WHEEL",
+            "opt_str", None, "install",
+            "Install llama-cpp-python from a prebuilt CUDA wheel index (cu130) plus "
+            "NVIDIA's pip CUDA runtime, instead of building it from source; applies "
+            "on the next `muse pull` / `muse models refresh`.",
+            choices=("cu130",)),
     # --- fetch ---
     Setting("fetch.allow_private", "MUSE_ALLOW_PRIVATE_FETCH",
             "bool", False, "fetch",

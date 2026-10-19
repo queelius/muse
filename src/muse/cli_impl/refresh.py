@@ -43,6 +43,7 @@ from muse.core.catalog import (
 )
 from muse.core.venv import (
     install_python_sources,
+    pip_install_commands,
     run_owned_command,
     venv_python,
     venv_transaction,
@@ -311,8 +312,11 @@ def _refresh_staged_venv(
             extras=muse_extras,
         )
 
-    if not no_extras and pip_extras_list:
-        cmd2 = [python_path, "-m", "pip", "install", "--upgrade", *pip_extras_list]
+    commands = (
+        pip_install_commands(python_path, pip_extras_list, upgrade=True)
+        if not no_extras and pip_extras_list else ()
+    )
+    for cmd2 in commands:
         logger.info("refresh %s extras: %s", model_id, " ".join(cmd2))
         try:
             proc2 = run_owned_command(

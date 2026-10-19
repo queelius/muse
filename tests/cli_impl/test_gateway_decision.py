@@ -255,3 +255,97 @@ class TestQueueCeiling:
             r = await self._route(state)
             assert json.loads(r.body)["error"]["code"] == "queue_full"
             await self._finish(release, tasks)
+
+
+# --- client disconnect -------------------------------------------------------
+
+
+def test_only_systemone_cancels_its_worker_call_on_disconnect():
+    from muse.core.discovery import disconnect_cancellable_paths
+
+    assert disconnect_cancellable_paths() == frozenset({"/v1/systemone"})
+
+
+def _disconnecting_request(body: bytes, gone: asyncio.Event):
+    from starlette.requests import Request
+
+    sent = [{"type": "http.request", "body": body, "more_body": False}]
+    received = []
+
+    async def receive():
+        received.append(1)
+        if sent:
+            return sent.pop()
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    scope = {
+        "type": "http", "method": "POST", "path": "/v1/systemone", "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    return Request(scope, receive), received
+
+
+def _hanging_client(mock_cls, opened: asyncio.Event, cancelled: asyncio.Event):
+    client = MagicMock()
+    client.aclose = AsyncMock()
+
+    async def hang():
+        opened.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    ctx = MagicMock()
+    ctx.__aenter__ = MagicMock(side_effect=lambda: hang())
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    client.stream = MagicMock(return_value=ctx)
+    mock_cls.return_value = client
+    return client
+
+
+async def test_disconnect_drops_the_worker_call_and_releases():
+    from muse.cli_impl.gateway import _forward_with_release
+    from muse.core.disconnect import ClientDisconnected
+
+    gone, opened, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    request, _ = _disconnecting_request(json.dumps(BODY).encode(), gone)
+    director = MagicMock()
+    released = []
+    with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+        client = _hanging_client(mock_cls, opened, cancelled)
+        call = asyncio.ensure_future(_forward_with_release(
+            request, "http://127.0.0.1:9001/v1/systemone", 30.0,
+            director=director, model_id=DECISION,
+            extra_release=lambda: released.append(1), cancel_on_disconnect=True,
+        ))
+        await asyncio.wait_for(opened.wait(), 5)
+        gone.set()
+        with pytest.raises(ClientDisconnected):
+            await asyncio.wait_for(call, 5)
+    assert cancelled.is_set()
+    director.release.assert_called_once_with(DECISION)
+    assert released == [1]
+    client.aclose.assert_awaited_once()
+
+
+async def test_other_paths_do_not_watch_for_disconnect():
+    from muse.cli_impl.gateway import _forward_with_release
+
+    gone, opened, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    request, received = _disconnecting_request(json.dumps(BODY).encode(), gone)
+    with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+        _hanging_client(mock_cls, opened, cancelled)
+        call = asyncio.ensure_future(_forward_with_release(
+            request, "http://127.0.0.1:9001/v1/x", 30.0,
+            director=MagicMock(), model_id=DECISION,
+        ))
+        await asyncio.wait_for(opened.wait(), 5)
+        gone.set()
+        await asyncio.sleep(0.05)
+        assert not call.done() and len(received) == 1  # only the body was read
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call

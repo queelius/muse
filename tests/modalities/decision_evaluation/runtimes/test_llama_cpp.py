@@ -14,6 +14,7 @@ from muse.modalities.decision_evaluation import templates
 from muse.modalities.decision_evaluation.codec import encode_response
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
+    DecisionCancelled,
     DecisionInputError,
     DecisionModel,
 )
@@ -467,3 +468,38 @@ def test_registered_as_a_native_gguf_backend():
     assert is_native_gguf({
         "backend_path": "muse.modalities.decision_evaluation.runtimes.llama_cpp:DecisionLlamaCppModel",
     })
+
+
+def test_should_stop_ends_the_batch_between_questions(fake):
+    FakeLlama.logits_fn = _letter_logits({"A": 1.0})
+    m = _model(fake)
+    req = _req({"a": _choice(["x", "y"]), "b": _choice(["x", "y"]), "c": _choice(["x", "y"])})
+    batch = m.prepare(req)
+    m._llama.calls.clear()
+    asked = []
+
+    def stop():
+        asked.append(len(asked))
+        return len(asked) > 1  # let the first question run, then stop
+
+    with pytest.raises(DecisionCancelled):
+        m.evaluate(batch, should_stop=stop)
+    assert [c for c in m._llama.calls if isinstance(c, tuple) and c[0] == "eval"] == [("eval", batch.questions[0].input_tokens)]
+    # Stopping is not a native failure: the instance keeps serving.
+    assert m.usable
+    assert len(m.evaluate(m.prepare(req)).answers) == 3
+
+
+@pytest.mark.parametrize("kw, cpu_only", [
+    ({"device": "cpu"}, True), ({"n_gpu_layers": 0}, True), ({}, False),
+])
+def test_cuda_runtime_is_prepared_before_import(kw, cpu_only, fake, monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setattr(runtime, "Llama", None)
+    monkeypatch.setattr(runtime, "prepare_llama_cpp", lambda **k: calls.append(k))
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+    _model(fake, **kw)
+    assert calls == [{"cpu_only": cpu_only}]

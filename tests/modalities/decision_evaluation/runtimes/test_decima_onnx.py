@@ -13,6 +13,7 @@ import muse.modalities.decision_evaluation.runtimes.decima_onnx as runtime
 from muse.modalities.decision_evaluation.codec import encode_response, score_confidence
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
+    DecisionCancelled,
     DecisionInputError,
     DecisionModel,
 )
@@ -463,3 +464,18 @@ def test_close_clears_cache_and_refuses_further_work(export):
     assert len(m._cache) == 0
     with pytest.raises(DecisionBackendError):
         m.prepare(req)
+
+
+def test_should_stop_ends_the_batch_between_questions(export):
+    m = _model(export)
+    req = _req({
+        "a": _choice({"a": None, "b": None}),
+        "b": _choice({"a": None, "b": None}),
+    })
+    batch = m.prepare(req)
+    m._rt.enc.calls.clear()
+    with pytest.raises(DecisionCancelled):
+        m.evaluate(batch, should_stop=lambda: True)
+    assert m._rt.enc.calls == []
+    assert m.usable
+    assert len(m.evaluate(batch).answers) == 2

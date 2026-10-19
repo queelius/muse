@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
+from muse.core.llama_cuda import prepare_llama_cpp
 from muse.core.placement import native_gpu_backend, native_gpu_offload, native_placement
 from muse.modalities.chat_completion.protocol import (
     ChatChoice,
@@ -29,11 +30,13 @@ logger = logging.getLogger(__name__)
 Llama: Any = None
 
 
-def _ensure_deps() -> None:
+def _ensure_deps(*, cpu_only: bool = False) -> None:
     global Llama
     if Llama is not None:
         return
     try:
+        # A prebuilt CUDA wheel needs NVIDIA's pip runtime loaded first.
+        prepare_llama_cpp(cpu_only=cpu_only)
         from llama_cpp import Llama as _Llama
         Llama = _Llama
     except Exception as e:  # noqa: BLE001
@@ -84,7 +87,7 @@ class LlamaCppModel:
         supports_tools: bool | None = None,  # consumed; not forwarded
         **_: Any,
     ) -> None:
-        _ensure_deps()
+        _ensure_deps(cpu_only=device == "cpu" or n_gpu_layers == 0)
         if Llama is None:
             raise RuntimeError(
                 "llama-cpp-python is not installed; run `muse pull` or "

@@ -122,6 +122,18 @@ Decision GGUF to the chat runtime. In the worker, one `DecisionExecutor` per
 model runs batches on its own thread behind a cap-1/32-deep `ConcurrencyGate`
 and releases the slot from the native call's completion callback, so a
 cancelled request cannot free the backend while native work continues.
+Cancellation does stop the batch at the next question boundary: `evaluate`
+takes `should_stop` and raises `DecisionCancelled` (native state stays
+usable). The worker route wraps execution in
+`muse.core.disconnect.unless_disconnected` (Starlette/uvicorn never cancel a
+non-streaming handler on client disconnect, so it races the work against
+the `http.disconnect` message), and the package exports
+`CANCEL_ON_DISCONNECT_PATHS = ("/v1/systemone",)`, a generic AST-read seam
+(`discovery.disconnect_cancellable_paths`) that makes the gateway close its
+worker connection, release its slot/refcount and record 499 when the
+client leaves while the worker is still producing headers. Only declare it
+where the worker owns admission, or a freed gateway slot could put two
+runs on one backend.
 PROBE_DEFAULTS runs one Choice, Score and Noul question. No per-model
 inference authorization exists in muse, so there is no 403 path.
 
@@ -519,6 +531,21 @@ default (-1). Refuses non-GGUF models (other runtimes silently ignore the kwarg)
 Takes effect on next cold load; run `muse models probe <id>` after pinning
 so admission sizing measures the split's real (smaller) VRAM peak. The
 probe honors the pin automatically (it constructs via `load_backend`).
+**CUDA llama-cpp-python wheels (v0.62.1).** pip's source build is CPU-only
+without `nvcc`. `install.llama_cpp_wheel: cu130` (env `MUSE_LLAMA_CPP_WHEEL`)
+makes `muse pull` / `muse models refresh` install llama-cpp-python
+binary-only from the abetlen cu130 index, capped at the verified version in
+`muse.core.llama_cuda.WHEELS`, plus `nvidia-cuda-runtime`/`nvidia-cublas`
+(`venv.pip_install_commands`; a same-version CPU build is force-reinstalled
+`--no-deps`). The wheel does not ship libcudart/libcublas and its RPATH is
+`$ORIGIN`, so `llama_cuda.prepare_llama_cpp()` dlopens them RTLD_GLOBAL from
+`site-packages/nvidia/*/lib` before `import llama_cpp` (both GGUF runtimes'
+`_ensure_deps`, `placement.native_gpu_offload/backend`, and the supervisor's
+`_QUERY` capability script, which also adds them to its cache identity).
+With `cpu_only=True` (a cpu placement or 0 GPU layers) it first sets
+`CUDA_VISIBLE_DEVICES=""`: a CUDA build otherwise allocates VRAM and offloads
+host matmuls even at `n_gpu_layers=0`. No-op for CPU builds. See
+docs/CHAT_COMPLETION.md "GPU builds of llama-cpp-python".
 Known limitation: a split model occupies both VRAM and host RAM, but the
 director accounts it against its resolved device's pool only -- the
 Tier-1 static-offload simplification (automatic offload was evaluated and

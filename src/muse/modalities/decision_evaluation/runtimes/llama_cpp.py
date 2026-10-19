@@ -16,12 +16,15 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from muse.core.llama_cuda import prepare_llama_cpp
 from muse.core.placement import native_gpu_backend, native_gpu_offload, native_placement
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
+    DecisionCancelled,
     DecisionBatch,
     DecisionInputError,
     DecisionRequest,
@@ -46,11 +49,13 @@ MAX_CONTEXT = 2048
 Llama: Any = None
 
 
-def _ensure_deps() -> None:
+def _ensure_deps(*, cpu_only: bool = False) -> None:
     global Llama
     if Llama is not None:
         return
     try:
+        # A prebuilt CUDA wheel needs NVIDIA's pip runtime loaded first.
+        prepare_llama_cpp(cpu_only=cpu_only)
         from llama_cpp import Llama as _Llama
         Llama = _Llama
     except Exception as e:  # noqa: BLE001
@@ -119,7 +124,7 @@ class DecisionLlamaCppModel:
         n_threads: int = 2,
         **_: Any,
     ) -> None:
-        _ensure_deps()
+        _ensure_deps(cpu_only=device == "cpu" or n_gpu_layers == 0)
         if Llama is None:
             raise RuntimeError(
                 "llama-cpp-python is not installed; run `muse pull` or "
@@ -184,7 +189,9 @@ class DecisionLlamaCppModel:
             input_tokens=sum(q.input_tokens for q in questions),
         )
 
-    def evaluate(self, batch: PreparedBatch) -> DecisionBatch:
+    def evaluate(
+        self, batch: PreparedBatch, *, should_stop: Callable[[], bool] | None = None,
+    ) -> DecisionBatch:
         if batch.model_id != self.model_id or any(
             not isinstance(q.payload, _Prompt) or q.payload.owner is not self
             for q in batch.questions
@@ -195,6 +202,8 @@ class DecisionLlamaCppModel:
             answers = []
             try:
                 for q in batch.questions:
+                    if should_stop is not None and should_stop():
+                        raise DecisionCancelled()
                     candidates = self._label_ids[: len(q.keys)]
                     self._reset()
                     self._llama.eval(q.payload.tokens)
@@ -204,6 +213,9 @@ class DecisionLlamaCppModel:
                         probabilities=dict(zip(q.keys, _softmax(logits))),
                     ))
                 self._reset()
+            except DecisionCancelled:
+                # Stopped between questions; the next question resets anyway.
+                raise
             except DecisionBackendError as exc:
                 # Non-finite logits are a bad answer, not bad native state
                 # (every question starts from a reset); anything else is.

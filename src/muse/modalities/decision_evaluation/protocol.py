@@ -11,6 +11,7 @@ distributions into wire answers.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, Union, runtime_checkable
 
@@ -118,6 +119,10 @@ class DecisionBackendError(Exception):
         super().__init__(message)
 
 
+class DecisionCancelled(Exception):
+    """The caller abandoned the batch; evaluation stopped between questions."""
+
+
 @runtime_checkable
 class DecisionModel(Protocol):
     """Structural protocol both decision runtimes satisfy."""
@@ -128,8 +133,13 @@ class DecisionModel(Protocol):
         """Tokenize and length-check every question; no inference."""
         ...
 
-    def evaluate(self, batch: PreparedBatch) -> DecisionBatch:
-        """Run inference on a batch this instance prepared."""
+    def evaluate(
+        self, batch: PreparedBatch, *, should_stop: Callable[[], bool] | None = None,
+    ) -> DecisionBatch:
+        """Run inference on a batch this instance prepared.
+
+        should_stop is checked before each question; when it returns True,
+        raise DecisionCancelled. Native state stays usable."""
         ...
 
     def close(self) -> None:

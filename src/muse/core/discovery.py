@@ -394,6 +394,26 @@ def strict_request_parsers(dirs: list[Path] | None = None) -> dict[str, str]:
     return out
 
 
+def disconnect_cancellable_paths(dirs: list[Path] | None = None) -> frozenset[str]:
+    """Request paths whose modality exports CANCEL_ON_DISCONNECT_PATHS.
+
+    For these paths the gateway drops its worker connection when the client
+    disconnects (releasing its slot and refcount at once) instead of waiting
+    for the worker's response. A modality declares this only when its worker
+    does its own admission and stops abandoned work, so freeing the gateway
+    slot early can never put two runs on the backend at once.
+    """
+    out: set[str] = set()
+    for tag, value in _declarations("CANCEL_ON_DISCONNECT_PATHS", dirs):
+        if isinstance(value, tuple) and all(
+            isinstance(v, str) and v.startswith("/") for v in value
+        ):
+            out.update(value)
+        else:
+            logger.warning("ignoring malformed CANCEL_ON_DISCONNECT_PATHS for %s", tag)
+    return frozenset(out)
+
+
 def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
     """Scan dirs in order for modality subpackages.
 

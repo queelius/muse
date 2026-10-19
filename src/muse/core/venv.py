@@ -1054,20 +1054,54 @@ def install_into_venv(venv_path: Path, packages: list[str]) -> None:
     py = venv_python(venv_path)
     verbose = _is_verbose()
     logger.info("installing %s into %s", packages, venv_path)
-    cmd = [str(py), "-m", "pip", "install"]
-    if not verbose:
-        cmd.append("-q")
-    cmd.extend(packages)
+    for cmd in pip_install_commands(str(py), packages, quiet=not verbose):
+        try:
+            run_owned_command(
+                cmd, timeout=_PIP_TIMEOUT,
+                capture_output=not verbose, check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            if not verbose:
+                _emit_failure_output(exc)
+            raise
+
+
+def pip_install_commands(
+    python: str, packages: list[str], *, upgrade: bool = False, quiet: bool = False,
+) -> collections.abc.Iterator[list[str]]:
+    """Yield the pip commands that install `packages`; run each before the next.
+
+    Usually one command. With `install.llama_cpp_wheel` set and a
+    llama-cpp-python requirement present, llama-cpp-python installs
+    separately from the prebuilt CUDA wheel index, and is force-reinstalled
+    when pip kept an existing CPU build of a satisfying version.
+    """
+    from muse.core import config, llama_cuda
+
+    plan = llama_cuda.install_plan(list(packages), config.get("install.llama_cpp_wheel"))
+    base = [python, "-m", "pip", "install"]
+    if quiet:
+        base.append("-q")
+    if upgrade:
+        base.append("--upgrade")
+    for step, args in enumerate(plan):
+        yield [*base, *args]
+        if step == 1 and not _is_cuda_llama_build(python):
+            logger.info("replacing the CPU llama-cpp-python build in %s", python)
+            yield [*base, *llama_cuda.reinstall_args(args)]
+
+
+def _is_cuda_llama_build(python: str) -> bool:
+    from muse.core import llama_cuda
 
     try:
-        run_owned_command(
-            cmd, timeout=_PIP_TIMEOUT,
-            capture_output=not verbose, check=True,
+        result = run_owned_command(
+            [python, "-c", llama_cuda.IS_CUDA_BUILD_SCRIPT],
+            timeout=60, capture_output=True, check=False,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        if not verbose:
-            _emit_failure_output(exc)
-        raise
+    except (OSError, subprocess.SubprocessError):
+        return False  # unknown: reinstalling the wheel is the safe side
+    return result.returncode == 0
 
 
 def _source_relative_path(

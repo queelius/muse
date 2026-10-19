@@ -54,6 +54,8 @@ def is_native_gguf(manifest: dict) -> bool:
 
 def native_gpu_offload() -> bool:
     """Inspect the loaded native library in the current model interpreter."""
+    from muse.core.llama_cuda import prepare_llama_cpp
+    prepare_llama_cpp()
     try:
         import llama_cpp
     except ImportError:
@@ -79,6 +81,8 @@ def _backend_from_system_info(info: str, *, platform: str) -> str:
 
 def native_gpu_backend() -> str:
     """Identify supported native families without consulting Torch CUDA."""
+    from muse.core.llama_cuda import prepare_llama_cpp
+    prepare_llama_cpp()
     import llama_cpp
     info = getattr(llama_cpp, "llama_print_system_info", lambda: b"")()
     if isinstance(info, bytes):
@@ -91,10 +95,16 @@ import importlib.metadata
 import json
 import sys
 from pathlib import Path
+try:
+    from muse.core.llama_cuda import prepare_llama_cpp
+except ImportError:
+    preloaded = []
+else:
+    preloaded = prepare_llama_cpp()
 import llama_cpp
 llama_cpp.llama_backend_init()
 package = Path(llama_cpp.__file__).resolve()
-paths = {str(package), str(package.parent)}
+paths = {str(package), str(package.parent), *preloaded}
 for path in package.parent.rglob('*'):
     if path.is_dir() or path.suffix in ('.py', '.so', '.dll', '.dylib', '.pyd') or '.so.' in path.name:
         paths.add(str(path))

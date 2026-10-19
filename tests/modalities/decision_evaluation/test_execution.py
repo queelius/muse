@@ -45,7 +45,7 @@ class BlockingBackend:
             raise self.prepare_error
         return PreparedBatch("m", (PreparedQuestion("q", ("true", "false"), None, 3),), 3)
 
-    def evaluate(self, batch):
+    def evaluate(self, batch, *, should_stop=None):
         with self.lock:
             self.active += 1
             self.calls += 1
@@ -220,3 +220,24 @@ async def test_close_reports_undrained_work():
     assert await ex.close(timeout=0.05) is False
     backend.gate.set()
     await task
+
+
+async def test_cancelling_a_running_request_asks_the_backend_to_stop(executor):
+    backend = BlockingBackend()
+    seen = []
+    original = backend.evaluate
+
+    def evaluate(batch, *, should_stop=None):
+        seen.append(should_stop)
+        return original(batch, should_stop=should_stop)
+
+    backend.evaluate = evaluate
+    running = asyncio.ensure_future(executor.execute(backend, REQUEST, deadline=_deadline()))
+    await _until(backend.started.is_set)
+    assert seen[0]() is False
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert seen[0]() is True
+    backend.gate.set()
+    await _until(lambda: executor.running == 0)

@@ -47,9 +47,11 @@ from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, is_enabled, known_models
 from muse.core.discovery import (
     concurrency_ceilings,
+    disconnect_cancellable_paths,
     model_optional_paths,
     strict_request_parsers,
 )
+from muse.core.disconnect import ClientDisconnected, unless_disconnected
 from muse.core.errors import error_type_for_status
 from muse.core.server import _format_loaded_at, build_model_entry
 
@@ -1353,7 +1355,11 @@ async def _route_via_director(
             request, target_url, timeout,
             director=state.director, model_id=model_id,
             extra_release=_release_slot,
+            cancel_on_disconnect=request.url.path in disconnect_cancellable_paths(),
         )
+    except ClientDisconnected:
+        # Nobody receives this response; it is recorded as a 499 below.
+        response = _openai_error(499, "client_disconnected", "the client disconnected")
     except asyncio.CancelledError:
         stop_event = getattr(state, "stop_event", None)
         is_set = getattr(stop_event, "is_set", None)
@@ -1652,9 +1658,15 @@ async def _forward_with_release(
     director: Any,
     model_id: str,
     extra_release: "Callable[[], None] | None" = None,
+    cancel_on_disconnect: bool = False,
 ) -> Response:
     """Forward + release variant: same shape as `_forward`, but wires the
     director.release call into the response lifecycle.
+
+    `cancel_on_disconnect` (paths a modality lists in
+    CANCEL_ON_DISCONNECT_PATHS): if the client disconnects while the worker
+    is still producing its response headers, close the worker connection,
+    release as on any open failure, and raise ClientDisconnected.
 
     `extra_release`, when given, is invoked immediately after each
     director.release site (spec 2026-07-08: the concurrency-gate slot
@@ -1726,7 +1738,10 @@ async def _forward_with_release(
             content=body,
             params=dict(request.query_params),
         )
-        response = await stream_ctx.__aenter__()
+        opening = stream_ctx.__aenter__()
+        response = await (
+            unless_disconnected(request, opening) if cancel_on_disconnect else opening
+        )
     except BaseException:
         # BaseException, not just Exception: a CancelledError here (the client
         # disconnected while we were opening the worker connection) must

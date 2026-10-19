@@ -10,8 +10,9 @@ state concurrently either. Each backend gets one DecisionExecutor:
     single thread;
   - the slot is released by the native call's completion callback, NOT by
     the awaiting request. Cancelling a request whose batch is already
-    running stops the wait, not the native work, and the next request is
-    admitted only after that work has finished.
+    running stops the wait and asks the backend to stop before its next
+    question; the question in progress always finishes, and the next
+    request is admitted only after the native work has returned.
 
 A backend that reports `usable = False` is refused; the worker's /health
 then fails so the supervisor replaces the worker.
@@ -21,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import threading
 
 from muse.cli_impl.queueing import ConcurrencyGate
 from muse.modalities.decision_evaluation.protocol import (
@@ -34,10 +36,12 @@ from muse.modalities.decision_evaluation.protocol import (
 logger = logging.getLogger(__name__)
 
 
-def _run(backend: DecisionModel, request: DecisionRequest) -> DecisionBatch:
+def _run(
+    backend: DecisionModel, request: DecisionRequest, stop: threading.Event,
+) -> DecisionBatch:
     # Every question is prepared (tokenized, length-checked) before any is
     # evaluated, so an invalid question means no inference at all.
-    return backend.evaluate(backend.prepare(request))
+    return backend.evaluate(backend.prepare(request), should_stop=stop.is_set)
 
 
 def _consume(future: asyncio.Future) -> None:
@@ -79,9 +83,10 @@ class DecisionExecutor:
         await self._gate.acquire_slot(
             self.model_id, self._cap, deadline=deadline, max_queue_depth=self._depth,
         )
+        stop = threading.Event()
         try:
             self._check_open(backend)
-            future = self._pool.submit(_run, backend, request)
+            future = self._pool.submit(_run, backend, request, stop)
         except BaseException:
             self._gate.release_slot(self.model_id)
             raise
@@ -91,7 +96,11 @@ class DecisionExecutor:
         wrapped.add_done_callback(_consume)
         # shield: a cancelled request must not cancel the native work's
         # tracking future; the slot follows the native work, not the caller.
-        return await asyncio.shield(wrapped)
+        try:
+            return await asyncio.shield(wrapped)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
 
     def _finished(self, future: concurrent.futures.Future) -> None:
         self._running.discard(future)

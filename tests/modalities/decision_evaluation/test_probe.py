@@ -36,7 +36,7 @@ class FakeBackend:
             input_tokens=10 * len(request.questions),
         )
 
-    def evaluate(self, batch):
+    def evaluate(self, batch, *, should_stop=None):
         answers = [
             QuestionDistribution(q.question_id, {k: 1 / len(q.keys) for k in q.keys})
             for q in batch.questions

@@ -25,11 +25,13 @@ import logging
 import math
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
+    DecisionCancelled,
     DecisionBatch,
     DecisionInputError,
     DecisionQuestion,
@@ -265,7 +267,9 @@ class DecimaOnnxModel:
         e = np.exp(logp - logp.max())
         return [float(x) for x in e / e.sum()]
 
-    def evaluate(self, batch: PreparedBatch) -> DecisionBatch:
+    def evaluate(
+        self, batch: PreparedBatch, *, should_stop: Callable[[], bool] | None = None,
+    ) -> DecisionBatch:
         if batch.model_id != self.model_id or any(
             not isinstance(q.payload, _Prepared) or q.payload.owner is not self
             for q in batch.questions
@@ -276,11 +280,15 @@ class DecimaOnnxModel:
             answers = []
             try:
                 for q in batch.questions:
+                    if should_stop is not None and should_stop():
+                        raise DecisionCancelled()
                     probs = self._probabilities(q.payload)
                     answers.append(QuestionDistribution(
                         question_id=q.question_id,
                         probabilities=dict(zip(q.keys, probs)),
                     ))
+            except DecisionCancelled:
+                raise
             except DecisionBackendError as exc:
                 if exc.code != "invalid_distribution":
                     self._unusable = True

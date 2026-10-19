@@ -912,3 +912,34 @@ class TestTransactionalRefresh:
         assert result.state == "ok"
         assert (venv_path / "marker").read_text() == "committed"
         assert pth.read_text() == "committed-checkout\n"
+
+
+def test_cuda_wheel_setting_splits_the_extras_step(tmp_catalog, tmp_path, monkeypatch):
+    from muse.core import llama_cuda
+
+    monkeypatch.setenv("MUSE_LLAMA_CPP_WHEEL", "cu130")
+    py = _make_python_path(tmp_path, "x")
+    _seed_catalog({
+        "x": {
+            "pulled_at": "...", "hf_repo": "x", "local_dir": "/x",
+            "venv_path": str(tmp_path / "venvs" / "x"),
+            "python_path": py,
+            "enabled": True,
+        },
+    })
+    manifest = {
+        "model_id": "x", "modality": "chat/completion",
+        "pip_extras": ("llama-cpp-python>=0.2.90",),
+    }
+    with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
+         patch("muse.core.venv._is_cuda_llama_build", return_value=False), \
+         patch("muse.cli_impl.refresh.run_owned_command") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        result = refresh_one("x")
+    assert result.state == "ok"
+    extras = [c.args[0][5:] for c in mock_run.call_args_list[1:]]
+    index, verified, runtimes = llama_cuda.WHEELS["cu130"]
+    assert extras[0] == list(runtimes)
+    assert extras[1] == ["--only-binary=llama-cpp-python", "--extra-index-url", index,
+                         "llama-cpp-python>=0.2.90", f"llama-cpp-python<={verified}"]
+    assert extras[2][:2] == ["--force-reinstall", "--no-deps"]

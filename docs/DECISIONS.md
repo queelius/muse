@@ -129,6 +129,16 @@ The numbers above are illustrative, not a measurement.
   including the state repeated per question and option encodings even
   when they are served from cache. `output_tokens` is always 0.
 
+**Decision-0.8B's Score answers are often bimodal.** It can put most of
+the probability on the two end levels and little in the middle. Then
+`score` (the weighted mean) lands between them on a level the model
+barely chose, and `confidence` is near 0 even though no level looked
+uncertain. In the 2026-10-19 live run it scored a checkout outage 1.29
+(confidence 0.00) on a 0-2 scale, although its most probable level was 2.
+Read the `probabilities` for Score questions; do not threshold `score`
+alone. Decima-base's ordinal head did not show this pattern in the same
+run.
+
 **Confidence measures concentration, not correctness.** Neither model is a
 safety gate. Their answers can change with option wording, option order,
 prompt injection in `state`, rules involving numbers, or out-of-domain
@@ -144,6 +154,7 @@ questions. Enforce policy deterministically, outside these models.
 | 409 | the model is disabled |
 | 503 | queue full or timed out, the model cannot be served, or the backend is unusable until its worker restarts |
 | 500 | the backend returned an invalid distribution, or failed |
+| 499 | the client disconnected; nobody receives this, it appears only in telemetry |
 
 Responses never include your text, local paths or native exception text.
 
@@ -156,9 +167,14 @@ cannot raise them; a positive `server.max_queue_depth` can lower the
 queue limit.
 
 The gateway parses the body strictly before choosing a model, so a
-malformed request never triggers a cold load. Inside the worker, a
-request cancelled mid-inference does not free the model until the native
-work finishes.
+malformed request never triggers a cold load.
+
+**A client that gives up stops its batch.** The modality lists
+`/v1/systemone` in `CANCEL_ON_DISCONNECT_PATHS`, so when a client
+disconnects, the gateway closes its worker connection at once. The
+worker sees the disconnect and stops the batch before its next question.
+The question already running always finishes, and the model takes no
+other request until it does. Both sides record the request as status 499.
 
 If a native failure leaves a model's state uncertain, the worker stops
 serving it and its `/health` returns 503, so the supervisor replaces the
@@ -250,3 +266,30 @@ Both models chose `billing` and judged the duplicate charge true, but they
 put the same message's urgency at different levels. This was a
 handful of hand-written questions, so it says nothing about accuracy or
 calibration.
+
+### GPU run, 2026-10-19
+
+The same host, with `install.llama_cpp_wheel: cu130` (see
+[GPU builds of llama-cpp-python](CHAT_COMPLETION.md#gpu-builds-of-llama-cpp-python))
+and `muse models refresh decision-0.8b-q8`, then `muse-local` restarted.
+Decision's `auto` placement now resolves to **CUDA**. Decima-base is
+ONNX and stays on CPU.
+
+| | `decima-base` (CPU) | `decision-0.8b-q8` (GPU) |
+|---|---|---|
+| Probe | (unchanged) | load 1.1 s, peak 1.40 GB VRAM |
+| Hot 3-question request through the gateway, median of 5 | 219 ms | 81 ms (CPU build: about 7.5 s) |
+| 50 simultaneous requests | 33 served, 17 `queue_full`, 5.7 s | 33 served, 17 `queue_full`, 2.5 s |
+| 16-question batch, run to completion | 35.4 s | 3.2 s |
+| Next request after abandoning that batch at 0.3 s | 1.98 s | 0.23 s |
+
+- **Same logits.** A scratch benchmark of the cu130 wheel produced the
+  same option logits on GPU as on CPU (max difference 0.0).
+- **Panel unchanged.** On the 12 hand-labelled questions, Decision matched
+  12 and Decima 11, as on CPU. Decision changed one of five Choice answers
+  when the options were reversed; Decima changed none.
+- **Contract unchanged.** The error contract, MCP `muse_decide` and
+  content-free telemetry all checked out again.
+- **Abandoned batches stop.** Before 0.62.1, an abandoned 16-question
+  request kept the model busy for its full run (189 s on the CPU build).
+

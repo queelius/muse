@@ -268,6 +268,45 @@ creates a per-model venv with `llama-cpp-python` installed, downloads
 just the chosen GGUF file (skipping other quants in the same repo to
 save bandwidth), and persists the manifest in `~/.muse/catalog.json`.
 
+## GPU builds of llama-cpp-python
+
+By default pip builds llama-cpp-python from source. Without the CUDA
+toolkit (`nvcc`) that build is CPU-only, so every GGUF model, chat and
+decision alike, runs on the CPU even on a GPU host.
+
+To use prebuilt CUDA wheels instead:
+
+```bash
+muse config set install.llama_cpp_wheel cu130   # or MUSE_LLAMA_CPP_WHEEL=cu130
+muse models refresh <id>                       # existing GGUF venvs; new pulls use it too
+```
+
+- **What gets installed.** llama-cpp-python comes binary-only from
+  `https://abetlen.github.io/llama-cpp-python/whl/cu130`. It is capped at
+  the newest version muse has verified (0.3.33), so a loose `>=0.2.90`
+  requirement cannot pick up an untested wheel. NVIDIA's pip CUDA 13
+  runtime and cuBLAS come with it (`nvidia-cuda-runtime`,
+  `nvidia-cublas`, about 580 MB per venv).
+- **The CPU build is replaced.** pip counts an existing CPU build of the
+  same version as already satisfied. When the refresh finds one, it
+  force-reinstalls the wheel without touching its dependencies.
+- **Requirements.** Linux x86-64, glibc 2.35 or newer, and an NVIDIA
+  driver new enough for CUDA 13 (580+). The CUDA toolkit is not needed.
+- **Loading.** The wheel links `libcudart`/`libcublas` but does not ship
+  them, and llama.cpp never searches pip's `nvidia/*/lib` directory.
+  `muse.core.llama_cuda.prepare_llama_cpp()` loads them before
+  `import llama_cpp`. This happens in both GGUF runtimes, the probe and
+  the supervisor's GPU capability query. In a CPU-only build it does
+  nothing.
+- **`cpu` means CPU.** Even with `n_gpu_layers=0`, a CUDA build still
+  offloads large host matrix multiplies to the GPU and allocates VRAM. So
+  for a model placed on the CPU (`set-device <id> cpu`, or
+  `set-gpu-layers <id> 0`), muse hides the CUDA devices from that worker
+  before llama.cpp loads.
+
+Unset the setting (`muse config unset install.llama_cpp_wheel`) to go
+back to source builds on the next pull or refresh.
+
 ## Implementation notes
 
 - `LlamaCppModel` runs in-process inside the per-model venv. This

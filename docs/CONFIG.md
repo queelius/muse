@@ -112,6 +112,12 @@ A snapshot of the defaults:
 | `paths.modalities_dir` | `MUSE_MODALITIES_DIR` | null |
 | `paths.config_file` | `MUSE_CONFIG` | null (-> catalog_dir/config.yaml) |
 
+### install (applied by `muse pull` / `muse models refresh`)
+
+| key | env | default |
+|---|---|---|
+| `install.llama_cpp_wheel` | `MUSE_LLAMA_CPP_WHEEL` | null (build llama-cpp-python from source). `cu130`: prebuilt CUDA 13 wheel plus NVIDIA's pip runtime; see docs/CHAT_COMPLETION.md "GPU builds of llama-cpp-python" |
+
 ### fetch
 
 | key | env | default |

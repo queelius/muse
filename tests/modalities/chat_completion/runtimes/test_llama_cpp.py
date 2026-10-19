@@ -356,3 +356,21 @@ class TestPerfKwargsForwarding:
         kwargs = self._construct(tmp_path, flash_attn=False, n_batch=0)
         assert kwargs["flash_attn"] is False
         assert kwargs["n_batch"] == 0
+
+
+@pytest.mark.parametrize("kw, cpu_only", [
+    ({"device": "cpu"}, True), ({"n_gpu_layers": 0}, True), ({"device": "auto"}, False),
+])
+def test_cuda_runtime_is_prepared_before_import(tmp_path, monkeypatch, kw, cpu_only):
+    import muse.modalities.chat_completion.runtimes.llama_cpp as runtime
+
+    local_dir, gguf = _with_existing_gguf(tmp_path)
+    calls = []
+    fake_llama = MagicMock()
+    monkeypatch.setattr(runtime, "Llama", None)
+    monkeypatch.setattr(runtime, "prepare_llama_cpp", lambda **k: calls.append(k))
+    monkeypatch.setattr(runtime, "native_gpu_offload", lambda: False)
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=fake_llama))
+    runtime.LlamaCppModel(model_id="t", hf_repo="t/m", local_dir=str(local_dir), gguf_file=gguf, **kw)
+    assert calls == [{"cpu_only": cpu_only}]
+    fake_llama.assert_called_once()
