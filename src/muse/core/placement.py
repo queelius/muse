@@ -42,10 +42,14 @@ def native_placement(
     return Placement(device, "cpu" if target == "mps" else "cuda", n_gpu_layers)
 
 
+NATIVE_GGUF_BACKENDS = frozenset({
+    "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel",
+    "muse.modalities.decision_evaluation.runtimes.llama_cpp:DecisionLlamaCppModel",
+})
+
+
 def is_native_gguf(manifest: dict) -> bool:
-    return manifest.get("backend_path", "") == (
-        "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
-    )
+    return manifest.get("backend_path", "") in NATIVE_GGUF_BACKENDS
 
 
 def native_gpu_offload() -> bool:
