@@ -19,7 +19,10 @@ import io
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from muse.modalities.image_generation.image_input import decode_image_input
+from muse.modalities.image_generation.image_input import (
+    ImageTooLargeError,
+    decode_image_input,
+)
 
 
 def _png_bytes(width=64, height=64, color=(0, 128, 255)):
@@ -85,7 +88,7 @@ async def test_decode_http_url_fetches_via_net_fetch():
 async def test_decode_rejects_oversize_data_url():
     huge = b"\x00" * (11 * 1024 * 1024)  # 11MB
     data_url = f"data:image/png;base64,{base64.b64encode(huge).decode()}"
-    with pytest.raises(ValueError, match="exceeds"):
+    with pytest.raises(ImageTooLargeError, match="exceeds"):
         await decode_image_input(data_url, max_bytes=10 * 1024 * 1024)
 
 
@@ -334,7 +337,7 @@ async def test_decode_image_file_rejects_oversized():
     from muse.modalities.image_generation.image_input import decode_image_file
     huge = b"\x00" * (11 * 1024 * 1024)
     upload = _FakeUploadFile(huge)
-    with pytest.raises(ValueError, match="exceeds"):
+    with pytest.raises(ImageTooLargeError, match="exceeds"):
         await decode_image_file(upload, max_bytes=10 * 1024 * 1024)
 
 

@@ -33,6 +33,7 @@ from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.image_input import (
+    ImageTooLargeError,
     close_decoded_images,
     decode_image_file,
 )
@@ -213,7 +214,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     close_decoded_images([original])
         except ValueError as e:
             message = str(e)
-            if "image bytes exceeds max" in message:
+            if isinstance(e, ImageTooLargeError):
                 message = (
                     "uploaded image exceeds "
                     f"MUSE_3D_INPUT_MAX_BYTES={cap} bytes"

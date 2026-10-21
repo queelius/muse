@@ -41,6 +41,10 @@ _ALLOWED_IMAGE_MIME = frozenset({
 _HTTP_TIMEOUT = 30.0
 
 
+class ImageTooLargeError(ValueError):
+    """Image input (raw or base64-encoded) exceeds the byte cap."""
+
+
 def _default_max_bytes() -> int:
     """Image-input byte cap (env MUSE_IMAGE_INPUT_MAX_BYTES), read live so
     operators can raise it without a restart; <= 0 means the default."""
@@ -172,7 +176,7 @@ async def decode_image_file(
     if not raw:
         raise ValueError("empty image file")
     if len(raw) > cap:
-        raise ValueError(
+        raise ImageTooLargeError(
             f"image bytes exceeds max ({len(raw)} > {cap})"
         )
     return _bytes_to_pil(raw, max_side=max_side, max_pixels=max_pixels)
@@ -193,7 +197,7 @@ def _decode_data_url(value: str, *, max_bytes: int, max_pixels: int):
     # for padding slack avoids false-positives on exact-fit boundaries.
     max_b64_len = (max_bytes * 4) // 3 + 4
     if len(b64) > max_b64_len:
-        raise ValueError(
+        raise ImageTooLargeError(
             f"image bytes exceeds max ({len(b64)} b64 chars > {max_b64_len} limit)"
         )
     try:
@@ -201,7 +205,7 @@ def _decode_data_url(value: str, *, max_bytes: int, max_pixels: int):
     except Exception as e:  # noqa: BLE001
         raise ValueError(f"base64 decode failed: {e}") from e
     if len(raw) > max_bytes:
-        raise ValueError(
+        raise ImageTooLargeError(
             f"image bytes exceeds max ({len(raw)} > {max_bytes})"
         )
     return _bytes_to_pil(raw, max_pixels=max_pixels)
