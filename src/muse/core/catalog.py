@@ -1529,23 +1529,15 @@ def pull(
     if curated is not None:
         _run_automatic_storage_maintenance()
         if curated.uri:
-            # Resolver-pulled curated entry. Override the synthesized id
-            # so the catalog stores the friendly curated id (e.g.
-            # qwen3-8b-q4) instead of qwen3-8b-instruct-gguf-q4-k-m.
-            # Also forward the curated capabilities overlay so any
-            # runtime-specific settings (trust_remote_code, chat_format,
-            # context_length) land in the persisted manifest.
-            overlay = dict(curated.capabilities or {})
+            # Resolver-pulled curated entry, stored under the friendly
+            # curated id (e.g. qwen3-8b-q4), not the synthesized one.
             with _model_pull_lock(curated.id):
                 return _pull_via_resolver(
                     curated.uri,
                     model_id_override=curated.id,
-                    capabilities_overlay=overlay or None,
-                    modality_override=curated.modality,
                     base_override=base_override,
-                    revision_override=curated.revision,
-                    code_revision_override=curated.code_revision,
                     allow_source_change=True,
+                    **_curated_resolver_kwargs(curated),
                 )
         # Bundled curated entry: id equals an existing bundled script's
         # model_id. Fall through to the bundled path with that id.
@@ -1580,16 +1572,12 @@ def pull(
         _run_automatic_storage_maintenance()
         with _model_pull_lock(lock_identity):
             if uri_curated is not None:
-                overlay = dict(uri_curated.capabilities or {})
                 return _pull_via_resolver(
                     identifier,
                     model_id_override=uri_curated.id,
-                    capabilities_overlay=overlay or None,
-                    modality_override=uri_curated.modality,
                     base_override=base_override,
-                    revision_override=uri_curated.revision,
-                    code_revision_override=uri_curated.code_revision,
                     allow_source_change=True,
+                    **_curated_resolver_kwargs(uri_curated),
                 )
             return _pull_via_resolver(identifier, base_override=base_override)
 
@@ -1617,14 +1605,12 @@ def pull(
         _run_automatic_storage_maintenance()
         with _model_pull_lock(identifier):
             if uri_curated is not None:
+                # No allow_source_change: a bare-id re-pull keeps its source.
                 return _pull_via_resolver(
                     source_uri,
                     model_id_override=identifier,
-                    capabilities_overlay=uri_curated.capabilities or None,
-                    modality_override=uri_curated.modality,
                     base_override=base_override,
-                    revision_override=uri_curated.revision,
-                    code_revision_override=uri_curated.code_revision,
+                    **_curated_resolver_kwargs(uri_curated),
                 )
             return _pull_via_resolver(
                 source_uri,
@@ -1679,17 +1665,25 @@ def _pull_uri_as(uri: str, model_id: str, *, base_override: str | None) -> str:
         return _pull_via_resolver(
             uri,
             model_id_override=model_id,
-            capabilities_overlay=(
-                dict(uri_curated.capabilities or {}) or None
-                if uri_curated is not None else None
-            ),
-            modality_override=uri_curated.modality if uri_curated else None,
             base_override=base_override,
-            revision_override=uri_curated.revision if uri_curated else None,
-            code_revision_override=(
-                uri_curated.code_revision if uri_curated else None
-            ),
+            **_curated_resolver_kwargs(uri_curated),
         )
+
+
+def _curated_resolver_kwargs(entry) -> dict[str, Any]:
+    """Resolver-pull options a curated entry contributes (none for None).
+
+    The capabilities overlay carries runtime settings such as
+    trust_remote_code or chat_format into the persisted manifest.
+    """
+    if entry is None:
+        return {}
+    return {
+        "capabilities_overlay": dict(entry.capabilities or {}) or None,
+        "modality_override": entry.modality,
+        "revision_override": entry.revision,
+        "code_revision_override": entry.code_revision,
+    }
 
 
 def _source_key(uri: str) -> tuple[str, str]:
