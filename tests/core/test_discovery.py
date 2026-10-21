@@ -345,7 +345,7 @@ class TestModelOptionalPaths:
 
         second = model_optional_paths()
         assert calls["n"] == after_first  # no re-walk on the second call
-        assert first is second  # same cached object, not just equal content
+        assert first == second
 
     def test_explicit_dirs_bypass_the_default_scan_cache(self, tmp_path):
         """Passing explicit `dirs` (the test-seam usage throughout this

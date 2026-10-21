@@ -13,10 +13,8 @@ import os
 import signal
 import threading
 from contextlib import ExitStack
-from pathlib import Path
 
 from muse.cli_impl.serve_util import run_uvicorn
-from muse.core import config
 from muse.core.catalog import (
     _model_resource_lease,
     get_manifest,
@@ -24,7 +22,7 @@ from muse.core.catalog import (
     known_models,
     load_backend,
 )
-from muse.core.discovery import discover_modalities
+from muse.core.discovery import discover_modalities, modality_dirs
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
 
@@ -63,36 +61,6 @@ def _start_parent_watchdog(expected_parent_pid: int) -> None:
         daemon=True,
         name="muse-parent-watchdog",
     ).start()
-
-
-def _bundled_modalities_dir() -> Path:
-    """Directory containing muse's built-in modality packages."""
-    # worker.py sits at src/muse/cli_impl/worker.py; parents[1] is src/muse/.
-    return Path(__file__).resolve().parents[1] / "modalities"
-
-
-def _env_modalities_dir() -> Path | None:
-    """Optional extra modalities dir from `$MUSE_MODALITIES_DIR` env var.
-
-    Intended as an escape hatch for power users experimenting with new
-    modality contracts, not a normal extension surface. Most users
-    should extend via model scripts instead (see $MUSE_MODELS_DIR).
-    """
-    env = config.get("paths.modalities_dir")
-    return Path(env) if env else None
-
-
-def _modality_dirs() -> list[Path]:
-    """Scan order for modality discovery: bundled first, then env override.
-
-    First-found-wins on MODALITY tag collision, so bundled modalities
-    shadow env-dir entries that declare the same MIME tag.
-    """
-    dirs = [_bundled_modalities_dir()]
-    env = _env_modalities_dir()
-    if env is not None:
-        dirs.append(env)
-    return dirs
 
 
 def run_worker(*, host: str, port: int, models: list[str], device: str) -> int:
@@ -179,7 +147,7 @@ def _run_worker_with_leases(
     # {"detail": "Not Found"}. Adding a new modality requires zero
     # changes here: drop a subpackage under src/muse/modalities/ that
     # exports MODALITY + build_router, and discovery picks it up.
-    for tag, build_router in discover_modalities(_modality_dirs()).items():
+    for tag, build_router in discover_modalities(modality_dirs()).items():
         log.info("mounting modality router for %s", tag)
         routers[tag] = build_router(registry)
 

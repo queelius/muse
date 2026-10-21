@@ -110,116 +110,72 @@ def discover_models(dirs: list[Path]) -> dict[str, DiscoveredModel]:
     return found
 
 
+def modality_dirs() -> list[Path]:
+    """Modality scan roots: the bundled tree, then `$MUSE_MODALITIES_DIR`.
+
+    Every discovery surface (worker routers, HF plugins, the AST-read
+    seams) walks these roots in this order, so first-found-wins on a
+    MODALITY tag collision means bundled shadows the env dir.
+    """
+    bundled = Path(__file__).resolve().parents[1] / "modalities"
+    env = config.get("paths.modalities_dir")
+    return [bundled] + ([Path(env)] if env else [])
+
+
+# Kept for existing importers (muse.core.resolvers_hf, tests).
+_default_hf_plugin_dirs = modality_dirs
+
+
+def _modality_inits(dirs: list[Path], label: str):
+    """Yield (MODALITY tag, __init__.py) per modality package, AST-read and
+    first-found-wins per tag. An unreadable scan root is logged and skipped,
+    so a bad `$MUSE_MODALITIES_DIR` never raises on the request path."""
+    seen_tags: set[str] = set()
+    for d in dirs:
+        if not d or not d.is_dir():
+            continue
+        try:
+            entries = sorted(d.iterdir())
+        except OSError as e:
+            logger.warning("%s: cannot list directory %s: %s", label, d, e)
+            continue
+        for sub in entries:
+            init_py = sub / "__init__.py"
+            if not sub.is_dir() or sub.name.startswith("_") or not init_py.exists():
+                continue
+            tag = _ast_extract_modality(init_py)
+            if not tag or tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            yield tag, init_py
+
+
 def modality_tags() -> list[str]:
     """Single source of truth: which modality MIME tags does this muse know?
 
-    Walks the bundled modalities tree plus `$MUSE_MODALITIES_DIR` (if set)
-    and returns the sorted MODALITY tag list. Used by CLI argparse choices,
-    test invariants, and any caller that needs "what modalities exist?"
-    without paying the full router-build cost of `discover_modalities`.
+    Walks `modality_dirs()` and returns the sorted MODALITY tag list. Used
+    by CLI argparse choices, test invariants, and any caller that needs
+    "what modalities exist?" without paying the full router-build cost of
+    `discover_modalities`.
 
     Reads each modality `__init__.py` via AST parsing rather than executing
     it, so callers like `muse --help` and `muse pull` don't transitively
     import fastapi (which the modality routes depend on but the bare
     `pip install muse` user may not have).
-
-    First-found-wins on collision (matches `discover_modalities` semantics).
     """
-    bundled = Path(__file__).resolve().parents[1] / "modalities"
-    env = config.get("paths.modalities_dir")
-    dirs = [bundled] + ([Path(env)] if env else [])
-
-    seen: set[str] = set()
-    for d in dirs:
-        if not d or not d.is_dir():
-            continue
-        for sub in sorted(d.iterdir()):
-            if not sub.is_dir() or sub.name.startswith("_"):
-                continue
-            init_py = sub / "__init__.py"
-            if not init_py.exists():
-                continue
-            tag = _ast_extract_modality(init_py)
-            if tag and tag not in seen:
-                seen.add(tag)
-    return sorted(seen)
+    return sorted(tag for tag, _ in _modality_inits(modality_dirs(), "modality_tags"))
 
 
 def _ast_extract_modality(init_py: Path) -> str | None:
-    """Pull the `MODALITY = "..."` literal from an __init__.py without exec.
-
-    Only handles the simple case (top-level `MODALITY = "string-literal"`),
-    which matches the convention every bundled modality follows. Anything
-    fancier (computed values, conditional assignment) returns None.
-    """
-    try:
-        tree = ast.parse(init_py.read_text())
-    except (OSError, SyntaxError):
-        return None
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not (isinstance(target, ast.Name) and target.id == "MODALITY"):
-                continue
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                return node.value.value
-    return None
-
-
-def _ast_extract_model_optional_paths(init_py: Path) -> tuple[str, ...]:
-    """Pull the `MODEL_OPTIONAL_PATHS = (...)` literal from an __init__.py
-    without exec.
-
-    Mirrors `_ast_extract_modality`: only handles a top-level assignment
-    to a tuple/list of string literals (the convention `text_translation`
-    established). Anything fancier, or no such assignment, returns ().
-    """
-    try:
-        tree = ast.parse(init_py.read_text())
-    except (OSError, SyntaxError):
-        return ()
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not (
-                isinstance(target, ast.Name)
-                and target.id == "MODEL_OPTIONAL_PATHS"
-            ):
-                continue
-            if isinstance(node.value, (ast.Tuple, ast.List)):
-                return tuple(
-                    elt.value for elt in node.value.elts
-                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                )
-    return ()
-
-
-# Process-lifetime memoization of the dirs=None (default-scan) result.
-# LibreTranslate clients always omit `model`, so the gateway calls
-# model_optional_paths() with no args on the hot path for EVERY
-# model-less request. The AST tree-walk it performs (~4ms, scales with
-# modality count) has no reason to re-run per request: modality packages
-# cannot change at runtime (matches the documented convention behind
-# discovery's other script-scan cache -- a restart picks up new ones).
-# Only the dirs=None call is memoized; explicit `dirs` (the test-seam
-# usage throughout tests/core/test_discovery.py) always computes fresh
-# and never populates or reads this cache.
-_MODEL_OPTIONAL_PATHS_CACHE: dict[str, str] | None = None
+    """The `MODALITY = "..."` string literal from an __init__.py, without
+    exec; None when absent, computed, or not a string."""
+    tag = _ast_extract_literal(init_py, "MODALITY")
+    return tag if isinstance(tag, str) else None
 
 
 def _reset_model_optional_paths_cache() -> None:
-    """Test seam: clear the process-lifetime memoization.
-
-    Mirrors `muse.core.chat_formats._reset_cache_for_tests` /
-    `muse.core.curated._reset_curated_cache_for_tests`. Call this between
-    test cases that rely on model_optional_paths()'s default (dirs=None)
-    scan picking up a freshly-constructed temp modality tree. Also clears
-    the concurrency_ceilings() / strict_request_parsers() caches.
-    """
-    global _MODEL_OPTIONAL_PATHS_CACHE
-    _MODEL_OPTIONAL_PATHS_CACHE = None
+    """Test seam: clear the memoized default (dirs=None) scans behind
+    model_optional_paths() and the other AST-read declaration seams."""
     _DECLARATION_CACHE.clear()
 
 
@@ -230,64 +186,24 @@ def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
     Consumed by the gateway's default-model seam (see
     `muse.cli_impl.gateway`): a request to one of these paths with no
     `model` field resolves to the modality's first enabled catalog model
-    instead of 400ing `model_required`. AST-based (no imports), like
-    `modality_tags()`, so it stays cheap enough to call on every gateway
-    request and keeps the bare-install contract (no fastapi import just
-    to compute this map).
+    instead of 400ing `model_required`. AST-based (no imports) and, for
+    the default scan, memoized for the process lifetime, so it stays cheap
+    enough to call on every gateway request and keeps the bare-install
+    contract (no fastapi import just to compute this map).
 
     First-found-wins per MODALITY tag, mirroring `discover_modalities`'s
     collision rule: a duplicate tag discovered in a later dir contributes
-    no paths, even if its own MODEL_OPTIONAL_PATHS differs.
-
-    `dirs` defaults to the same bundled + `$MUSE_MODALITIES_DIR` scan
-    roots as `modality_tags()` / `discover_modalities`. The dirs=None
-    result is memoized for the process lifetime (see
-    `_MODEL_OPTIONAL_PATHS_CACHE` above); pass explicit `dirs` to always
-    force a fresh scan (tests do this).
-
-    An unreadable directory (permission error, or a $MUSE_MODALITIES_DIR
-    removed after boot) is logged and skipped rather than raised, so a
-    bad scan root degrades to "no optional paths from that dir" instead
-    of 500ing every model-less request.
+    no paths, even if its own MODEL_OPTIONAL_PATHS differs. Pass explicit
+    `dirs` to force a fresh scan (tests do this).
     """
-    global _MODEL_OPTIONAL_PATHS_CACHE
-
-    use_cache = dirs is None
-    if use_cache and _MODEL_OPTIONAL_PATHS_CACHE is not None:
-        return _MODEL_OPTIONAL_PATHS_CACHE
-
-    if dirs is None:
-        bundled = Path(__file__).resolve().parents[1] / "modalities"
-        env = config.get("paths.modalities_dir")
-        dirs = [bundled] + ([Path(env)] if env else [])
-
     out: dict[str, str] = {}
-    seen_tags: set[str] = set()
-    for d in dirs:
-        if not d or not d.is_dir():
+    for tag, value in _declarations("MODEL_OPTIONAL_PATHS", dirs):
+        if not isinstance(value, (tuple, list)):
+            logger.warning("ignoring malformed MODEL_OPTIONAL_PATHS for %s", tag)
             continue
-        try:
-            entries = sorted(d.iterdir())
-        except OSError as e:
-            logger.warning(
-                "model_optional_paths: cannot list directory %s: %s", d, e,
-            )
-            continue
-        for sub in entries:
-            if not sub.is_dir() or sub.name.startswith("_"):
-                continue
-            init_py = sub / "__init__.py"
-            if not init_py.exists():
-                continue
-            tag = _ast_extract_modality(init_py)
-            if not tag or tag in seen_tags:
-                continue
-            seen_tags.add(tag)
-            for p in _ast_extract_model_optional_paths(init_py):
+        for p in value:
+            if isinstance(p, str):
                 out.setdefault(p, tag)
-
-    if use_cache:
-        _MODEL_OPTIONAL_PATHS_CACHE = out
     return out
 
 
@@ -311,36 +227,17 @@ def _ast_extract_literal(init_py: Path, name: str) -> Any:
 
 def _declarations(name: str, dirs: list[Path] | None) -> list[tuple[str, Any]]:
     """[(modality tag, literal NAME)] per modality package, first-found-wins
-    per tag (the `model_optional_paths` rules, including its memoized
-    default scan and its tolerance of unreadable scan roots)."""
+    per tag. The default scan (dirs=None, over `modality_dirs()`) is
+    memoized for the process lifetime: modality packages cannot change at
+    runtime, and the gateway consults these on the request path."""
     use_cache = dirs is None
     if use_cache and name in _DECLARATION_CACHE:
         return _DECLARATION_CACHE[name]
-    if dirs is None:
-        bundled = Path(__file__).resolve().parents[1] / "modalities"
-        env = config.get("paths.modalities_dir")
-        dirs = [bundled] + ([Path(env)] if env else [])
     out: list[tuple[str, Any]] = []
-    seen_tags: set[str] = set()
-    for d in dirs:
-        if not d or not d.is_dir():
-            continue
-        try:
-            entries = sorted(d.iterdir())
-        except OSError as e:
-            logger.warning("%s: cannot list directory %s: %s", name, d, e)
-            continue
-        for sub in entries:
-            init_py = sub / "__init__.py"
-            if not sub.is_dir() or sub.name.startswith("_") or not init_py.exists():
-                continue
-            tag = _ast_extract_modality(init_py)
-            if not tag or tag in seen_tags:
-                continue
-            seen_tags.add(tag)
-            value = _ast_extract_literal(init_py, name)
-            if value is not None:
-                out.append((tag, value))
+    for tag, init_py in _modality_inits(dirs if dirs is not None else modality_dirs(), name):
+        value = _ast_extract_literal(init_py, name)
+        if value is not None:
+            out.append((tag, value))
     if use_cache:
         _DECLARATION_CACHE[name] = out
     return out
@@ -640,13 +537,3 @@ def _load_package(pkg_dir: Path) -> Any:
     spec.loader.exec_module(module)
     return module
 
-
-def _default_hf_plugin_dirs() -> list[Path]:
-    """Default scan paths: bundled modalities + $MUSE_MODALITIES_DIR if set.
-
-    Mirrors `modality_tags()` and `discover_modalities` ordering so all
-    discovery surfaces walk the same roots in the same precedence.
-    """
-    bundled = Path(__file__).resolve().parents[1] / "modalities"
-    env = config.get("paths.modalities_dir")
-    return [bundled] + ([Path(env)] if env else [])
