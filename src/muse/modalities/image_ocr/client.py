@@ -5,13 +5,12 @@ env fallback, requests under the hood, raise_for_status before parsing.
 """
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url, upload_bytes
 
 
 class OcrClient:
@@ -23,8 +22,7 @@ class OcrClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     def ocr(
@@ -42,7 +40,7 @@ class OcrClient:
 
         Returns the full response dict: {id, model, text, usage}.
         """
-        files = {"image": ("image.png", _to_bytes(image), "image/png")}
+        files = {"image": ("image.png", upload_bytes(image, kind="image", allow_pil=True), "image/png")}
         data: dict[str, Any] = {}
         if model is not None:
             data["model"] = model
@@ -59,17 +57,3 @@ class OcrClient:
         return r.json()
 
 
-def _to_bytes(image: Any) -> bytes:
-    """Coerce bytes / path / file-like / PIL.Image to bytes."""
-    if isinstance(image, bytes):
-        return image
-    if isinstance(image, (str, Path)):
-        return Path(image).read_bytes()
-    if hasattr(image, "read"):
-        return image.read()
-    # PIL.Image fallback: serialize as PNG.
-    if hasattr(image, "save"):
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        return buf.getvalue()
-    raise TypeError(f"unsupported image type: {type(image).__name__}")

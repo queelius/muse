@@ -15,7 +15,7 @@ from typing import Any
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 from muse.modalities.decision_evaluation.validation import parse_request
 
 
@@ -33,8 +33,7 @@ class DecisionClient:
     """Minimal HTTP client for the decision/evaluation modality."""
 
     def __init__(self, server_url: str | None = None, *, timeout: float = 300.0) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     def decide(self, *, model: str, state: str | dict | list, questions: dict) -> dict:

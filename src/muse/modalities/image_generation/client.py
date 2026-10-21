@@ -11,19 +11,14 @@ from typing import Any
 
 import requests
 
-from muse.core import config
-
-
-def _resolve_base_url(base_url: str | None) -> str:
-    base = base_url or config.get("client.server_url")
-    return base.rstrip("/")
+from muse.modalities._common.client import resolve_server_url
 
 
 class GenerationsClient:
     """Thin HTTP client against the muse images.generations endpoint."""
 
     def __init__(self, base_url: str | None = None, timeout: float = 300.0) -> None:
-        self.base_url = _resolve_base_url(base_url)
+        self.base_url = resolve_server_url(base_url)
         self.timeout = timeout
 
     def generate(
@@ -77,7 +72,7 @@ class ImageEditsClient:
     """
 
     def __init__(self, base_url: str | None = None, timeout: float = 300.0) -> None:
-        self.base_url = _resolve_base_url(base_url)
+        self.base_url = resolve_server_url(base_url)
         self.timeout = timeout
 
     def edit(
@@ -137,7 +132,7 @@ class ImageVariationsClient:
     """
 
     def __init__(self, base_url: str | None = None, timeout: float = 300.0) -> None:
-        self.base_url = _resolve_base_url(base_url)
+        self.base_url = resolve_server_url(base_url)
         self.timeout = timeout
 
     def vary(

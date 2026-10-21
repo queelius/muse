@@ -11,7 +11,7 @@ from typing import Any
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 
 
 class VideoGenerationClient:
@@ -25,8 +25,7 @@ class VideoGenerationClient:
     def __init__(
         self, server_url: str | None = None, timeout: float = 600.0,
     ) -> None:
-        server_url = server_url or config.get("client.server_url")
-        self.server_url = server_url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self.timeout = timeout
 
     def generate(

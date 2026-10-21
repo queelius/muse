@@ -13,11 +13,11 @@ inputs.
 from __future__ import annotations
 
 import base64
-from typing import Any, Iterable, Union
+from typing import Any, Union
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 from muse.modalities.image_embedding.codec import base64_to_embedding
 
 
@@ -45,8 +45,7 @@ class ImageEmbeddingsClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self.timeout = timeout
 
     def embed(

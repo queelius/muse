@@ -15,7 +15,7 @@ from typing import Any
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 
 
 class TranscriptionClient:
@@ -27,8 +27,7 @@ class TranscriptionClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     def transcribe(

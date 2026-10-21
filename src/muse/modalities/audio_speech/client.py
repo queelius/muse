@@ -11,7 +11,7 @@ import logging
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,7 @@ class SpeechClient:
     """
 
     def __init__(self, server_url: str | None = None, model: str | None = None):
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self.model = model
 
     # -- Probes ------------------------------------------------------------

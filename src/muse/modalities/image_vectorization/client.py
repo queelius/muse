@@ -1,13 +1,12 @@
 """HTTP client for ``POST /v1/images/vectorize``."""
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url, upload_bytes
 
 
 class VectorizationClient:
@@ -19,9 +18,7 @@ class VectorizationClient:
         *,
         timeout: float = 600.0,
     ) -> None:
-        self.server_url = (
-            server_url or config.get("client.server_url")
-        ).rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     def vectorize(
@@ -41,7 +38,7 @@ class VectorizationClient:
         ``response_format="json"`` returns the full response envelope.
         ``response_format="svg"`` returns the raw SVG string.
         """
-        files = {"image": ("image.png", _to_bytes(image), "image/png")}
+        files = {"image": ("image.png", upload_bytes(image, kind="image", allow_pil=True), "image/png")}
         fields = {
             "model": model,
             "max_new_tokens": max_new_tokens,
@@ -64,15 +61,3 @@ class VectorizationClient:
         return response.json()
 
 
-def _to_bytes(image: Any) -> bytes:
-    if isinstance(image, bytes):
-        return image
-    if isinstance(image, (str, Path)):
-        return Path(image).read_bytes()
-    if hasattr(image, "read"):
-        return image.read()
-    if hasattr(image, "save"):
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
-    raise TypeError(f"unsupported image type: {type(image).__name__}")

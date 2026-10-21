@@ -6,32 +6,16 @@ posts multipart/form-data to its route and returns the parsed JSON
 envelope.
 
 The image-input handling (bytes / path / file-like / PIL.Image) is
-factored into _to_bytes (mirrors OcrClient).
+shared via muse.modalities._common.client.upload_bytes.
 """
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from muse.core import config
-
-
-def _to_bytes(image: Any) -> bytes:
-    """Coerce bytes / path / file-like / PIL.Image to bytes (PNG)."""
-    if isinstance(image, bytes):
-        return image
-    if isinstance(image, (str, Path)):
-        return Path(image).read_bytes()
-    if hasattr(image, "read"):
-        return image.read()
-    if hasattr(image, "save"):
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        return buf.getvalue()
-    raise TypeError(f"unsupported image type: {type(image).__name__}")
+from muse.modalities._common.client import resolve_server_url, upload_bytes
 
 
 class _CVClientBase:
@@ -43,8 +27,7 @@ class _CVClientBase:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
 
@@ -58,7 +41,7 @@ class DepthClient(_CVClientBase):
         model: str | None = None,
         response_format: str = "png16",
     ) -> dict[str, Any]:
-        files = {"image": ("image.png", _to_bytes(image), "image/png")}
+        files = {"image": ("image.png", upload_bytes(image, kind="image", allow_pil=True), "image/png")}
         data: dict[str, Any] = {"response_format": response_format}
         if model is not None:
             data["model"] = model
@@ -80,7 +63,7 @@ class KeypointClient(_CVClientBase):
         model: str | None = None,
         threshold: float | None = None,
     ) -> dict[str, Any]:
-        files = {"image": ("image.png", _to_bytes(image), "image/png")}
+        files = {"image": ("image.png", upload_bytes(image, kind="image", allow_pil=True), "image/png")}
         data: dict[str, Any] = {}
         if model is not None:
             data["model"] = model
@@ -105,7 +88,7 @@ class ObjectDetectionClient(_CVClientBase):
         threshold: float | None = None,
         max_detections: int | None = None,
     ) -> dict[str, Any]:
-        files = {"image": ("image.png", _to_bytes(image), "image/png")}
+        files = {"image": ("image.png", upload_bytes(image, kind="image", allow_pil=True), "image/png")}
         data: dict[str, Any] = {}
         if model is not None:
             data["model"] = model

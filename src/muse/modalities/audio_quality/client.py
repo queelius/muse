@@ -6,17 +6,7 @@ from typing import Any
 
 import requests
 
-from muse.core import config
-
-
-def _to_bytes(audio: bytes | str | Path | Any) -> bytes:
-    if isinstance(audio, bytes):
-        return audio
-    if isinstance(audio, (str, Path)):
-        return Path(audio).read_bytes()
-    if hasattr(audio, "read"):
-        return audio.read()
-    raise TypeError(f"unsupported audio type: {type(audio).__name__}")
+from muse.modalities._common.client import resolve_server_url, upload_bytes
 
 
 class AudioQualityClient:
@@ -28,8 +18,7 @@ class AudioQualityClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     def assess(
@@ -41,7 +30,7 @@ class AudioQualityClient:
         content_type: str = "audio/wav",
     ) -> dict[str, Any]:
         """Assess bytes, a path, or a readable file-like object."""
-        files = {"file": (filename, _to_bytes(audio), content_type)}
+        files = {"file": (filename, upload_bytes(audio, kind="audio"), content_type)}
         data: dict[str, str] = {}
         if model is not None:
             data["model"] = model

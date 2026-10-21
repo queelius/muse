@@ -7,7 +7,7 @@ from typing import Iterator
 
 import httpx
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 from muse.core.sse import iter_sse_events
 
 
@@ -39,7 +39,7 @@ class ChatClient:
     """
 
     def __init__(self, base_url: str | None = None, timeout: float = 300.0) -> None:
-        self.base_url = (base_url or config.get("client.server_url")).rstrip("/")
+        self.base_url = resolve_server_url(base_url)
         self.timeout = timeout
 
     def chat(self, *, model: str | None = None, messages: list[dict], **kwargs) -> dict:

@@ -1,24 +1,12 @@
 """HTTP client for /v1/audio/classifications."""
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from muse.core import config
-
-
-def _to_bytes(audio: Any) -> bytes:
-    """Coerce bytes / path / file-like to bytes."""
-    if isinstance(audio, bytes):
-        return audio
-    if isinstance(audio, (str, Path)):
-        return Path(audio).read_bytes()
-    if hasattr(audio, "read"):
-        return audio.read()
-    raise TypeError(f"unsupported audio type: {type(audio).__name__}")
+from muse.modalities._common.client import resolve_server_url, upload_bytes
 
 
 class AudioClassificationsClient:
@@ -30,8 +18,7 @@ class AudioClassificationsClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     def classify(
@@ -49,7 +36,7 @@ class AudioClassificationsClient:
         .read(). The path's contents (or bytes) are forwarded as the
         multipart `file` field.
         """
-        files = {"file": (filename, _to_bytes(audio), content_type)}
+        files = {"file": (filename, upload_bytes(audio, kind="audio"), content_type)}
         data: dict[str, Any] = {}
         if model is not None:
             data["model"] = model

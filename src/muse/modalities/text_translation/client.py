@@ -11,14 +11,14 @@ from typing import Any
 
 import httpx
 
-from muse.core import config
+from muse.modalities._common.client import resolve_server_url
 
 
 class TranslateClient:
     """Minimal HTTP client for the text/translation modality."""
 
     def __init__(self, base_url: str | None = None, timeout: float = 120.0) -> None:
-        self.base_url = (base_url or config.get("client.server_url")).rstrip("/")
+        self.base_url = resolve_server_url(base_url)
         self.timeout = timeout
 
     def translate(

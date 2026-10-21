@@ -13,22 +13,7 @@ from typing import Any
 
 import requests
 
-from muse.core import config
-
-
-def _to_bytes(image: Any) -> bytes:
-    """Coerce bytes / path / file-like to bytes.
-
-    Mirrors AudioClassificationsClient._to_bytes and
-    GenerationsClient's image-coercion shape.
-    """
-    if isinstance(image, bytes):
-        return image
-    if isinstance(image, (str, Path)):
-        return Path(image).read_bytes()
-    if hasattr(image, "read"):
-        return image.read()
-    raise TypeError(f"unsupported image type: {type(image).__name__}")
+from muse.modalities._common.client import resolve_server_url, upload_bytes
 
 
 class Generation3DClient:
@@ -40,8 +25,7 @@ class Generation3DClient:
         *,
         timeout: float = 300.0,
     ) -> None:
-        url = server_url or config.get("client.server_url")
-        self.server_url = url.rstrip("/")
+        self.server_url = resolve_server_url(server_url)
         self._timeout = timeout
 
     # ---------------- text-to-3d ----------------
@@ -99,7 +83,7 @@ class Generation3DClient:
         `image` accepts bytes, a path-like, or a file-like object with
         .read(). Returns the parsed envelope.
         """
-        files = {"image": (filename, _to_bytes(image), content_type)}
+        files = {"image": (filename, upload_bytes(image, kind="image"), content_type)}
         data: list[tuple[str, str]] = [
             ("n", str(n)),
             ("response_format", response_format),
