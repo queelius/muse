@@ -53,6 +53,25 @@ def test_pull_lock_refuses_symlink_directory(tmp_path: Path) -> None:
     assert list(external.iterdir()) == []
 
 
+def test_pull_lock_refuses_dangling_symlink_directory(tmp_path: Path) -> None:
+    missing = tmp_path.parent / f"{tmp_path.name}-missing-locks"
+    (tmp_path / "locks").symlink_to(missing, target_is_directory=True)
+
+    with pytest.raises(catalog.CatalogError, match="cannot create catalog path"):
+        with catalog._model_pull_lock("model"):
+            pytest.fail("unsafe lock unexpectedly acquired")
+
+    assert not missing.exists()
+
+
+def test_catalog_lock_file_is_private(tmp_path: Path) -> None:
+    catalog._write_catalog({"model": {"enabled": True}})
+
+    lock = tmp_path / ".catalog.lock"
+    assert lock.stat().st_mode & 0o777 == 0o600
+    assert lock.stat().st_nlink == 1
+
+
 def test_catalog_write_rejects_nonfinite_json() -> None:
     with pytest.raises(catalog.CatalogError, match="finite numbers"):
         catalog._write_catalog({"model": {"memory_gb": float("nan")}})
