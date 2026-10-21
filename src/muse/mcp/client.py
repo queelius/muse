@@ -63,30 +63,27 @@ class MuseClient:
 
     # JSON in / JSON out
 
-    def _post_json(self, path: str, body: dict) -> dict:
+    def _post(self, path: str, body: dict) -> httpx.Response:
+        """POST ``body`` (None values dropped) as JSON; raise on error status."""
         cleaned = {k: v for k, v in body.items() if v is not None}
         with httpx.Client(timeout=self.timeout) as c:
             r = c.post(f"{self.server_url}{path}", json=cleaned)
         r.raise_for_status()
-        return r.json()
+        return r
+
+    def _post_json(self, path: str, body: dict) -> dict:
+        return self._post(path, body).json()
 
     def _post_bytes(self, path: str, body: dict) -> bytes:
-        cleaned = {k: v for k, v in body.items() if v is not None}
-        with httpx.Client(timeout=self.timeout) as c:
-            r = c.post(f"{self.server_url}{path}", json=cleaned)
-        r.raise_for_status()
-        return r.content
+        return self._post(path, body).content
 
-    def _post_multipart(
-        self,
-        path: str,
-        *,
-        files: dict,
-        data: dict | None = None,
-    ) -> Any:
-        """POST multipart/form-data; return JSON if response is JSON, else bytes."""
+    def _post_multipart(self, path: str, *, files: dict, data: dict) -> Any:
+        """POST multipart/form-data with ``data`` as string form fields
+        (None values dropped); return JSON if the response is JSON, else
+        bytes."""
+        fields = {k: str(v) for k, v in data.items() if v is not None}
         with httpx.Client(timeout=self.timeout) as c:
-            r = c.post(f"{self.server_url}{path}", files=files, data=data or {})
+            r = c.post(f"{self.server_url}{path}", files=files, data=fields)
         r.raise_for_status()
         ct = r.headers.get("content-type", "").lower()
         if ct.startswith("application/json"):
@@ -149,32 +146,27 @@ class MuseClient:
             "mask": ("mask.png", mask, "image/png"),
         }
         body.setdefault("response_format", "b64_json")
-        data = {k: str(v) for k, v in body.items() if v is not None}
-        return self._post_multipart("/v1/images/edits", files=files, data=data)
+        return self._post_multipart("/v1/images/edits", files=files, data=body)
 
     def vary_image(self, *, image: bytes, **body: Any) -> dict:
         files = {"image": ("image.png", image, "image/png")}
         body.setdefault("response_format", "b64_json")
-        data = {k: str(v) for k, v in body.items() if v is not None}
-        return self._post_multipart("/v1/images/variations", files=files, data=data)
+        return self._post_multipart("/v1/images/variations", files=files, data=body)
 
     def upscale_image(self, *, image: bytes, **body: Any) -> dict:
         files = {"image": ("image.png", image, "image/png")}
         body.setdefault("response_format", "b64_json")
-        data = {k: str(v) for k, v in body.items() if v is not None}
-        return self._post_multipart("/v1/images/upscale", files=files, data=data)
+        return self._post_multipart("/v1/images/upscale", files=files, data=body)
 
     def segment_image(self, *, image: bytes, **body: Any) -> dict:
         files = {"image": ("image.png", image, "image/png")}
-        data = {k: str(v) for k, v in body.items() if v is not None}
-        return self._post_multipart("/v1/images/segment", files=files, data=data)
+        return self._post_multipart("/v1/images/segment", files=files, data=body)
 
     def vectorize_image(self, *, image: bytes, **body: Any) -> dict:
         files = {"image": ("image.png", image, "image/png")}
         body.setdefault("response_format", "json")
-        data = {k: str(v) for k, v in body.items() if v is not None}
         return self._post_multipart(
-            "/v1/images/vectorize", files=files, data=data,
+            "/v1/images/vectorize", files=files, data=body,
         )
 
     def generate_animation(self, **body: Any) -> dict:
@@ -202,9 +194,8 @@ class MuseClient:
         **body: Any,
     ) -> dict:
         files = {"file": (filename, audio, "application/octet-stream")}
-        data = {k: str(v) for k, v in body.items() if v is not None}
         return self._post_multipart(
-            "/v1/audio/transcriptions", files=files, data=data,
+            "/v1/audio/transcriptions", files=files, data=body,
         )
 
     def embed_audio(
@@ -215,9 +206,8 @@ class MuseClient:
         **body: Any,
     ) -> dict:
         files = {"file": (filename, audio, "application/octet-stream")}
-        data = {k: str(v) for k, v in body.items() if v is not None}
         return self._post_multipart(
-            "/v1/audio/embeddings", files=files, data=data,
+            "/v1/audio/embeddings", files=files, data=body,
         )
 
     # Resolver search (admin-style discovery)

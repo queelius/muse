@@ -337,8 +337,3 @@ def pack_audio_output(
         "data": base64.b64encode(audio_bytes).decode("ascii"),
         "mimeType": mime,
     }
-
-
-def pack_text_output(text: str) -> dict[str, Any]:
-    """Build an MCP TextContent dict for a string payload."""
-    return {"type": "text", "text": text}

@@ -15,7 +15,6 @@ from muse.mcp.binary_io import (
     binary_input_schema,
     pack_audio_output,
     pack_image_output,
-    pack_text_output,
     resolve_binary_input,
 )
 
@@ -234,10 +233,6 @@ class TestPackOutputs:
     def test_pack_audio_custom_mime(self):
         block = pack_audio_output(b"\x00", mime="audio/opus")
         assert block["mimeType"] == "audio/opus"
-
-    def test_pack_text(self):
-        block = pack_text_output("hello")
-        assert block == {"type": "text", "text": "hello"}
 
 
 class TestSchema:

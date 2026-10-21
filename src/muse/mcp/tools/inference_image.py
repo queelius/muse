@@ -18,36 +18,18 @@ an envelope (PNG b64 strings or COCO RLE dicts depending on
 from __future__ import annotations
 
 import base64
-import json
-from typing import Any
 
 from mcp.types import Tool
 
-from muse.mcp.binary_io import (
-    binary_input_schema,
-    pack_image_output,
-    resolve_binary_input,
-)
+from muse.mcp.binary_io import binary_input_schema, pack_image_output
 from muse.mcp.client import MuseClient
 from muse.mcp.tools import INFERENCE_TOOLS, ToolEntry
-
-
-def _json_block(payload: Any) -> dict:
-    return {"type": "text", "text": json.dumps(payload, indent=2)}
-
-
-def _filter_keys(args: dict, prefixes: tuple[str, ...]) -> dict:
-    """Return ``args`` minus any key starting with one of ``prefixes``,
-    and minus None values. Used to peel off binary input fields before
-    forwarding the rest to muse as request body."""
-    out = {}
-    for k, v in args.items():
-        if any(k.startswith(p) for p in prefixes):
-            continue
-        if v is None:
-            continue
-        out[k] = v
-    return out
+from muse.mcp.tools._common import (
+    binary_arg,
+    json_block,
+    json_handler,
+    request_body,
+)
 
 
 # ---- handlers ----
@@ -65,12 +47,12 @@ def _images_envelope_to_blocks(out: dict, *, summary_extras: dict) -> list[dict]
         "n": len(out.get("data", [])),
         **summary_extras,
     }
-    blocks.append(_json_block(summary))
+    blocks.append(json_block(summary))
     return blocks
 
 
 def _handle_generate_image(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args, prefixes=())
+    body = request_body(args)
     body.setdefault("response_format", "b64_json")
     out = client.generate_image(**body)
     return _images_envelope_to_blocks(out, summary_extras={
@@ -79,86 +61,33 @@ def _handle_generate_image(client: MuseClient, args: dict) -> list[dict]:
 
 
 def _handle_edit_image(client: MuseClient, args: dict) -> list[dict]:
-    image = resolve_binary_input(
-        b64=args.get("image_b64"),
-        url=args.get("image_url"),
-        path=args.get("image_path"),
-        field_name="image",
+    image = binary_arg(args, "image")
+    mask = binary_arg(args, "mask")
+    out = client.edit_image(
+        image=image, mask=mask, **request_body(args, "image", "mask"),
     )
-    mask = resolve_binary_input(
-        b64=args.get("mask_b64"),
-        url=args.get("mask_url"),
-        path=args.get("mask_path"),
-        field_name="mask",
-    )
-    body = _filter_keys(args, prefixes=("image_", "mask_"))
-    out = client.edit_image(image=image, mask=mask, **body)
     return _images_envelope_to_blocks(out, summary_extras={})
 
 
 def _handle_vary_image(client: MuseClient, args: dict) -> list[dict]:
-    image = resolve_binary_input(
-        b64=args.get("image_b64"),
-        url=args.get("image_url"),
-        path=args.get("image_path"),
-        field_name="image",
-    )
-    body = _filter_keys(args, prefixes=("image_",))
-    out = client.vary_image(image=image, **body)
+    image = binary_arg(args, "image")
+    out = client.vary_image(image=image, **request_body(args, "image"))
     return _images_envelope_to_blocks(out, summary_extras={})
 
 
 def _handle_upscale_image(client: MuseClient, args: dict) -> list[dict]:
-    image = resolve_binary_input(
-        b64=args.get("image_b64"),
-        url=args.get("image_url"),
-        path=args.get("image_path"),
-        field_name="image",
-    )
-    body = _filter_keys(args, prefixes=("image_",))
-    out = client.upscale_image(image=image, **body)
+    image = binary_arg(args, "image")
+    out = client.upscale_image(image=image, **request_body(args, "image"))
     return _images_envelope_to_blocks(out, summary_extras={
         "scale": args.get("scale", 4),
     })
 
 
-def _handle_segment_image(client: MuseClient, args: dict) -> list[dict]:
-    image = resolve_binary_input(
-        b64=args.get("image_b64"),
-        url=args.get("image_url"),
-        path=args.get("image_path"),
-        field_name="image",
-    )
-    body = _filter_keys(args, prefixes=("image_",))
-    out = client.segment_image(image=image, **body)
-    # Segmentation envelopes carry masks per the codec convention; we
-    # forward the full envelope as a TextContent block.
-    return [_json_block(out)]
-
-
 def _handle_vectorize_image(client: MuseClient, args: dict) -> list[dict]:
-    image = resolve_binary_input(
-        b64=args.get("image_b64"),
-        url=args.get("image_url"),
-        path=args.get("image_path"),
-        field_name="image",
-    )
-    body = _filter_keys(args, prefixes=("image_",))
+    image = binary_arg(args, "image")
+    body = request_body(args, "image")
     body["response_format"] = "json"
-    out = client.vectorize_image(image=image, **body)
-    return [_json_block(out)]
-
-
-def _handle_generate_animation(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args, prefixes=())
-    out = client.generate_animation(**body)
-    return [_json_block(out)]
-
-
-def _handle_embed_image(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args, prefixes=())
-    out = client.embed_image(**body)
-    return [_json_block(out)]
+    return [json_block(client.vectorize_image(image=image, **body))]
 
 
 # ---- tool definitions ----
@@ -324,7 +253,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model"],
             },
         ),
-        handler=_handle_segment_image,
+        handler=json_handler("segment_image", binary="image"),
     ),
     ToolEntry(
         tool=Tool(
@@ -410,7 +339,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "prompt"],
             },
         ),
-        handler=_handle_generate_animation,
+        handler=json_handler("generate_animation"),
     ),
     ToolEntry(
         tool=Tool(
@@ -441,6 +370,6 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "input"],
             },
         ),
-        handler=_handle_embed_image,
+        handler=json_handler("embed_image"),
     ),
 ])

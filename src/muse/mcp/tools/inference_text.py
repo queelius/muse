@@ -13,57 +13,10 @@ block; the LLM picks fields it needs from there.
 """
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from mcp.types import Tool
 
-from muse.mcp.client import MuseClient
 from muse.mcp.tools import INFERENCE_TOOLS, ToolEntry
-
-
-def _json_block(payload: Any) -> dict:
-    return {"type": "text", "text": json.dumps(payload, indent=2)}
-
-
-# ---- handlers ----
-
-def _handle_chat(client: MuseClient, args: dict) -> list[dict]:
-    body = {k: v for k, v in args.items() if v is not None}
-    out = client.chat(**body)
-    return [_json_block(out)]
-
-
-def _handle_summarize(client: MuseClient, args: dict) -> list[dict]:
-    body = {k: v for k, v in args.items() if v is not None}
-    out = client.summarize(**body)
-    return [_json_block(out)]
-
-
-def _handle_rerank(client: MuseClient, args: dict) -> list[dict]:
-    body = {k: v for k, v in args.items() if v is not None}
-    out = client.rerank(**body)
-    return [_json_block(out)]
-
-
-def _handle_classify(client: MuseClient, args: dict) -> list[dict]:
-    body = {k: v for k, v in args.items() if v is not None}
-    out = client.classify(**body)
-    return [_json_block(out)]
-
-
-def _handle_embed_text(client: MuseClient, args: dict) -> list[dict]:
-    body = {k: v for k, v in args.items() if v is not None}
-    out = client.embed_text(**body)
-    # Return the full envelope; vectors are big so prefer not to log
-    # them but the LLM still needs the dimensions for downstream tools.
-    return [_json_block(out)]
-
-
-def _handle_translate(client: MuseClient, args: dict) -> list[dict]:
-    body = {k: v for k, v in args.items() if v is not None}
-    out = client.translate(**body)
-    return [_json_block(out)]
+from muse.mcp.tools._common import json_handler
 
 
 # ---- tool definitions ----
@@ -117,7 +70,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "messages"],
             },
         ),
-        handler=_handle_chat,
+        handler=json_handler("chat"),
     ),
     ToolEntry(
         tool=Tool(
@@ -148,7 +101,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "text"],
             },
         ),
-        handler=_handle_summarize,
+        handler=json_handler("summarize"),
     ),
     ToolEntry(
         tool=Tool(
@@ -176,7 +129,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "query", "documents"],
             },
         ),
-        handler=_handle_rerank,
+        handler=json_handler("rerank"),
     ),
     ToolEntry(
         tool=Tool(
@@ -206,7 +159,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "input"],
             },
         ),
-        handler=_handle_classify,
+        handler=json_handler("classify"),
     ),
     ToolEntry(
         tool=Tool(
@@ -236,7 +189,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "input"],
             },
         ),
-        handler=_handle_embed_text,
+        handler=json_handler("embed_text"),
     ),
     ToolEntry(
         tool=Tool(
@@ -270,6 +223,6 @@ INFERENCE_TOOLS.extend([
                 "required": ["q", "source", "target"],
             },
         ),
-        handler=_handle_translate,
+        handler=json_handler("translate"),
     ),
 ])

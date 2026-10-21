@@ -11,31 +11,21 @@ inline media).
 """
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from mcp.types import Tool
 
 from muse.mcp.client import MuseClient
 from muse.mcp.tools import INFERENCE_TOOLS, ToolEntry
-
-
-def _json_block(payload: Any) -> dict:
-    return {"type": "text", "text": json.dumps(payload, indent=2)}
-
-
-def _filter_keys(args: dict) -> dict:
-    return {k: v for k, v in args.items() if v is not None}
+from muse.mcp.tools._common import json_block, request_body
 
 
 # ---- handler ----
 
 def _handle_generate_video(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args)
+    body = request_body(args)
     body.setdefault("response_format", "mp4")
     # The route's envelope is {data, model, metadata: {frames, fps,
     # duration_seconds, format, size}}; pass it through unchanged.
-    return [_json_block(client.generate_video(**body))]
+    return [json_block(client.generate_video(**body))]
 
 
 # ---- tool definition ----

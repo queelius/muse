@@ -14,22 +14,19 @@ trio and forward via multipart.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.types import Tool
 
-from muse.mcp.binary_io import (
-    binary_input_schema,
-    pack_audio_output,
-    resolve_binary_input,
-)
+from muse.mcp.binary_io import binary_input_schema, pack_audio_output
 from muse.mcp.client import MuseClient
 from muse.mcp.tools import INFERENCE_TOOLS, ToolEntry
-
-
-def _json_block(payload: Any) -> dict:
-    return {"type": "text", "text": json.dumps(payload, indent=2)}
+from muse.mcp.tools._common import (
+    binary_arg,
+    json_block,
+    json_handler,
+    request_body,
+)
 
 
 # response_format -> audio MIME. Speech emits wav/opus; music/sfx emit
@@ -50,25 +47,14 @@ def _audio_mime(response_format: Any) -> str:
     )
 
 
-def _filter_keys(args: dict, prefixes: tuple[str, ...]) -> dict:
-    out = {}
-    for k, v in args.items():
-        if any(k.startswith(p) for p in prefixes):
-            continue
-        if v is None:
-            continue
-        out[k] = v
-    return out
-
-
 # ---- handlers ----
 
 def _handle_speak(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args, prefixes=())
+    body = request_body(args)
     audio = client.speak(**body)
     return [
         pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
-        _json_block({
+        json_block({
             "model": body.get("model"),
             "size_bytes": len(audio),
             "format": body.get("response_format", "wav"),
@@ -77,56 +63,28 @@ def _handle_speak(client: MuseClient, args: dict) -> list[dict]:
 
 
 def _handle_transcribe(client: MuseClient, args: dict) -> list[dict]:
-    audio = resolve_binary_input(
-        b64=args.get("audio_b64"),
-        url=args.get("audio_url"),
-        path=args.get("audio_path"),
-        field_name="audio",
-    )
-    body = _filter_keys(args, prefixes=("audio_",))
-    out = client.transcribe(audio=audio, **body)
+    audio = binary_arg(args, "audio")
+    out = client.transcribe(audio=audio, **request_body(args, "audio"))
     if isinstance(out, bytes):
         # raw text or vtt/srt body returned as bytes
-        return [_json_block({"text": out.decode("utf-8", errors="replace")})]
-    return [_json_block(out)]
+        return [json_block({"text": out.decode("utf-8", errors="replace")})]
+    return [json_block(out)]
 
 
-def _handle_generate_music(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args, prefixes=())
-    audio = client.generate_music(**body)
-    return [
-        pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
-        _json_block({
-            "model": body.get("model"),
-            "duration": body.get("duration"),
-            "size_bytes": len(audio),
-        }),
-    ]
-
-
-def _handle_generate_sfx(client: MuseClient, args: dict) -> list[dict]:
-    body = _filter_keys(args, prefixes=())
-    audio = client.generate_sfx(**body)
-    return [
-        pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
-        _json_block({
-            "model": body.get("model"),
-            "duration": body.get("duration"),
-            "size_bytes": len(audio),
-        }),
-    ]
-
-
-def _handle_embed_audio(client: MuseClient, args: dict) -> list[dict]:
-    audio = resolve_binary_input(
-        b64=args.get("audio_b64"),
-        url=args.get("audio_url"),
-        path=args.get("audio_path"),
-        field_name="audio",
-    )
-    body = _filter_keys(args, prefixes=("audio_",))
-    out = client.embed_audio(audio=audio, **body)
-    return [_json_block(out)]
+def _audio_generation_handler(method: str):
+    """music / sfx: one AudioContent block plus a JSON summary."""
+    def handler(client: MuseClient, args: dict) -> list[dict]:
+        body = request_body(args)
+        audio = getattr(client, method)(**body)
+        return [
+            pack_audio_output(audio, mime=_audio_mime(body.get("response_format"))),
+            json_block({
+                "model": body.get("model"),
+                "duration": body.get("duration"),
+                "size_bytes": len(audio),
+            }),
+        ]
+    return handler
 
 
 # ---- tool definitions ----
@@ -220,7 +178,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "prompt"],
             },
         ),
-        handler=_handle_generate_music,
+        handler=_audio_generation_handler("generate_music"),
     ),
     ToolEntry(
         tool=Tool(
@@ -249,7 +207,7 @@ INFERENCE_TOOLS.extend([
                 "required": ["model", "prompt"],
             },
         ),
-        handler=_handle_generate_sfx,
+        handler=_audio_generation_handler("generate_sfx"),
     ),
     ToolEntry(
         tool=Tool(
@@ -274,6 +232,6 @@ INFERENCE_TOOLS.extend([
                 "required": ["model"],
             },
         ),
-        handler=_handle_embed_audio,
+        handler=json_handler("embed_audio", binary="audio"),
     ),
 ])
