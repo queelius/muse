@@ -70,6 +70,7 @@ from muse.observability.recorder import record
 # catalog when the manifest declares no memory_gb. Both are on the request
 # hot path, so importing per-request would pay a needless cost.
 from muse.cli_impl.supervisor import (
+    _director_capacity_knobs,
     backfill_manifest_memory,
     revalidate_servability,
 )
@@ -986,9 +987,7 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
             continue
         if not entry.get("enabled", True):
             continue
-        reason = revalidate_servability(
-            state, model_id, **_director_headroom(state.director),
-        )
+        reason = revalidate_servability(state, model_id)
         try:
             manifest = get_manifest(model_id)
         except (CatalogError, KeyError):
@@ -1012,30 +1011,6 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
             unservable_reason=reason,
         ))
     return out
-
-
-def _director_headroom(director: Any) -> dict[str, float]:
-    """Extract `{gpu_headroom_gb, cpu_headroom_gb}` kwargs from `director`.
-
-    Used to thread the LoadDirector's OWN configured headroom into
-    `revalidate_servability` so the gateway's servability gate and the
-    director's admit/evict fit check never diverge (see
-    `_route_via_director` step 1). Only includes a key when the attribute
-    is present AND numeric: a bare `MagicMock()` director (as several
-    tests construct) auto-creates a `MagicMock` attribute for any name
-    accessed, which is not a float and would blow up the headroom
-    subtraction in `_available_pools`. Omitting the key in that case falls
-    through to `revalidate_servability`'s own hardcoded defaults, matching
-    pre-fix behavior for tests that don't care about headroom.
-    """
-    kwargs: dict[str, float] = {}
-    gpu = getattr(director, "gpu_headroom_gb", None)
-    if isinstance(gpu, (int, float)):
-        kwargs["gpu_headroom_gb"] = float(gpu)
-    cpu = getattr(director, "cpu_headroom_gb", None)
-    if isinstance(cpu, (int, float)):
-        kwargs["cpu_headroom_gb"] = float(cpu)
-    return kwargs
 
 
 def _cold_model_needs_servability_check(director: Any, model_id: str) -> bool:
@@ -1063,18 +1038,17 @@ async def _prepare_director_manifest(
     state: Any, model_id: str, catalog_entry: dict | None, *, check_servability: bool,
 ) -> tuple[str | None, dict]:
     """Share one off-loop placement check; request cancellation owns no child."""
-    headroom = _director_headroom(state.director)
     requested = state.device
     key = (
         asyncio.get_running_loop(), id(state), id(state.director), model_id, requested,
-        json.dumps(catalog_entry, sort_keys=True), tuple(sorted(headroom.items())),
-        repr(getattr(state.director, "gpu_budget_gb", None)),
-        repr(getattr(state.director, "cpu_budget_gb", None)), check_servability,
+        json.dumps(catalog_entry, sort_keys=True),
+        tuple(sorted(_director_capacity_knobs(state.director).items())),
+        check_servability,
     )
 
     def prepare() -> tuple[str | None, dict]:
         if check_servability:
-            reason = revalidate_servability(state, model_id, **headroom)
+            reason = revalidate_servability(state, model_id)
             if reason is not None:
                 return reason, {}
         manifest = get_manifest(model_id)

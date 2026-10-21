@@ -1936,14 +1936,33 @@ def _servability_reason(
     return None
 
 
+def _director_capacity_knobs(director: Any) -> dict[str, "float | None"]:
+    """The director's budget/headroom knobs as `_capacity_pools` kwargs.
+
+    Servability checks use the director's OWN configuration so boot
+    validation, listings and request admission never disagree with its
+    fit check. A missing director, or a non-numeric attribute on a test
+    double, falls back to the default (no budget; 1 GB GPU / 2 GB CPU
+    headroom).
+    """
+    def knob(name: str, default: "float | None") -> "float | None":
+        value = getattr(director, name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return default
+
+    return {
+        "gpu_budget_gb": knob("gpu_budget_gb", None),
+        "cpu_budget_gb": knob("cpu_budget_gb", None),
+        "gpu_headroom_gb": knob("gpu_headroom_gb", 1.0),
+        "cpu_headroom_gb": knob("cpu_headroom_gb", 2.0),
+    }
+
+
 def validate_catalog_at_boot(
     state: SupervisorState,
     *,
     memory_probe: "Any | None" = None,
-    gpu_budget_gb: "float | None" = None,
-    cpu_budget_gb: "float | None" = None,
-    gpu_headroom_gb: float = 1.0,
-    cpu_headroom_gb: float = 2.0,
 ) -> None:
     """Walk the enabled catalog and stamp unservable_reasons.
 
@@ -1991,11 +2010,7 @@ def validate_catalog_at_boot(
         return
 
     cpu_available_gb, gpu_available_gb, cuda_available = _capacity_pools(
-        memory_probe,
-        gpu_headroom_gb=gpu_headroom_gb,
-        cpu_headroom_gb=cpu_headroom_gb,
-        gpu_budget_gb=gpu_budget_gb,
-        cpu_budget_gb=cpu_budget_gb,
+        memory_probe, **_director_capacity_knobs(state.director),
     )
 
     for model_id, entry in catalog.items():
@@ -2017,10 +2032,6 @@ def revalidate_servability(
     model_id: str,
     *,
     memory_probe: "Any | None" = None,
-    gpu_budget_gb: "float | None" = None,
-    cpu_budget_gb: "float | None" = None,
-    gpu_headroom_gb: float | None = None,
-    cpu_headroom_gb: float | None = None,
 ) -> str | None:
     """Re-derive one model's unservable verdict against the LIVE catalog.
 
@@ -2030,8 +2041,8 @@ def revalidate_servability(
     previously unservable model valid. This re-reads the (mtime-cached)
     catalog for ONE model and re-runs the SAME provenance, environment, and
     `_servability_reason` checks boot uses, then updates the stamp, so the
-    gateway reflects reality WITHOUT a supervisor restart. Omitted budgets
-    and headroom inherit the director's configuration.
+    gateway reflects reality WITHOUT a supervisor restart. Budgets and
+    headroom come from the director (`_director_capacity_knobs`).
 
     Crucially this preserves a genuine "exceeds device capacity" stamp: a
     model that cannot fit even an empty working set is NOT cleared just
@@ -2047,32 +2058,6 @@ def revalidate_servability(
     """
     if memory_probe is None:
         memory_probe = _MemoryProbeAdapter()
-    # Omitted knobs inherit the director's configuration so listings,
-    # admin status and request admission cannot disagree. Explicit values
-    # still win. Ignore fabricated/non-numeric attributes on test doubles.
-    if gpu_headroom_gb is None:
-        configured = getattr(state.director, "gpu_headroom_gb", None)
-        gpu_headroom_gb = (
-            float(configured)
-            if isinstance(configured, (int, float)) and not isinstance(configured, bool)
-            else 1.0
-        )
-    if cpu_headroom_gb is None:
-        configured = getattr(state.director, "cpu_headroom_gb", None)
-        cpu_headroom_gb = (
-            float(configured)
-            if isinstance(configured, (int, float)) and not isinstance(configured, bool)
-            else 2.0
-        )
-    if state.director is not None:
-        if gpu_budget_gb is None:
-            configured = getattr(state.director, "gpu_budget_gb", None)
-            if isinstance(configured, (int, float)) and not isinstance(configured, bool):
-                gpu_budget_gb = float(configured)
-        if cpu_budget_gb is None:
-            configured = getattr(state.director, "cpu_budget_gb", None)
-            if isinstance(configured, (int, float)) and not isinstance(configured, bool):
-                cpu_budget_gb = float(configured)
     catalog = _read_catalog()
     entry = catalog.get(model_id)
     if entry is None:
@@ -2085,11 +2070,7 @@ def revalidate_servability(
             state.unservable_reasons.pop(model_id, None)
         return None
     cpu_available_gb, gpu_available_gb, cuda_available = _capacity_pools(
-        memory_probe,
-        gpu_headroom_gb=gpu_headroom_gb,
-        cpu_headroom_gb=cpu_headroom_gb,
-        gpu_budget_gb=gpu_budget_gb,
-        cpu_budget_gb=cpu_budget_gb,
+        memory_probe, **_director_capacity_knobs(state.director),
     )
     reason = model_load_blocker(model_id, entry) or _servability_reason(
         _entry_with_live_manifest(model_id, entry),
@@ -2538,13 +2519,7 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
         # Permanent servability validation belongs inside the transaction:
         # malformed catalogs or capacity probes must not strand the singleton
         # or any owners initialized before gateway startup.
-        validate_catalog_at_boot(
-            state,
-            gpu_budget_gb=state.director.gpu_budget_gb,
-            cpu_budget_gb=state.director.cpu_budget_gb,
-            gpu_headroom_gb=state.director.gpu_headroom_gb,
-            cpu_headroom_gb=state.director.cpu_headroom_gb,
-        )
+        validate_catalog_at_boot(state)
         if state.unservable_reasons:
             for mid, reason in sorted(state.unservable_reasons.items()):
                 logger.warning("unservable model %r: %s", mid, reason)

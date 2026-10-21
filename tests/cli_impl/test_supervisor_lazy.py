@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -524,16 +525,12 @@ class TestValidateCatalogAtBoot:
             },
         })
         state = SupervisorState()
+        state.director = SimpleNamespace(gpu_budget_gb=8.0, gpu_headroom_gb=1.0)
         probe = MagicMock()
         probe.gpu_free_gb.return_value = None
         probe.cpu_free_gb.return_value = 32.0
 
-        validate_catalog_at_boot(
-            state,
-            memory_probe=probe,
-            gpu_budget_gb=8.0,
-            gpu_headroom_gb=1.0,
-        )
+        validate_catalog_at_boot(state, memory_probe=probe)
 
         assert "gpu-model" not in state.unservable_reasons
 
@@ -559,13 +556,10 @@ class TestValidateCatalogAtBoot:
                 return True
 
         state = SupervisorState()
-        validate_catalog_at_boot(
-            state,
-            memory_probe=RocmProbe(),
-            gpu_budget_gb=8.0,
-            gpu_headroom_gb=1.0,
-            cpu_headroom_gb=0.0,
+        state.director = SimpleNamespace(
+            gpu_budget_gb=8.0, gpu_headroom_gb=1.0, cpu_headroom_gb=0.0,
         )
+        validate_catalog_at_boot(state, memory_probe=RocmProbe())
 
         # It fits the static GPU pool but not the deliberately tiny CPU pool.
         assert "rocm-model" not in state.unservable_reasons
@@ -598,12 +592,8 @@ class TestValidateCatalogAtBoot:
             def cuda_available(self):
                 return True
 
-        validate_catalog_at_boot(
-            state,
-            memory_probe=NvidiaProbe(),
-            gpu_budget_gb=8.0,
-            gpu_headroom_gb=1.0,
-        )
+        state.director = SimpleNamespace(gpu_budget_gb=8.0, gpu_headroom_gb=1.0)
+        validate_catalog_at_boot(state, memory_probe=NvidiaProbe())
 
         # Hard capacity is min(12 GiB physical, 8 GiB budget) - 1 GiB
         # headroom = 7 GiB. The current 2 GiB free is a director concern:
@@ -640,9 +630,7 @@ class TestValidateCatalogAtBoot:
                 return True
 
         state = SupervisorState()
-        validate_catalog_at_boot(
-            state, memory_probe=NvidiaProbe(), gpu_headroom_gb=1.0,
-        )
+        validate_catalog_at_boot(state, memory_probe=NvidiaProbe())
 
         reason = state.unservable_reasons["too-large"]
         assert "12.0 GB > 7.0 GB capacity on cuda" in reason
