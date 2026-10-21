@@ -18,6 +18,9 @@ behind import-light functions:
 - ``cuda_runtime_available()``: lazy torch CUDA/ROCm detection.
 - ``resolve_memory_pool()`` and ``available_capacity_gb()``: shared
   control-plane policy for device pooling and live-or-budget capacity.
+- ``probe_method()``, ``optional_probe_gb()``, ``check_cuda_available()``:
+  defensive readers for injected probe objects (production adapter or a
+  test double that implements only some methods).
 
 ``pynvml`` is a soft dep: muse runs on AMD GPU hosts, Apple Silicon, and
 CPU-only CI without it. The director tolerates ``None`` from
@@ -31,8 +34,9 @@ directly (see ``tests/core/test_memory_probe.py``).
 from __future__ import annotations
 
 import logging
+import math
 import threading
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +185,50 @@ def cuda_runtime_available(torch_module: Any = _TORCH_UNSET) -> bool:
         return bool(checker()) if callable(checker) else False
     except Exception as exc:  # noqa: BLE001
         logger.debug("torch CUDA availability check failed: %s", exc)
+        return False
+
+
+def probe_method(probe: Any, name: str) -> Callable[[], Any] | None:
+    """An explicitly implemented method of an injected probe, else ``None``.
+
+    Older injected probes implement only ``*_free_gb``. Looking up a
+    missing method on ``MagicMock`` fabricates another mock, so the class
+    attribute is inspected before trusting the bound one.
+    """
+    if not callable(getattr(type(probe), name, None)):
+        return None
+    method = getattr(probe, name, None)
+    return method if callable(method) else None
+
+
+def optional_probe_gb(probe: Any, name: str) -> float | None:
+    """Call an optional numeric probe method (e.g. ``gpu_total_gb``).
+
+    Missing, failing, non-numeric, negative or non-finite readings mean
+    "unknown" (``None``) rather than an accidental zero capacity.
+    """
+    method = probe_method(probe, name)
+    if method is None:
+        return None
+    try:
+        value = method()
+        if value is None or isinstance(value, bool):
+            return None
+        result = float(value)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("optional memory probe %s failed: %s", name, exc)
+        return None
+    return result if math.isfinite(result) and result >= 0.0 else None
+
+
+def check_cuda_available(checker: Callable[[], Any] | None) -> bool:
+    """Call an injected CUDA-runtime detector; absence or failure is False."""
+    if checker is None:
+        return False
+    try:
+        return bool(checker())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("CUDA runtime availability check failed: %s", exc)
         return False
 
 

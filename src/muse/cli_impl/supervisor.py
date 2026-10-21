@@ -41,7 +41,10 @@ from muse.core.catalog import CatalogError, _read_catalog, get_manifest, model_l
 
 from muse.core.memory_probe import (
     available_capacity_gb,
+    check_cuda_available,
     declared_device,
+    optional_probe_gb,
+    probe_method,
     resolve_memory_pool,
 )
 from muse.core.resource_registry import (
@@ -1467,42 +1470,6 @@ class _MemoryProbeAdapter:
         return memory_probe.cuda_runtime_available()
 
 
-def _cuda_checker_for_probe(memory_probe: "Any") -> "Callable[[], bool] | None":
-    """Return an explicitly implemented CUDA checker, never a loose mock child."""
-    descriptor = getattr(type(memory_probe), "cuda_available", None)
-    if not callable(descriptor):
-        return None
-    checker = getattr(memory_probe, "cuda_available", None)
-    return checker if callable(checker) else None
-
-
-def _optional_probe_gb(memory_probe: "Any", method_name: str) -> float | None:
-    """Read an optional numeric probe method without trusting loose mocks.
-
-    Older injected probes implement only ``*_free_gb``.  Looking up a
-    missing method on ``MagicMock`` fabricates another mock, so descriptor
-    inspection is required before calling it.  Invalid or failed optional
-    readings fall back to the established free-memory behavior.
-    """
-    descriptor = getattr(type(memory_probe), method_name, None)
-    if not callable(descriptor):
-        return None
-    method = getattr(memory_probe, method_name, None)
-    if not callable(method):
-        return None
-    try:
-        value = method()
-        if isinstance(value, bool) or value is None:
-            return None
-        result = float(value)
-        if not math.isfinite(result) or result < 0.0:
-            return None
-        return result
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("optional memory probe %s failed: %s", method_name, exc)
-        return None
-
-
 def _weights_size_gb(catalog_entry: dict) -> float:
     """On-disk size of a model's downloaded weights, in GB (0.0 if unknown).
 
@@ -1842,7 +1809,7 @@ def _capacity_pools(
     selects CUDA only when NVML or torch reports a CUDA-compatible runtime.
     """
     cpu_free_gb = float(memory_probe.cpu_free_gb())
-    cpu_total_gb = _optional_probe_gb(memory_probe, "cpu_total_gb")
+    cpu_total_gb = optional_probe_gb(memory_probe, "cpu_total_gb")
     cpu_available = available_capacity_gb(
         live_free_gb=(cpu_total_gb if cpu_total_gb is not None else cpu_free_gb),
         budget_gb=cpu_budget_gb,
@@ -1850,19 +1817,15 @@ def _capacity_pools(
     )
     cpu_available_gb = float(cpu_available or 0.0)
     gpu_free = memory_probe.gpu_free_gb()
-    gpu_total_gb = _optional_probe_gb(memory_probe, "gpu_total_gb")
+    gpu_total_gb = optional_probe_gb(memory_probe, "gpu_total_gb")
     gpu_available_gb = available_capacity_gb(
         live_free_gb=(gpu_total_gb if gpu_total_gb is not None else gpu_free),
         budget_gb=gpu_budget_gb,
         headroom_gb=gpu_headroom_gb,
     )
-    checker = _cuda_checker_for_probe(memory_probe)
-    cuda_available = gpu_free is not None
-    if not cuda_available and checker is not None:
-        try:
-            cuda_available = bool(checker())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("CUDA runtime availability check failed: %s", exc)
+    cuda_available = gpu_free is not None or check_cuda_available(
+        probe_method(memory_probe, "cuda_available"),
+    )
     return cpu_available_gb, gpu_available_gb, cuda_available
 
 
@@ -2218,7 +2181,7 @@ def build_load_director(
         cpu_budget_gb=config.get("server.cpu_budget_gb"),
         gpu_headroom_gb=config.get("server.gpu_headroom_gb"),
         cpu_headroom_gb=config.get("server.cpu_headroom_gb"),
-        cuda_available_fn=_cuda_checker_for_probe(memory_probe),
+        cuda_available_fn=probe_method(memory_probe, "cuda_available"),
     )
 
 

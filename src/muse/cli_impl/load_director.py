@@ -88,7 +88,9 @@ _INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
 
 from muse.core.memory_probe import (
     available_capacity_gb,
+    check_cuda_available,
     declared_device,
+    optional_probe_gb,
     resolve_memory_pool,
 )
 
@@ -1960,18 +1962,8 @@ class LoadDirector:
         return resolve_memory_pool(
             "auto",
             gpu_free_gb=gpu_free,
-            cuda_available=self._cuda_runtime_available(),
+            cuda_available=check_cuda_available(self.cuda_available_fn),
         ) == "cuda"
-
-    def _cuda_runtime_available(self) -> bool:
-        """Call the injected runtime detector without trusting loose mocks."""
-        if self.cuda_available_fn is None:
-            return False
-        try:
-            return bool(self.cuda_available_fn())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("CUDA runtime availability check failed: %s", exc)
-            return False
 
     def _resolve_pool_device(self, device: str) -> str:
         """Map a declared device to the concrete memory POOL it draws from.
@@ -2015,32 +2007,6 @@ class LoadDirector:
             )
             return resident_gb + evicting_gb
 
-    def _optional_total_gb(self, pool: str) -> float | None:
-        """Read an optional physical-capacity method from the probe.
-
-        Descriptor inspection avoids treating ``MagicMock``'s fabricated
-        child attributes as real probe APIs. Invalid optional values mean
-        "unknown" rather than becoming an accidental zero-capacity stamp.
-        """
-        method_name = "gpu_total_gb" if pool == "cuda" else "cpu_total_gb"
-        descriptor = getattr(type(self.memory_probe), method_name, None)
-        if not callable(descriptor):
-            return None
-        method = getattr(self.memory_probe, method_name, None)
-        if not callable(method):
-            return None
-        try:
-            value = method()
-            if value is None or isinstance(value, bool):
-                return None
-            result = float(value)
-            if not math.isfinite(result) or result < 0.0:
-                return None
-            return result
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("optional %s probe failed: %s", method_name, exc)
-            return None
-
     def _hard_capacity_for_device(self, device: str) -> float | None:
         """Empty-working-set capacity after configured headroom.
 
@@ -2048,24 +2014,17 @@ class LoadDirector:
         exposes it) and never current free memory. A configured budget caps
         that ceiling and also serves as the static fallback.
         """
-        pool = self._resolve_pool_device(device)
-        total_gb = self._optional_total_gb(pool)
-        if pool == "cuda":
-            budget_gb = self.gpu_budget_gb
-            headroom_gb = self.gpu_headroom_gb
-        else:
-            budget_gb = self.cpu_budget_gb
-            headroom_gb = self.cpu_headroom_gb
-        if total_gb is None and budget_gb is None:
-            return None
-        ceiling_gb = (
-            float(budget_gb)
-            if total_gb is None
-            else total_gb
-            if budget_gb is None
-            else min(total_gb, float(budget_gb))
+        if self._resolve_pool_device(device) == "cuda":
+            return available_capacity_gb(
+                live_free_gb=optional_probe_gb(self.memory_probe, "gpu_total_gb"),
+                budget_gb=self.gpu_budget_gb,
+                headroom_gb=self.gpu_headroom_gb,
+            )
+        return available_capacity_gb(
+            live_free_gb=optional_probe_gb(self.memory_probe, "cpu_total_gb"),
+            budget_gb=self.cpu_budget_gb,
+            headroom_gb=self.cpu_headroom_gb,
         )
-        return max(0.0, ceiling_gb - float(headroom_gb))
 
     def _free_for_device(self, device: str) -> float:
         """Live free memory in GB for the relevant device.
