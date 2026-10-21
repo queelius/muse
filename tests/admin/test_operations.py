@@ -1457,6 +1457,7 @@ class TestRestartWorkerCleanup:
         ), patch("muse.admin.operations.wait_for_ready"):
             _restart_worker_inplace(
                 spec,
+                models=("x",),
                 device="cpu",
                 stop_event=state.stop_event,
             )
@@ -1494,6 +1495,7 @@ class TestRestartWorkerCleanup:
             with pytest.raises(TimeoutError, match="never ready"):
                 _restart_worker_inplace(
                     spec,
+                    models=("x",),
                     device="cpu",
                     stop_event=state.stop_event,
                 )

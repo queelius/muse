@@ -151,16 +151,9 @@ def find_worker_for_model(state: SupervisorState, model_id: str) -> WorkerSpec |
 
 
 def _director_method(state: SupervisorState, name: str) -> Callable[..., Any] | None:
-    """Return one real director API without triggering MagicMock attributes."""
+    """Return one director API, or None when no director is bound."""
     director = getattr(state, "director", None)
-    descriptor = getattr(type(director), name, None)
-    if director is None or not callable(descriptor):
-        return None
-
-    def call(*args: Any, **kwargs: Any) -> Any:
-        return descriptor(director, *args, **kwargs)
-
-    return call
+    return None if director is None else getattr(director, name)
 
 
 def _allow_director_model(state: SupervisorState, model_id: str) -> None:
@@ -1520,7 +1513,7 @@ def _run_subprocess_into_job(
 def _restart_worker_inplace(
     spec: WorkerSpec,
     *,
-    models: tuple[str, ...] | None = None,
+    models: tuple[str, ...],
     device: str,
     log_hub: "Any | None" = None,
     stop_event: "threading.Event | None" = None,
@@ -1530,16 +1523,15 @@ def _restart_worker_inplace(
     Used by enable_model (joining a venv group) and disable_model
     (dropping a model from a multi-model worker). ``models`` is captured by
     the operation owner before the slow phase; a concurrent caller waits
-    for that operation rather than changing this command plan. Direct
-    legacy callers may omit it to snapshot the current ``spec.models`` at
-    function entry. Reuses the spec's port and python_path. A replacement that
-    reaches readiness resets the consecutive auto-restart failure budget.
+    for that operation rather than changing this command plan. Reuses the
+    spec's port and python_path. A replacement that reaches readiness
+    resets the consecutive auto-restart failure budget.
 
     `log_hub` is forwarded to `spawn_worker` so a restart-in-place keeps
     piping the worker's stdout into the LogHub when telemetry is enabled
     (callers pass `state.log_hub`).
     """
-    planned_models = tuple(spec.models) if models is None else tuple(models)
+    planned_models = tuple(models)
     _shutdown_workers([spec])
     with spec.process_lock:
         if spec.process is not None:
