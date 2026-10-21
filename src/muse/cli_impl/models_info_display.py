@@ -326,6 +326,34 @@ def format_info(
     return "\n".join(lines)
 
 
+def format_curated_info(c) -> str:
+    """Render a `CuratedEntry` as the same shape as `format_info` for
+    curated-only (not-yet-pulled) entries.
+    """
+    lines: list[str] = []
+    lines.append(f"{c.id}".ljust(36) + "  [recommended, not pulled]")
+    lines.append("")
+    lines.append("Basics:")
+    if c.modality:
+        lines.append(f"  modality:        {c.modality}")
+    if c.uri:
+        lines.append(f"  uri:             {c.uri}")
+    if c.description:
+        lines.append(f"  description:     {c.description}")
+    if c.size_gb is not None:
+        lines.append(f"  size on HF:      ~{c.size_gb:.1f} GB")
+    if c.tags:
+        lines.append(f"  tags:            {', '.join(c.tags)}")
+    if c.capabilities:
+        lines.append("")
+        lines.append("Capabilities (would be applied at pull):")
+        for k, v in c.capabilities.items():
+            lines.append(f"  {k + ':':17s}{v}")
+    lines.append("")
+    lines.append(f"To install: muse pull {c.id}")
+    return "\n".join(lines)
+
+
 def _format_bytes(b: int) -> str:
     if b >= 1024**3:
         return f"{b / 1024**3:.1f} GB"

@@ -90,45 +90,31 @@ class McpFilter(str, Enum):
 # Top-level Typer app. rich_markup_mode lets help strings use [bold]
 # and similar inline rich tags; we don't lean on it heavily but it
 # costs nothing.
+_TYPER_SETTINGS = {
+    "no_args_is_help": True,
+    "rich_markup_mode": "rich",
+    "context_settings": {"help_option_names": ["-h", "--help"]},
+}
 app = typer.Typer(
     name="muse",
     help="Multi-modality generation server + admin CLI",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-    context_settings={"help_option_names": ["-h", "--help"]},
+    **_TYPER_SETTINGS,
 )
-models_app = typer.Typer(
-    name="models",
-    help="manage the model catalog",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-    context_settings={"help_option_names": ["-h", "--help"]},
+
+
+def _subapp(name: str, help: str) -> typer.Typer:
+    """Create a command group with the top-level app's shared settings."""
+    sub = typer.Typer(name=name, help=help, **_TYPER_SETTINGS)
+    app.add_typer(sub, name=name)
+    return sub
+
+
+models_app = _subapp("models", "manage the model catalog")
+config_app = _subapp("config", "inspect and edit muse's config.yaml")
+doctor_app = _subapp(
+    "doctor", "diagnose local muse state and owned runtime resources",
 )
-app.add_typer(models_app, name="models")
-config_app = typer.Typer(
-    name="config",
-    help="inspect and edit muse's config.yaml",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-    context_settings={"help_option_names": ["-h", "--help"]},
-)
-app.add_typer(config_app, name="config")
-doctor_app = typer.Typer(
-    name="doctor",
-    help="diagnose local muse state and owned runtime resources",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-    context_settings={"help_option_names": ["-h", "--help"]},
-)
-app.add_typer(doctor_app, name="doctor")
-storage_app = typer.Typer(
-    name="storage",
-    help="inspect and reclaim Muse-owned disk space",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-    context_settings={"help_option_names": ["-h", "--help"]},
-)
-app.add_typer(storage_app, name="storage")
+storage_app = _subapp("storage", "inspect and reclaim Muse-owned disk space")
 
 
 def _version_callback(value: bool) -> bool:
@@ -686,7 +672,7 @@ def models_info(
     `muse models list` symmetrically.
     """
     from muse.core.catalog import _read_catalog, known_models
-    from muse.cli_impl.models_info_display import format_info
+    from muse.cli_impl.models_info_display import format_curated_info, format_info
     from muse.core.curated import load_curated
 
     catalog_known = known_models()
@@ -707,39 +693,11 @@ def models_info(
         (c for c in load_curated() if c.id == model_id), None,
     )
     if curated_match is not None:
-        typer.echo(_format_curated_info(curated_match))
+        typer.echo(format_curated_info(curated_match))
         return
 
     typer.echo(f"error: unknown model {model_id!r}", err=True)
     raise typer.Exit(2)
-
-
-def _format_curated_info(c) -> str:
-    """Render a `CuratedEntry` as the same shape as `format_info` for
-    curated-only (not-yet-pulled) entries.
-    """
-    lines: list[str] = []
-    lines.append(f"{c.id}".ljust(36) + "  [recommended, not pulled]")
-    lines.append("")
-    lines.append("Basics:")
-    if c.modality:
-        lines.append(f"  modality:        {c.modality}")
-    if c.uri:
-        lines.append(f"  uri:             {c.uri}")
-    if c.description:
-        lines.append(f"  description:     {c.description}")
-    if c.size_gb is not None:
-        lines.append(f"  size on HF:      ~{c.size_gb:.1f} GB")
-    if c.tags:
-        lines.append(f"  tags:            {', '.join(c.tags)}")
-    if c.capabilities:
-        lines.append("")
-        lines.append("Capabilities (would be applied at pull):")
-        for k, v in c.capabilities.items():
-            lines.append(f"  {k + ':':17s}{v}")
-    lines.append("")
-    lines.append(f"To install: muse pull {c.id}")
-    return "\n".join(lines)
 
 
 @models_app.command("remove")
@@ -778,25 +736,7 @@ def models_enable(
     change live (worker spawn or restart-in-place). Otherwise it falls
     back to mutating catalog.json directly with a warning.
     """
-    outcome = _try_admin_action("enable", model_id)
-    if outcome is AdminActionOutcome.SUCCESS:
-        return
-    if outcome is AdminActionOutcome.FAILED:
-        raise typer.Exit(2)
-    if outcome is AdminActionOutcome.TIMEOUT:
-        raise typer.Exit(3)
-    # NOT_HANDLED: no admin token / admin unreachable / admin disabled
-    # (503) -- fall through to the catalog-only path exactly as today.
-
-    from muse.core.catalog import set_enabled
-    try:
-        set_enabled(model_id, True)
-    except KeyError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-    typer.echo(
-        f"enabled {model_id} (catalog only; supervisor will pick this up on restart)"
-    )
+    _set_model_enabled(model_id, True)
 
 
 @models_app.command("disable")
@@ -808,23 +748,30 @@ def models_disable(
     Stays in catalog, not loaded by `muse serve`. Same admin-API
     routing as `enable`.
     """
-    outcome = _try_admin_action("disable", model_id)
+    _set_model_enabled(model_id, False)
+
+
+def _set_model_enabled(model_id: str, enabled: bool) -> None:
+    """Shared body of `models enable` / `models disable`."""
+    action = "enable" if enabled else "disable"
+    outcome = _try_admin_action(action, model_id)
     if outcome is AdminActionOutcome.SUCCESS:
         return
     if outcome is AdminActionOutcome.FAILED:
         raise typer.Exit(2)
     if outcome is AdminActionOutcome.TIMEOUT:
         raise typer.Exit(3)
-    # NOT_HANDLED: fall through to the catalog-only path exactly as today.
+    # NOT_HANDLED: no admin token / admin unreachable / admin disabled
+    # (503) -- fall through to the catalog-only path exactly as today.
 
     from muse.core.catalog import set_enabled
     try:
-        set_enabled(model_id, False)
+        set_enabled(model_id, enabled)
     except KeyError as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(2)
     typer.echo(
-        f"disabled {model_id} (catalog only; supervisor will pick this up on restart)"
+        f"{action}d {model_id} (catalog only; supervisor will pick this up on restart)"
     )
 
 
@@ -869,10 +816,7 @@ def models_set_device(
 
     try:
         set_device_override(model_id, target)
-    except KeyError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-    except ValueError as e:
+    except (KeyError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(2)
 
@@ -977,10 +921,7 @@ def models_set_gpu_layers(
 
     try:
         set_gpu_layers_override(model_id, target)
-    except KeyError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-    except ValueError as e:
+    except (KeyError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(2)
 
@@ -1024,21 +965,19 @@ def models_warmup(
     command exits non-zero with a clear error rather than silently
     succeeding.
     """
-    from muse.core import config
-    if not config.get("admin.token"):
+    try:
+        client = _admin_client(timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"error: admin client unavailable: {e}", err=True)
+        raise typer.Exit(2)
+    if client is None:
         typer.echo(
             "error: warmup requires a running `muse serve` with MUSE_ADMIN_TOKEN set",
             err=True,
         )
         raise typer.Exit(2)
 
-    try:
-        from muse.admin.client import AdminClient, AdminClientError
-    except Exception as e:  # noqa: BLE001
-        typer.echo(f"error: admin client unavailable: {e}", err=True)
-        raise typer.Exit(2)
-
-    client = AdminClient(timeout=timeout)
+    from muse.admin.client import AdminClientError
     try:
         # Pass the per-call timeout explicitly: cold loads take 10-60s
         # for typical models and longer (5+ min) for large diffusion or
@@ -1213,7 +1152,20 @@ def config_unset(
     raise typer.Exit(run_unset(key) or 0)
 
 
-# Helpers (preserved verbatim from the argparse era) -----------------------
+# Admin-API helpers ---------------------------------------------------------
+
+
+def _admin_client(timeout: float):
+    """An AdminClient when an admin token is configured, else None.
+
+    The import is deferred (and may raise ImportError on an install
+    without the server extras' httpx) so `muse --help` stays light.
+    """
+    from muse.core import config
+    if not config.get("admin.token"):
+        return None
+    from muse.admin.client import AdminClient
+    return AdminClient(timeout=timeout)
 
 
 def _probe_online_worker_status(model_id: str) -> dict | None:
@@ -1239,18 +1191,9 @@ def _probe_online_worker_status(model_id: str) -> dict | None:
 
 def _probe_admin_worker_status(model_id: str) -> dict | None:
     """Admin-API worker status, or None without a token / on any failure."""
-    from muse.core import config
-    if not config.get("admin.token"):
-        return None
     try:
-        from muse.admin.client import AdminClient, AdminClientError
-    except Exception:  # noqa: BLE001
-        return None
-    client = AdminClient(timeout=2.0)
-    try:
-        return client.status(model_id)
-    except AdminClientError:
-        return None
+        client = _admin_client(timeout=2.0)
+        return client.status(model_id) if client is not None else None
     except Exception:  # noqa: BLE001
         return None
 
@@ -1281,14 +1224,13 @@ def _try_admin_action(action: str, model_id: str) -> AdminActionOutcome:
     (no admin token / unreachable / 503 admin_disabled), where falling
     through to the catalog-only path is correct.
     """
-    from muse.core import config
-    if not config.get("admin.token"):
-        return AdminActionOutcome.NOT_HANDLED
     try:
-        from muse.admin.client import AdminClient, AdminClientError
+        client = _admin_client(timeout=5.0)
     except Exception:  # noqa: BLE001
         return AdminActionOutcome.NOT_HANDLED
-    client = AdminClient(timeout=5.0)
+    if client is None:
+        return AdminActionOutcome.NOT_HANDLED
+    from muse.admin.client import AdminClientError
     try:
         if action == "enable":
             out = client.enable(model_id)
