@@ -1070,16 +1070,23 @@ def install_into_venv(venv_path: Path, packages: list[str]) -> None:
                 _emit_failure_output(exc)
             raise
 
-    for cmd in pip_install_steps(str(py), packages, quiet=not verbose):
+    for cmd in pip_install_commands(str(py), packages, quiet=not verbose):
         run(cmd)
-    reinstall = cuda_reinstall_command(str(py), packages, quiet=not verbose)
-    if reinstall is not None:
-        run(reinstall)
 
 
-def _pip_plan(
-    python: str, packages: list[str], *, upgrade: bool, quiet: bool,
-) -> tuple[list[str], list[list[str]]]:
+def pip_install_commands(
+    python: str, packages: list[str], *, upgrade: bool = False, quiet: bool = False,
+) -> collections.abc.Iterator[list[str]]:
+    """Yield the pip commands that install `packages`; run each before
+    requesting the next.
+
+    Usually one command. With `install.llama_cpp_wheel` set and a
+    llama-cpp-python requirement present, llama-cpp-python installs as a
+    second command from the prebuilt CUDA wheel index. pip keeps an existing
+    CPU build of a satisfying version, so after those run, the build now
+    installed is inspected and a CPU one is force-reinstalled (without deps).
+    That check is why the commands are yielded lazily.
+    """
     from muse.core import config, llama_cuda
 
     plan = llama_cuda.install_plan(list(packages), config.get("install.llama_cpp_wheel"))
@@ -1088,53 +1095,11 @@ def _pip_plan(
         base.append("-q")
     if upgrade:
         base.append("--upgrade")
-    return base, plan
-
-
-def pip_install_steps(
-    python: str, packages: list[str], *, upgrade: bool = False, quiet: bool = False,
-) -> list[list[str]]:
-    """Return the pip commands that install `packages`, to run in order.
-
-    Usually one command. With `install.llama_cpp_wheel` set and a
-    llama-cpp-python requirement present, llama-cpp-python installs as a
-    second command from the prebuilt CUDA wheel index. After these succeed,
-    run `cuda_reinstall_command` with the same arguments.
-    """
-    base, plan = _pip_plan(python, packages, upgrade=upgrade, quiet=quiet)
-    return [[*base, *args] for args in plan]
-
-
-def cuda_reinstall_command(
-    python: str, packages: list[str], *, upgrade: bool = False, quiet: bool = False,
-) -> list[str] | None:
-    """Return the command that replaces a CPU llama-cpp-python build, or None.
-
-    Call only after `pip_install_steps` ran: pip keeps an existing CPU build
-    of a satisfying version, so this inspects the build now installed and
-    force-reinstalls the CUDA wheel (without deps) only when it is not one.
-    """
-    from muse.core import llama_cuda
-
-    base, plan = _pip_plan(python, packages, upgrade=upgrade, quiet=quiet)
-    if len(plan) < 2 or _is_cuda_llama_build(python):
-        return None
-    logger.info("replacing the CPU llama-cpp-python build in %s", python)
-    return [*base, *llama_cuda.reinstall_args(plan[1])]
-
-
-def pip_install_commands(
-    python: str, packages: list[str], *, upgrade: bool = False, quiet: bool = False,
-) -> collections.abc.Iterator[list[str]]:
-    """Yield `pip_install_steps`, then any `cuda_reinstall_command`.
-
-    Each command must run before the next is requested: the reinstall check
-    inspects the build the earlier commands installed.
-    """
-    yield from pip_install_steps(python, packages, upgrade=upgrade, quiet=quiet)
-    reinstall = cuda_reinstall_command(python, packages, upgrade=upgrade, quiet=quiet)
-    if reinstall is not None:
-        yield reinstall
+    for args in plan:
+        yield [*base, *args]
+    if len(plan) > 1 and not _is_cuda_llama_build(python):
+        logger.info("replacing the CPU llama-cpp-python build in %s", python)
+        yield [*base, *llama_cuda.reinstall_args(plan[1])]
 
 
 def _is_cuda_llama_build(python: str) -> bool:
