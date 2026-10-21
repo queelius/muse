@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_summarization.codec import (
     encode_summarization_response,
@@ -83,12 +83,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"format must be one of {list(_VALID_FORMATS)}; got {req.format!r}",
             )
 
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         # backend.summarize is sync (transformers generate); offload so a
         # slow inference doesn't block sibling /health, /v1/models, or

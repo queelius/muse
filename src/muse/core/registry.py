@@ -90,6 +90,26 @@ class ModalityRegistry:
             )
         return self._models[modality][model_id]
 
+    def get_or_404(self, modality: str, model_id: str | None = None) -> Any:
+        """`get`, but an unknown model raises the OpenAI-shape 404.
+
+        For route handlers: `ModelNotFoundError` names the requested id,
+        or `<default>` when the request omitted `model`.
+        """
+        try:
+            return self.get(modality, model_id)
+        except KeyError:
+            # Deferred: errors imports fastapi; the registry stays light.
+            from muse.core.errors import ModelNotFoundError
+            raise ModelNotFoundError(
+                model_id=model_id or "<default>", modality=modality,
+            ) from None
+
+    def capabilities(self, modality: str, model_id: str) -> dict:
+        """The model's manifest `capabilities` dict; `{}` when absent or null."""
+        manifest = self.manifest(modality, model_id) or {}
+        return manifest.get("capabilities") or {}
+
     def set_default(self, modality: str, model_id: str) -> None:
         if model_id not in self._models.get(modality, {}):
             available = sorted(self._models.get(modality, {}))

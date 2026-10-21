@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_alignment.codec import encode_audio_alignment
 from muse.modalities.audio_alignment.protocol import (
@@ -82,12 +82,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"audio file exceeds MUSE_AUDIO_ALIGNMENT_MAX_BYTES={cap}",
             )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, model)
 
         suffix = Path(file.filename or "audio").suffix or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:

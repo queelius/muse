@@ -24,7 +24,7 @@ from muse.modalities.audio_speech.codec import (
     float_to_pcm16,
     wav_bytes_to_opus,
 )
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -64,19 +64,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.get("/speech/voices")
     def list_voices(model: str | None = None):
-        try:
-            m = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+        m = registry.get_or_404(MODALITY, model)
         voices = getattr(m, "voices", [])
         return {"model": m.model_id, "voices": voices}
 
     @router.post("/speech")
     async def speech(req: SpeechRequest):
-        try:
-            model = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=req.model or "<default>", modality=MODALITY)
+        model = registry.get_or_404(MODALITY, req.model)
 
         if req.stream:
             return await _stream(model, req)

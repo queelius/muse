@@ -19,7 +19,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_classification.codec import (
     encode_audio_classifications,
@@ -73,12 +73,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"raise MUSE_AUDIO_CLS_MAX_BYTES if intentional",
             )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, model)
 
         # librosa needs a filesystem path; write the upload to a temp
         # file. Using delete=False so the inference thread can read it

@@ -152,6 +152,37 @@ def test_registry_manifest_returns_none_for_unknown_model():
     assert reg.manifest("text/classification", "nope") is None
 
 
+def test_capabilities_returns_dict_or_empty(reg):
+    reg.register("image/generation", FakeImageModel(), manifest={
+        "model_id": "fake-diffusion", "capabilities": {"supports_img2img": True},
+    })
+    reg.register("image/generation", FakeImageModel(model_id="null-caps"),
+                 manifest={"model_id": "null-caps", "capabilities": None})
+    reg.register("image/generation", FakeImageModel(model_id="no-caps"))
+    assert reg.capabilities("image/generation", "fake-diffusion") == {
+        "supports_img2img": True,
+    }
+    assert reg.capabilities("image/generation", "null-caps") == {}
+    assert reg.capabilities("image/generation", "no-caps") == {}
+    assert reg.capabilities("image/generation", "unknown") == {}
+
+
+def test_get_or_404_raises_openai_shape_404(reg):
+    from muse.core.errors import ModelNotFoundError
+
+    m = FakeAudioModel()
+    reg.register("audio/speech", m)
+    assert reg.get_or_404("audio/speech") is m
+    assert reg.get_or_404("audio/speech", "fake-tts") is m
+    with pytest.raises(ModelNotFoundError) as exc:
+        reg.get_or_404("audio/speech", "nope")
+    assert exc.value.status_code == 404
+    assert "'nope'" in exc.value.detail["error"]["message"]
+    with pytest.raises(ModelNotFoundError) as exc:
+        reg.get_or_404("image/generation")
+    assert "'<default>'" in exc.value.detail["error"]["message"]
+
+
 # -- v0.34.0 finding #14: per-backend inference lock ---------------------
 
 

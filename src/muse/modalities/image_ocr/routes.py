@@ -16,7 +16,7 @@ import logging
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.image_input import (
@@ -57,12 +57,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"got {max_new_tokens}",
                 )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, model)
 
         effective_id = backend.model_id
 

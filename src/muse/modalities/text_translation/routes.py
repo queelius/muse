@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_translation.codec import (
     languages_payload,
@@ -96,12 +96,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"limits.translate_max_chars={max_chars}",
             )
 
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         # Pre-dispatch pair validation against supported_languages() (T2
         # review note): checks membership, never materializes the full
@@ -214,12 +209,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.get("/languages")
     async def languages(model: str | None = Query(default=None)):
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, model)
         supported = backend.supported_languages()
         return JSONResponse(content=languages_payload(supported))
 

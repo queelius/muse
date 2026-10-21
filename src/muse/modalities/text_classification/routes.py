@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_classification.codec import (
     encode_classifications, encode_moderations,
@@ -136,20 +136,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"MUSE_MODERATIONS_MAX_CHARS_PER_ITEM={_max_chars_per_item()}",
             )
 
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         # Resolve effective model_id for the response envelope. Prefer
         # the backend's own model_id (set on instantiation) so that the
         # response reflects what actually answered, not the request's
         # model field which may have been None.
         effective_id = backend.model_id
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        capabilities = manifest.get("capabilities") or {}
+        capabilities = registry.capabilities(MODALITY, effective_id)
         threshold = _resolve_threshold(req.threshold, capabilities)
         safe_labels = _resolve_safe_labels(capabilities)
 
@@ -235,16 +229,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
 
         # Resolve the backend.
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         effective_id = backend.model_id
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        capabilities = manifest.get("capabilities") or {}
+        capabilities = registry.capabilities(MODALITY, effective_id)
 
         # Capability gate: dispatch by candidate_labels presence.
         if req.candidate_labels is not None:

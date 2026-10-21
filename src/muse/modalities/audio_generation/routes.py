@@ -17,7 +17,7 @@ import logging
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_generation.codec import (
     UnsupportedFormatError,
@@ -80,16 +80,10 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
     capability flag. Default True so v1 manifests without the flag set
     are not silently broken.
     """
-    try:
-        model = registry.get(MODALITY, req.model)
-    except KeyError:
-        raise ModelNotFoundError(
-            model_id=req.model or "<default>", modality=MODALITY,
-        )
+    model = registry.get_or_404(MODALITY, req.model)
 
     effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
-    manifest = registry.manifest(MODALITY, effective_id) or {}
-    capabilities = manifest.get("capabilities") or {}
+    capabilities = registry.capabilities(MODALITY, effective_id)
     cap_key = "supports_music" if kind == "music" else "supports_sfx"
     if not capabilities.get(cap_key, True):
         return error_response(

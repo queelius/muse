@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from muse.cli_impl.queueing import QueueFull, QueueTimeout
 from muse.core import config
 from muse.core.disconnect import ClientDisconnected, unless_disconnected
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.decision_evaluation.codec import encode_response
 from muse.modalities.decision_evaluation.execution import DecisionExecutor
@@ -88,10 +88,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         except DecisionInputError as exc:
             return error_response(exc.status, exc.code, exc.message)
 
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=req.model, modality=MODALITY)
+        backend = registry.get_or_404(MODALITY, req.model)
 
         budget = config.get("server.queue_timeout_seconds") or 0.0
         deadline = time.monotonic() + max(0.0, float(budget))

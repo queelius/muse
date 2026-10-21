@@ -31,7 +31,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import Response
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_transcription.codec import encode_transcription
 
@@ -83,12 +83,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if not data:
             return error_response(400, "invalid_parameter", "file is empty")
 
-        # registry.get raises KeyError; convert to ModelNotFoundError for
-        # the OpenAI-compat envelope (see embedding_text/routes.py).
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=model, modality=MODALITY)
+        backend = registry.get_or_404(MODALITY, model)
 
         want_words = "word" in timestamp_granularities
 

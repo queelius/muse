@@ -20,7 +20,7 @@ import time
 from fastapi import APIRouter, File, Form, UploadFile
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.image_input import (
@@ -96,14 +96,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "guidance must be in [0.0, 20.0]",
             )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+        backend = registry.get_or_404(MODALITY, model)
 
         effective_id = getattr(backend, "model_id", None) or (model or "<default>")
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        capabilities = manifest.get("capabilities", {}) or {}
+        capabilities = registry.capabilities(MODALITY, effective_id)
         supported = list(capabilities.get("supported_scales") or [4])
         if scale not in supported:
             return error_response(

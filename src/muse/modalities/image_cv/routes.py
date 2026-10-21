@@ -24,7 +24,7 @@ import logging
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_cv.codec import (
@@ -44,20 +44,6 @@ MODALITY = "image/cv"
 logger = logging.getLogger(__name__)
 
 
-def _resolve_backend(registry: ModalityRegistry, model: str | None):
-    """Look up the backend; raise ModelNotFoundError on miss.
-
-    Mirrors the pattern from sibling modalities. Returns the registered
-    backend object so the route can read .model_id and the manifest.
-    """
-    try:
-        return registry.get(MODALITY, model)
-    except KeyError:
-        raise ModelNotFoundError(
-            model_id=model or "<default>", modality=MODALITY,
-        )
-
-
 def _capability_gate(
     registry: ModalityRegistry, backend, *, primitive: str,
 ) -> JSONResponse | None:
@@ -71,8 +57,7 @@ def _capability_gate(
         "keypoints": "supports_keypoints",
         "detection": "supports_detection",
     }[primitive]
-    manifest = registry.manifest(MODALITY, backend.model_id) or {}
-    capabilities = manifest.get("capabilities") or {}
+    capabilities = registry.capabilities(MODALITY, backend.model_id)
     if not capabilities.get(flag_name):
         return error_response(
             400, "wrong_primitive",
@@ -101,7 +86,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"got {response_format!r}",
             )
 
-        backend = _resolve_backend(registry, model)
+        backend = registry.get_or_404(MODALITY, model)
         gate = _capability_gate(registry, backend, primitive="depth")
         if gate is not None:
             return gate
@@ -162,7 +147,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"threshold must be in [0, 1]; got {threshold}",
             )
 
-        backend = _resolve_backend(registry, model)
+        backend = registry.get_or_404(MODALITY, model)
         gate = _capability_gate(registry, backend, primitive="keypoints")
         if gate is not None:
             return gate
@@ -228,7 +213,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"max_detections must be in [1, 10000]; got {max_detections}",
             )
 
-        backend = _resolve_backend(registry, model)
+        backend = registry.get_or_404(MODALITY, model)
         gate = _capability_gate(registry, backend, primitive="detection")
         if gate is not None:
             return gate

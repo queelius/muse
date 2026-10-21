@@ -23,7 +23,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.chat_completion.codec import (
@@ -286,18 +286,9 @@ def _decoded_message_images(messages: list[dict]) -> list[Any]:
 def build_router(registry: ModalityRegistry) -> APIRouter:
     router = APIRouter(prefix="/v1", tags=["chat/completion"])
 
-    def _get_model(model_id: str | None):
-        try:
-            return registry.get(MODALITY, model_id)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model_id or "<default>",
-                modality=MODALITY,
-            )
-
     @router.post("/chat/completions")
     async def chat_completions(req: ChatCompletionRequest):
-        model = _get_model(req.model)
+        model = registry.get_or_404(MODALITY, req.model)
 
         # Derive effective_id the same way image_generation does: prefer
         # the model's own model_id attr; fall back to the request field or
@@ -307,8 +298,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # Read capability flags from the registry manifest (NOT instance
         # attrs) so resolver-pulled VLMs whose capabilities live in the
         # synthesized manifest are correctly gated.
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        caps = manifest.get("capabilities", {})
+        caps = registry.capabilities(MODALITY, effective_id)
         supports_vision = caps.get("supports_vision", False)
         supports_multi_image = caps.get("supports_multi_image", False)
 

@@ -12,7 +12,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_animation.codec import (
@@ -101,14 +101,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.post("/animations")
     async def animations(req: AnimationsRequest):
-        try:
-            model = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
-        manifest = registry.manifest(MODALITY, model.model_id) or {}
-        capabilities = manifest.get("capabilities") or {}
+        model = registry.get_or_404(MODALITY, req.model)
+        capabilities = registry.capabilities(MODALITY, model.model_id)
 
         # Image-to-animation gate
         init_image = None

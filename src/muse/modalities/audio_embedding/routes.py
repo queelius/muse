@@ -31,7 +31,7 @@ import logging
 from fastapi import APIRouter, File, Form, UploadFile
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.audio_embedding.codec import embedding_to_base64
 
@@ -114,12 +114,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
             audio_bytes_list.append(data)
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, model)
 
         # backend.embed is sync (transformers forward + librosa decode);
         # offload so a slow inference doesn't block sibling /health,

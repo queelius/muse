@@ -384,6 +384,24 @@ def test_post_image_with_unsupported_model_returns_400(client_with_uncapable_mod
     assert "img2img" in body["error"]["message"].lower()
 
 
+def test_post_image_with_null_capabilities_returns_400_not_500():
+    """`capabilities: null` in a manifest reads as no capabilities."""
+    reg = ModalityRegistry()
+    model = RecordingImageModel(model_id="null-caps")
+    reg.register("image/generation", model, manifest={
+        "model_id": "null-caps", "modality": "image/generation",
+        "capabilities": None,
+    })
+    app = create_app(registry=reg, routers={"image/generation": build_router(reg)})
+    r = TestClient(app).post("/v1/images/generations", json={
+        "prompt": "x",
+        "model": "null-caps",
+        "image": "data:image/png;base64,iVBORw0KGgo=",
+    })
+    assert r.status_code == 400
+    assert "img2img" in r.json()["error"]["message"].lower()
+
+
 def test_post_malformed_data_url_returns_400_image_decode_error(
     client_with_capable_model,
 ):

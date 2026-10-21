@@ -30,7 +30,7 @@ import logging
 from fastapi import APIRouter, File, Form, UploadFile
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.image_input import (
@@ -189,14 +189,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     "boxes must be a JSON list of [x1, y1, x2, y2] integer quads",
                 )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+        backend = registry.get_or_404(MODALITY, model)
 
         effective_id = getattr(backend, "model_id", None) or (model or "<default>")
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        capabilities = manifest.get("capabilities", {}) or {}
+        capabilities = registry.capabilities(MODALITY, effective_id)
 
         # Capability gate (defense-in-depth before runtime invocation).
         cap_key = _MODE_CAPABILITY[mode]

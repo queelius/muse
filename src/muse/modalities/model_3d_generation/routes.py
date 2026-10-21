@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.image_input import (
@@ -98,12 +98,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         # Resolve backend or 404.
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         # Resolve effective_id from the backend so error messages name
         # the real model (the registry default when req.model is None).
@@ -116,8 +111,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # Capability gate: supports_text_to_3d=True required. Mismatch
         # returns 400 BEFORE invoking the backend, naming the alternate
         # route in the error message.
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        capabilities = manifest.get("capabilities") or {}
+        capabilities = registry.capabilities(MODALITY, effective_id)
         if not capabilities.get("supports_text_to_3d"):
             return error_response(
                 400, "unsupported_route",
@@ -181,12 +175,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         # Resolve backend or 404.
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, model)
 
         effective_id = (
             getattr(backend, "model_id", None)
@@ -195,8 +184,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         )
 
         # Capability gate: supports_image_to_3d=True required.
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        capabilities = manifest.get("capabilities") or {}
+        capabilities = registry.capabilities(MODALITY, effective_id)
         if not capabilities.get("supports_image_to_3d"):
             return error_response(
                 400, "unsupported_route",

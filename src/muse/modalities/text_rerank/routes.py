@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_rerank.codec import encode_rerank_response
 
@@ -106,12 +106,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"MUSE_RERANK_MAX_DOC_CHARS={max_doc_chars}",
             )
 
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         effective_id = backend.model_id
 

@@ -30,7 +30,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_embedding.codec import embedding_to_base64
@@ -99,12 +99,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"MUSE_IMAGE_EMBEDDINGS_MAX_BATCH={max_batch}",
             )
 
-        try:
-            backend = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        backend = registry.get_or_404(MODALITY, req.model)
 
         # Decode each input entry into a PIL.Image. Failures surface as
         # 400s with the OpenAI-shape error envelope; one bad input

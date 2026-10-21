@@ -23,7 +23,7 @@ import time
 from fastapi import APIRouter, File, Form, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.codec import to_bytes, to_data_url
@@ -67,10 +67,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.post("/generations")
     async def generations(req: GenerationRequest):
-        try:
-            model = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=req.model or "<default>", modality=MODALITY)
+        model = registry.get_or_404(MODALITY, req.model)
 
         # Resolve the effective model id (the registry default when req.model is None)
         # so capability-gate errors and decode-failure errors name a real model.
@@ -79,8 +76,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # lora_scale only applies to LoRA adapter models; reject early
         # for others (mirrors the supports_img2img capability gate).
         if req.lora_scale is not None:
-            manifest = registry.manifest(MODALITY, effective_id) or {}
-            if not manifest.get("capabilities", {}).get("lora_adapter"):
+            if not registry.capabilities(MODALITY, effective_id).get("lora_adapter"):
                 return error_response(
                     400,
                     "lora_not_supported",
@@ -93,8 +89,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # must decode to a PIL.Image.
         init_image = None
         if req.image is not None:
-            manifest = registry.manifest(MODALITY, effective_id) or {}
-            if not manifest.get("capabilities", {}).get("supports_img2img"):
+            if not registry.capabilities(MODALITY, effective_id).get("supports_img2img"):
                 return error_response(
                     400,
                     "invalid_parameter",
@@ -217,14 +212,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"size {size} out of supported range (64-2048 per side)",
             )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+        backend = registry.get_or_404(MODALITY, model)
 
         effective_id = getattr(backend, "model_id", None) or (model or "<default>")
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        if not manifest.get("capabilities", {}).get("supports_inpainting"):
+        if not registry.capabilities(MODALITY, effective_id).get("supports_inpainting"):
             return error_response(
                 400, "invalid_parameter",
                 f"model {effective_id!r} does not support inpainting",
@@ -332,14 +323,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"size {size} out of supported range (64-2048 per side)",
             )
 
-        try:
-            backend = registry.get(MODALITY, model)
-        except KeyError:
-            raise ModelNotFoundError(model_id=model or "<default>", modality=MODALITY)
+        backend = registry.get_or_404(MODALITY, model)
 
         effective_id = getattr(backend, "model_id", None) or (model or "<default>")
-        manifest = registry.manifest(MODALITY, effective_id) or {}
-        if not manifest.get("capabilities", {}).get("supports_variations"):
+        if not registry.capabilities(MODALITY, effective_id).get("supports_variations"):
             return error_response(
                 400, "invalid_parameter",
                 f"model {effective_id!r} does not support variations",

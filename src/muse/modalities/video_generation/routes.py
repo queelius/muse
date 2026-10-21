@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from muse.core import config
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.video_generation.codec import (
     UnsupportedFormatError,
@@ -104,12 +104,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.post("/generations")
     async def generations(req: VideoGenerationRequest):
-        try:
-            model = registry.get(MODALITY, req.model)
-        except KeyError:
-            raise ModelNotFoundError(
-                model_id=req.model or "<default>", modality=MODALITY,
-            )
+        model = registry.get_or_404(MODALITY, req.model)
 
         width = height = None
         if req.size is not None:
