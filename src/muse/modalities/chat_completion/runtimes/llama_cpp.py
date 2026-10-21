@@ -16,6 +16,7 @@ from typing import Any, Iterator
 
 from muse.core.llama_cuda import prepare_llama_cpp
 from muse.core.placement import native_gpu_backend, native_gpu_offload, native_placement
+from muse.core.runtime_helpers import GGUF_DEFAULT_CONTEXT_LENGTH
 from muse.modalities.chat_completion.protocol import (
     ChatChoice,
     ChatChunk,
@@ -66,7 +67,7 @@ class LlamaCppModel:
         hf_repo: str,
         local_dir: str | None = None,
         gguf_file: str,
-        context_length: int = 8192,
+        context_length: int = GGUF_DEFAULT_CONTEXT_LENGTH,
         chat_format: str | None = None,
         chat_template: str | None = None,  # deprecated alias for chat_format
         n_gpu_layers: int = -1,

@@ -16,6 +16,7 @@ Public surface:
 - ``set_inference_mode(model) -> None``
 - ``LoadTimer(label, logger)`` (context manager)
 - ``resolve_model_source(ref: str) -> str``
+- ``GGUF_DEFAULT_CONTEXT_LENGTH`` (llama.cpp active context default)
 """
 from __future__ import annotations
 
@@ -24,6 +25,14 @@ import time
 from typing import Any
 
 from muse.core.memory_probe import cuda_runtime_available
+
+
+# Active llama.cpp context (KV cache) when a GGUF manifest sets none:
+# LlamaCppModel's default, and the cap the chat HF resolver applies to a
+# repo's trained context (recorded separately as max_context_length).
+# Lives here, not in the runtime, because hf.py plugins load single-file
+# and may not import modality packages.
+GGUF_DEFAULT_CONTEXT_LENGTH = 8192
 
 
 def select_device(
