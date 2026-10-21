@@ -88,3 +88,48 @@ def test_unused_seeds_are_dropped_after_the_download(tmp_path):
     blobs = {p.name for p in (muse / repo_folder(REPO) / "blobs").iterdir()}
     assert blobs == {_lfs(used)}
     assert (shared / repo_folder(REPO) / "blobs" / _lfs(unused)).exists()  # shared copy kept
+
+
+def test_seeded_blobs_lose_group_and_world_write(tmp_path):
+    data = b"W" * 10
+    shared = _shared(tmp_path, {"m.bin": (data, _lfs(data))})
+    os.chmod(shared / repo_folder(REPO) / "blobs" / _lfs(data), 0o666)
+    [blob] = seed_repo(tmp_path / "weights", REPO, shared=shared)
+    assert os.stat(blob).st_mode & 0o777 == 0o644
+
+
+def test_blobs_owned_by_another_user_are_not_seeded(tmp_path, monkeypatch):
+    data = b"W" * 10
+    shared = _shared(tmp_path, {"m.bin": (data, _lfs(data))})
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(shared).st_uid + 1)
+    muse = tmp_path / "weights"
+    assert seed_repo(muse, REPO, shared=shared) == []
+    assert not list((muse / repo_folder(REPO) / "blobs").iterdir())
+
+
+def test_the_linked_file_is_what_gets_verified(tmp_path, monkeypatch):
+    import muse.core.hf_seed as hf_seed
+
+    data = b"W" * 10
+    shared = _shared(tmp_path, {"m.bin": (data, _lfs(data))})
+    checked = []
+    real = hf_seed._verified
+    monkeypatch.setattr(hf_seed, "_verified", lambda p, n: checked.append(p) or real(p, n))
+    seed_repo(tmp_path / "weights", REPO, shared=shared)
+    assert checked and all(".muse-seed-" in p.name for p in checked)
+
+
+def test_folder_patterns_and_revisions_follow_huggingface_hub(tmp_path):
+    a, b = b"A" * 10, b"B" * 10
+    shared = _shared(tmp_path, {"unet/w.safetensors": (a, _lfs(a))})
+    repo = shared / repo_folder(REPO)
+    (repo / "blobs" / _lfs(b)).write_bytes(b)
+    other = repo / "snapshots" / ("b" * 40)
+    other.mkdir()
+    (other / "x.bin").symlink_to(os.path.relpath(repo / "blobs" / _lfs(b), other))
+    seeded = seed_repo(tmp_path / "w1", REPO, shared=shared, allow_patterns=["unet/"])
+    assert [p.name for p in seeded] == [_lfs(a)]
+    seeded = seed_repo(tmp_path / "w2", REPO, shared=shared, revision=REV)
+    assert [p.name for p in seeded] == [_lfs(a)]
+    seeded = seed_repo(tmp_path / "w3", REPO, shared=shared, revision="c" * 40)
+    assert sorted(p.name for p in seeded) == sorted([_lfs(a), _lfs(b)])

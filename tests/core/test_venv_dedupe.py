@@ -89,7 +89,7 @@ def test_only_replaces_files_in_the_named_venv(tmp_path):
 
 def test_staging_dirs_bin_scripts_and_small_files_are_ignored(tmp_path, monkeypatch):
     a, b = _venv(tmp_path, "a"), _venv(tmp_path, "b")
-    staging = _venv(tmp_path, ".a.transaction-x")
+    staging = _venv(tmp_path, ".gone.transaction-x")
     for v in (a, b, staging):
         (v / "bin" / "tool").write_bytes(b"#!/v/bin/python\n")
         os.utime(v / "bin" / "tool", (OLD, OLD))
@@ -178,3 +178,53 @@ def test_a_corrupt_digest_cache_only_costs_rehashing(tmp_path):
     cache = tmp_path / "venv-digests.json"
     cache.write_text("{not json")
     assert dedupe_venvs(root, cache=cache).linked_files == 1
+
+
+def test_a_venv_in_a_transaction_is_left_alone(tmp_path):
+    a, b = _venv(tmp_path, "a"), _venv(tmp_path, "qwen3.5-b")
+    x, y = _put(a, "lib.so", b"payload"), _put(b, "lib.so", b"payload")
+    (tmp_path / ".qwen3.5-b.transaction-abc123").mkdir()
+    assert dedupe_venvs(tmp_path).linked_files == 0
+    assert not _same(x, y)
+
+
+def test_a_stale_cached_digest_never_links_different_bytes(tmp_path):
+    root = tmp_path / "venvs"
+    a, b = _venv(root, "a"), _venv(root, "b")
+    x, y = _put(a, "lib.so", b"payload"), _put(b, "lib.so", b"PAYLOAD")
+    with patch.object(venv_dedupe, "_digest", return_value="same"):
+        result = dedupe_venvs(root)
+    assert result.linked_files == 0 and not _same(x, y)
+    assert y.read_bytes() == b"PAYLOAD"
+
+
+def test_a_keeper_replaced_while_linking_is_not_linked(tmp_path):
+    a, b = _venv(tmp_path, "a"), _venv(tmp_path, "b")
+    x, y = _put(a, "lib.so", b"payload"), _put(b, "lib.so", b"payload")
+    real_link = os.link
+
+    def swap_keeper_first(src, dst):
+        # pip replaces the keeper (new inode, same bytes) just before the link.
+        Path(src).unlink()
+        Path(src).write_bytes(b"PAYLOAD")
+        real_link(src, dst)
+
+    with patch.object(venv_dedupe.os, "link", side_effect=swap_keeper_first):
+        result = dedupe_venvs(tmp_path)
+    assert result.linked_files == 0
+    assert (a / "lib/python3.12/site-packages/lib.so").read_bytes() != (
+        b / "lib/python3.12/site-packages/lib.so").read_bytes()
+    assert not list(tmp_path.rglob("*.muse-dedupe-*"))
+
+
+def test_the_digest_cache_drops_inodes_that_no_longer_exist(tmp_path):
+    import json
+
+    root = tmp_path / "venvs"
+    a, b = _venv(root, "a"), _venv(root, "b")
+    _put(a, "lib.so", b"payload"), _put(b, "lib.so", b"payload")
+    cache = tmp_path / "venv-digests.json"
+    cache.write_text(json.dumps({"1:999999": [7, 0, "gone"]}))
+    dedupe_venvs(root, cache=cache)
+    kept = json.loads(cache.read_text())
+    assert "1:999999" not in kept and kept

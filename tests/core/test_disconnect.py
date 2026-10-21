@@ -90,3 +90,15 @@ async def test_cancelling_the_caller_cancels_the_work():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancelled.is_set()
+
+
+async def test_a_failing_receive_channel_is_not_a_disconnect():
+    class Broken:
+        async def receive(self):
+            raise RuntimeError("Unexpected message received")
+
+    async def work():
+        await asyncio.sleep(0.01)
+        return "done"
+
+    assert await unless_disconnected(Broken(), work()) == "done"

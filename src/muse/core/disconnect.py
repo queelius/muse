@@ -41,16 +41,24 @@ async def _settle(task: asyncio.Future) -> None:
 
 async def unless_disconnected(request: Any, work: Awaitable[T]) -> T:
     """Await `work`; raise ClientDisconnected (after cancelling it) if the
-    client disconnects first. Cancelling the caller cancels `work` too."""
+    client disconnects first. Cancelling the caller cancels `work` too. If
+    the receive channel fails instead, the work simply runs to completion."""
     task = asyncio.ensure_future(work)
     watcher = asyncio.ensure_future(_disconnected(request))
     try:
         await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        if not task.done() and watcher.exception() is not None:
+            logger.debug(
+                "cannot watch for disconnect: %s", type(watcher.exception()).__name__,
+            )
+            await asyncio.wait({task})
     except BaseException:
         await _settle(task)
         raise
     finally:
         watcher.cancel()
+        if watcher.done() and not watcher.cancelled():
+            watcher.exception()  # retrieved, so asyncio does not warn
     if task.done():
         return task.result()
     await _settle(task)

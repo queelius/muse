@@ -15,12 +15,17 @@ files of at least MIN_BYTES under `lib/python*/site-packages` are linked;
 `bin/` scripts (whose shebangs pip rewrites in place) are never touched.
 Transaction staging directories (dot-prefixed) are skipped.
 
-Each replacement re-checks both files, links to a temporary name and
-renames it over the target, so a reader sees either the old or the new
-file, and a running worker keeps the inode it already has open.
+A venv being refreshed or re-pulled is mutated in place (venv_transaction
+clones it back to its canonical path and pip runs there), so a venv with a
+`.<name>.transaction-*` sibling is left alone. Digests only group
+candidates: each replacement re-checks both files' stat, compares their
+bytes, links the keeper to a temporary name, confirms that name is the
+keeper's inode, and renames it over the target. A reader sees either the
+old or the new file, and a running worker keeps the inode it has open.
 """
 from __future__ import annotations
 
+import filecmp
 import hashlib
 import json
 import logging
@@ -78,15 +83,27 @@ def _stat(path: Path) -> _File | None:
 
 
 def model_venvs(root: Path) -> list[Path]:
-    """Canonical venvs under root: not staging (dot) dirs, not symlinks."""
+    """Canonical venvs under root: not staging (dot) dirs, not symlinks, and
+    not in the middle of a venv transaction."""
     try:
         entries = sorted(root.iterdir())
     except OSError:
         return []
+    busy = _in_transaction(entries)
     return [
         p for p in entries
-        if not p.name.startswith(".") and not p.is_symlink() and (p / "pyvenv.cfg").is_file()
+        if not p.name.startswith(".") and p.name not in busy
+        and not p.is_symlink() and (p / "pyvenv.cfg").is_file()
     ]
+
+
+def _in_transaction(entries: list[Path]) -> set[str]:
+    """Names of venvs with a live `.<name>.transaction-*` workspace."""
+    return {
+        p.name[1:].split(".transaction-", 1)[0]
+        for p in entries
+        if p.name.startswith(".") and ".transaction-" in p.name
+    }
 
 
 def _package_files(venv: Path) -> list[_File]:
@@ -134,13 +151,16 @@ class _DigestCache:
         self.used[key] = [f.size, f.mtime_ns, value]
         return value
 
-    def save(self) -> None:
+    def save(self, live: set[str]) -> None:
+        """Persist digests for the inodes in `live` (dev:ino keys seen this
+        pass); entries for inodes that no longer exist are dropped."""
         if self.path is None:
             return
+        kept = {k: v for k, v in {**self.entries, **self.used}.items() if k in live}
         try:
             fd, tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
             with os.fdopen(fd, "w") as fh:
-                json.dump({**self.entries, **self.used}, fh)
+                json.dump(kept, fh)
             os.replace(tmp, self.path)
         except OSError:
             logger.debug("could not save the dedupe digest cache", exc_info=True)
@@ -154,16 +174,29 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def _unchanged(f: _File) -> bool:
-    now = _stat(f.path)
+def _is(now: _File | None, f: _File) -> bool:
+    """`now` is still the file `f` was (inode numbers alone get reused)."""
     return (
         now is not None and now.inode == f.inode and now.size == f.size
         and now.mtime_ns == f.mtime_ns
     )
 
 
-def _replace_with_link(keeper: _File, target: _File) -> bool:
+def _unchanged(f: _File) -> bool:
+    return _is(_stat(f.path), f)
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    try:
+        return filecmp.cmp(a, b, shallow=False)
+    except OSError:
+        return False
+
+
+def _replace_with_link(keeper: _File, target: _File, root: Path) -> bool:
     if not (_unchanged(keeper) and _unchanged(target)):
+        return False
+    if not _same_bytes(keeper.path, target.path):
         return False
     tmp = target.path.with_name(f".{target.path.name}.muse-dedupe-{os.getpid()}")
     try:
@@ -171,7 +204,16 @@ def _replace_with_link(keeper: _File, target: _File) -> bool:
     except OSError as exc:
         logger.debug("cannot link %s: %s", target.path, exc)
         return False
+    venv = target.path.relative_to(root).parts[0]
     try:
+        # The keeper may have been replaced since it was compared, and a
+        # transaction may have started on the target's venv.
+        if (
+            not _is(_stat(tmp), keeper)
+            or not _unchanged(target)
+            or venv in _in_transaction(list(root.iterdir()))
+        ):
+            raise OSError("changed while linking")
         os.replace(tmp, target.path)
     except OSError as exc:
         logger.debug("cannot replace %s: %s", target.path, exc)
@@ -201,6 +243,7 @@ def dedupe_venvs(
     settled_before = int((now - SETTLE_SECONDS) * 1e9)
     venvs = model_venvs(root)
     files = [f for v in venvs for f in _package_files(v)]
+    live = {f"{f.dev}:{f.ino}" for f in files}
     if only is not None:
         only = Path(only)
         sizes = {f.size for f in files if f.path.is_relative_to(only)}
@@ -245,7 +288,7 @@ def dedupe_venvs(
                 ]
                 done = 0
                 for target in targets:
-                    if dry_run or _replace_with_link(keeper, target):
+                    if dry_run or _replace_with_link(keeper, target, root):
                         done += 1
                     else:
                         skipped += 1
@@ -253,7 +296,7 @@ def dedupe_venvs(
                 # Space comes back only once no other name holds the inode.
                 if done and done == paths[0].nlink:
                     reclaimed += size
-    digests.save()
+    digests.save(live)
     return DedupeResult(len(files), linked, reclaimed, skipped, dry_run)
 
 
