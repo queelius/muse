@@ -1234,15 +1234,12 @@ once at boot (`_init_telemetry`, gated on `telemetry.enabled`) and tears
 them down symmetrically on shutdown (`sampler.stop()` joins the sampler
 thread; `store.close()` closes the sqlite connection).
 
-### Known limitations (v1)
+### Eviction telemetry
 
-- **Idle-sweep eviction is not instrumented.** `IdleSweeper` (the
-  DEFAULT reclaim path for an untouched model past its idle timeout)
-  does not currently call `record("model_evict", ...)`; only
-  `LoadDirector`'s memory-pressure eviction path does. The `load_evict`
-  series therefore undercounts real evictions on a lightly-loaded box
-  where idle timeout, not memory pressure, is doing most of the
-  reclaiming.
+- **`model_evict` covers every director eviction** (memory-pressure LRU,
+  idle sweep, admin disable) and carries `pool` and `gb`; it is emitted from
+  `finish_eviction` once the teardown succeeds, so a failed disable records
+  no event (it logs a `disable_fn_raised` decision instead).
 
 ## Federation
 
