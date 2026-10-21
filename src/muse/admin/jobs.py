@@ -17,7 +17,6 @@ import subprocess
 import threading
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -94,7 +93,7 @@ class JobStore:
     addressable via `get`/`list_recent`. The default is 10 minutes,
     matching the spec.
 
-    `max_jobs` is a hard bound on both the map and its ordering deque.
+    `max_jobs` is a hard bound on the map.
     Creating a job evicts the oldest terminal entry when necessary. If
     every slot is still active, creation raises `JobStoreFullError`
     rather than forgetting a live job (and any subprocess it owns).
@@ -109,7 +108,6 @@ class JobStore:
         if max_jobs <= 0:
             raise ValueError("max_jobs must be greater than zero")
         self._jobs: dict[str, Job] = {}
-        self._order: deque[str] = deque()
         self._lock = threading.Lock()
         self._retention = retention_seconds
         self._max_jobs = max_jobs
@@ -129,7 +127,6 @@ class JobStore:
             self._reap_expired()
             self._make_room_for_job()
             self._jobs[job.job_id] = job
-            self._order.append(job.job_id)
         logger.info("job %s created (op=%s, model=%s)", job.job_id, op, model_id)
         return job
 
@@ -154,7 +151,8 @@ class JobStore:
         """Return jobs newest-first, capped at `max_jobs`."""
         with self._lock:
             self._reap_expired()
-            return [self._jobs[jid] for jid in reversed(self._order) if jid in self._jobs]
+            # dict insertion order is creation order.
+            return list(reversed(self._jobs.values()))
 
     def start_thread(self, job_id: str, thread: threading.Thread) -> None:
         """Atomically attach and start a job thread unless shutdown won.
@@ -253,13 +251,7 @@ class JobStore:
                 # through the concrete Popen ownership token. If exit cannot
                 # be proven, retain the target on the Job so supervisor
                 # shutdown can make another bounded cleanup attempt.
-                target = _ProcessTarget(
-                    process=process,
-                    pid=pid,
-                    pgid=pgid,
-                    process_lock=job.process_lock,
-                    job=job,
-                )
+                target = _ProcessTarget.for_job(job)
                 _terminate_targets(
                     [target], timeout=_REGISTRATION_ROLLBACK_SECONDS,
                 )
@@ -283,13 +275,7 @@ class JobStore:
             job = self._jobs.get(job_id)
             if job is None or job.process is not process:
                 return
-            target = _ProcessTarget(
-                process=process,
-                pid=job.process_pid,
-                pgid=job.process_group_id,
-                process_lock=job.process_lock,
-                job=job,
-            )
+            target = _ProcessTarget.for_job(job)
         state = _target_state(target)
         if state is False and not _target_cleanup_complete(target):
             _terminate_targets([target], timeout=0.0)
@@ -356,13 +342,7 @@ class JobStore:
                 raise RuntimeError(
                     f"admin job {job_id!r} does not own the requested subprocess"
                 )
-            target = _ProcessTarget(
-                process=process,
-                pid=job.process_pid,
-                pgid=job.process_group_id,
-                process_lock=job.process_lock,
-                job=job,
-            )
+            target = _ProcessTarget.for_job(job)
 
         timeout = max(0.0, timeout)
         deadline = time.monotonic() + timeout
@@ -407,13 +387,7 @@ class JobStore:
             job = self._jobs.get(job_id)
             if job is None or job.process is not process:
                 return
-            target = _ProcessTarget(
-                process=process,
-                pid=job.process_pid,
-                pgid=job.process_group_id,
-                process_lock=job.process_lock,
-                job=job,
-            )
+            target = _ProcessTarget.for_job(job)
         _terminate_targets([target], timeout=max(0.0, timeout))
 
     def shutdown(self, timeout: float = 5.0) -> bool:
@@ -434,13 +408,7 @@ class JobStore:
                 if job.process is None:
                     continue
                 job.process_cancel_requested = True
-                targets.append(_ProcessTarget(
-                    process=job.process,
-                    pid=job.process_pid,
-                    pgid=job.process_group_id,
-                    process_lock=job.process_lock,
-                    job=job,
-                ))
+                targets.append(_ProcessTarget.for_job(job))
             threads = [j.thread for j in self._jobs.values() if j.thread is not None]
 
         # Reserve some of the total budget for worker threads to consume the
@@ -490,9 +458,8 @@ class JobStore:
         while len(self._jobs) >= self._max_jobs:
             evict_id = next(
                 (
-                    jid for jid in self._order
-                    if jid in self._jobs
-                    and _job_is_evictable(self._jobs[jid])
+                    jid for jid, job in self._jobs.items()
+                    if _job_is_evictable(job)
                 ),
                 None,
             )
@@ -501,10 +468,6 @@ class JobStore:
                     f"admin job capacity reached ({self._max_jobs} active jobs)"
                 )
             self._jobs.pop(evict_id, None)
-            try:
-                self._order.remove(evict_id)
-            except ValueError:
-                pass
 
     def _reap_expired(self) -> None:
         """Drop jobs whose finished_at_monotonic is older than retention.
@@ -521,10 +484,6 @@ class JobStore:
         ]
         for jid in expired:
             self._jobs.pop(jid, None)
-            try:
-                self._order.remove(jid)
-            except ValueError:
-                pass
 
 
 @dataclass
@@ -539,6 +498,17 @@ class _ProcessTarget:
     final_signal_delivered: bool = False
     leader_reaped: bool = False
     group_released: bool = False
+
+    @classmethod
+    def for_job(cls, job: Job) -> "_ProcessTarget":
+        """Snapshot the identity of the subprocess `job` currently owns."""
+        return cls(
+            process=job.process,
+            pid=job.process_pid,
+            pgid=job.process_group_id,
+            process_lock=job.process_lock,
+            job=job,
+        )
 
     def __post_init__(self) -> None:
         if self.job is not None and self.job.process_group_released:
@@ -658,23 +628,6 @@ def _target_state_locked(target: _ProcessTarget) -> bool | None:
 def _target_state(target: _ProcessTarget) -> bool | None:
     with target.process_lock:
         return _target_state_locked(target)
-
-
-def _target_alive_locked(target: _ProcessTarget) -> bool:
-    """Return whether the exact, unreaped Popen leader is positively alive."""
-    return _target_state_locked(target) is True
-
-
-def _target_alive(target: _ProcessTarget) -> bool:
-    """Check one owned target while serializing against wait/reap."""
-    with target.process_lock:
-        return _target_alive_locked(target)
-
-
-def _target_exited(target: _ProcessTarget) -> bool:
-    """Return whether the exact Popen leader is positively observed exited."""
-    with target.process_lock:
-        return _target_state_locked(target) is False
 
 
 def _target_cleanup_complete(target: _ProcessTarget) -> bool:
@@ -855,7 +808,7 @@ def _terminate_targets(targets: list[_ProcessTarget], *, timeout: float) -> bool
     deadline = started + max(0.0, timeout)
     term_deadline = started + max(0.0, timeout) * 0.6
 
-    live = [target for target in targets if _target_alive(target)]
+    live = [target for target in targets if _target_state(target) is True]
     for target in live:
         _signal_target(target, signal.SIGTERM)
     survivors = _wait_for_targets(live, term_deadline)
