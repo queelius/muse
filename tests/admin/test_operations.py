@@ -430,7 +430,7 @@ class TestEnableModel:
 
     def test_already_loaded_marks_done_no_spawn(self, tmp_catalog, state, store, monkeypatch):
         # Seed with a bundled-style model so known_models() picks it up.
-        from muse.core import catalog as catalog_mod
+        from muse.core import catalog_models as catalog_mod
         # Inject a fake known_models entry.
         monkeypatch.setattr(catalog_mod, "_known_models_cache", None)
         _seed_catalog({

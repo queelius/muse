@@ -357,7 +357,7 @@ class TestH5KnownModelsCacheLock:
         loser has definitely started waiting -- then release both and verify
         the call count.
         """
-        from muse.core import catalog as cat_mod
+        from muse.core import catalog_models as cat_mod
 
         # Reset cache so both threads see a cold miss.
         _reset_known_models_cache()
@@ -421,7 +421,7 @@ class TestH5KnownModelsCacheLock:
     def test_second_call_is_fast_path_no_lock(self, monkeypatch):
         """After the cache is built, known_models() takes the fast path without
         calling discover_models again."""
-        from muse.core import catalog as cat_mod
+        from muse.core import catalog_models as cat_mod
 
         # Warm the cache first.
         _write_catalog({})
@@ -663,7 +663,7 @@ class TestM12DisableRestartFailure:
             # Also need known_models to return our test-model. The cache is
             # keyed by catalog identity; inject the current key so the
             # memoized fast path serves the fake entries.
-            from muse.core import catalog as cat_mod
+            from muse.core import catalog_models as cat_mod
             fake_entry = MagicMock()
             fake_entry.extra = {}
             monkeypatch.setattr(
@@ -720,7 +720,7 @@ class TestM12DisableRestartFailure:
         )
         state.workers.append(spec)
 
-        from muse.core import catalog as cat_mod
+        from muse.core import catalog_models as cat_mod
         fake_entry = MagicMock()
         fake_entry.extra = {}
         monkeypatch.setattr(

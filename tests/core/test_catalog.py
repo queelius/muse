@@ -43,6 +43,10 @@ def test_pull_runs_automatic_storage_maintenance_before_model_dispatch(
         "find_curated",
         lambda _identifier: SimpleNamespace(id="demo", uri=None),
     )
+    monkeypatch.setattr(
+        "muse.core.catalog_models.find_curated",
+        lambda _identifier: SimpleNamespace(id="demo", uri=None),
+    )
     monkeypatch.setattr(catalog_module, "_pull_bundled", bundled)
 
     pull("demo")
@@ -892,7 +896,7 @@ def test_load_backend_rejects_stale_curated_non_remote_code_pin(tmp_catalog):
     })
     fake_module = MagicMock()
 
-    with patch("muse.core.catalog.find_curated", return_value=curated), patch(
+    with patch("muse.core.catalog.find_curated", return_value=curated), patch("muse.core.catalog_models.find_curated", return_value=curated), patch(
         "muse.core.catalog._import_backend_module", return_value=fake_module,
     ), pytest.raises(RuntimeError, match="immutable resolver provenance"):
         load_backend("opus-mt-en-es")
@@ -1501,7 +1505,7 @@ def test_known_models_does_not_rerun_discovery_on_catalog_change(
     """Catalog-change invalidation must NOT re-run discover_models: script
     discovery does importlib imports (module bodies execute), so it stays
     cached for the process lifetime; only the cheap merge re-runs."""
-    import muse.core.catalog as cat
+    import muse.core.catalog_models as cat
 
     calls = {"n": 0}
     real_discover = cat.discover_models
@@ -1563,7 +1567,7 @@ def test_get_manifest_for_aliased_script_uses_the_discovery_cache(tmp_catalog):
 
     known_models()
     with patch(
-        "muse.core.catalog.discover_models",
+        "muse.core.catalog_models.discover_models",
         side_effect=AssertionError("discovery must not re-run"),
     ):
         manifest = get_manifest("smolvlm-256m-instruct")
@@ -2604,7 +2608,7 @@ def test_pull_curated_resolver_id_uses_curated_id_in_catalog(tmp_catalog):
         tags=(),
     )
     try:
-        with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
+        with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
              patch("muse.core.catalog.create_venv"), \
              patch("muse.core.catalog.install_into_venv"), \
              patch("muse.core.catalog.check_system_packages", return_value=[]):
@@ -2636,7 +2640,7 @@ def test_pull_curated_bundled_alias_uses_bundled_path(tmp_catalog):
         description=None,
         tags=(),
     )
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
          patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
          patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
@@ -2656,7 +2660,7 @@ def test_pull_bare_id_unaffected_by_curated_cache(tmp_catalog):
     _reset_curated_cache_for_tests()
     # find_curated returns None for the real "soprano-80m" if the YAML's
     # bundled entry is `kokoro-82m` etc. — make it explicit:
-    with patch("muse.core.catalog.find_curated", return_value=None), \
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
          patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
@@ -2682,7 +2686,7 @@ def test_pull_unknown_id_suggests_close_curated_match(tmp_catalog):
             size_gb=5.0, description="close match", tags=(),
         ),
     ]
-    with patch("muse.core.catalog.find_curated", return_value=None), \
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.curated.load_curated", return_value=fake_curated):
         with pytest.raises(KeyError) as exc_info:
             pull("qwen3-8b-q4")
@@ -2697,7 +2701,7 @@ def test_pull_unknown_id_with_no_close_matches_suggests_models_list(tmp_catalog)
     from muse.core.catalog import pull
 
     # patch curated to empty so only bundled ids are candidates
-    with patch("muse.core.catalog.find_curated", return_value=None), \
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.curated.load_curated", return_value=[]):
         with pytest.raises(KeyError) as exc_info:
             pull("total-gibberish-no-match-zzzzz")
@@ -2725,7 +2729,7 @@ def test_pull_unknown_id_error_includes_curated_ids_in_did_you_mean(tmp_catalog)
             description="", tags=(),
         ),
     ]
-    with patch("muse.core.catalog.find_curated", return_value=None), \
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.curated.load_curated", return_value=fake_curated):
         with pytest.raises(KeyError) as exc_info:
             pull("llama-3.2-3b")  # close to llama-3.2-3b-q4
@@ -2783,7 +2787,7 @@ def test_pull_via_resolver_merges_curated_capabilities_overlay(tmp_catalog):
     # resolve() is imported locally inside _pull_via_resolver
     # (`from muse.core.resolvers import resolve`), so the patch must
     # target the source module, not muse.core.catalog.
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
          patch("muse.core.resolvers.resolve", return_value=fake_resolved) as mock_resolve, \
          patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
@@ -2842,7 +2846,7 @@ def test_pull_via_resolver_overlay_wins_on_collision(tmp_catalog):
         backend_path="fake.mod:Cls",
         download=lambda cache_root: cache_root / "weights" / "collide",
     )
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), \
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
          patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
          patch("muse.core.catalog.check_system_packages", return_value=[]), \
@@ -2891,8 +2895,8 @@ def test_pull_via_resolver_installs_and_persists_reviewed_python_sources(
     )
     expected_venv = tmp_catalog / "venvs" / "source-model"
 
-    with patch("muse.core.catalog.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=None), \
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=None), patch("muse.core.catalog_models.find_curated_by_uri", return_value=None), \
          patch("muse.core.resolvers.resolve", return_value=fake_resolved), \
          patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
@@ -2947,8 +2951,8 @@ def test_pull_uri_direct_inherits_curated_capabilities(tmp_catalog):
     )
     # find_curated by id returns None (user didn't type curated id);
     # find_curated_by_uri returns the entry (URI matches curated.yaml).
-    with patch("muse.core.catalog.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_curated), \
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_curated), patch("muse.core.catalog_models.find_curated_by_uri", return_value=fake_curated), \
          patch("muse.core.catalog.create_venv"), \
          patch("muse.core.catalog.install_into_venv"), \
          patch("muse.core.catalog.check_system_packages", return_value=[]), \
@@ -3008,7 +3012,7 @@ def test_known_models_reapplies_curated_capabilities_overlay_at_runtime(
         capabilities={"device": "cpu", "new_key": "new_val"},
     )
 
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated):
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated):
         _reset_known_models_cache()
         models = known_models()
 
@@ -3066,7 +3070,7 @@ def test_get_manifest_reapplies_curated_capabilities_overlay_at_runtime(
         capabilities={"device": "cpu", "new_key": "new_val"},
     )
 
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated):
+    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated):
         _reset_known_models_cache()
         manifest = get_manifest("stale-model")
 
@@ -3112,8 +3116,8 @@ def test_known_models_uri_based_curated_lookup_when_id_misses(tmp_catalog):
         capabilities={"device": "cpu"},
     )
 
-    with patch("muse.core.catalog.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_uri_curated):
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_uri_curated), patch("muse.core.catalog_models.find_curated_by_uri", return_value=fake_uri_curated):
         _reset_known_models_cache()
         models = known_models()
 
@@ -3166,6 +3170,9 @@ def test_load_backend_bundled_script_device_capability_honored(tmp_catalog):
 
     with patch(
         "muse.core.catalog.known_models",
+        return_value={"kokoro-82m": fake_entry},
+    ), patch(
+        "muse.core.catalog_models.known_models",
         return_value={"kokoro-82m": fake_entry},
     ), patch(
         "muse.core.catalog.is_pulled",
@@ -3386,8 +3393,8 @@ def test_known_models_no_curated_match_leaves_manifest_unchanged(tmp_catalog):
     }
     _write_catalog(catalog_state)
 
-    with patch("muse.core.catalog.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=None):
+    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog.find_curated_by_uri", return_value=None), patch("muse.core.catalog_models.find_curated_by_uri", return_value=None):
         _reset_known_models_cache()
         models = known_models()
 
@@ -3407,7 +3414,7 @@ class TestResetKnownModelsCacheLocking:
     def test_invalidator_blocks_while_lock_held(self):
         import threading
 
-        from muse.core import catalog as catalog_mod
+        from muse.core import catalog_models as catalog_mod
 
         # Seed a sentinel cache so we can observe when it gets cleared.
         catalog_mod._known_models_cache = {"sentinel": object()}  # type: ignore[assignment]
@@ -3552,6 +3559,7 @@ class TestPullBaseOverrideDispatch:
             capabilities={"trust_remote_code": True},
         )
         monkeypatch.setattr(cat, "find_curated", lambda ident: fake_curated)
+        monkeypatch.setattr("muse.core.catalog_models.find_curated", lambda ident: fake_curated)
 
         calls = self._capture(monkeypatch)
         pull("some-lora-alias", base_override="sdxl-turbo")
@@ -3585,7 +3593,9 @@ class TestPullBaseOverrideDispatch:
             capabilities={"trust_remote_code": True},
         )
         monkeypatch.setattr(cat, "find_curated", lambda ident: None)
+        monkeypatch.setattr("muse.core.catalog_models.find_curated", lambda ident: None)
         monkeypatch.setattr(cat, "find_curated_by_uri", lambda uri: fake_uri_curated)
+        monkeypatch.setattr("muse.core.catalog_models.find_curated_by_uri", lambda uri: fake_uri_curated)
 
         calls = self._capture(monkeypatch)
         pull("hf://org/some-lora", base_override="sdxl-turbo")
@@ -3612,6 +3622,7 @@ class TestPullBaseOverrideDispatch:
         )
         _reset_known_models_cache()
         monkeypatch.setattr(cat, "find_curated_by_uri", lambda uri: None)
+        monkeypatch.setattr("muse.core.catalog_models.find_curated_by_uri", lambda uri: None)
 
         calls = self._capture(monkeypatch)
         pull("pixel-art-xl", base_override="sdxl-turbo")
@@ -3682,6 +3693,7 @@ class TestBaseOverrideDurability:
             capabilities={"base_model": "sdxl-turbo"},
         )
         monkeypatch.setattr(cat, "find_curated", lambda ident: fake_curated)
+        monkeypatch.setattr("muse.core.catalog_models.find_curated", lambda ident: fake_curated)
 
         entries = known_models()
         assert entries["pixel-art-xl"].extra["base_model"] == "flux-schnell"
@@ -4099,8 +4111,10 @@ class TestTransactionalPullRollback:
             (path / "marker").write_text("source-mutated")
             raise RuntimeError("reviewed source activation failed")
 
-        with patch("muse.core.catalog.find_curated", return_value=None), patch(
+        with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), patch(
             "muse.core.catalog.find_curated_by_uri", return_value=None,
+        ), patch(
+            "muse.core.catalog_models.find_curated_by_uri", return_value=None,
         ), patch(
             "muse.core.resolvers.resolve", return_value=resolved,
         ), patch(

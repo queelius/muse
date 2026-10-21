@@ -173,6 +173,9 @@ def test_explicit_id_cannot_take_another_curated_id(_isolate, resolver, no_insta
     with patch(
         "muse.core.catalog.find_curated",
         side_effect=lambda i: curated if i == "friendly" else None,
+    ), patch(
+        "muse.core.catalog_models.find_curated",
+        side_effect=lambda i: curated if i == "friendly" else None,
     ):
         with pytest.raises(ModelIdConflictError):
             pull("hf://alice/Foo-GGUF@q4_k_m", model_id="friendly")
@@ -214,6 +217,9 @@ def test_curated_pull_may_replace_its_own_entry_from_a_new_uri(
     )
     with patch(
         "muse.core.catalog.find_curated",
+        side_effect=lambda i: curated if i == "friendly" else None,
+    ), patch(
+        "muse.core.catalog_models.find_curated",
         side_effect=lambda i: curated if i == "friendly" else None,
     ):
         pull("friendly")
