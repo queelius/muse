@@ -20,7 +20,6 @@ import math
 import os
 import signal
 import stat
-import tempfile
 import threading
 import time
 import uuid
@@ -28,7 +27,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from muse.core import config
+from muse.core import config, securefs
 
 
 _SCHEMA_VERSION = 1
@@ -173,140 +172,43 @@ def _validate_runtime_dir(
     directory: Path, *, missing_ok: bool = False, set_private_mode: bool = False,
 ) -> bool:
     """Validate the runtime directory itself without following a symlink."""
-    if os.name == "posix":
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        try:
-            directory_fd = os.open(directory, flags)
-        except FileNotFoundError:
-            if missing_ok:
-                return False
-            raise
-        except OSError as exc:
-            raise ResourceRegistryError(
-                f"resource runtime path is not a safe directory: {directory}: {exc}"
-            ) from exc
-        try:
-            if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
-                raise ResourceRegistryError(
-                    f"resource runtime path is not a directory: {directory}"
-                )
-            info = os.fstat(directory_fd)
-            if info.st_uid != os.geteuid():
-                raise ResourceRegistryError(
-                    f"resource runtime directory is not owned by this user: {directory}"
-                )
-            if set_private_mode:
-                os.fchmod(directory_fd, 0o700)
-            elif info.st_mode & 0o022:
-                raise ResourceRegistryError(
-                    f"resource runtime directory is group/other writable: {directory}"
-                )
-        finally:
-            os.close(directory_fd)
-        return True
-
-    try:  # pragma: no cover - exercised on Windows CI
-        info = directory.lstat()
-    except FileNotFoundError:
-        if missing_ok:
-            return False
-        raise
-    except OSError as exc:
-        raise ResourceRegistryError(f"cannot inspect {directory}: {exc}") from exc
-    is_junction = getattr(directory, "is_junction", lambda: False)
-    if stat.S_ISLNK(info.st_mode) or is_junction() or not directory.is_dir():
-        raise ResourceRegistryError(
-            f"resource runtime path is not a safe directory: {directory}"
-        )
-    if set_private_mode:
-        directory.chmod(0o700)
-    return True
+    return securefs.validate_directory(
+        directory,
+        error=ResourceRegistryError,
+        label="resource runtime path",
+        private=set_private_mode,
+        missing_ok=missing_ok,
+    )
 
 
 def _ensure_runtime_dir(catalog_dir: Path | None = None) -> Path:
     directory = _runtime_dir(catalog_dir)
-    try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _validate_runtime_dir(directory, set_private_mode=True)
-    except ResourceRegistryError:
-        raise
-    except OSError as exc:
-        raise ResourceRegistryError(
-            f"cannot prepare resource runtime directory {directory}: {exc}"
-        ) from exc
+    securefs.ensure_directory(
+        directory,
+        error=ResourceRegistryError,
+        label="resource runtime path",
+        private=True,
+    )
     return directory
 
 
-def _open_regular_file(
-    path: Path, flags: int, *, mode: int | None = None, require_single_link: bool = False,
-) -> int:
-    """Open one regular file without following a final-component symlink."""
-    open_flags = flags | getattr(os, "O_CLOEXEC", 0)
-    if os.name == "posix":
-        open_flags |= getattr(os, "O_NOFOLLOW", 0)
-    else:  # pragma: no cover - exercised on Windows CI
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            info = None
-        if info is not None and stat.S_ISLNK(info.st_mode):
-            raise ResourceRegistryError(f"refusing symlink resource file {path}")
-        open_flags |= getattr(os, "O_BINARY", 0)
-    try:
-        if mode is None:
-            descriptor = os.open(path, open_flags)
-        else:
-            descriptor = os.open(path, open_flags, mode)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise ResourceRegistryError(f"cannot safely open {path}: {exc}") from exc
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ResourceRegistryError(f"resource path is not a regular file: {path}")
-        if os.name == "posix":
-            if info.st_uid != os.geteuid():
-                raise ResourceRegistryError(
-                    f"resource file is not owned by this user: {path}"
-                )
-            if info.st_mode & 0o022:
-                raise ResourceRegistryError(
-                    f"resource file is group/other writable: {path}"
-                )
-        if require_single_link and info.st_nlink != 1:
-            raise ResourceRegistryError(f"resource lock has multiple links: {path}")
-    except Exception:
-        os.close(descriptor)
-        raise
-    return descriptor
+def _open_regular_file(path: Path, flags: int) -> int:
+    """Open one private regular file without following a final-component symlink."""
+    return securefs.open_regular_file(
+        path,
+        flags,
+        error=ResourceRegistryError,
+        label="resource file",
+        require_private=True,
+    )
 
 
 def _acquire_file_lock(handle: Any, *, exclusive: bool) -> None:
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-        import msvcrt
-
-        handle.seek(0)
-        operation = msvcrt.LK_LOCK if exclusive else msvcrt.LK_RLCK
-        msvcrt.locking(handle.fileno(), operation, 1)
-        return
-    import fcntl
-
-    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-    fcntl.flock(handle.fileno(), operation)
+    securefs.lock_file(handle, exclusive=exclusive)
 
 
 def _release_file_lock(handle: Any) -> None:
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-        import msvcrt
-
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    import fcntl
-
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    securefs.unlock_file(handle)
 
 
 @contextlib.contextmanager
@@ -320,26 +222,14 @@ def _registry_lock(
         _validate_runtime_dir(directory)
     lock_path = directory / "resources.lock"
     with _PROCESS_LOCK:
-        flags = os.O_RDWR | os.O_CREAT if create else os.O_RDONLY
-        descriptor = _open_regular_file(
+        handle = securefs.open_lock_file(
             lock_path,
-            flags,
-            mode=0o600 if create else None,
-            require_single_link=True,
+            error=ResourceRegistryError,
+            label="resource lock",
+            create=create,
         )
-        mode = "r+b" if create else "rb"
-        with os.fdopen(descriptor, mode) as handle:
+        with handle:
             try:
-                if create:
-                    if os.name == "posix":
-                        os.fchmod(handle.fileno(), 0o600)
-                    # Windows byte-range locking needs a concrete byte. POSIX
-                    # also writes it so a registry can be moved across platforms.
-                    handle.seek(0, os.SEEK_END)
-                    if handle.tell() == 0:
-                        handle.write(b"\0")
-                        handle.flush()
-                        os.fsync(handle.fileno())
                 _acquire_file_lock(handle, exclusive=exclusive)
             except (ImportError, OSError) as exc:
                 raise ResourceRegistryError(
@@ -411,7 +301,7 @@ def _read_unlocked(catalog_dir: Path | None = None) -> dict[str, ResourceRecord]
 def _write_unlocked(
     records: dict[str, ResourceRecord], catalog_dir: Path | None = None,
 ) -> None:
-    directory = _ensure_runtime_dir(catalog_dir)
+    _ensure_runtime_dir(catalog_dir)
     target = registry_path(catalog_dir)
     if len(records) > _MAX_RESOURCE_RECORDS:
         raise ResourceRegistryError(
@@ -433,42 +323,7 @@ def _write_unlocked(
         raise ResourceRegistryError(
             f"resource registry cannot exceed {_MAX_REGISTRY_BYTES} bytes"
         )
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=directory,
-            prefix="resources.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temp_path = Path(handle.name)
-            os.chmod(temp_path, 0o600)
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, target)
-        try:
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-            directory_fd = os.open(directory, flags)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            pass
-    except OSError as exc:
-        raise ResourceRegistryError(f"cannot write {target}: {exc}") from exc
-    finally:
-        if temp_path is not None:
-            try:
-                temp_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
+    securefs.atomic_write_text(target, serialized, error=ResourceRegistryError)
 
 
 def _process_create_time(pid: int) -> float | None:
