@@ -1,15 +1,22 @@
-"""Venv management helpers.
+"""Per-model venvs: creation, rollback-safe updates, layout, output mode.
 
-Each pulled model gets its own venv under ~/.muse/venvs/<model-id>/.
-This module handles creation and pip-install-into-venv; the catalog
-records the resulting Python interpreter path per model.
+Each pulled model gets its own venv under ~/.muse/venvs/<model-id>/; the
+catalog records the resulting Python interpreter path per model. This
+module creates venvs through a private staging directory, wraps updates in
+`venv_transaction` (clone, mutate, roll back on failure), and owns the
+layout helpers (`venv_python`, site-packages) and the installer output
+mode shared by every install step.
 
-Output discipline (v0.40.3+): `install_into_venv` defaults to quiet
-mode (`pip install -q` + captured stdout/stderr, only emitted on
-non-zero exit). The CLI's `muse pull -v` / `--verbose` flips into
-pass-through mode via the `install_output_mode` context manager.
-The verbose mode preserves the v0.40.2 firehose for dep-resolution
-debugging.
+Output discipline (v0.40.3+): installs default to quiet mode (`pip install
+-q` + captured stdout/stderr, only emitted on non-zero exit). The CLI's
+`muse pull -v` / `--verbose` flips into pass-through mode via the
+`install_output_mode` context manager. The verbose mode preserves the
+v0.40.2 firehose for dep-resolution debugging.
+
+Related modules: `muse.core.owned_command` (the installer subprocess
+runner), `muse.core.pip_install` (pip installs into a venv),
+`muse.core.python_sources` (reviewed git sources exposed via .pth) and
+`muse.core.ports` (worker port selection).
 """
 from __future__ import annotations
 
@@ -19,7 +26,6 @@ import errno
 import logging
 import os
 import shutil
-import socket
 import stat
 import subprocess
 import sys
@@ -430,20 +436,3 @@ def _venv_site_packages(venv_path: Path) -> Path:
     return venv_path / "lib" / version / "site-packages"
 
 
-def find_free_port(start: int = 9001, end: int = 9999) -> int:
-    """Find an unbound local port in [start, end]. Raises RuntimeError if exhausted.
-
-    The port is probed by briefly binding then releasing it; the returned
-    number is a *hint*, not a reservation. A TOCTOU window exists between
-    this function returning and the caller binding the port, so the caller
-    MUST verify the worker actually bound it (e.g., via /health check)
-    and retry with a different port on startup failure.
-    """
-    for port in range(start, end + 1):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", port))
-                return port
-        except OSError:
-            continue
-    raise RuntimeError(f"no free port in range [{start}, {end}]")

@@ -24,9 +24,9 @@ from muse.core.venv import (
     run_owned_command,
     venv_transaction,
     venv_python,
-    find_free_port,
 )
 from muse.core.pip_install import install_into_venv
+from muse.core.ports import find_free_port
 from muse.core.python_sources import install_python_sources
 
 

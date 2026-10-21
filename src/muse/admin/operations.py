@@ -49,7 +49,7 @@ from muse.core.catalog import (
     set_enabled,
 )
 from muse.core.owned_process import BoundedTail, drain_stream_into
-from muse.core.venv import find_free_port
+from muse.core.ports import find_free_port
 
 logger = logging.getLogger(__name__)
 

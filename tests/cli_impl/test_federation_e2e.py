@@ -48,7 +48,7 @@ from fastapi import FastAPI, Request
 from starlette.testclient import TestClient
 
 from muse.cli_impl.federation import build_coordinator
-from muse.core.venv import find_free_port
+from muse.core.ports import find_free_port
 from muse.federation.nodes import NodeSpec
 from muse.federation.registry import NodeRegistry
 
