@@ -156,10 +156,10 @@ def observe_leader(
     pinned fails closed (None): polling would reap it and release an
     unknown numeric group before its descendants are drained. Anything else
     (test doubles, non-POSIX) falls back to ``poll()``, mirroring Popen's
-    side effect of storing the polled status on ``returncode``.
+    side effect of storing the polled status on ``returncode``. Callers
+    decide whether an unsafe (None) PID is ambiguous before calling: the
+    exact Popen handle is still a valid ownership token for ``poll()``.
     """
-    if pid is None:
-        return None
     if type(getattr(process, "returncode", None)) is int:
         return False
     if pinned:

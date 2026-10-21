@@ -21,6 +21,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from muse.core.owned_process import (
+    MANAGED_JOB_GROUP_ENV,
+    REAL_POPEN_TYPE,
+    cleanup_deadlines,
+    concrete_safe_id,
+    kill_signal,
+    new_process_group_kwargs,
+    observe_leader,
+    reap_exited_leader,
+    signal_isolated_group,
+    supports_pinned_leader,
+    validated_isolated_group,
+)
 from muse.core.resource_registry import (
     ResourceRegistryError,
     register_process,
@@ -33,8 +46,9 @@ _RETENTION_SECONDS = 600.0  # ten minutes
 _MAX_JOBS = 100
 _PROCESS_WAIT_SLICE_SECONDS = 0.1
 _REGISTRATION_ROLLBACK_SECONDS = 5.0
-_MANAGED_JOB_GROUP_ENV = "MUSE_MANAGED_JOB_PROCESS_GROUP"
-_REAL_POPEN_TYPE = subprocess.Popen
+_MANAGED_JOB_GROUP_ENV = MANAGED_JOB_GROUP_ENV
+_REAL_POPEN_TYPE = REAL_POPEN_TYPE
+_PROCESS_LABEL = "admin child"
 
 
 class JobStoreFullError(RuntimeError):
@@ -209,13 +223,10 @@ class JobStore:
             child_env[_MANAGED_JOB_GROUP_ENV] = "1"
             popen_kwargs["env"] = child_env
 
-            if os.name == "posix":
-                popen_kwargs["start_new_session"] = True
-            elif os.name == "nt":
-                create_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                popen_kwargs["creationflags"] = (
-                    int(popen_kwargs.get("creationflags", 0)) | create_group
-                )
+            popen_kwargs.update(new_process_group_kwargs(
+                os.name,
+                creationflags=int(popen_kwargs.get("creationflags", 0)),
+            ))
 
             process = subprocess.Popen(cmd, **popen_kwargs)
             pid = _concrete_safe_id(getattr(process, "pid", None))
@@ -537,43 +548,18 @@ def _thread_stopped(thread: Any) -> bool:
         return False
 
 
-def _concrete_safe_id(value: Any) -> int | None:
-    """Return a signal-safe concrete PID/PGID, rejecting mocks and PID 1."""
-    if type(value) is not int or value <= 1:
-        return None
-    return value
+_concrete_safe_id = concrete_safe_id
 
 
 def _validated_isolated_group(pid: int | None) -> int | None:
     """Return the child's isolated PGID, or None when it cannot be proven."""
-    if os.name != "posix" or pid is None:
-        return None
-    try:
-        pgid = _concrete_safe_id(os.getpgid(pid))
-        own_pgid = _concrete_safe_id(os.getpgrp())
-    except OSError:
-        return None
-    if own_pgid is None or pgid != pid or pgid == own_pgid:
-        logger.error(
-            "refusing process-group ownership for admin child pid=%r pgid=%r own_pgid=%r",
-            pid, pgid, own_pgid,
-        )
-        return None
-    return pgid
+    return validated_isolated_group(pid, os_name=os.name, label=_PROCESS_LABEL)
 
 
 def _supports_pinned_target(target: _ProcessTarget) -> bool:
     """Whether WNOWAIT can pin this exact real POSIX PID==PGID leader."""
-    return bool(
-        os.name == "posix"
-        and target.pid is not None
-        and target.pgid == target.pid
-        and isinstance(target.process, _REAL_POPEN_TYPE)
-        and callable(getattr(os, "waitid", None))
-        and getattr(os, "P_PID", None) is not None
-        and getattr(os, "WEXITED", None) is not None
-        and getattr(os, "WNOHANG", None) is not None
-        and getattr(os, "WNOWAIT", None) is not None
+    return supports_pinned_leader(
+        target.process, target.pid, target.pgid, os_name=os.name,
     )
 
 
@@ -589,40 +575,15 @@ def _target_state_locked(target: _ProcessTarget) -> bool | None:
         return None
     if type(getattr(target.process, "returncode", None)) is int:
         return False
-    if _supports_pinned_target(target):
-        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
-        try:
-            status = os.waitid(os.P_PID, target.pid, flags)
-        except InterruptedError:
-            return True
-        except (ChildProcessError, OSError) as e:
-            logger.warning(
-                "could not observe admin child %r without reaping: %s",
-                target.pid,
-                e,
-            )
-            return None
-        return not (
-            status is not None
-            and getattr(status, "si_pid", target.pid) == target.pid
-        )
-    if os.name == "posix" and isinstance(target.process, _REAL_POPEN_TYPE):
-        return None
-    try:
-        observed = target.process.poll()
-        if type(observed) is int and type(
-            getattr(target.process, "returncode", None)
-        ) is not int:
-            # Lightweight test/fallback process doubles need not implement
-            # Popen's side effect of storing poll() on returncode; mirror it
-            # so the exact-reap contract remains coherent.
-            target.process.returncode = observed
-        return observed is None
-    except Exception as e:  # noqa: BLE001
-        # Signalling a numeric identity after an ambiguous poll is unsafe:
-        # fail closed and leave the registry record for explicit repair.
-        logger.warning("could not inspect owned admin child %r: %s", target.pid, e)
-        return None
+    # Pinned leaders are observed with WNOWAIT; an unpinned real POSIX child
+    # fails closed; an ambiguous poll leaves the registry record for repair.
+    return observe_leader(
+        target.process,
+        target.pid,
+        pinned=_supports_pinned_target(target),
+        os_name=os.name,
+        label=_PROCESS_LABEL,
+    )
 
 
 def _target_state(target: _ProcessTarget) -> bool | None:
@@ -665,20 +626,14 @@ def _signal_target(
                 return False
             if not force and state is not True:
                 return state is False
-            try:
-                os.killpg(target.pgid, sig)
-            except ProcessLookupError:
-                if force:
-                    target.final_signal_delivered = True
-                return True
-            except (OSError, TypeError, ValueError) as e:
-                logger.warning(
-                    "could not signal admin process group %s: %s", target.pgid, e,
-                )
-                return False
-            if force:
+            # ESRCH with the PID==PGID leader still pinned proves the group
+            # has no signalable members left, which also counts as delivered.
+            delivered = signal_isolated_group(
+                target.pid, target.pgid, sig, label=_PROCESS_LABEL,
+            )
+            if delivered and force:
                 target.final_signal_delivered = True
-            return True
+            return delivered
 
         if state is False:
             if force:
@@ -688,43 +643,29 @@ def _signal_target(
             return False
 
         if target.pgid is not None and os.name == "posix":
+            # Not WNOWAIT-pinned (test doubles only: a real unpinned POSIX
+            # child is ambiguous above), so revalidate the live group first.
             try:
                 current_pgid = _concrete_safe_id(os.getpgid(target.pid))
-                own_pgid = _concrete_safe_id(os.getpgrp())
             except OSError as e:
                 logger.warning(
                     "could not revalidate admin process group %r: %s",
                     target.pgid, e,
                 )
                 return False
-            if (
-                own_pgid is None
-                or target.pgid <= 1
-                or target.pgid == own_pgid
-                or target.pgid != target.pid
-                or current_pgid != target.pgid
-            ):
+            if current_pgid != target.pgid:
                 logger.error(
                     "refusing unsafe admin process-group signal "
-                    "pid=%r pgid=%r current_pgid=%r own_pgid=%r",
-                    target.pid, target.pgid, current_pgid, own_pgid,
+                    "pid=%r pgid=%r current_pgid=%r",
+                    target.pid, target.pgid, current_pgid,
                 )
                 return False
-            try:
-                os.killpg(target.pgid, sig)
-            except ProcessLookupError:
-                if force:
-                    target.final_signal_delivered = True
-                return True
-            except OSError as e:
-                logger.warning(
-                    "could not signal admin process group %s: %s",
-                    target.pgid, e,
-                )
-                return False
-            if force:
+            delivered = signal_isolated_group(
+                target.pid, target.pgid, sig, label=_PROCESS_LABEL,
+            )
+            if delivered and force:
                 target.final_signal_delivered = True
-            return True
+            return delivered
 
         # A Popen object is itself a positive ownership token, but reject an
         # unsafe/non-concrete pid before calling its signalling methods. This
@@ -781,18 +722,10 @@ def _reap_target(target: _ProcessTarget) -> bool:
             return False
         if _target_state_locked(target) is not False:
             return False
-        try:
-            returncode = target.process.wait(timeout=0.0)
-        except (subprocess.TimeoutExpired, ChildProcessError, OSError) as e:
-            logger.warning("could not reap admin child %r: %s", target.pid, e)
+        if reap_exited_leader(
+            target.process, target.pid, label=_PROCESS_LABEL,
+        ) is None:
             return False
-        except Exception as e:  # noqa: BLE001
-            logger.warning("could not reap admin child %r: %s", target.pid, e)
-            return False
-        if type(returncode) is not int:
-            return False
-        if type(getattr(target.process, "returncode", None)) is not int:
-            target.process.returncode = returncode
         target.leader_reaped = True
         target.group_released = True
         if target.job is not None:
@@ -804,20 +737,18 @@ def _terminate_targets(targets: list[_ProcessTarget], *, timeout: float) -> bool
     """TERM targets, final-KILL every pinned group, then reap exact leaders."""
     if not targets:
         return True
-    started = time.monotonic()
-    deadline = started + max(0.0, timeout)
-    term_deadline = started + max(0.0, timeout) * 0.6
+    term_deadline, deadline = cleanup_deadlines(timeout)
 
     live = [target for target in targets if _target_state(target) is True]
     for target in live:
         _signal_target(target, signal.SIGTERM)
     survivors = _wait_for_targets(live, term_deadline)
-    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    final_signal = kill_signal()
     survivor_ids = {id(target) for target in survivors}
     for target in targets:
         # Pinned groups are KILLed even when their leader honored TERM; exact
         # child fallbacks simply mark an already-exited leader as releasable.
-        _signal_target(target, kill_signal, force=True)
+        _signal_target(target, final_signal, force=True)
         if id(target) in survivor_ids:
             logger.warning(
                 "admin child %r did not exit after TERM; sent final kill",

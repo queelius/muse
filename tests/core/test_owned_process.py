@@ -131,10 +131,12 @@ class TestObserveAndReap:
         ) is False
         process.poll.assert_not_called()
 
-    def test_missing_pid_is_ambiguous(self):
+    def test_real_unpinned_posix_child_fails_closed_without_polling(self):
+        process = MagicMock(spec=subprocess.Popen, returncode=None)
         assert op.observe_leader(
-            MagicMock(returncode=None), None, pinned=False, os_name="posix", label="t",
+            process, 4242, pinned=False, os_name="posix", label="t",
         ) is None
+        process.poll.assert_not_called()
 
     def test_double_poll_mirrors_returncode(self):
         process = MagicMock(returncode=None)
