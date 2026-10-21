@@ -498,18 +498,6 @@ class TestM1CatalogRWMLock:
         assert "key-a" in final, "key-a was lost (M1 not fixed)"
         assert "key-b" in final, "key-b was lost (M1 not fixed)"
 
-    def test_writeback_lock_is_catalog_write_lock(self):
-        """_WRITEBACK_LOCK in load_director is the same object as
-        _CATALOG_WRITE_LOCK in catalog. A test that patches
-        load_director._WRITEBACK_LOCK therefore patches the shared lock."""
-        from muse.cli_impl import load_director as ld_mod
-        from muse.core import catalog as cat_mod
-
-        assert ld_mod._WRITEBACK_LOCK is cat_mod._CATALOG_WRITE_LOCK, (
-            "_WRITEBACK_LOCK is not the same object as _CATALOG_WRITE_LOCK; "
-            "M1 shared-lock alias broken."
-        )
-
     def test_set_enabled_serialized_by_catalog_write_lock(self, tmp_path, monkeypatch):
         """Two concurrent set_enabled calls (on different models) both commit.
 

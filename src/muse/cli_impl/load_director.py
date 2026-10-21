@@ -68,21 +68,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-# Task D writeback uses the existing catalog read / atomic-write helpers.
-# These are imported at module scope so tests can monkeypatch them on the
+# The observed-peak writeback uses the catalog read / atomic-write helpers
+# under the shared _CATALOG_WRITE_LOCK that every catalog read-modify-write
+# site holds. Imported at module scope so tests can monkeypatch them on the
 # load_director module's namespace (see tests/cli_impl/test_load_director.py
 # `test_swallows_ioerror_during_write` etc.).
 from muse.core.catalog import _CATALOG_WRITE_LOCK, _read_catalog, _write_catalog
-
-# M1: _WRITEBACK_LOCK is an alias to the catalog-level _CATALOG_WRITE_LOCK so
-# that the observed-peak writeback in _observed_peak_writeback (which does its
-# own _read_catalog -> mutate -> _write_catalog) participates in the same
-# shared lock as all other catalog RMW sites (probe.py, set_enabled, etc.).
-# Keeping the name _WRITEBACK_LOCK preserves backward compatibility with any
-# code or tests that reference it directly (the tests mock it at the
-# load_director module level, which still works because this binding points
-# at the same Lock object as _CATALOG_WRITE_LOCK in catalog.py).
-_WRITEBACK_LOCK = _CATALOG_WRITE_LOCK
 
 # H4: maximum seconds a waiter will block on an in-flight Event before
 # re-entering the decision phase. The value must exceed the load timeout
@@ -113,12 +104,6 @@ from muse.core.memory_probe import (
 from muse.observability.recorder import record
 
 logger = logging.getLogger(__name__)
-
-
-# (M1: _WRITEBACK_LOCK is now an alias to catalog._CATALOG_WRITE_LOCK,
-# defined below near the catalog imports. The old module-level
-# threading.Lock() is removed to prevent two locks guarding the same
-# resource. See the import block above.)
 
 
 # Default headroom margins in GB. Subtracted from live free before the
@@ -978,15 +963,15 @@ class LoadDirector:
     ) -> None:
         """Body of the writeback thread; runs OFF the request hot path.
 
-        Held under the module-level _WRITEBACK_LOCK so concurrent cold
-        loads of different models do not lose updates via interleaved
-        read-modify-write.
+        Held under catalog's _CATALOG_WRITE_LOCK so concurrent cold loads
+        of different models (and every other catalog writer) do not lose
+        updates via interleaved read-modify-write.
 
         Errors are logged at WARNING and swallowed: the catalog write
         is best-effort, not an invariant.
         """
         try:
-            with _WRITEBACK_LOCK:
+            with _CATALOG_WRITE_LOCK:
                 catalog = _read_catalog()
                 entry = catalog.get(model_id)
                 if entry is None:
