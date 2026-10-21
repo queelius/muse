@@ -262,47 +262,25 @@ _CatalogFileKey = tuple[str, int, int, int, int, int]
 _known_models_cache: tuple[_CatalogFileKey, dict[str, CatalogEntry]] | None = None
 _MISSING_CATALOG_KEY: _CatalogFileKey = ("<no-catalog>", -2, -2, -2, -2, -2)
 
-# H5: guards the check-then-populate sequence in known_models() so that
-# two threads racing on the first call do not both run discover_models()
-# (which does importlib imports -- double-executing user script module
-# bodies) and both write the cache. Double-checked locking: outer
-# check outside the lock for the common hot path; inner check under the
-# lock only when the outer miss suggests a first-time build is needed.
-# Lock ordering: _KNOWN_MODELS_LOCK is always acquired BEFORE
-# _CATALOG_WRITE_LOCK (see M1 fix). Never hold _CATALOG_WRITE_LOCK when
-# acquiring _KNOWN_MODELS_LOCK.
+# Guards known_models()'s check-then-populate so two threads racing on the
+# first call do not both run discover_models() (importlib imports that
+# would execute user script bodies twice). Double-checked: the hot path
+# checks outside the lock.
 _KNOWN_MODELS_LOCK: threading.Lock = threading.Lock()
 
-# M1: shared lock for ALL catalog read-modify-write sequences.
+# _CATALOG_WRITE_LOCK (below) serializes every catalog read-modify-write.
+# The atomic write-then-rename in _write_catalog prevents corruption but not
+# lost updates between concurrent read -> mutate -> write sequences (probe
+# writes, admin enable/disable, load_director's observed-peak writeback,
+# which uses it under the alias load_director._WRITEBACK_LOCK). Hold it for
+# the whole sequence.
 #
-# The atomic write-then-rename in _write_catalog prevents file corruption
-# but does NOT prevent lost updates: if thread A reads, thread B reads,
-# thread B writes, then thread A writes, B's update is silently erased.
-#
-# Sites that previously each did their own _read_catalog -> mutate ->
-# _write_catalog without coordination:
-#   - probe.py (_write_probe_results / run_probe)
-#   - admin/operations.py (disable_model's set_enabled + any future
-#     RMW that does not already go through catalog helpers)
-#   - load_director.py (_observed_peak_writeback, previously guarded by
-#     its own _WRITEBACK_LOCK)
-#
-# All callers must hold _CATALOG_WRITE_LOCK for the full
-# read -> mutate -> write sequence. Do NOT hold state.lock or
-# _KNOWN_MODELS_LOCK when acquiring _CATALOG_WRITE_LOCK; that would
-# invert the documented acquisition order (state.lock -> catalog lock).
-#
-# Lock ordering (always acquire in this order to prevent deadlocks):
+# Lock ordering (acquire in this order to prevent deadlocks):
 #   1. _KNOWN_MODELS_LOCK  (only when building the known_models cache)
 #   2. _CATALOG_WRITE_LOCK (when doing a catalog RMW)
-#   state.lock and _CATALOG_WRITE_LOCK are NEVER held simultaneously;
-#   the plan-under-state.lock then execute-outside-lock discipline in
-#   supervisor and admin operations already keeps catalog writes outside
-#   state.lock.
-#
-# load_director._WRITEBACK_LOCK is an alias to this lock (set when that
-# module imports from here) so existing code using the old name keeps
-# working without changes.
+# state.lock and _CATALOG_WRITE_LOCK are never held together: supervisor
+# and admin operations plan under state.lock and write the catalog after
+# releasing it.
 
 
 def _flock(handle, *, blocking: bool) -> bool:
@@ -774,7 +752,7 @@ def known_models() -> dict[str, CatalogEntry]:
       1. `discover_models` over the configured dirs (script-based models,
          bundled or user-dropped).
       2. catalog.json entries with a `manifest` field (resolver-pulled
-         models persisted by Task F2's `_pull_via_resolver`).
+         models persisted by `_pull_via_resolver`).
 
     Bundled / discovered scripts win on model_id collision: a user
     cannot silently shadow a script by pulling a same-id resolver
@@ -793,14 +771,8 @@ def known_models() -> dict[str, CatalogEntry]:
     older key, which the next call's key mismatch rebuilds away; the
     reverse (stale content under a fresh key) cannot happen.
 
-    H5: double-checked locking around the cache population. The outer
-    check is fast and lock-free for the common hot path. The inner check
-    under _KNOWN_MODELS_LOCK is the critical section that prevents two
-    concurrent threads from both calling discover_models() (importlib
-    imports -- double-executing user script module bodies) and both
-    writing the cache.
-    Lock ordering: _KNOWN_MODELS_LOCK is always acquired BEFORE
-    _CATALOG_WRITE_LOCK (never the other way around; see M1 note).
+    Cache population uses double-checked locking under _KNOWN_MODELS_LOCK,
+    which is always acquired before _CATALOG_WRITE_LOCK.
     """
     global _known_models_cache, _discovered_entries_cache
     # Fast path: cache built against the current catalog file identity.
@@ -1586,16 +1558,11 @@ def pull(
                 )
             return _pull_via_resolver(identifier, base_override=base_override)
 
-    # Bare id: could be a bundled script OR a resolver-pulled model
-    # (resolver-pulled ids also show up in known_models() via their
-    # persisted manifest). Re-pulling a resolver model by its friendly id
-    # must go back through the resolver: _pull_bundled would overwrite the
-    # entry with a bundled-shaped dict lacking `manifest`/`source`, and the
-    # next known_models() rebuild would then drop the (no-manifest,
-    # no-script) entry so the model vanishes with a spurious 'unknown
-    # model' error (M3). Detect the resolver case by the `source` URI the
-    # resolver persists and route back through _pull_via_resolver, keeping
-    # the same catalog id and re-applying any curated overlay.
+    # Bare id: a bundled script OR a resolver-pulled model (whose persisted
+    # manifest also lists it in known_models()). A resolver model, detected
+    # by its persisted `source` URI, re-pulls through the resolver under the
+    # same id with any curated overlay: _pull_bundled would write an entry
+    # without `manifest`/`source` that known_models() then drops.
     from muse.core.curated import load_curated
 
     _validate_model_id_for_fs(identifier)
@@ -2058,59 +2025,28 @@ def _pull_via_resolver(
 ) -> str:
     """Pull a model via a resolver URI (e.g. hf://Qwen/Qwen3-8B-GGUF@q4_k_m).
 
-    Looks up the resolver for the URI's scheme, calls `resolve(uri)` to
-    get a synthesized ResolvedModel (manifest + backend_path + download
-    callable), creates the per-model venv, installs deps, downloads the
-    weights via `resolved.download()`, persists the synthesized manifest
-    plus a `source: <uri>` field into catalog.json, and invalidates the
-    known_models cache so the next call sees the new entry.
+    Resolves the URI, builds the per-model venv, downloads the weights and
+    persists the synthesized manifest plus `source: <uri>` in catalog.json.
 
-    `model_id_override` is set when the URI was reached via a curated
-    alias (e.g. user typed `qwen3-8b-q4` which expands to
-    `hf://Qwen/Qwen3-8B-Instruct-GGUF@q4_k_m`). The override replaces
-    the resolver's synthesized model_id so the catalog stores the
-    friendly curated id.
-
-    `modality_override` is set when the curated alias declared an
-    explicit `modality:` field. The priority-based resolver dispatch
-    sometimes misclassifies multi-flavor repos (rerankers ship as
-    sentence-transformers, so the embedding/text plugin claims them
-    even though they're cross-encoders). When the operator declared
-    a modality in curated.yaml, we honor it: look up the plugin for
-    that modality and resolve via it directly. Bypasses sniff-priority.
-
-    `capabilities_overlay` is set when the URI was reached via a curated
-    alias that declared its own `capabilities:` block. It merges into
-    the resolver-synthesized manifest's `capabilities` (shallow merge;
-    overlay wins on key collision). The merged block ends up in the
-    persisted manifest and flows into the runtime constructor via
-    `load_backend`.
-
-    `revision_override` pins the Hugging Face model snapshot selected by a
-    curated entry. `code_revision_override` separately pins a repository
-    referenced by Transformers `auto_map`; it is persisted as a runtime
-    capability so the loader can pass `code_revision` to Transformers.
-
-    `allow_source_change` is set by curated pulls, which own their id: when
-    a curated row's URI changes, re-pulling it replaces the old source.
-    Every other pull refuses to replace an entry from a different source
-    (see `_check_resolver_target`).
-
-    `base_override` is the operator's `--base` pin for a LoRA adapter
-    pull. Modeled on `device_override`: it is stored as a TOP-LEVEL
-    `base_override` field on the catalog entry (not merged into
-    `capabilities_overlay`), so it survives `known_models()`'s later
-    curated-overlay re-application and `get_manifest()` reads, both of
-    which apply it AFTER curated capabilities so the operator wins over
-    both the tag-declared base and a curated `base_model`. It is also
-    forwarded into `resolve()` so a turbo `--base` pairing re-derives
-    generation defaults (steps/guidance) at resolve time (fix I2), and
-    written into the manifest's `capabilities.base_model` here so
-    `_validate_lora_capabilities` and the persisted manifest agree with
-    the top-level field. When omitted (a plain re-pull), any
-    `base_override` already recorded on the PRIOR catalog entry for this
-    model_id is carried over so re-pulling never silently reverts a
-    previously-set operator pin.
+    - `model_id_override`: catalog id to use instead of the synthesized one
+      (a curated alias's friendly id, or `muse pull --id`).
+    - `modality_override`: a curated `modality:` that bypasses sniff dispatch
+      (rerankers ship as sentence-transformers repos, for example).
+    - `capabilities_overlay`: curated capabilities, shallow-merged over the
+      synthesized ones (overlay wins) and passed to the runtime.
+    - `revision_override`: the curated, immutable Hugging Face snapshot.
+      `code_revision_override` pins a repo referenced by Transformers
+      `auto_map`, persisted as the `code_revision` capability.
+    - `allow_source_change`: curated pulls own their id, so a changed
+      curated URI replaces the old source; other pulls refuse that (see
+      `_check_resolver_target`).
+    - `base_override`: the operator's `--base` LoRA pin. Like
+      `device_override` it is a top-level catalog field, applied after
+      curated capabilities by `known_models()` and `get_manifest()`, so the
+      operator beats both the tag-declared and curated base. It is also
+      passed to the resolver (turbo bases re-derive steps/guidance) and
+      written into `capabilities.base_model`. A re-pull without `--base`
+      keeps the prior entry's pin.
     """
     from muse.core.resolvers import resolve
 
@@ -2627,9 +2563,8 @@ def set_enabled(model_id: str, enabled: bool) -> None:
     Raises KeyError if the model is not in the catalog (not pulled).
     Other catalog fields are preserved.
 
-    M1: holds _CATALOG_WRITE_LOCK for the full read->mutate->write
-    sequence so concurrent mutations on different keys do not lose
-    each other's updates.
+    Holds _CATALOG_WRITE_LOCK for the full read->mutate->write sequence so
+    concurrent mutations on different keys do not lose each other's updates.
     """
     with _CATALOG_WRITE_LOCK:
         catalog = _read_catalog()
