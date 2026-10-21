@@ -37,7 +37,7 @@ from muse.modalities._common.uploads import (
     looks_like_audio_decode_error,
     read_upload,
 )
-from muse.modalities.audio_embedding.codec import embedding_to_base64
+from muse.modalities.audio_embedding.codec import encode_embedding_list
 
 
 logger = logging.getLogger(__name__)
@@ -138,27 +138,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             # envelope, logging the real exception server-side.
             raise
 
-        data = []
-        for i, vec in enumerate(result.embeddings):
-            embedding_field = (
-                embedding_to_base64(vec)
-                if encoding_format == "base64"
-                else vec
-            )
-            data.append({
-                "object": "embedding",
-                "embedding": embedding_field,
-                "index": i,
-            })
-
-        return {
-            "object": "list",
-            "data": data,
-            "model": result.model_id,
-            "usage": {
-                "prompt_tokens": 0,
-                "total_tokens": 0,
-            },
-        }
+        return encode_embedding_list(
+            result.embeddings, model_id=result.model_id,
+            encoding_format=encoding_format,
+        )
 
     return router

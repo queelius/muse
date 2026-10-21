@@ -12,7 +12,8 @@ from __future__ import annotations
 from muse.modalities.embedding_text.codec import (
     base64_to_embedding,
     embedding_to_base64,
+    encode_embedding_list,
 )
 
 
-__all__ = ["embedding_to_base64", "base64_to_embedding"]
+__all__ = ["embedding_to_base64", "base64_to_embedding", "encode_embedding_list"]

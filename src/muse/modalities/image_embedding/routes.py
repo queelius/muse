@@ -33,7 +33,7 @@ from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_embedding.codec import embedding_to_base64
+from muse.modalities.image_embedding.codec import encode_embedding_list
 from muse.modalities.image_generation.image_input import (
     close_decoded_images,
     decode_image_input,
@@ -145,27 +145,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             if not abandoned:
                 close_decoded_images(images)
 
-        data = []
-        for i, vec in enumerate(result.embeddings):
-            embedding_field = (
-                embedding_to_base64(vec)
-                if req.encoding_format == "base64"
-                else vec
-            )
-            data.append({
-                "object": "embedding",
-                "embedding": embedding_field,
-                "index": i,
-            })
-
-        return {
-            "object": "list",
-            "data": data,
-            "model": result.model_id,
-            "usage": {
-                "prompt_tokens": 0,
-                "total_tokens": 0,
-            },
-        }
+        return encode_embedding_list(
+            result.embeddings, model_id=result.model_id,
+            encoding_format=req.encoding_format,
+        )
 
     return router

@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field, field_validator
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities.embedding_text.codec import embedding_to_base64
+from muse.modalities.embedding_text.codec import encode_embedding_list
 
 logger = logging.getLogger(__name__)
 
@@ -120,26 +120,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "embedding backend failed; see server logs",
             )
 
-        data = []
-        for i, vec in enumerate(result.embeddings):
-            if req.encoding_format == "base64":
-                embedding_field = embedding_to_base64(vec)
-            else:
-                embedding_field = vec
-            data.append({
-                "object": "embedding",
-                "embedding": embedding_field,
-                "index": i,
-            })
-
-        return {
-            "object": "list",
-            "data": data,
-            "model": result.model_id,
-            "usage": {
-                "prompt_tokens": result.prompt_tokens,
-                "total_tokens": result.prompt_tokens,
-            },
-        }
+        return encode_embedding_list(
+            result.embeddings, model_id=result.model_id,
+            encoding_format=req.encoding_format,
+            prompt_tokens=result.prompt_tokens,
+        )
 
     return router

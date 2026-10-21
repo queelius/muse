@@ -4,7 +4,27 @@ import struct
 
 import pytest
 
-from muse.modalities.embedding_text.codec import embedding_to_base64, base64_to_embedding
+from muse.modalities.embedding_text.codec import (
+    base64_to_embedding,
+    embedding_to_base64,
+    encode_embedding_list,
+)
+
+
+def test_encode_embedding_list_openai_envelope():
+    body = encode_embedding_list([[1.0, 2.0], [3.0]], model_id="m", prompt_tokens=4)
+    assert body == {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "embedding": [1.0, 2.0], "index": 0},
+            {"object": "embedding", "embedding": [3.0], "index": 1},
+        ],
+        "model": "m",
+        "usage": {"prompt_tokens": 4, "total_tokens": 4},
+    }
+    b64 = encode_embedding_list([[1.0]], model_id="m", encoding_format="base64")
+    assert b64["data"][0]["embedding"] == embedding_to_base64([1.0])
+    assert b64["usage"] == {"prompt_tokens": 0, "total_tokens": 0}
 
 
 def test_round_trip_preserves_values_approximately():

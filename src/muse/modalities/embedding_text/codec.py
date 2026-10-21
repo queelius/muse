@@ -39,3 +39,33 @@ def base64_to_embedding(encoded: str) -> list[float]:
         )
     arr = np.frombuffer(raw, dtype="<f4")
     return arr.tolist()
+
+
+def encode_embedding_list(
+    embeddings: list[list[float]],
+    *,
+    model_id: str,
+    encoding_format: str = "float",
+    prompt_tokens: int = 0,
+) -> dict:
+    """Build the OpenAI `/v1/embeddings` response envelope.
+
+    Shared by the text, image and audio embedding routes so the wire
+    shape stays identical; `encoding_format="base64"` packs each vector
+    with `embedding_to_base64`.
+    """
+    return {
+        "object": "list",
+        "data": [
+            {
+                "object": "embedding",
+                "embedding": (
+                    embedding_to_base64(vec) if encoding_format == "base64" else vec
+                ),
+                "index": i,
+            }
+            for i, vec in enumerate(embeddings)
+        ],
+        "model": model_id,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }
