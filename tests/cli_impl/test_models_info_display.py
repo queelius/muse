@@ -272,12 +272,11 @@ class TestIdleTimeoutCapability:
     """
 
     def test_idle_timeout_present_in_every_modality_table(self):
-        for modality, table in KNOWN_CAPABILITIES.items():
-            assert "idle_timeout_seconds" in table, (
-                f"idle_timeout_seconds missing from {modality} table"
-            )
-            label, _ = table["idle_timeout_seconds"]
-            assert label == "idle timeout"
+        for modality in KNOWN_CAPABILITIES:
+            out = _render_capability_value(modality, "idle_timeout_seconds", 60)
+            assert out == ("idle timeout", "60s"), modality
+            out = _render_capability_value(modality, "device", "cuda")
+            assert out == ("device pref", "cuda"), modality
 
     def test_idle_timeout_renders_with_seconds_suffix(self):
         out = _render_capability_value(
