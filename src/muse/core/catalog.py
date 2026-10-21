@@ -25,7 +25,6 @@ import copy
 import importlib
 from importlib import metadata as importlib_metadata
 import contextlib
-import errno
 import hashlib
 import json
 import logging
@@ -34,7 +33,6 @@ import os
 import re
 import shutil
 import stat
-import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -44,7 +42,7 @@ from typing import Any
 
 from huggingface_hub import snapshot_download
 
-from muse.core import config
+from muse.core import config, securefs
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
 from muse.core.hf_seed import drop_unused_seeds, seed_repo
@@ -284,56 +282,6 @@ _KNOWN_MODELS_LOCK: threading.Lock = threading.Lock()
 # releasing it.
 
 
-def _flock(handle, *, blocking: bool) -> bool:
-    """Take an exclusive advisory lock on an open lock file.
-
-    Returns False only when ``blocking`` is false and another owner holds it.
-    """
-    if os.name == "nt":  # pragma: no cover - platform-specific fallback
-        import msvcrt
-
-        # msvcrt.locking locks bytes from the current file position. Ensure
-        # the lock file owns at least one byte, then consistently lock byte 0.
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-        try:
-            msvcrt.locking(handle.fileno(), mode, 1)
-        except OSError as exc:
-            if not blocking and exc.errno in {
-                errno.EACCES, errno.EAGAIN, errno.EDEADLK,
-            }:
-                return False
-            raise
-        return True
-
-    import fcntl
-
-    flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-    try:
-        fcntl.flock(handle.fileno(), flags)
-    except BlockingIOError:
-        return False
-    return True
-
-
-def _release_catalog_file_lock(handle) -> None:
-    """Release an advisory lock acquired by `_flock`."""
-    if os.name == "nt":  # pragma: no cover - platform-specific fallback
-        import msvcrt
-
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-
-    import fcntl
-
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
 def check_system_packages(packages: list[str]) -> list[str]:
     """Return the subset of system packages not found on PATH."""
     return [p for p in packages if shutil.which(p) is None]
@@ -345,35 +293,11 @@ def _ensure_owned_directory(path: Path, *, private: bool = False) -> None:
     The configured catalog directory may itself intentionally live below a
     symlinked parent.  What must never be accepted is a symlink in place of
     the directory Muse is about to chmod or populate (notably ``locks/``).
+    See `muse.core.securefs.ensure_directory` for the checks applied.
     """
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if os.name != "posix":  # pragma: no cover - Windows fallback
-        info = path.lstat()
-        is_junction = getattr(path, "is_junction", lambda: False)
-        if stat.S_ISLNK(info.st_mode) or is_junction() or not path.is_dir():
-            raise CatalogError(f"catalog path is not a safe directory: {path}")
-        return
-
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise CatalogError(f"catalog path is not a safe directory: {path}: {exc}") from exc
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISDIR(info.st_mode):
-            raise CatalogError(f"catalog path is not a directory: {path}")
-        if info.st_uid != os.geteuid():
-            raise CatalogError(f"catalog directory is not owned by this user: {path}")
-        if private:
-            os.fchmod(descriptor, 0o700)
-        elif info.st_mode & 0o022:
-            raise CatalogError(
-                f"catalog directory is group/other writable: {path}"
-            )
-    finally:
-        os.close(descriptor)
+    securefs.ensure_directory(
+        path, error=CatalogError, label="catalog path", private=private,
+    )
 
 
 def _open_catalog_regular_file(
@@ -385,58 +309,20 @@ def _open_catalog_regular_file(
     require_private: bool = False,
 ) -> int:
     """Open one owned regular file without following its final component."""
-    open_flags = flags | getattr(os, "O_CLOEXEC", 0)
-    if os.name == "posix":
-        open_flags |= getattr(os, "O_NOFOLLOW", 0)
-    else:  # pragma: no cover - Windows fallback
-        try:
-            before = path.lstat()
-        except FileNotFoundError:
-            before = None
-        if before is not None and stat.S_ISLNK(before.st_mode):
-            raise CatalogError(f"refusing symlink catalog file: {path}")
-        open_flags |= getattr(os, "O_BINARY", 0)
-    try:
-        descriptor = (
-            os.open(path, open_flags)
-            if mode is None
-            else os.open(path, open_flags, mode)
-        )
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise CatalogError(f"cannot safely open catalog file {path}: {exc}") from exc
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise CatalogError(f"catalog path is not a regular file: {path}")
-        if os.name == "posix":
-            if info.st_uid != os.geteuid():
-                raise CatalogError(f"catalog file is not owned by this user: {path}")
-            if require_private and info.st_mode & 0o022:
-                raise CatalogError(
-                    f"catalog file is group/other writable: {path}"
-                )
-        if require_single_link and info.st_nlink != 1:
-            raise CatalogError(f"catalog lock has multiple links: {path}")
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
+    return securefs.open_regular_file(
+        path,
+        flags,
+        error=CatalogError,
+        label="catalog file",
+        mode=mode,
+        require_single_link=require_single_link,
+        require_private=require_private,
+    )
 
 
 def _open_catalog_lock(path: Path):
     """Return a private binary handle suitable for the advisory lock."""
-    descriptor = _open_catalog_regular_file(
-        path,
-        os.O_CREAT | os.O_RDWR,
-        mode=0o600,
-        require_single_link=True,
-        require_private=True,
-    )
-    if os.name == "posix":
-        os.fchmod(descriptor, 0o600)
-    return os.fdopen(descriptor, "a+b", buffering=0)
+    return securefs.open_lock_file(path, error=CatalogError, label="catalog lock")
 
 
 class _CatalogWriteLock:
@@ -466,7 +352,7 @@ class _CatalogWriteLock:
             _ensure_owned_directory(catalog_dir, private=True)
             lock_path = catalog_dir / ".catalog.lock"
             handle = _open_catalog_lock(lock_path)
-            _flock(handle, blocking=True)
+            securefs.lock_file(handle)
             self._local.handle = handle
             self._local.depth = 1
 
@@ -493,7 +379,7 @@ class _CatalogWriteLock:
 
             handle = self._local.handle
             try:
-                _release_catalog_file_lock(handle)
+                securefs.unlock_file(handle)
             finally:
                 handle.close()
                 del self._local.handle
@@ -537,12 +423,12 @@ def _advisory_lock(path: Path, thread_lock, *, wait: bool, busy_exc: Exception):
         _ensure_owned_directory(path.parent, private=True)
         handle = _open_catalog_lock(path)
         try:
-            if not _flock(handle, blocking=wait):
+            if not securefs.lock_file(handle, blocking=wait):
                 raise busy_exc
             try:
                 yield
             finally:
-                _release_catalog_file_lock(handle)
+                securefs.unlock_file(handle)
         finally:
             handle.close()
     finally:
@@ -1249,25 +1135,6 @@ def _reset_read_catalog_cache() -> None:
     _read_catalog_cache = None
 
 
-def _fsync_directory(path: Path) -> None:
-    """Best-effort directory fsync after atomic replacement."""
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        # Some filesystems/platforms do not support directory fsync. The
-        # file itself was still fsynced before replace, so retain portability.
-        pass
-    finally:
-        os.close(fd)
-
-
 def _write_catalog(data: dict) -> None:
     """Durably write catalog JSON through a unique same-directory temp file.
 
@@ -1297,28 +1164,7 @@ def _write_catalog(data: dict) -> None:
     with _CATALOG_WRITE_LOCK:
         p = _catalog_path()
         _ensure_owned_directory(p.parent)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=p.parent,
-            prefix=f".{p.name}.",
-            suffix=".tmp",
-            text=True,
-        )
-        tmp = Path(tmp_name)
-        try:
-            if os.name == "posix":
-                os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(serialized)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, p)
-            _fsync_directory(p.parent)
-        except BaseException:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
+        securefs.atomic_write_text(p, serialized)
         _read_catalog_cache = None
 
 
