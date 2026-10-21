@@ -79,7 +79,7 @@ class TestPipTargetArgs:
         with patch(
             "muse.cli_impl.refresh._muse_repo_root", return_value=None,
         ), patch(
-            "muse.core.catalog.importlib_metadata.version", return_value="1.2.3",
+            "muse.core.catalog_pull.importlib_metadata.version", return_value="1.2.3",
         ):
             args = _pip_target_args(["images", "embeddings"])
         assert args == ["museq[server,images,embeddings]==1.2.3"]
@@ -101,7 +101,7 @@ class TestPipTargetArgs:
         with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
              patch("muse.cli_impl.refresh._muse_repo_root", return_value=None), \
              patch(
-                 "muse.core.catalog.importlib_metadata.version",
+                 "muse.core.catalog_pull.importlib_metadata.version",
                  return_value="1.2.3",
              ), \
              patch("muse.cli_impl.refresh.run_owned_command") as mock_run:

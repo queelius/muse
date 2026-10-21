@@ -82,9 +82,9 @@ def resolver():
 
 @pytest.fixture
 def no_install():
-    with patch("muse.core.catalog.create_venv") as create, \
-         patch("muse.core.catalog.install_into_venv") as install, \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv") as create, \
+         patch("muse.core.catalog_pull.install_into_venv") as install, \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         yield create, install
 
 
@@ -171,7 +171,7 @@ def test_explicit_id_cannot_take_another_curated_id(_isolate, resolver, no_insta
         size_gb=None, description=None, tags=(), capabilities={},
     )
     with patch(
-        "muse.core.catalog.find_curated",
+        "muse.core.catalog_pull.find_curated",
         side_effect=lambda i: curated if i == "friendly" else None,
     ), patch(
         "muse.core.catalog_models.find_curated",
@@ -216,7 +216,7 @@ def test_curated_pull_may_replace_its_own_entry_from_a_new_uri(
         size_gb=None, description=None, tags=(), capabilities={},
     )
     with patch(
-        "muse.core.catalog.find_curated",
+        "muse.core.catalog_pull.find_curated",
         side_effect=lambda i: curated if i == "friendly" else None,
     ), patch(
         "muse.core.catalog_models.find_curated",

@@ -95,10 +95,10 @@ def test_no_probe_skips_and_keeps_model_enabled(monkeypatch, tmp_catalog):
 
 
 def test_pull_returns_the_installed_id_for_a_bundled_model(tmp_catalog):
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         assert catalog.pull("kokoro-82m") == "kokoro-82m"
 
 

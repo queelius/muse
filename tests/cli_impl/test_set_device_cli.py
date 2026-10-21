@@ -21,10 +21,10 @@ def tmp_catalog(tmp_path, monkeypatch):
 
 def _pull_soprano():
     from muse.core.catalog import pull
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
 

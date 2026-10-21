@@ -25,7 +25,7 @@ def test_pull_runs_automatic_storage_maintenance_before_model_dispatch(
 ):
     from types import SimpleNamespace
 
-    from muse.core import catalog as catalog_module
+    from muse.core import catalog_pull as catalog_module
 
     events = []
 
@@ -258,10 +258,10 @@ def test_is_pulled_false_when_not_in_catalog(tmp_catalog):
 
 
 def test_pull_installs_pip_downloads_and_writes_catalog(tmp_catalog):
-    with patch("muse.core.catalog.create_venv") as mock_create, \
-         patch("muse.core.catalog.install_into_venv") as mock_install, \
-         patch("muse.core.catalog.snapshot_download") as mock_download, \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv") as mock_create, \
+         patch("muse.core.catalog_pull.install_into_venv") as mock_install, \
+         patch("muse.core.catalog_pull.snapshot_download") as mock_download, \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         mock_download.return_value = "/fake/cache/soprano"
         pull("soprano-80m")
         mock_create.assert_called_once()
@@ -277,7 +277,7 @@ def test_pull_unknown_raises_without_running_storage_maintenance(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "muse.core.catalog._run_automatic_storage_maintenance",
+        "muse.core.catalog_pull._run_automatic_storage_maintenance",
         lambda: pytest.fail("unknown identifiers must not trigger cleanup"),
     )
     with pytest.raises(KeyError, match="unknown model"):
@@ -287,19 +287,19 @@ def test_pull_unknown_raises_without_running_storage_maintenance(
 def test_pull_warns_on_missing_system_packages(tmp_catalog, caplog):
     import logging
     caplog.set_level(logging.WARNING)
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=["espeak-ng"]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=["espeak-ng"]):
         pull("kokoro-82m")
         assert "espeak-ng" in caplog.text
 
 
 def test_remove_clears_from_catalog(tmp_catalog):
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
         assert is_pulled("soprano-80m")
         remove("soprano-80m")
@@ -314,10 +314,10 @@ def test_remove_default_leaves_venv_on_disk(tmp_catalog):
     python.parent.mkdir()
     python.touch(mode=0o700)
     (venv_path / "marker").write_text("present")
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     remove("soprano-80m")
     assert venv_path.exists(), "default remove must not delete the venv"
@@ -332,10 +332,10 @@ def test_remove_with_purge_deletes_venv(tmp_catalog):
     python.parent.mkdir()
     python.touch(mode=0o700)
     (venv_path / "marker").write_text("present")
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     remove("soprano-80m", purge=True)
     assert not venv_path.exists(), "purge must delete the venv directory"
@@ -370,10 +370,10 @@ def test_remove_with_purge_preserves_venv_referenced_by_other_entry(tmp_catalog)
 
 def test_remove_with_purge_tolerates_missing_venv(tmp_catalog):
     """purge=True must not raise if the venv directory is already gone."""
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     venv_path = tmp_catalog / "venvs" / "soprano-80m"
     if venv_path.exists():
@@ -896,7 +896,8 @@ def test_load_backend_rejects_stale_curated_non_remote_code_pin(tmp_catalog):
     })
     fake_module = MagicMock()
 
-    with patch("muse.core.catalog.find_curated", return_value=curated), patch("muse.core.catalog_models.find_curated", return_value=curated), patch(
+    with patch("muse.core.catalog_pull.find_curated", return_value=curated), \
+         patch("muse.core.catalog_models.find_curated", return_value=curated), patch(
         "muse.core.catalog._import_backend_module", return_value=fake_module,
     ), pytest.raises(RuntimeError, match="immutable resolver provenance"):
         load_backend("opus-mt-en-es")
@@ -1054,10 +1055,10 @@ def test_load_backend_accepts_matching_curated_remote_code_pins(tmp_catalog):
 
 
 def test_load_backend_imports_and_constructs(tmp_catalog):
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
     fake_class = MagicMock()
@@ -1099,10 +1100,10 @@ def test_load_backend_handles_backend_path_with_extra_colon(tmp_catalog):
 
 
 def test_write_catalog_is_atomic_no_tmp_leftover(tmp_catalog):
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     # After successful write, the .tmp file must not exist
     tmp_files = list(tmp_catalog.glob("*.tmp"))
@@ -1114,10 +1115,10 @@ def test_write_catalog_is_atomic_no_tmp_leftover(tmp_catalog):
 
 def test_pull_creates_venv_under_muse_catalog_dir(tmp_catalog):
     """pull() must create a venv at <MUSE_CATALOG_DIR>/venvs/<model-id>/."""
-    with patch("muse.core.catalog.create_venv") as mock_create, \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv") as mock_create, \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
         mock_create.assert_called_once()
         venv_target = mock_create.call_args[0][0]
@@ -1127,10 +1128,10 @@ def test_pull_creates_venv_under_muse_catalog_dir(tmp_catalog):
 
 def test_pull_installs_pip_extras_into_venv_not_system(tmp_catalog):
     """pip_extras go into the venv, never the supervisor's env."""
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv") as mock_install, \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv") as mock_install, \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     # Find the call that installed soprano's actual pip_extras. There are
     # two calls in total: museq[server] first, then the model's pip_extras.
@@ -1150,10 +1151,10 @@ def test_pull_installs_muse_editable_with_server_extras(tmp_catalog):
     ModuleNotFoundError: No module named 'muse'. The supervisor can't
     spawn workers.
     """
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv") as mock_install, \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv") as mock_install, \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
     muse_call = next(
@@ -1169,10 +1170,10 @@ def test_pull_installs_muse_editable_with_server_extras(tmp_catalog):
 
 
 def test_pull_records_venv_path_and_python_in_catalog(tmp_catalog):
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     catalog = _read_catalog()
     entry = catalog["soprano-80m"]
@@ -1190,18 +1191,18 @@ def test_catalog_has_no_system_install_pip_extras(tmp_catalog):
     `install_into_venv` only."""
     import muse.core.catalog as catalog_module
     assert not hasattr(catalog_module, "install_pip_extras")
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
 
 def test_pull_records_enabled_true_by_default(tmp_catalog):
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     catalog = _read_catalog()
     assert catalog["soprano-80m"]["enabled"] is True
@@ -1233,14 +1234,14 @@ def test_bundled_repull_preserves_latest_operator_state(tmp_catalog):
         set_gpu_layers_override(model_id, 12)
         return "/fake/new-weights"
 
-    with patch("muse.core.catalog.ensure_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.install_python_sources"), \
+    with patch("muse.core.catalog_pull.ensure_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.install_python_sources"), \
          patch(
-             "muse.core.catalog.snapshot_download",
+             "muse.core.catalog_pull.snapshot_download",
              side_effect=download_after_admin_edit,
          ), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         _pull_bundled_transaction(
             model_id,
             entry,
@@ -1293,10 +1294,10 @@ def test_resolver_repull_preserves_latest_operator_state(tmp_catalog):
         "python_sources": [],
         "capabilities": {},
     }
-    with patch("muse.core.catalog.ensure_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.install_python_sources"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.ensure_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.install_python_sources"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         _pull_resolved_transaction(
             uri="hf://org/resolved-v2",
             model_id=model_id,
@@ -1340,20 +1341,20 @@ def test_read_catalog_backfills_enabled_for_legacy_entries(tmp_catalog):
 
 def test_is_enabled_helper_returns_true_for_entry_with_flag(tmp_catalog):
     from muse.core.catalog import is_enabled
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     assert is_enabled("soprano-80m") is True
 
 
 def test_is_enabled_helper_returns_false_after_set_enabled_false(tmp_catalog):
     from muse.core.catalog import is_enabled, set_enabled
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     set_enabled("soprano-80m", False)
     assert is_enabled("soprano-80m") is False
@@ -1367,10 +1368,10 @@ def test_set_enabled_raises_on_unknown_model(tmp_catalog):
 
 def test_set_enabled_preserves_other_fields(tmp_catalog):
     from muse.core.catalog import set_enabled
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     before = _read_catalog()["soprano-80m"]
     set_enabled("soprano-80m", False)
@@ -2093,9 +2094,9 @@ def test_pull_dispatches_to_resolver_for_uri(tmp_catalog):
     register_resolver(_FakeResolver())
 
     try:
-        with patch("muse.core.catalog.create_venv"), \
-             patch("muse.core.catalog.install_into_venv"), \
-             patch("muse.core.catalog.check_system_packages", return_value=[]):
+        with patch("muse.core.catalog_pull.create_venv"), \
+             patch("muse.core.catalog_pull.install_into_venv"), \
+             patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
             pull("fake://some/repo@variant")
     finally:
         _reset_registry_for_tests()
@@ -2113,10 +2114,10 @@ def test_pull_dispatches_to_resolver_for_uri(tmp_catalog):
 def test_pull_bare_id_still_uses_bundled_path(tmp_catalog):
     """Regression: non-URI pull goes through known_models() / scripts."""
     from muse.core.catalog import pull, is_pulled
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("kokoro-82m")
     assert is_pulled("kokoro-82m")
     # Bundled-path entries do NOT carry a `manifest` field (legacy shape preserved)
@@ -2132,15 +2133,15 @@ class TestMuseServerInstallArgs:
 
     def test_editable_target_when_source_tree(self):
         from muse.core.catalog import _muse_server_install_args
-        with patch("muse.core.catalog._muse_repo_root", return_value=Path("/src/muse")):
+        with patch("muse.core.catalog_pull._muse_repo_root", return_value=Path("/src/muse")):
             args = _muse_server_install_args()
         assert args == ["-e", "/src/muse[server]"]
 
     def test_pypi_target_when_no_source_tree(self):
         from muse.core.catalog import _muse_server_install_args
-        with patch("muse.core.catalog._muse_repo_root", return_value=None), \
+        with patch("muse.core.catalog_pull._muse_repo_root", return_value=None), \
              patch(
-                 "muse.core.catalog.importlib_metadata.version",
+                 "muse.core.catalog_pull.importlib_metadata.version",
                  return_value="1.2.3",
              ):
             args = _muse_server_install_args()
@@ -2151,16 +2152,16 @@ class TestMuseServerInstallArgs:
         self, tmp_catalog,
     ):
         from muse.core.catalog import pull
-        with patch("muse.core.catalog._muse_repo_root", return_value=None), \
+        with patch("muse.core.catalog_pull._muse_repo_root", return_value=None), \
              patch(
-                 "muse.core.catalog.importlib_metadata.version",
+                 "muse.core.catalog_pull.importlib_metadata.version",
                  return_value="1.2.3",
              ), \
-             patch("muse.core.catalog.create_venv"), \
-             patch("muse.core.catalog.install_into_venv") as mock_install, \
-             patch("muse.core.catalog.install_python_sources"), \
-             patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-             patch("muse.core.catalog.check_system_packages", return_value=[]):
+             patch("muse.core.catalog_pull.create_venv"), \
+             patch("muse.core.catalog_pull.install_into_venv") as mock_install, \
+             patch("muse.core.catalog_pull.install_python_sources"), \
+             patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+             patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
             pull("kokoro-82m")
         # The muse-self install (first call) must be the published dist, no -e.
         first_args = mock_install.call_args_list[0].args[1]
@@ -2183,8 +2184,8 @@ def test_repull_resolver_model_by_bare_id_routes_through_resolver(tmp_catalog):
     )
     _reset_known_models_cache()
 
-    with patch("muse.core.catalog._pull_via_resolver") as mock_resolver, \
-         patch("muse.core.catalog._pull_bundled") as mock_bundled:
+    with patch("muse.core.catalog_pull._pull_via_resolver") as mock_resolver, \
+         patch("muse.core.catalog_pull._pull_bundled") as mock_bundled:
         pull("qwen3-8b-gguf-q4-k-m")
 
     mock_bundled.assert_not_called()
@@ -2229,9 +2230,9 @@ def test_pull_invalidates_known_models_cache_on_resolver_pull(tmp_catalog):
     register_resolver(_FakeResolver())
 
     try:
-        with patch("muse.core.catalog.create_venv"), \
-             patch("muse.core.catalog.install_into_venv"), \
-             patch("muse.core.catalog.check_system_packages", return_value=[]):
+        with patch("muse.core.catalog_pull.create_venv"), \
+             patch("muse.core.catalog_pull.install_into_venv"), \
+             patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
             pull("fake://anything")
     finally:
         _reset_registry_for_tests()
@@ -2492,10 +2493,10 @@ def test_set_device_override_writes_field(tmp_catalog):
     from muse.core.catalog import (
         pull, set_device_override, _read_catalog,
     )
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
     set_device_override("soprano-80m", "cuda")
@@ -2506,10 +2507,10 @@ def test_set_device_override_clears_with_none(tmp_catalog):
     from muse.core.catalog import (
         pull, set_device_override, _read_catalog,
     )
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
     set_device_override("soprano-80m", "cuda")
@@ -2521,10 +2522,10 @@ def test_set_device_override_validates_device(tmp_catalog):
     from muse.core.catalog import (
         pull, set_device_override,
     )
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
     with pytest.raises(ValueError, match="device"):
@@ -2545,10 +2546,10 @@ def test_load_backend_bundled_path_unchanged(tmp_catalog):
     apart from injecting `model_id` (which bundled scripts already
     accept via **_).
     """
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake/local"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake/local"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
 
     fake_class = MagicMock()
@@ -2608,10 +2609,11 @@ def test_pull_curated_resolver_id_uses_curated_id_in_catalog(tmp_catalog):
         tags=(),
     )
     try:
-        with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
-             patch("muse.core.catalog.create_venv"), \
-             patch("muse.core.catalog.install_into_venv"), \
-             patch("muse.core.catalog.check_system_packages", return_value=[]):
+        with patch("muse.core.catalog_pull.find_curated", return_value=fake_curated), \
+             patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
+             patch("muse.core.catalog_pull.create_venv"), \
+             patch("muse.core.catalog_pull.install_into_venv"), \
+             patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
             pull("friendly-id")
     finally:
         _reset_registry_for_tests()
@@ -2640,11 +2642,12 @@ def test_pull_curated_bundled_alias_uses_bundled_path(tmp_catalog):
         description=None,
         tags=(),
     )
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("kokoro-82m")
     assert is_pulled("kokoro-82m")
     # Bundled path: no `manifest` field persisted (legacy shape)
@@ -2660,11 +2663,12 @@ def test_pull_bare_id_unaffected_by_curated_cache(tmp_catalog):
     _reset_curated_cache_for_tests()
     # find_curated returns None for the real "soprano-80m" if the YAML's
     # bundled entry is `kokoro-82m` etc. — make it explicit:
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("soprano-80m")
     assert is_pulled("soprano-80m")
 
@@ -2686,7 +2690,8 @@ def test_pull_unknown_id_suggests_close_curated_match(tmp_catalog):
             size_gb=5.0, description="close match", tags=(),
         ),
     ]
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.curated.load_curated", return_value=fake_curated):
         with pytest.raises(KeyError) as exc_info:
             pull("qwen3-8b-q4")
@@ -2701,7 +2706,8 @@ def test_pull_unknown_id_with_no_close_matches_suggests_models_list(tmp_catalog)
     from muse.core.catalog import pull
 
     # patch curated to empty so only bundled ids are candidates
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.curated.load_curated", return_value=[]):
         with pytest.raises(KeyError) as exc_info:
             pull("total-gibberish-no-match-zzzzz")
@@ -2729,7 +2735,8 @@ def test_pull_unknown_id_error_includes_curated_ids_in_did_you_mean(tmp_catalog)
             description="", tags=(),
         ),
     ]
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
          patch("muse.core.curated.load_curated", return_value=fake_curated):
         with pytest.raises(KeyError) as exc_info:
             pull("llama-3.2-3b")  # close to llama-3.2-3b-q4
@@ -2787,12 +2794,13 @@ def test_pull_via_resolver_merges_curated_capabilities_overlay(tmp_catalog):
     # resolve() is imported locally inside _pull_via_resolver
     # (`from muse.core.resolvers import resolve`), so the patch must
     # target the source module, not muse.core.catalog.
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
          patch("muse.core.resolvers.resolve", return_value=fake_resolved) as mock_resolve, \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]), \
-         patch("muse.core.catalog.venv_python", return_value="/fake/py"):
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog_pull.venv_python", return_value="/fake/py"):
         pull("my-model")
 
     catalog = _read_catalog()
@@ -2846,11 +2854,12 @@ def test_pull_via_resolver_overlay_wins_on_collision(tmp_catalog):
         backend_path="fake.mod:Cls",
         download=lambda cache_root: cache_root / "weights" / "collide",
     )
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]), \
-         patch("muse.core.catalog.venv_python", return_value="/fake/py"), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_models.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog_pull.venv_python", return_value="/fake/py"), \
          patch("muse.core.resolvers.resolve", return_value=fake_resolved):
         pull("collide")
 
@@ -2895,17 +2904,19 @@ def test_pull_via_resolver_installs_and_persists_reviewed_python_sources(
     )
     expected_venv = tmp_catalog / "venvs" / "source-model"
 
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=None), patch("muse.core.catalog_models.find_curated_by_uri", return_value=None), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog_pull.find_curated_by_uri", return_value=None), \
+         patch("muse.core.catalog_models.find_curated_by_uri", return_value=None), \
          patch("muse.core.resolvers.resolve", return_value=fake_resolved), \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
          patch(
-             "muse.core.catalog.install_python_sources",
+             "muse.core.catalog_pull.install_python_sources",
              side_effect=lambda *_: events.append("source"),
          ) as install_sources, \
-         patch("muse.core.catalog.venv_python", return_value=Path("/fake/py")):
+         patch("muse.core.catalog_pull.venv_python", return_value=Path("/fake/py")):
         pull("hf://org/source-model")
 
     install_sources.assert_called_once_with(expected_venv, [source])
@@ -2951,12 +2962,14 @@ def test_pull_uri_direct_inherits_curated_capabilities(tmp_catalog):
     )
     # find_curated by id returns None (user didn't type curated id);
     # find_curated_by_uri returns the entry (URI matches curated.yaml).
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_curated), patch("muse.core.catalog_models.find_curated_by_uri", return_value=fake_curated), \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]), \
-         patch("muse.core.catalog.venv_python", return_value="/fake/py"), \
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog_pull.find_curated_by_uri", return_value=fake_curated), \
+         patch("muse.core.catalog_models.find_curated_by_uri", return_value=fake_curated), \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog_pull.venv_python", return_value="/fake/py"), \
          patch("muse.core.resolvers.resolve", return_value=fake_resolved):
         pull("hf://KoalaAI/Text-Moderation")
 
@@ -3012,7 +3025,8 @@ def test_known_models_reapplies_curated_capabilities_overlay_at_runtime(
         capabilities={"device": "cpu", "new_key": "new_val"},
     )
 
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated):
+    with patch("muse.core.catalog_pull.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_models.find_curated", return_value=fake_curated):
         _reset_known_models_cache()
         models = known_models()
 
@@ -3070,7 +3084,8 @@ def test_get_manifest_reapplies_curated_capabilities_overlay_at_runtime(
         capabilities={"device": "cpu", "new_key": "new_val"},
     )
 
-    with patch("muse.core.catalog.find_curated", return_value=fake_curated), patch("muse.core.catalog_models.find_curated", return_value=fake_curated):
+    with patch("muse.core.catalog_pull.find_curated", return_value=fake_curated), \
+         patch("muse.core.catalog_models.find_curated", return_value=fake_curated):
         _reset_known_models_cache()
         manifest = get_manifest("stale-model")
 
@@ -3116,8 +3131,10 @@ def test_known_models_uri_based_curated_lookup_when_id_misses(tmp_catalog):
         capabilities={"device": "cpu"},
     )
 
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=fake_uri_curated), patch("muse.core.catalog_models.find_curated_by_uri", return_value=fake_uri_curated):
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog_pull.find_curated_by_uri", return_value=fake_uri_curated), \
+         patch("muse.core.catalog_models.find_curated_by_uri", return_value=fake_uri_curated):
         _reset_known_models_cache()
         models = known_models()
 
@@ -3205,10 +3222,10 @@ def test_human_size_formats_bytes(nbytes, expected):
 
 def test_pull_bundled_honors_allow_patterns_capability(tmp_catalog):
     """MANIFEST.capabilities.allow_patterns flows into snapshot_download."""
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake") as mock_download, \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake") as mock_download, \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         # sd-turbo MANIFEST declares allow_patterns in v0.18.2
         pull("sd-turbo")
     # Verify snapshot_download was called with allow_patterns
@@ -3224,10 +3241,10 @@ def test_pull_bundled_honors_allow_patterns_capability(tmp_catalog):
 
 def test_pull_bundled_kokoro_uses_local_only_artifact_filter(tmp_catalog):
     """Kokoro pulls every required local file and no unrelated artifact."""
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.snapshot_download", return_value="/fake") as mock_download, \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.snapshot_download", return_value="/fake") as mock_download, \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("kokoro-82m")
     mock_download.assert_called_once()
     kwargs = mock_download.call_args.kwargs
@@ -3256,7 +3273,7 @@ def test_bundled_pull_rejects_missing_revision_before_side_effects(
         hf_repo="org/repo",
         bundled=True,
     )
-    with patch("muse.core.catalog.ensure_venv") as ensure:
+    with patch("muse.core.catalog_pull.ensure_venv") as ensure:
         with pytest.raises(CatalogError, match="must declare an immutable"):
             _pull_bundled_transaction(
                 "mutable-bundled",
@@ -3268,13 +3285,13 @@ def test_bundled_pull_rejects_missing_revision_before_side_effects(
 
 def test_pull_bundled_honors_pinned_revision(tmp_catalog):
     """Exact custom architectures must download the reviewed snapshot."""
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
          patch(
-             "muse.core.catalog.snapshot_download",
+             "muse.core.catalog_pull.snapshot_download",
              return_value="/fake/starvector",
          ) as mock_download, \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("starvector-1b-im2svg")
 
     kwargs = mock_download.call_args.kwargs
@@ -3298,13 +3315,13 @@ def test_pull_bundled_honors_pinned_revision(tmp_catalog):
 
 def test_pull_bundled_projects_top_level_revision_and_filters(tmp_catalog):
     """Top-level download metadata must not be lost during discovery."""
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
          patch(
-             "muse.core.catalog.snapshot_download",
+             "muse.core.catalog_pull.snapshot_download",
              return_value="/fake/mert",
          ) as mock_download, \
-         patch("muse.core.catalog.check_system_packages", return_value=[]):
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
         pull("mert-v1-95m")
 
     kwargs = mock_download.call_args.kwargs
@@ -3320,9 +3337,9 @@ def test_pull_bundled_routes_multi_artifact_manifest_to_atomic_bundle(
     tmp_catalog,
 ):
     bundle = tmp_catalog / "weights" / "animatediff-bundle"
-    with patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]), \
+    with patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
          patch(
              "muse.core.artifacts.download_hf_artifact_bundle",
              return_value=bundle,
@@ -3393,8 +3410,10 @@ def test_known_models_no_curated_match_leaves_manifest_unchanged(tmp_catalog):
     }
     _write_catalog(catalog_state)
 
-    with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), \
-         patch("muse.core.catalog.find_curated_by_uri", return_value=None), patch("muse.core.catalog_models.find_curated_by_uri", return_value=None):
+    with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+         patch("muse.core.catalog_models.find_curated", return_value=None), \
+         patch("muse.core.catalog_pull.find_curated_by_uri", return_value=None), \
+         patch("muse.core.catalog_models.find_curated_by_uri", return_value=None):
         _reset_known_models_cache()
         models = known_models()
 
@@ -3511,7 +3530,7 @@ class TestPullBaseOverrideDispatch:
     """
 
     def _capture(self, monkeypatch):
-        import muse.core.catalog as cat
+        import muse.core.catalog_pull as cat
         calls = {}
 
         def fake_pvr(uri, **kwargs):
@@ -3544,7 +3563,7 @@ class TestPullBaseOverrideDispatch:
     def test_curated_alias_branch_threads_base_override_kwarg(
         self, tmp_catalog, monkeypatch,
     ):
-        import muse.core.catalog as cat
+        import muse.core.catalog_pull as cat
         from muse.core.catalog import pull
         from muse.core.curated import CuratedEntry
 
@@ -3578,7 +3597,7 @@ class TestPullBaseOverrideDispatch:
         URI happens to match a curated entry by URI (as opposed to the user
         typing the curated alias id).
         """
-        import muse.core.catalog as cat
+        import muse.core.catalog_pull as cat
         from muse.core.catalog import pull
         from muse.core.curated import CuratedEntry
 
@@ -3595,7 +3614,9 @@ class TestPullBaseOverrideDispatch:
         monkeypatch.setattr(cat, "find_curated", lambda ident: None)
         monkeypatch.setattr("muse.core.catalog_models.find_curated", lambda ident: None)
         monkeypatch.setattr(cat, "find_curated_by_uri", lambda uri: fake_uri_curated)
-        monkeypatch.setattr("muse.core.catalog_models.find_curated_by_uri", lambda uri: fake_uri_curated)
+        monkeypatch.setattr(
+            "muse.core.catalog_models.find_curated_by_uri", lambda uri: fake_uri_curated,
+        )
 
         calls = self._capture(monkeypatch)
         pull("hf://org/some-lora", base_override="sdxl-turbo")
@@ -3610,7 +3631,7 @@ class TestPullBaseOverrideDispatch:
         thread --base through to _pull_via_resolver, not warn-and-ignore.
         The warning is reserved for true bundled-script pulls, which have
         no LoRA base to set."""
-        import muse.core.catalog as cat
+        import muse.core.catalog_pull as cat
         from muse.core.catalog import pull
 
         _write_persisted_resolver_entry(
@@ -3647,7 +3668,7 @@ class TestPullBaseOverrideDispatch:
         bundled_id = next(
             mid for mid in known_models() if find_curated(mid) is None
         )
-        with patch("muse.core.catalog._pull_bundled") as mock_bundled:
+        with patch("muse.core.catalog_pull._pull_bundled") as mock_bundled:
             pull(bundled_id, base_override="sdxl-turbo")
         mock_bundled.assert_called_once_with(bundled_id)
         assert "--base only applies" in caplog.text
@@ -3662,7 +3683,7 @@ class TestBaseOverrideDurability:
     def test_known_models_applies_base_override_over_curated_base_model(
         self, tmp_catalog, monkeypatch,
     ):
-        import muse.core.catalog as cat
+        import muse.core.catalog_pull as cat
         from muse.core.catalog import known_models, _catalog_path
         from muse.core.curated import CuratedEntry
         import json
@@ -3775,9 +3796,9 @@ class TestBaseOverrideDurability:
             )
 
         monkeypatch.setattr("muse.core.resolvers.resolve", fake_resolve)
-        with patch("muse.core.catalog.create_venv"), \
-             patch("muse.core.catalog.install_into_venv"), \
-             patch("muse.core.catalog.check_system_packages", return_value=[]):
+        with patch("muse.core.catalog_pull.create_venv"), \
+             patch("muse.core.catalog_pull.install_into_venv"), \
+             patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
             _pull_via_resolver(
                 "hf://nerijs/pixel-art-xl",
                 model_id_override="pixel-art-xl",
@@ -4056,13 +4077,13 @@ class TestTransactionalPullRollback:
             raise RuntimeError("dependency install failed")
 
         with patch(
-            "muse.core.catalog.create_venv",
+            "muse.core.catalog_pull.create_venv",
             side_effect=self._create_replacement,
         ), patch(
-            "muse.core.catalog.install_into_venv",
+            "muse.core.catalog_pull.install_into_venv",
             side_effect=fail_install,
-        ), patch("muse.core.catalog.snapshot_download") as download, patch(
-            "muse.core.catalog.check_system_packages", return_value=[],
+        ), patch("muse.core.catalog_pull.snapshot_download") as download, patch(
+            "muse.core.catalog_pull.check_system_packages", return_value=[],
         ):
             with pytest.raises(RuntimeError, match="dependency install failed"):
                 pull("soprano-80m")
@@ -4111,18 +4132,19 @@ class TestTransactionalPullRollback:
             (path / "marker").write_text("source-mutated")
             raise RuntimeError("reviewed source activation failed")
 
-        with patch("muse.core.catalog.find_curated", return_value=None), patch("muse.core.catalog_models.find_curated", return_value=None), patch(
-            "muse.core.catalog.find_curated_by_uri", return_value=None,
+        with patch("muse.core.catalog_pull.find_curated", return_value=None), \
+             patch("muse.core.catalog_models.find_curated", return_value=None), patch(
+            "muse.core.catalog_pull.find_curated_by_uri", return_value=None,
         ), patch(
             "muse.core.catalog_models.find_curated_by_uri", return_value=None,
         ), patch(
             "muse.core.resolvers.resolve", return_value=resolved,
         ), patch(
-            "muse.core.catalog.create_venv",
+            "muse.core.catalog_pull.create_venv",
             side_effect=self._create_replacement,
-        ), patch("muse.core.catalog.install_into_venv"), patch(
-            "muse.core.catalog.install_python_sources", side_effect=fail_source,
-        ), patch("muse.core.catalog.check_system_packages", return_value=[]):
+        ), patch("muse.core.catalog_pull.install_into_venv"), patch(
+            "muse.core.catalog_pull.install_python_sources", side_effect=fail_source,
+        ), patch("muse.core.catalog_pull.check_system_packages", return_value=[]):
             with pytest.raises(RuntimeError, match="reviewed source activation failed"):
                 pull("hf://org/transactional-source")
 
@@ -4148,14 +4170,14 @@ class TestTransactionalPullRollback:
         _write_catalog(prior_catalog)
 
         with patch(
-            "muse.core.catalog.create_venv",
+            "muse.core.catalog_pull.create_venv",
             side_effect=self._create_replacement,
-        ), patch("muse.core.catalog.install_into_venv"), patch(
-            "muse.core.catalog.snapshot_download", return_value="/fake/weights",
+        ), patch("muse.core.catalog_pull.install_into_venv"), patch(
+            "muse.core.catalog_pull.snapshot_download", return_value="/fake/weights",
         ), patch(
-            "muse.core.catalog.check_system_packages", return_value=[],
+            "muse.core.catalog_pull.check_system_packages", return_value=[],
         ), patch(
-            "muse.core.catalog._write_catalog",
+            "muse.core.catalog_pull._write_catalog",
             side_effect=OSError("catalog write failed"),
         ):
             with pytest.raises(OSError, match="catalog write failed"):
@@ -4166,13 +4188,13 @@ class TestTransactionalPullRollback:
 
 
 class TestCheckSystemPackages:
-    @patch("muse.core.catalog.shutil.which")
+    @patch("muse.core.catalog_pull.shutil.which")
     def test_returns_missing(self, mock_which):
         from muse.core.catalog import check_system_packages
         mock_which.side_effect = lambda x: "/usr/bin/ffmpeg" if x == "ffmpeg" else None
         assert check_system_packages(["ffmpeg", "espeak-ng"]) == ["espeak-ng"]
 
-    @patch("muse.core.catalog.shutil.which")
+    @patch("muse.core.catalog_pull.shutil.which")
     def test_empty_when_all_present(self, mock_which):
         from muse.core.catalog import check_system_packages
         mock_which.return_value = "/usr/bin/cmd"
@@ -4205,11 +4227,11 @@ def test_resolver_pull_seeds_only_the_files_it_downloads(tmp_catalog, source):
     )
 
     with patch("muse.core.resolvers.resolve", return_value=fake_resolved), \
-         patch("muse.core.catalog.seed_repo", return_value=[]) as seed, \
-         patch("muse.core.catalog.create_venv"), \
-         patch("muse.core.catalog.install_into_venv"), \
-         patch("muse.core.catalog.check_system_packages", return_value=[]), \
-         patch("muse.core.catalog.venv_python", return_value="/fake/py"):
+         patch("muse.core.catalog_pull.seed_repo", return_value=[]) as seed, \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog_pull.venv_python", return_value="/fake/py"):
         pull("hf://org/repo")
 
     seed.assert_called_once()
