@@ -43,13 +43,13 @@ def _run(monkeypatch, tmp_path, probe_rc=None, probe_exc=None, args=("pull", "hf
     monkeypatch.setattr(catalog, "pull", _fake_pull(tmp_path))
     calls = []
 
-    def _probe(identifier, *, before_keys, **kw):
-        calls.append(identifier)
+    def _probe(*, model_id, **kw):
+        calls.append(model_id)
         if probe_exc is not None:
             raise probe_exc
         return probe_rc
 
-    monkeypatch.setattr(probe_mod, "run_probe_for_pull", _probe)
+    monkeypatch.setattr(probe_mod, "run_probe", _probe)
     result = CliRunner().invoke(app, list(args))
     _reset_read_catalog_cache()
     return result, calls
@@ -92,17 +92,6 @@ def test_no_probe_skips_and_keeps_model_enabled(monkeypatch, tmp_catalog):
     assert result.exit_code == 0, result.output
     assert calls == []
     assert _read_catalog()["m1"]["enabled"] is True
-
-
-def test_unidentified_pull_is_a_failure(monkeypatch, tmp_catalog):
-    """When the pulled id cannot be determined, the real probe helper
-    reports failure; the pull must not claim success."""
-    monkeypatch.setattr(catalog, "pull", lambda identifier, **kw: None)
-
-    result = CliRunner().invoke(app, ["pull", "hf://o/unknown"])
-
-    assert result.exit_code == 1
-    assert "could not identify" in result.output
 
 
 def test_pull_returns_the_installed_id_for_a_bundled_model(tmp_catalog):

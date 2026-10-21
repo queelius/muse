@@ -371,7 +371,6 @@ def pull(
     from muse.core.catalog import (
         ModelIdConflictError,
         ModelInUseError,
-        _read_catalog,
         _validate_model_id_for_fs,
         pull as _pull,
     )
@@ -395,15 +394,6 @@ def pull(
         except ValueError as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(2)
-
-    # Capture the catalog state pre-pull so the post-pull probe can
-    # identify which entry is new. URIs and curated aliases that synth
-    # an override don't reveal the resolved model_id from the pull call
-    # itself; the diff is the cheapest, most reliable way to find it.
-    try:
-        before_keys = set(_read_catalog().keys())
-    except Exception:  # noqa: BLE001
-        before_keys = set()
 
     with install_output_mode(verbose=verbose):
         try:
@@ -434,15 +424,16 @@ def pull(
         # Probe-on-pull: a successful pull means the model loads and runs a
         # representative inference. A failed probe leaves the weights and
         # venv in place (a retry needs no re-download) but disables the model.
-        probe_id = pulled_id if isinstance(pulled_id, str) else (model_id or identifier)
         try:
-            from muse.cli_impl.probe import run_probe_for_pull
-            rc = run_probe_for_pull(probe_id, before_keys=before_keys)
+            from muse.cli_impl.probe import run_probe
+            rc = run_probe(
+                model_id=pulled_id, no_inference=False, device=None, as_json=False,
+            )
         except Exception as e:  # noqa: BLE001
             typer.echo(f"error: probe-on-pull failed: {e}", err=True)
             rc = 5
         if rc != 0:
-            _fail_pull_probe(probe_id)
+            _fail_pull_probe(pulled_id)
             raise typer.Exit(1)
 
 
