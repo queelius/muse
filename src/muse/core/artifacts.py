@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import re
-import shutil
 import stat
 import sys
 import tempfile
@@ -14,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
+
+from muse.core.venv import remove_owned_entry
 
 
 logger = logging.getLogger(__name__)
@@ -265,17 +266,9 @@ def _cleanup_staging(staging: Path, cache_root: Path) -> None:
     if staging.parent != cache_root or not staging.name.startswith("."):
         raise ArtifactBundleError(f"refusing unsafe staging cleanup: {staging}")
     try:
-        mode = staging.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        staging.unlink()
-        return
-    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
-        raise ArtifactBundleError(
-            f"refusing recursive bundle cleanup without fd-safe rmtree: {staging}"
-        )
-    shutil.rmtree(staging)
+        remove_owned_entry(staging, cache_root)
+    except ValueError as exc:
+        raise ArtifactBundleError(f"refusing bundle cleanup: {exc}") from exc
 
 
 def download_hf_artifact_bundle(

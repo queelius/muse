@@ -405,7 +405,7 @@ def test_remove_with_purge_reports_all_filesystem_cleanup_failures(
         raise PermissionError("filesystem denied deletion")
 
     failing_rmtree.avoids_symlink_attacks = True
-    monkeypatch.setattr(catalog_module.shutil, "rmtree", failing_rmtree)
+    monkeypatch.setattr("muse.core.venv.shutil.rmtree", failing_rmtree)
 
     with pytest.raises(CatalogError) as caught:
         remove("broken", purge=True)
@@ -441,7 +441,7 @@ def test_remove_with_purge_requires_fd_safe_recursive_deletion(
         called = True
 
     unsafe_rmtree.avoids_symlink_attacks = False
-    monkeypatch.setattr(catalog_module.shutil, "rmtree", unsafe_rmtree)
+    monkeypatch.setattr("muse.core.venv.shutil.rmtree", unsafe_rmtree)
 
     with pytest.raises(CatalogError, match="fd-safe recursive deletion"):
         remove("unsafe-platform", purge=True)

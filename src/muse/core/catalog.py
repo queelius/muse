@@ -32,7 +32,6 @@ import logging
 import math
 import os
 import re
-import shutil
 import stat
 import tempfile
 import threading
@@ -56,6 +55,7 @@ from muse.core.venv import (
     ensure_venv,
     install_into_venv,
     install_python_sources,
+    remove_owned_entry,
     venv_python,
     venv_transaction,
 )
@@ -2455,36 +2455,13 @@ def _purge_owned_directory(
     model_id: str,
     label: str,
 ) -> None:
-    """Remove one validated owned path without hiding cleanup failures.
-
-    Symlinks and non-directories are unlinked as one entry. Recursive
-    deletion is allowed only when the platform's `shutil.rmtree` advertises
-    its fd-safe implementation, matching artifact/installer staging cleanup.
-    """
+    """Remove one validated owned path without hiding cleanup failures."""
     try:
-        mode = target.lstat().st_mode
-    except FileNotFoundError:
-        return
-    except OSError as exc:
+        remove_owned_entry(target, target.parent)
+    except ValueError as exc:
         raise CatalogError(
-            f"could not inspect {label} for model {model_id!r}: {target}: {exc}"
+            f"refusing to purge {label} for model {model_id!r}: {exc}"
         ) from exc
-
-    try:
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-            target.unlink()
-            return
-        if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
-            raise CatalogError(
-                f"refusing to purge {label} for model {model_id!r} without "
-                f"fd-safe recursive deletion support: {target}"
-            )
-        shutil.rmtree(target)
-    except FileNotFoundError:
-        # Another cleanup owner may already have removed the exact path.
-        return
-    except CatalogError:
-        raise
     except OSError as exc:
         raise CatalogError(
             f"could not purge {label} for model {model_id!r}: {target}: {exc}"

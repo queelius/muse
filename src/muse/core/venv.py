@@ -735,32 +735,36 @@ def _emit_failure_output(exc: subprocess.CalledProcessError | subprocess.Timeout
         sys.stderr.write(stderr)
 
 
-def _cleanup_venv_staging(staging: Path, parent: Path) -> None:
-    """Remove exactly one private venv staging entry without following links."""
-    if staging.parent != parent:
-        logger.error("refusing venv cleanup outside its parent: %s", staging)
-        return
-    try:
-        mode = staging.lstat().st_mode
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.warning("could not inspect venv staging path %s: %s", staging, exc)
-        return
+def remove_owned_entry(path: Path, parent: Path) -> None:
+    """Remove exactly one owned entry below ``parent`` without following links.
 
+    A symlink or non-directory is unlinked as one entry, so a substituted
+    link's target is never traversed. Directories are removed recursively
+    only when ``shutil.rmtree`` advertises its fd-safe implementation. A
+    missing path is not an error. Raises ValueError for a refused removal
+    and OSError when the filesystem fails.
+    """
+    if path.parent != parent:
+        raise ValueError(f"refusing cleanup outside its parent: {path}")
     try:
+        mode = path.lstat().st_mode
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-            staging.unlink()
+            path.unlink()
             return
         if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
-            logger.error(
-                "refusing recursive venv cleanup without fd-safe rmtree: %s",
-                staging,
-            )
-            return
-        shutil.rmtree(staging)
+            raise ValueError(f"fd-safe recursive deletion is unavailable: {path}")
+        shutil.rmtree(path)
     except FileNotFoundError:
-        pass
+        # Another cleanup owner may already have removed the exact path.
+        return
+
+
+def _cleanup_venv_staging(staging: Path, parent: Path) -> None:
+    """Remove exactly one private venv staging entry without following links."""
+    try:
+        remove_owned_entry(staging, parent)
+    except ValueError as exc:
+        logger.error("refusing venv staging cleanup: %s", exc)
     except OSError as exc:
         logger.warning("could not clean venv staging path %s: %s", staging, exc)
 
@@ -1444,30 +1448,10 @@ def _materialize_git_source(
 
 def _cleanup_source_staging(temp: Path, name_root: Path) -> None:
     """Remove exactly one installer-owned staging path without traversal risk."""
-    if temp.parent != name_root:
-        logger.error("refusing Python source cleanup outside its name directory: %s", temp)
-        return
     try:
-        mode = temp.lstat().st_mode
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.warning("could not inspect Python source staging path %s: %s", temp, exc)
-        return
-
-    try:
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-            # A substituted symlink/file is removed as one directory entry;
-            # its target is never traversed.
-            temp.unlink()
-            return
-        if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
-            logger.error(
-                "refusing recursive source cleanup without fd-safe rmtree: %s",
-                temp,
-            )
-            return
-        shutil.rmtree(temp)
+        remove_owned_entry(temp, name_root)
+    except ValueError as exc:
+        logger.error("refusing Python source staging cleanup: %s", exc)
     except OSError as exc:
         # Cleanup must not mask the source/Git failure that led here. Leaving
         # an inert staging directory is safer than widening deletion scope.
