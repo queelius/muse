@@ -68,7 +68,7 @@ def build_workers_router() -> APIRouter:
                         f"worker on port {port} is not currently running",
                     )
                 try:
-                    signalled = _signal_worker_process(proc, signal.SIGTERM)
+                    signalled = _signal_worker_process(spec, proc, signal.SIGTERM)
                 except Exception as e:  # noqa: BLE001
                     return error_response(
                         500, "terminate_failed",

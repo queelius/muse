@@ -93,7 +93,7 @@ class TestRestartWorker:
         spec = WorkerSpec(
             models=["x"], python_path="/p", port=9001,
         )
-        spec.process = MagicMock()
+        spec.process = MagicMock(pid=4242)
         spec.process.poll.return_value = None
         set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
         r = client.post("/v1/admin/workers/9001/restart", headers=headers)
@@ -108,7 +108,7 @@ class TestRestartWorker:
         spec = WorkerSpec(
             models=["x"], python_path="/p", port=9001,
         )
-        spec.process = MagicMock()
+        spec.process = MagicMock(pid=4242)
         spec.process.poll.return_value = None
         spec.process.terminate.side_effect = OSError("no such process")
         set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
@@ -126,7 +126,7 @@ class TestRestartWorker:
         spec = WorkerSpec(
             models=["x"], python_path="/p", port=9001,
         )
-        spec.process = MagicMock()
+        spec.process = MagicMock(pid=4242)
         spec.process.poll.return_value = None
         spec.restart_count = 9
         spec.failure_count = 3

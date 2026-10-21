@@ -943,52 +943,26 @@ def _monitor_workers(
             return
 
 
-def _signal_worker_process(
-    proc: Any, sig: signal.Signals, *, force: bool = False,
-) -> bool:
-    """Signal one proven-live worker generation.
+def _signal_worker_process(spec: WorkerSpec, proc: Any, sig: signal.Signals) -> bool:
+    """Signal one proven-live worker generation (the admin restart route).
 
-    The caller must hold the owning ``WorkerSpec.process_lock``.  The single
-    initial poll is both the liveness check and the no-PID-reuse boundary: if
-    the leader is alive it cannot release its PID until a later reap, and the
-    shared lock prevents any other Muse thread from performing that reap
-    before this function signals.  Ambiguous or exited processes fail closed.
+    The caller holds ``spec.process_lock``. Liveness comes from
+    ``_worker_process_state_locked``, which never reaps: a real isolated
+    leader is observed with WNOWAIT, so its PID==PGID stays pinned and the
+    later teardown can still signal and drain the group. (``poll()`` here
+    used to reap a just-exited leader, after which teardown refused the
+    group signal, the spec was retained, and no replacement could spawn.)
+    Ambiguous or exited generations fail closed.
 
-    Returns whether a signal method was invoked.
+    Returns whether a signal was sent.
     """
-    try:
-        returncode = proc.poll()
-    except Exception:  # noqa: BLE001
+    if _worker_process_state_locked(spec, proc) is not True:
         return False
-    if returncode is not None:
-        return False
-
-    if os.name == "posix":
-        try:
-            pid = proc.pid
-            # Never allow invalid/mock metadata to become killpg(1), which is
-            # kill(-1) at the syscall layer and broadcasts to every process
-            # the caller may signal. Also refuse our own process group: real
-            # workers are spawned with start_new_session=True, so neither
-            # guard excludes a legitimate managed worker.
-            if type(pid) is not int or pid <= 1:
-                raise ValueError(f"unsafe worker pid {pid}")
-            pgid = os.getpgid(pid)
-            if (
-                type(pgid) is not int
-                or pgid <= 1
-                or pgid != pid
-                or pgid == os.getpgrp()
-            ):
-                raise ValueError(f"unsafe worker process group {pgid}")
-            os.killpg(pgid, sig)
-            return True
-        except (AttributeError, OSError, TypeError, ValueError):
-            pass
-    if force:
-        proc.kill()
-    else:
-        proc.terminate()
+    pid = _concrete_worker_id(getattr(proc, "pid", None))
+    if _supports_pinned_worker_leader(proc, pid, spec.process_group_id):
+        return signal_isolated_group(pid, spec.process_group_id, sig, label="worker")
+    # No validated group (a test double, or not POSIX): only the exact child.
+    proc.terminate()
     return True
 
 

@@ -210,7 +210,7 @@ class TestRestartWorker:
         spec = WorkerSpec(
             models=["kokoro-82m"], python_path="/v/bin/python", port=9001,
         )
-        spec.process = MagicMock()
+        spec.process = MagicMock(pid=4242)
         spec.process.poll.return_value = None
         set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
         r = client.post("/v1/admin/workers/9001/restart", headers=headers)

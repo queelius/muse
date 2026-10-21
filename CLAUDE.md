@@ -419,6 +419,7 @@ Modality backends implementing modality-specific protocols
   registers the `ModelNotFoundError` exception handler so 404s use the
   OpenAI-style `{"error":{...}}` envelope instead of FastAPI's `{"detail":...}`.
 - `muse.core.securefs`: the one implementation of owned-directory checks, no-follow regular-file opens, advisory locks and atomic fsynced writes; catalog, resource_registry and config call it with their own error class.
+- `muse.core.owned_process`: the one implementation of owned subprocess groups (new session per child, PID==PGID validation, WNOWAIT leader pinning so a group is only signalled while its unreaped leader holds the id, never our own group, TERM-then-KILL deadlines, bounded output tails). Used by the installer runner, admin jobs and the supervisor's worker teardown and restart.
 - `muse.core.venv`: venv creation (`create_venv`, `install_into_venv`, `find_free_port`). Each `muse pull` creates `~/.muse/venvs/<model-id>/`; catalog records the `python_path`.
 - `muse.cli_impl.worker`: single-worker mode (runs one uvicorn in one venv). Invoked via `muse _worker` (hidden subcommand).
 - `muse.cli_impl.gateway`: FastAPI proxy app. Routes by `model` field in request body/query; aggregates `/v1/models` and `/health` across workers.

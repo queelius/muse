@@ -294,28 +294,48 @@ class TestShutdownWorkers:
         proc.terminate.assert_not_called()
 
     def test_mock_pid_cannot_broadcast_to_process_group_one(self):
-        from muse.cli_impl.supervisor import _signal_worker_process
+        from muse.cli_impl.supervisor import WorkerSpec, _signal_worker_process
 
         proc = MagicMock()
         proc.poll.return_value = None
-        # A non-concrete mock PID cannot reach killpg.  Because the exact
-        # generation is proven alive, the Popen-scoped fallback is safe.
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.process = proc
+        # A non-concrete mock PID is never proven live, so nothing is signalled.
         with patch("muse.cli_impl.supervisor.os.killpg") as mock_killpg:
-            assert _signal_worker_process(proc, signal.SIGTERM) is True
-
+            assert _signal_worker_process(spec, proc, signal.SIGTERM) is False
         mock_killpg.assert_not_called()
-        proc.terminate.assert_called_once_with()
+        proc.terminate.assert_not_called()
 
-    def test_ambiguous_process_state_is_never_signalled(self):
-        from muse.cli_impl.supervisor import _signal_worker_process
+    def test_restart_signals_the_pinned_group_without_reaping(self):
+        from muse.cli_impl.supervisor import WorkerSpec, _signal_worker_process
 
         proc = MagicMock(pid=12345)
-        proc.poll.side_effect = OSError("cannot inspect child")
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.process = proc
+        spec.process_group_id = 12345
+        with patch(
+            "muse.cli_impl.supervisor._worker_process_state_locked", return_value=True,
+        ), patch(
+            "muse.cli_impl.supervisor._supports_pinned_worker_leader", return_value=True,
+        ), patch("muse.cli_impl.supervisor.os.getpgrp", return_value=54321), \
+             patch("muse.cli_impl.supervisor.os.killpg") as mock_killpg:
+            assert _signal_worker_process(spec, proc, signal.SIGTERM) is True
+        mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+        proc.poll.assert_not_called()
 
-        with patch("muse.cli_impl.supervisor.os.killpg") as mock_killpg:
-            assert _signal_worker_process(proc, signal.SIGTERM) is False
+    def test_ambiguous_or_exited_process_is_never_signalled(self):
+        from muse.cli_impl.supervisor import WorkerSpec, _signal_worker_process
 
-        mock_killpg.assert_not_called()
+        proc = MagicMock(pid=12345)
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.process = proc
+        for state in (None, False):
+            with patch(
+                "muse.cli_impl.supervisor._worker_process_state_locked",
+                return_value=state,
+            ), patch("muse.cli_impl.supervisor.os.killpg") as mock_killpg:
+                assert _signal_worker_process(spec, proc, signal.SIGTERM) is False
+            mock_killpg.assert_not_called()
         proc.terminate.assert_not_called()
         proc.kill.assert_not_called()
 
@@ -434,9 +454,6 @@ class TestShutdownWorkers:
         with patch(
             "muse.cli_impl.supervisor.time.monotonic",
             side_effect=lambda: clock["now"],
-        ), patch(
-            "muse.cli_impl.supervisor._signal_worker_process",
-            return_value=True,
         ), patch(
             "muse.cli_impl.supervisor._BACKGROUND_JOIN_TIMEOUT_SECONDS",
             3.0,
