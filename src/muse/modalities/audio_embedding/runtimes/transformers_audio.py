@@ -97,7 +97,9 @@ def _set_inference_mode(model: Any) -> None:
     set_inference_mode(model)
 
 
-def _load_processor(src: str, *, trust_remote_code: bool = False) -> Any:
+def _load_processor(
+    src: str, *, trust_remote_code: bool = False, **load_kwargs: Any,
+) -> Any:
     """Load AutoProcessor; fall back to AutoFeatureExtractor on failure.
 
     Audio repos almost universally ship `preprocessor_config.json`
@@ -107,7 +109,7 @@ def _load_processor(src: str, *, trust_remote_code: bool = False) -> Any:
     """
     try:
         return AutoProcessor.from_pretrained(
-            src, trust_remote_code=trust_remote_code,
+            src, trust_remote_code=trust_remote_code, **load_kwargs,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -117,7 +119,7 @@ def _load_processor(src: str, *, trust_remote_code: bool = False) -> Any:
         if AutoFeatureExtractor is None:
             raise
         return AutoFeatureExtractor.from_pretrained(
-            src, trust_remote_code=trust_remote_code,
+            src, trust_remote_code=trust_remote_code, **load_kwargs,
         )
 
 
@@ -215,6 +217,8 @@ class AudioEmbeddingRuntime:
       - dimensions (optional override; auto-detected if absent)
       - trust_remote_code (bool; required for MERT and any repo that
         ships a custom feature extractor)
+      - revision (optional Hub commit; forwarded only when loading from
+        hf_repo without a local_dir, so remote code stays pinned)
       - other kwargs absorbed by **_
     """
 
@@ -233,6 +237,7 @@ class AudioEmbeddingRuntime:
         max_duration_seconds: float = 60.0,
         dimensions: int | None = None,
         trust_remote_code: bool = False,
+        revision: str | None = None,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -254,15 +259,18 @@ class AudioEmbeddingRuntime:
         self._trust_remote_code = bool(trust_remote_code)
 
         src = local_dir or hf_repo
+        hub_kwargs: dict[str, Any] = (
+            {"revision": revision} if revision and not local_dir else {}
+        )
         logger.info(
             "loading audio embedder from %s (device=%s, dtype=%s, sr=%d)",
             src, self._device, dtype, self._sample_rate,
         )
         self._processor = _load_processor(
-            src, trust_remote_code=self._trust_remote_code,
+            src, trust_remote_code=self._trust_remote_code, **hub_kwargs,
         )
         torch_dtype = _resolve_dtype(dtype)
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = dict(hub_kwargs)
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype
         if self._trust_remote_code:
