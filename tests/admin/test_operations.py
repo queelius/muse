@@ -2042,6 +2042,47 @@ class TestProbeAndPull:
         assert "qwen3-9b-q4" in cmd
         assert job.process is None
 
+    @staticmethod
+    def _job_timeout(store, run):
+        """Run an admin op with fake Popen and return its wait deadline."""
+        process = _fake_admin_process(stdout="ok")
+        with _mock_admin_popen(process), \
+             patch.object(store, "wait_process", return_value=0) as wait:
+            run()
+        return wait.call_args.kwargs["timeout"]
+
+    def test_probe_job_outlasts_the_models_probe_timeout(self, tmp_catalog, store):
+        """Regression: the flat 1800s admin deadline killed video probes,
+        which the CLI itself allows 2700s."""
+        from muse.cli_impl.probe import _probe_timeout
+
+        job = store.create("probe", "wan2-1-t2v-1-3b")
+        timeout = self._job_timeout(store, lambda: probe_model(
+            "wan2-1-t2v-1-3b", no_inference=False, device=None,
+            store=store, job=job,
+        ))
+        assert _probe_timeout("video/generation") >= 2700
+        assert timeout > _probe_timeout("video/generation")
+
+    def test_probe_job_for_unknown_model_uses_default_budget(self, tmp_catalog, store):
+        from muse.cli_impl.probe import DEFAULT_PROBE_TIMEOUT_SECONDS
+
+        job = store.create("probe", "no-such-model")
+        timeout = self._job_timeout(store, lambda: probe_model(
+            "no-such-model", no_inference=False, device=None,
+            store=store, job=job,
+        ))
+        assert timeout > DEFAULT_PROBE_TIMEOUT_SECONDS
+
+    def test_pull_job_budgets_install_plus_longest_probe(self, tmp_catalog, store):
+        from muse.core.discovery import probe_timeouts
+
+        job = store.create("pull", "hf://o/r")
+        timeout = self._job_timeout(
+            store, lambda: pull_model("hf://o/r", store=store, job=job),
+        )
+        assert timeout >= 1800 + max(probe_timeouts().values())
+
     def test_pull_timeout_marks_failed(self, tmp_catalog, store):
         job = store.create("pull", "qwen3-9b-q4")
         process = _fake_admin_process(stdout="partial", stderr="waiting")

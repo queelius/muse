@@ -1186,7 +1186,10 @@ def probe_model(
         cmd.extend(["--device", device])
     cmd.append("--json")
     cmd.extend(["--", model_id])
-    _run_subprocess_into_job(cmd, store=store, job=job, success_op="probe")
+    _run_subprocess_into_job(
+        cmd, store=store, job=job, success_op="probe",
+        timeout=_probe_job_timeout(model_id),
+    )
 
 
 def pull_model(identifier: str, *, store: JobStore, job: Job) -> None:
@@ -1205,10 +1208,45 @@ def pull_model(identifier: str, *, store: JobStore, job: Job) -> None:
     # "--" terminates option parsing (see probe_model's comment) so an
     # identifier beginning with "-" is always treated as positional.
     cmd = [sys.executable, "-m", "muse.cli", "pull", "--", identifier]
-    _run_subprocess_into_job(cmd, store=store, job=job, success_op="pull")
+    _run_subprocess_into_job(
+        cmd, store=store, job=job, success_op="pull",
+        timeout=_pull_job_timeout(),
+    )
 
 
 _SUBPROCESS_TIMEOUT_SECONDS = 1800
+# Headroom over the CLI's own probe deadline (interpreter startup, catalog
+# reads, persisting the measurement), so the child's probe timeout and its
+# clearer error always fire before the admin job kills the subprocess.
+_PROBE_JOB_MARGIN_SECONDS = 120.0
+
+
+def _probe_job_timeout(model_id: str) -> float:
+    """Wait at least as long as `muse models probe` gives this model."""
+    from muse.cli_impl.probe import _probe_timeout
+
+    entry = known_models().get(model_id)
+    modality = entry.modality if entry is not None else ""
+    return _probe_timeout(modality) + _PROBE_JOB_MARGIN_SECONDS
+
+
+def _pull_job_timeout() -> float:
+    """Install budget plus the longest probe any modality may run.
+
+    The pulled model's modality is unknown until the child resolves the
+    identifier, so the post-pull probe is budgeted at the largest declared
+    PROBE_TIMEOUT_SECONDS (video/generation's 2700s exceeds the old flat
+    1800s, which killed admin pulls mid-probe).
+    """
+    from muse.cli_impl.probe import DEFAULT_PROBE_TIMEOUT_SECONDS
+    from muse.core.discovery import probe_timeouts
+
+    longest_probe = max(
+        [DEFAULT_PROBE_TIMEOUT_SECONDS, *probe_timeouts().values()],
+    )
+    return (
+        _SUBPROCESS_TIMEOUT_SECONDS + longest_probe + _PROBE_JOB_MARGIN_SECONDS
+    )
 _SUBPROCESS_STREAM_TAIL_BYTES = 256 * 1024
 _SUBPROCESS_READ_CHUNK_BYTES = 64 * 1024
 _SUBPROCESS_OUTPUT_DRAIN_SECONDS = 5.0
@@ -1366,8 +1404,11 @@ def _run_subprocess_into_job(
     store: JobStore,
     job: Job,
     success_op: str,
+    timeout: float = _SUBPROCESS_TIMEOUT_SECONDS,
 ) -> None:
     """Run `cmd` to completion; retain bounded stdout/stderr tails.
+
+    The child is killed after `timeout` seconds.
 
     On success: state=done, log_lines populated, result contains the op
     name + return code + stdout. On failure: state=failed, error has the
@@ -1390,7 +1431,7 @@ def _run_subprocess_into_job(
         store.wait_process(
             job.job_id,
             proc,
-            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
 
         output_closed = capture.finish(_SUBPROCESS_OUTPUT_DRAIN_SECONDS)
