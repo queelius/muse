@@ -304,8 +304,11 @@ _KNOWN_MODELS_LOCK: threading.Lock = threading.Lock()
 # working without changes.
 
 
-def _acquire_catalog_file_lock(handle) -> None:
-    """Take an exclusive advisory lock on an open catalog lock file."""
+def _flock(handle, *, blocking: bool) -> bool:
+    """Take an exclusive advisory lock on an open lock file.
+
+    Returns False only when ``blocking`` is false and another owner holds it.
+    """
     if os.name == "nt":  # pragma: no cover - platform-specific fallback
         import msvcrt
 
@@ -316,43 +319,29 @@ def _acquire_catalog_file_lock(handle) -> None:
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        return
-
-    import fcntl
-
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-
-
-def _try_acquire_catalog_file_lock(handle) -> bool:
-    """Try one exclusive advisory lock without waiting."""
-    if os.name == "nt":  # pragma: no cover - platform-specific fallback
-        import msvcrt
-
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
         try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(handle.fileno(), mode, 1)
         except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            if not blocking and exc.errno in {
+                errno.EACCES, errno.EAGAIN, errno.EDEADLK,
+            }:
                 return False
             raise
         return True
 
     import fcntl
 
+    flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), flags)
     except BlockingIOError:
         return False
     return True
 
 
 def _release_catalog_file_lock(handle) -> None:
-    """Release an advisory lock acquired by `_acquire_catalog_file_lock`."""
+    """Release an advisory lock acquired by `_flock`."""
     if os.name == "nt":  # pragma: no cover - platform-specific fallback
         import msvcrt
 
@@ -486,14 +475,13 @@ class _CatalogWriteLock:
             self._local.depth = depth + 1
             return True
 
-        fd: int | None = None
         handle = None
         try:
             catalog_dir = _catalog_dir()
             _ensure_owned_directory(catalog_dir, private=True)
             lock_path = catalog_dir / ".catalog.lock"
             handle = _open_catalog_lock(lock_path)
-            _acquire_catalog_file_lock(handle)
+            _flock(handle, blocking=True)
             self._local.handle = handle
             self._local.depth = 1
 
@@ -506,8 +494,6 @@ class _CatalogWriteLock:
         except BaseException:
             if handle is not None:
                 handle.close()
-            elif fd is not None:
-                os.close(fd)
             self._thread_lock.release()
             raise
 
@@ -553,129 +539,59 @@ _RESOURCE_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _STORAGE_THREAD_LOCK = threading.RLock()
 
 
-class _ModelPullLock:
+@contextlib.contextmanager
+def _advisory_lock(path: Path, thread_lock, *, wait: bool, busy_exc: Exception):
+    """Hold ``thread_lock`` then an advisory file lock at ``path``.
+
+    Acquires the in-process lock first and the file lock second, releasing
+    in reverse. With ``wait=False`` either being busy raises ``busy_exc``.
+    """
+    if not thread_lock.acquire(blocking=wait):
+        raise busy_exc
+    try:
+        _ensure_owned_directory(path.parent, private=True)
+        handle = _open_catalog_lock(path)
+        try:
+            if not _flock(handle, blocking=wait):
+                raise busy_exc
+            try:
+                yield
+            finally:
+                _release_catalog_file_lock(handle)
+        finally:
+            handle.close()
+    finally:
+        thread_lock.release()
+
+
+def _model_pull_lock(identity: str, *, wait: bool = True):
     """Thread/process lock covering one model's complete pull transaction."""
-
-    def __init__(self, identity: str, *, wait: bool = True) -> None:
-        self._identity = identity
-        self._digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        self._wait = wait
-        self._thread_lock: threading.RLock | None = None
-        self._handle = None
-
-    def __enter__(self) -> "_ModelPullLock":
-        with _PULL_LOCKS_GUARD:
-            thread_lock = _PULL_THREAD_LOCKS.setdefault(
-                self._digest, threading.RLock(),
-            )
-        self._thread_lock = thread_lock
-        if not thread_lock.acquire(blocking=self._wait):
-            self._thread_lock = None
-            raise ModelInUseError(
-                f"model {self._identity!r} has an active pull or update; retry later"
-            )
-        fd: int | None = None
-        handle = None
-        try:
-            locks_dir = _catalog_dir() / "locks"
-            _ensure_owned_directory(locks_dir, private=True)
-            lock_path = locks_dir / f"pull-{self._digest}.lock"
-            handle = _open_catalog_lock(lock_path)
-            acquired = (
-                (_acquire_catalog_file_lock(handle) is None)
-                if self._wait
-                else _try_acquire_catalog_file_lock(handle)
-            )
-            if not acquired:
-                raise ModelInUseError(
-                    f"model {self._identity!r} has an active pull or update; "
-                    "retry later"
-                )
-            self._handle = handle
-            return self
-        except BaseException:
-            if handle is not None:
-                handle.close()
-            elif fd is not None:
-                os.close(fd)
-            thread_lock.release()
-            self._thread_lock = None
-            raise
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            if self._handle is not None:
-                try:
-                    _release_catalog_file_lock(self._handle)
-                finally:
-                    self._handle.close()
-                    self._handle = None
-        finally:
-            if self._thread_lock is not None:
-                self._thread_lock.release()
-                self._thread_lock = None
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    with _PULL_LOCKS_GUARD:
+        thread_lock = _PULL_THREAD_LOCKS.setdefault(digest, threading.RLock())
+    return _advisory_lock(
+        _catalog_dir() / "locks" / f"pull-{digest}.lock",
+        thread_lock,
+        wait=wait,
+        busy_exc=ModelInUseError(
+            f"model {identity!r} has an active pull or update; retry later"
+        ),
+    )
 
 
-def _model_pull_lock(identity: str, *, wait: bool = True) -> _ModelPullLock:
-    return _ModelPullLock(identity, wait=wait)
-
-
-class _StorageCacheLock:
+def _storage_cache_lock(*, wait: bool = True):
     """Serialize mutation of the Muse-owned weights cache across processes."""
-
-    def __init__(self, *, wait: bool = True) -> None:
-        self._wait = wait
-        self._thread_acquired = False
-        self._handle = None
-
-    def __enter__(self) -> "_StorageCacheLock":
-        if not _STORAGE_THREAD_LOCK.acquire(blocking=self._wait):
-            raise StorageBusyError(
-                "Muse's weights cache is busy with another pull or cleanup"
-            )
-        self._thread_acquired = True
-        handle = None
-        try:
-            locks_dir = _catalog_dir() / "locks"
-            _ensure_owned_directory(locks_dir, private=True)
-            handle = _open_catalog_lock(locks_dir / "storage-cache.lock")
-            acquired = (
-                (_acquire_catalog_file_lock(handle) is None)
-                if self._wait
-                else _try_acquire_catalog_file_lock(handle)
-            )
-            if not acquired:
-                raise StorageBusyError(
-                    "Muse's weights cache is busy with another pull or cleanup"
-                )
-            self._handle = handle
-            return self
-        except BaseException:
-            if handle is not None:
-                handle.close()
-            _STORAGE_THREAD_LOCK.release()
-            self._thread_acquired = False
-            raise
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            if self._handle is not None:
-                try:
-                    _release_catalog_file_lock(self._handle)
-                finally:
-                    self._handle.close()
-                    self._handle = None
-        finally:
-            if self._thread_acquired:
-                _STORAGE_THREAD_LOCK.release()
-                self._thread_acquired = False
+    return _advisory_lock(
+        _catalog_dir() / "locks" / "storage-cache.lock",
+        _STORAGE_THREAD_LOCK,
+        wait=wait,
+        busy_exc=StorageBusyError(
+            "Muse's weights cache is busy with another pull or cleanup"
+        ),
+    )
 
 
-def _storage_cache_lock(*, wait: bool = True) -> _StorageCacheLock:
-    return _StorageCacheLock(wait=wait)
-
-
-class _ModelResourceLease:
+def _model_resource_lease(model_id: str, *, wait: bool = False):
     """Exclusive lifetime lease for one model's venv and weight resources.
 
     Workers acquire a blocking lease for their whole lifetime. Commands that
@@ -683,70 +599,19 @@ class _ModelResourceLease:
     a live worker still owns it. The advisory file lock makes this contract
     work across the supervisor, worker venv, and direct CLI processes.
     """
-
-    def __init__(self, model_id: str, *, wait: bool) -> None:
-        if not isinstance(model_id, str) or not model_id:
-            raise ValueError("model resource lease requires a non-empty model id")
-        self._model_id = model_id
-        self._digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()
-        self._wait = wait
-        self._thread_lock: threading.Lock | None = None
-        self._handle = None
-
-    def __enter__(self) -> "_ModelResourceLease":
-        with _RESOURCE_LOCKS_GUARD:
-            thread_lock = _RESOURCE_THREAD_LOCKS.setdefault(
-                self._digest, threading.Lock(),
-            )
-        if not thread_lock.acquire(blocking=self._wait):
-            raise ModelInUseError(
-                f"model {self._model_id!r} is in use; stop or unload it and retry"
-            )
-        self._thread_lock = thread_lock
-        handle = None
-        try:
-            locks_dir = _catalog_dir() / "locks"
-            _ensure_owned_directory(locks_dir, private=True)
-            handle = _open_catalog_lock(
-                locks_dir / f"resource-{self._digest}.lock"
-            )
-            acquired = (
-                (_acquire_catalog_file_lock(handle) is None)
-                if self._wait
-                else _try_acquire_catalog_file_lock(handle)
-            )
-            if not acquired:
-                raise ModelInUseError(
-                    f"model {self._model_id!r} is in use; "
-                    "stop or unload it and retry"
-                )
-            self._handle = handle
-            return self
-        except BaseException:
-            if handle is not None:
-                handle.close()
-            thread_lock.release()
-            self._thread_lock = None
-            raise
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        try:
-            if self._handle is not None:
-                try:
-                    _release_catalog_file_lock(self._handle)
-                finally:
-                    self._handle.close()
-                    self._handle = None
-        finally:
-            if self._thread_lock is not None:
-                self._thread_lock.release()
-                self._thread_lock = None
-
-
-def _model_resource_lease(
-    model_id: str, *, wait: bool = False,
-) -> _ModelResourceLease:
-    return _ModelResourceLease(model_id, wait=wait)
+    if not isinstance(model_id, str) or not model_id:
+        raise ValueError("model resource lease requires a non-empty model id")
+    digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()
+    with _RESOURCE_LOCKS_GUARD:
+        thread_lock = _RESOURCE_THREAD_LOCKS.setdefault(digest, threading.Lock())
+    return _advisory_lock(
+        _catalog_dir() / "locks" / f"resource-{digest}.lock",
+        thread_lock,
+        wait=wait,
+        busy_exc=ModelInUseError(
+            f"model {model_id!r} is in use; stop or unload it and retry"
+        ),
+    )
 
 
 def _validated_persisted_manifest(
