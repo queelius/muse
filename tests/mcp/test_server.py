@@ -8,7 +8,9 @@ is asserted here once all tool modules have populated their lists.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -107,6 +109,24 @@ class TestCallHandler:
         assert len(out) == 1
         assert out[0]["type"] == "text"
         assert "unknown tool" in out[0]["text"]
+
+    def test_http_error_reports_muse_error_body(self, fake_client):
+        import httpx
+
+        request = httpx.Request("POST", "http://test/v1/chat/completions")
+        response = httpx.Response(
+            404, request=request,
+            json={"error": {"code": "model_not_found", "message": "no such model"}},
+        )
+        srv = MCPServer(client=fake_client, filter_kind="inference")
+        srv.client.chat = MagicMock(side_effect=httpx.HTTPStatusError(
+            "404", request=request, response=response,
+        ))
+        out = srv.call_handler("muse_chat", {"model": "x", "messages": []})
+        assert json.loads(out[0]["text"]) == {
+            "error": "muse returned HTTP 404 (model_not_found): no such model",
+            "tool": "muse_chat",
+        }
 
 
 class TestCallToolOffLoop:

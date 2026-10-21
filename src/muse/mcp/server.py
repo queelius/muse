@@ -16,9 +16,14 @@ import json
 import logging
 from typing import Any
 
+import httpx
+
+from muse.admin.client import AdminClientError
 from muse.mcp.client import MuseClient
 
 log = logging.getLogger("muse.mcp")
+
+_MAX_ERROR_CHARS = 300
 
 try:
     import mcp.types as _mcp_types  # noqa: F401
@@ -38,12 +43,8 @@ def _require_mcp() -> None:
         )
 
 
-def build_tools(filter_kind: str = "all") -> list[Any]:
-    """Build the list of registered MCP Tool objects.
-
-    ``filter_kind``: ``'admin'`` | ``'inference'`` | ``'all'``. Default
-    ``'all'`` returns 11 + 20 = 31 tools.
-    """
+def _entries(filter_kind: str) -> list[Any]:
+    """The ``ToolEntry`` rows exposed under ``filter_kind``."""
     _require_mcp()
     from muse.mcp.tools import ADMIN_TOOLS, INFERENCE_TOOLS
 
@@ -54,10 +55,34 @@ def build_tools(filter_kind: str = "all") -> list[Any]:
         )
     out: list[Any] = []
     if filter_kind in ("admin", "all"):
-        out.extend(t.tool for t in ADMIN_TOOLS)
+        out.extend(ADMIN_TOOLS)
     if filter_kind in ("inference", "all"):
-        out.extend(t.tool for t in INFERENCE_TOOLS)
+        out.extend(INFERENCE_TOOLS)
     return out
+
+
+def build_tools(filter_kind: str = "all") -> list[Any]:
+    """Build the list of registered MCP Tool objects.
+
+    ``filter_kind``: ``'admin'`` | ``'inference'`` | ``'all'`` (default).
+    """
+    return [entry.tool for entry in _entries(filter_kind)]
+
+
+def _upstream_error(response: httpx.Response) -> str:
+    """A short description of a muse HTTP error: the status plus the
+    server's OpenAI-shape error code and (bounded) message."""
+    try:
+        error = response.json().get("error") or {}
+        code, message = str(error.get("code", "")), str(error.get("message", ""))
+    except Exception:  # noqa: BLE001
+        code, message = "", ""
+    text = f"muse returned HTTP {response.status_code}"
+    if code:
+        text += f" ({code})"
+    if message:
+        text += f": {message[:_MAX_ERROR_CHARS]}"
+    return text
 
 
 class MCPServer:
@@ -79,27 +104,14 @@ class MCPServer:
         self.client = client
         self.filter_kind = filter_kind
         self._server = _LowServer("muse")
-        self._tools = build_tools(filter_kind)
-        self._handlers = self._build_handler_map()
+        entries = _entries(filter_kind)
+        self._tools = [entry.tool for entry in entries]
+        self._handlers = {entry.tool.name: entry.handler for entry in entries}
         self._wire_handlers()
-
-    def _build_handler_map(self) -> dict[str, Any]:
-        from muse.mcp.tools import ADMIN_TOOLS, INFERENCE_TOOLS
-
-        out: dict[str, Any] = {}
-        if self.filter_kind in ("admin", "all"):
-            for t in ADMIN_TOOLS:
-                out[t.tool.name] = t.handler
-        if self.filter_kind in ("inference", "all"):
-            for t in INFERENCE_TOOLS:
-                out[t.tool.name] = t.handler
-        return out
 
     def _wire_handlers(self) -> None:
         srv = self._server
         tools_snapshot = list(self._tools)
-        handlers_snapshot = dict(self._handlers)
-        client = self.client
 
         @srv.list_tools()
         async def _list_tools():
@@ -107,32 +119,14 @@ class MCPServer:
 
         @srv.call_tool()
         async def _call_tool(name: str, arguments: dict | None):
-            args = arguments or {}
-            handler = handlers_snapshot.get(name)
-            if handler is None:
-                return _to_content([{
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": f"unknown tool {name!r}"},
-                    ),
-                }])
-            try:
-                # Handlers are synchronous and make blocking httpx calls
-                # (up to 600s for generation). In HTTP+SSE mode there is a
-                # single event loop; running the handler inline would stall
-                # every concurrent tool call and SSE frame for the duration
-                # of one slow generation. Dispatch off-loop so the loop
-                # stays responsive. MuseClient is stateless per call, so
-                # this is thread-safe.
-                blocks = await asyncio.to_thread(handler, client, args)
-            except Exception as e:  # noqa: BLE001
-                log.exception("tool %s failed", name)
-                blocks = [{
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": str(e), "tool": name},
-                    ),
-                }]
+            # Handlers are synchronous and make blocking httpx calls
+            # (up to 600s for generation). In HTTP+SSE mode there is a
+            # single event loop; running the handler inline would stall
+            # every concurrent tool call and SSE frame for the duration
+            # of one slow generation. Dispatch off-loop so the loop
+            # stays responsive. MuseClient is stateless per call, so
+            # this is thread-safe.
+            blocks = await asyncio.to_thread(self.call_handler, name, arguments)
             return _to_content(blocks)
 
     @property
@@ -144,11 +138,14 @@ class MCPServer:
         return dict(self._handlers)
 
     def call_handler(self, name: str, args: dict | None = None) -> list[dict]:
-        """Synchronously invoke the registered handler for ``name``.
+        """Invoke the registered handler for ``name``; the one place tool
+        failures become error blocks.
 
-        Tests use this to drive tool calls without going through the
-        async stdio / HTTP transport. Returns the raw list of content
-        block dicts (pre-conversion to SDK types).
+        An ``AdminClientError`` becomes an ``admin_api_error`` block; an
+        HTTP error status from muse reports the status plus muse's error
+        code and message; anything else reports ``str(exc)``. Returns plain
+        content-block dicts (pre-conversion to SDK types), so tests drive
+        tools through here without the async transport.
         """
         handler = self._handlers.get(name)
         if handler is None:
@@ -158,11 +155,24 @@ class MCPServer:
             }]
         try:
             return handler(self.client, args or {})
+        except AdminClientError as e:
+            return [{"type": "text", "text": json.dumps({
+                "error": {
+                    "code": e.code,
+                    "message": e.message,
+                    "status": e.status,
+                    "type": "admin_api_error",
+                },
+            }, indent=2)}]
         except Exception as e:  # noqa: BLE001
             log.exception("tool %s failed", name)
+            message = (
+                _upstream_error(e.response)
+                if isinstance(e, httpx.HTTPStatusError) else str(e)
+            )
             return [{
                 "type": "text",
-                "text": json.dumps({"error": str(e), "tool": name}),
+                "text": json.dumps({"error": message, "tool": name}),
             }]
 
     async def run_stdio(self) -> None:

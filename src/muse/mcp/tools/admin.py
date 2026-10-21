@@ -15,7 +15,8 @@ Eleven tools cover the admin surface (`/v1/admin/*`):
   - muse_get_jobs              poll a single job or list recent jobs
 
 Long-running ops (pull, probe, enable) return a job_id to the LLM and
-hint at polling via muse_get_jobs.
+hint at polling via muse_get_jobs. An ``AdminClientError`` is reported
+by ``MCPServer.call_handler`` as an ``admin_api_error`` block.
 
 Auth: each handler that calls AdminClient methods inherits the token
 the MuseClient was constructed with (from MUSE_ADMIN_TOKEN by default).
@@ -24,30 +25,21 @@ unauthenticated; it falls through to MuseClient.list_models().
 """
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from mcp.types import Tool
 
-from muse.admin.client import AdminClientError
 from muse.mcp.client import MuseClient
 from muse.mcp.tools import ADMIN_TOOLS, ToolEntry
+from muse.mcp.tools._common import json_block
 
 
-def _json_block(payload: Any) -> dict:
-    """Pack any JSON-serializable payload as an MCP TextContent block."""
-    return {"type": "text", "text": json.dumps(payload, indent=2)}
-
-
-def _admin_error_block(e: AdminClientError) -> dict:
-    return _json_block({
-        "error": {
-            "code": e.code,
-            "message": e.message,
-            "status": e.status,
-            "type": "admin_api_error",
-        },
-    })
+def _job_reply(out: dict, estimated_time: str) -> list[dict]:
+    """The reply for an async admin op: its job id and how to poll it."""
+    return [json_block({
+        "job_id": out.get("job_id"),
+        "status": out.get("status"),
+        "poll_with": f"muse_get_jobs(job_id='{out.get('job_id')}')",
+        "estimated_time": estimated_time,
+    })]
 
 
 # ---- handlers ----
@@ -65,16 +57,11 @@ def _handle_list_models(client: MuseClient, args: dict) -> list[dict]:
         want = {"loaded": True, "unloaded": False}.get(s)
         if want is not None:
             rows = [r for r in rows if bool(r.get("loaded")) is want]
-    return [_json_block({"data": rows, "count": len(rows)})]
+    return [json_block({"data": rows, "count": len(rows)})]
 
 
 def _handle_get_model_info(client: MuseClient, args: dict) -> list[dict]:
-    model_id = args["model_id"]
-    try:
-        out = client.admin.status(model_id)
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block(out)]
+    return [json_block(client.admin.status(args["model_id"]))]
 
 
 def _handle_search_models(client: MuseClient, args: dict) -> list[dict]:
@@ -84,106 +71,59 @@ def _handle_search_models(client: MuseClient, args: dict) -> list[dict]:
         max_size_gb=args.get("max_size_gb"),
         limit=args.get("limit", 20),
     )
-    return [_json_block({
+    return [json_block({
         "results": out["results"],
         "count": len(out["results"]),
     })]
 
 
 def _handle_pull_model(client: MuseClient, args: dict) -> list[dict]:
-    try:
-        out = client.admin.pull(args["identifier"])
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block({
-        "job_id": out.get("job_id"),
-        "status": out.get("status"),
-        "poll_with": (
-            f"muse_get_jobs(job_id='{out.get('job_id')}')"
-        ),
-        "estimated_time": (
-            "30 seconds to 5 minutes depending on model size and "
-            "download speed"
-        ),
-    })]
+    return _job_reply(
+        client.admin.pull(args["identifier"]),
+        "30 seconds to 5 minutes depending on model size and download speed",
+    )
 
 
 def _handle_remove_model(client: MuseClient, args: dict) -> list[dict]:
-    try:
-        out = client.admin.remove(
-            args["model_id"],
-            purge=bool(args.get("purge", False)),
-        )
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block(out)]
+    return [json_block(client.admin.remove(
+        args["model_id"], purge=bool(args.get("purge", False)),
+    ))]
 
 
 def _handle_enable_model(client: MuseClient, args: dict) -> list[dict]:
-    try:
-        out = client.admin.enable(args["model_id"])
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block({
-        "job_id": out.get("job_id"),
-        "status": out.get("status"),
-        "poll_with": f"muse_get_jobs(job_id='{out.get('job_id')}')",
-        "estimated_time": (
-            "5 to 60 seconds depending on model load time"
-        ),
-    })]
+    return _job_reply(
+        client.admin.enable(args["model_id"]),
+        "5 to 60 seconds depending on model load time",
+    )
 
 
 def _handle_disable_model(client: MuseClient, args: dict) -> list[dict]:
-    try:
-        out = client.admin.disable(args["model_id"])
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block(out)]
+    return [json_block(client.admin.disable(args["model_id"]))]
 
 
 def _handle_probe_model(client: MuseClient, args: dict) -> list[dict]:
-    try:
-        out = client.admin.probe(
+    return _job_reply(
+        client.admin.probe(
             args["model_id"],
             no_inference=bool(args.get("no_inference", False)),
             device=args.get("device"),
-        )
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block({
-        "job_id": out.get("job_id"),
-        "status": out.get("status"),
-        "poll_with": f"muse_get_jobs(job_id='{out.get('job_id')}')",
-        "estimated_time": "10 seconds to 5 minutes per model",
-    })]
+        ),
+        "10 seconds to 5 minutes per model",
+    )
 
 
 def _handle_get_memory_status(client: MuseClient, args: dict) -> list[dict]:  # noqa: ARG001
-    try:
-        out = client.admin.memory()
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block(out)]
+    return [json_block(client.admin.memory())]
 
 
 def _handle_get_workers(client: MuseClient, args: dict) -> list[dict]:  # noqa: ARG001
-    try:
-        out = client.admin.workers()
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block(out)]
+    return [json_block(client.admin.workers())]
 
 
 def _handle_get_jobs(client: MuseClient, args: dict) -> list[dict]:
-    try:
-        if args.get("job_id"):
-            out = client.admin.job(args["job_id"])
-        else:
-            out = client.admin.jobs()
-    except AdminClientError as e:
-        return [_admin_error_block(e)]
-    return [_json_block(out)]
+    if args.get("job_id"):
+        return [json_block(client.admin.job(args["job_id"]))]
+    return [json_block(client.admin.jobs())]
 
 
 # ---- tool definitions ----
