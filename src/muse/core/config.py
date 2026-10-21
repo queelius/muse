@@ -420,7 +420,7 @@ _MISSING = object()
 
 
 class Config:
-    """Layered config resolver: override > env (live) > file (cached) > default.
+    """Layered config resolver: override arg > env (live) > file (cached) > default.
 
     The env var is re-read live on every `get` call so tests (and operators)
     that change the environment after construction see the new value. The
@@ -428,10 +428,8 @@ class Config:
     """
 
     def __init__(self, *, path: pathlib.Path | None = None,
-                 overrides: dict[str, Any] | None = None,
                  strict: bool = False):
         self._path = path if path is not None else config_path()
-        self._overrides = dict(overrides or {})
         self._strict = strict
         self._file: dict | None = None  # lazy
 
@@ -449,61 +447,58 @@ class Config:
             logger.warning("could not load config file %s: %s", self._path, e)
             return {}
         if not isinstance(data, dict):
-            if self._strict:
-                raise ConfigError(f"config file {self._path} is not a mapping")
-            logger.warning("config file %s is not a mapping; ignoring", self._path)
+            self._reject(f"config file {self._path} is not a mapping")
             return {}
         cleaned: dict = {}
         for group, leaves in data.items():
             if group not in _GROUPS:
-                if self._strict:
-                    raise ConfigError(
-                        f"unknown config section {group!r} in {self._path}"
-                    )
-                logger.warning("unknown config section %r in %s; ignoring", group, self._path)
+                self._reject(f"unknown config section {group!r} in {self._path}")
                 continue
             if not isinstance(leaves, dict):
-                if self._strict:
-                    raise ConfigError(
-                        f"config section {group!r} in {self._path} is not a mapping"
-                    )
-                logger.warning("unknown config section %r in %s; ignoring", group, self._path)
+                self._reject(
+                    f"config section {group!r} in {self._path} is not a mapping"
+                )
                 continue
             for leaf, val in leaves.items():
-                if f"{group}.{leaf}" not in SETTINGS_BY_KEY:
-                    if self._strict:
-                        raise ConfigError(
-                            f"unknown config key {group + '.' + str(leaf)!r} "
-                            f"in {self._path}"
-                        )
-                    logger.warning("unknown config key %r in %s; ignoring",
-                                   f"{group}.{leaf}", self._path)
+                key = f"{group}.{leaf}"
+                if key not in SETTINGS_BY_KEY:
+                    self._reject(f"unknown config key {key!r} in {self._path}")
                     continue
                 cleaned.setdefault(group, {})[leaf] = val
         return cleaned
+
+    def _reject(self, message: str) -> None:
+        """Raise a file defect in strict mode; otherwise warn and skip it."""
+        if self._strict:
+            raise ConfigError(message)
+        logger.warning("%s; ignoring", message)
 
     def _file_raw(self, setting: Setting):
         group, leaf = setting.key.split(".", 1)
         return self.file_values().get(group, {}).get(leaf, _MISSING)
 
+    def _resolve(self, setting: Setting) -> tuple[str, Any]:
+        """Return (origin, raw value) by env > file > default precedence."""
+        env_raw = os.environ.get(setting.env)
+        if env_raw is not None:
+            return "env", env_raw
+        # The file cannot redirect the path used to locate itself; bootstrap
+        # keys skip straight to the default (see BOOTSTRAP_KEYS docstring).
+        if setting.key not in BOOTSTRAP_KEYS:
+            file_raw = self._file_raw(setting)
+            if file_raw is not _MISSING:
+                return "file", file_raw
+        return "default", setting.default
+
     def get(self, key: str, override: Any | None = None) -> Any:
         setting = SETTINGS_BY_KEY[key]  # KeyError on unknown key (programmer error)
         if override is not None:
             return self._coerce_lenient(setting, override, "override")
-        if key in self._overrides:
-            return self._coerce_lenient(
-                setting, self._overrides[key], "override"
-            )
-        env_raw = os.environ.get(setting.env)
-        if env_raw is not None:
-            return self._coerce_lenient(setting, env_raw, "env")
-        if key in BOOTSTRAP_KEYS:
-            # The file cannot redirect the path used to locate itself;
-            # skip straight to the default (see BOOTSTRAP_KEYS docstring).
-            return setting.default
-        file_raw = self._file_raw(setting)
-        if file_raw is not _MISSING:
-            if file_raw is None:
+        origin, raw = self._resolve(setting)
+        if origin == "env":
+            return self._coerce_lenient(setting, raw, "env")
+        if origin == "file":
+            if raw is None:
                 # yaml null: str(None) would be the literal "None", which
                 # coerce would fail to parse as int/float. Handle natively.
                 if setting.type.startswith("opt_"):
@@ -519,8 +514,8 @@ class Config:
                 return setting.default
             # file values come from yaml already typed; still route through
             # coerce via str() so a yaml "true"/"5" and a python bool/int both work
-            return self._coerce_lenient(setting, str(file_raw), "file")
-        return setting.default
+            return self._coerce_lenient(setting, str(raw), "file")
+        return raw
 
     def _coerce_lenient(self, setting: Setting, raw: Any, origin: str) -> Any:
         try:
@@ -539,16 +534,7 @@ class Config:
         return self
 
     def source(self, key: str) -> str:
-        setting = SETTINGS_BY_KEY[key]
-        if key in self._overrides:
-            return "override"
-        if os.environ.get(setting.env) is not None:
-            return "env"
-        if key in BOOTSTRAP_KEYS:
-            return "default"
-        if self._file_raw(setting) is not _MISSING:
-            return "file"
-        return "default"
+        return self._resolve(SETTINGS_BY_KEY[key])[0]
 
 
 _CONFIG: Config | None = None
