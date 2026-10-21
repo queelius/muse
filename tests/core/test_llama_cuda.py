@@ -75,6 +75,27 @@ def test_commands_replace_a_cpu_build_without_touching_deps(monkeypatch):
     ]
 
 
+def test_install_checks_the_build_only_after_the_install_steps_ran(monkeypatch, tmp_path):
+    from muse.core import venv as venv_module
+
+    monkeypatch.setenv("MUSE_LLAMA_CPP_WHEEL", "cu130")
+    events: list[str] = []
+    monkeypatch.setattr(
+        venv_module, "run_owned_command",
+        lambda cmd, **kwargs: events.append(
+            "reinstall" if "--force-reinstall" in cmd else "install"
+        ),
+    )
+
+    def is_cuda_build(python):
+        events.append("check")
+        return False
+
+    monkeypatch.setattr(venv_module, "_is_cuda_llama_build", is_cuda_build)
+    venv_module.install_into_venv(tmp_path, ["llama-cpp-python==0.3.33"])
+    assert events == ["install", "install", "check", "reinstall"]
+
+
 def test_commands_stop_when_the_cuda_build_is_in_place(monkeypatch):
     cmds = _commands(monkeypatch, ["llama-cpp-python==0.3.33"], cuda_build=True)
     assert len(cmds) == 2
