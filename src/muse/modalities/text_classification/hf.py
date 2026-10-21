@@ -24,6 +24,12 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+    transformers_allow_patterns,
+)
 
 
 _CLASSIFIER_RUNTIME = (
@@ -35,17 +41,6 @@ _ZERO_SHOT_RUNTIME = (
     ":HFZeroShotPipeline"
 )
 _PIP_EXTRAS = ("transformers>=4.36.0", "torch>=2.1.0")
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _sniff(info) -> bool:
@@ -87,11 +82,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         else f"Text classifier: {repo_id}"
     )
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "text/classification",
         "hf_repo": repo_id,
         "description": description,
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -100,18 +95,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         manifest["revision"] = revision
 
     def _download(cache_root: Path) -> Path:
-        # text-classification repos commonly ship pytorch_model.bin +
-        # tf_model.h5 + flax + safetensors. We only need safetensors (or
-        # pytorch_model.bin as fallback for older repos). Mirror the
-        # fp16 detection from image_generation/hf.py so distilled fp16
-        # variants don't pull fp32 too.
-        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
-        has_fp16 = any(".fp16." in f for f in siblings)
-        if has_fp16:
-            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
-        else:
-            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
-        allow_patterns.append("pytorch_model.bin")
+        allow_patterns = transformers_allow_patterns(info)
         # SentencePiece tokenizers (DeBERTa-v3 spm.model, XLM-R
         # sentencepiece.bpe.model) often ship without a tokenizer.json.
         allow_patterns.append("*.model")
@@ -130,20 +114,10 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="text-classification",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="text-classification", modality="text/classification",
     )
-    for repo in repos:
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="text/classification",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

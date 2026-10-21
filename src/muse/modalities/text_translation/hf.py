@@ -58,6 +58,12 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+    transformers_allow_patterns,
+)
 
 
 _RUNTIME_PATH = (
@@ -81,24 +87,13 @@ _FAMILY_PATTERNS = ("m2m100", "nllb", "opus-mt", "madlad")
 _OPUS_PAIR_RE = re.compile(r"^opus-mt-([a-z]{2})-([a-z]{2})$")
 
 
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
-
-
 def _matches_family(repo_id: str) -> bool:
     # Scoped to the stripped model-name segment (after the org's
     # trailing slash), matching _opus_pair's existing discipline. An
     # org merely NAMED after a translation family (e.g. a hobbyist org
     # "nllb-fan-org") hosting an unrelated model must not match just
     # because the family string appears in the ORG segment.
-    name = _model_id(repo_id)
+    name = hf_model_id(repo_id)
     return any(pattern in name for pattern in _FAMILY_PATTERNS)
 
 
@@ -107,7 +102,7 @@ def _opus_pair(repo_id: str) -> tuple[str, str] | None:
     name. Returns None (no guessing) when the name doesn't match the
     strict two-letter-pair shape.
     """
-    name = _model_id(repo_id)
+    name = hf_model_id(repo_id)
     m = _OPUS_PAIR_RE.fullmatch(name)
     if not m:
         return None
@@ -148,11 +143,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "text/translation",
         "hf_repo": repo_id,
         "description": f"Translation model: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -161,16 +156,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         manifest["revision"] = revision
 
     def _download(cache_root: Path) -> Path:
-        # Keep weights light: prefer safetensors, drop tf/flax/onnx.
-        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
-        has_fp16 = any(".fp16." in f for f in siblings)
-        if has_fp16:
-            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
-        else:
-            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
-        # Older seq2seq translation repos still ship pytorch_model.bin
-        # (no safetensors).
-        allow_patterns.append("pytorch_model.bin")
+        allow_patterns = transformers_allow_patterns(info)
         # Tokenizer artifacts vary by family: m2m100/nllb use a shared
         # sentencepiece.bpe.model, opus-mt ships per-direction
         # source.spm/target.spm + vocab.json, madlad (T5-shape) uses
@@ -201,20 +187,10 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
     Filter: translation task tag. Returns one row per matching repo.
     Mirrors text/summarization's search shape.
     """
-    repos = api.list_models(
-        search=query, filter="translation",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="translation", modality="text/translation",
     )
-    for repo in repos:
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="text/translation",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

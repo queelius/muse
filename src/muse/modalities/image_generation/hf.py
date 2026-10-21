@@ -22,6 +22,11 @@ from muse.core.resolvers import (
     SearchResult,
     hf_commit_revision,
 )
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +43,6 @@ _PIP_EXTRAS = (
     "Pillow",
     "safetensors",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _infer_defaults(repo_id: str) -> dict[str, Any]:
@@ -217,11 +211,11 @@ def _resolve_lora(
 
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "image/generation",
         "hf_repo": repo_id,
         "description": f"Diffusers LoRA adapter: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_LORA_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -303,11 +297,11 @@ def _resolve(
         "supports_variations": True,
     }
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "image/generation",
         "hf_repo": repo_id,
         "description": f"Diffusers text-to-image: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -358,20 +352,10 @@ def _resolve(
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="text-to-image",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="text-to-image", modality="image/generation",
     )
-    for repo in repos:
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="image/generation",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

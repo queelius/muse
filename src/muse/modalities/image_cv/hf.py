@@ -44,6 +44,11 @@ from muse.core.resolvers import (
     SearchResult,
     hf_commit_revision,
 )
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    transformers_allow_patterns,
+)
 
 
 _DEPTH_RUNTIME = (
@@ -81,17 +86,6 @@ _KEYPOINT_NAME_HINTS = ("vitpose", "superpoint")
 _DETECTION_NAME_HINTS = (
     "detr", "yolos", "rtdetr", "rt-detr", "owlvit", "owl-vit",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _is_depth(info) -> bool:
@@ -232,11 +226,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         )
 
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "image/cv",
         "hf_repo": repo_id,
         "description": f"{kind} model: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": pip_extras,
         "system_packages": [],
         "capabilities": capabilities,
@@ -245,14 +239,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         manifest["revision"] = revision
 
     def _download(cache_root: Path) -> Path:
-        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
-        has_fp16 = any(".fp16." in f for f in siblings)
-        if has_fp16:
-            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
-        else:
-            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
-        # Older repos still ship pytorch_model.bin (no safetensors).
-        allow_patterns.append("pytorch_model.bin")
+        allow_patterns = transformers_allow_patterns(info)
         # Processor / config files. AutoImageProcessor reads
         # preprocessor_config.json to dispatch to the right processor.
         allow_patterns.extend([
@@ -296,7 +283,7 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
             seen.add(repo.id)
             yield SearchResult(
                 uri=f"hf://{repo.id}",
-                model_id=_model_id(repo.id),
+                model_id=hf_model_id(repo.id),
                 modality="image/cv",
                 size_gb=None,
                 downloads=getattr(repo, "downloads", None),

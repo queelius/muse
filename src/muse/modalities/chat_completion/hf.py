@@ -28,6 +28,7 @@ from muse.core.resolvers import (
     SearchResult,
     hf_commit_revision,
 )
+from muse.core.hf_plugin_helpers import hf_model_id, hf_repo_license
 
 
 _VARIANT_RE = re.compile(
@@ -86,17 +87,10 @@ def _variant_files(repo_id: str, siblings: list[str], matched: str) -> tuple[str
 
 
 def _gguf_model_id(repo_id: str, variant: str) -> str:
-    base = repo_id.split("/", 1)[-1].lower()
+    base = hf_model_id(repo_id)
     if not base.endswith("-gguf"):
         base = f"{base}-gguf"
     return f"{base}-{variant.lower().replace('_', '-')}"
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _sniff_supports_tools(chat_template: str | None) -> bool:
@@ -169,9 +163,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     revision = hf_commit_revision(info)
     is_vlm, multi_image = _is_vlm(info)
     if is_vlm:
-        license_str = _repo_license(info)
+        license_str = hf_repo_license(info)
         manifest = {
-            "model_id": repo_id.split("/", 1)[-1].lower(),
+            "model_id": hf_model_id(repo_id),
             "modality": "chat/completion",
             "hf_repo": repo_id,
             "description": f"VLM via HF resolver: {repo_id}",
@@ -239,7 +233,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         "modality": "chat/completion",
         "hf_repo": repo_id,
         "description": f"GGUF model: {repo_id} ({variant})",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,

@@ -13,6 +13,7 @@ from muse.core.resolvers import (
     SearchResult,
     hf_commit_revision,
 )
+from muse.core.hf_plugin_helpers import hf_model_id, hf_repo_license
 
 
 _RUNTIME = (
@@ -54,15 +55,6 @@ _SUPPORTED_LANGUAGES = (
 )
 
 
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    return getattr(card, "license", None) if card is not None else None
-
-
 def _is_supported_name(repo_id: str) -> bool:
     return repo_id.lower() == _REPO_NAME
 
@@ -87,14 +79,14 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         )
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "audio/alignment",
         "hf_repo": repo_id,
         "description": (
             "Qwen3 ForcedAligner 0.6B reference-text word alignment: "
             f"{repo_id}"
         ),
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": ["ffmpeg"],
         "capabilities": {
@@ -159,11 +151,11 @@ def _search(
             continue
         yield SearchResult(
             uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
+            model_id=hf_model_id(repo.id),
             modality="audio/alignment",
             size_gb=1.84,
             downloads=getattr(info, "downloads", None),
-            license=_repo_license(info),
+            license=hf_repo_license(info),
             description="Qwen3 ForcedAligner 0.6B word-level timestamps",
             metadata={
                 "likes": getattr(info, "likes", None),

@@ -15,22 +15,16 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+)
 
 
 _RUNTIME_PATH = "muse.modalities.audio_transcription.runtimes.faster_whisper:FasterWhisperModel"
 _PIP_EXTRAS = ("faster-whisper>=1.0.0",)
 _SYSTEM_PACKAGES = ("ffmpeg",)
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _looks_like_ct2(siblings: list[str], tags: list[str]) -> bool:
@@ -53,11 +47,11 @@ def _sniff(info) -> bool:
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "audio/transcription",
         "hf_repo": repo_id,
         "description": f"Faster-Whisper: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": list(_SYSTEM_PACKAGES),
         "capabilities": {},
@@ -80,20 +74,10 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="automatic-speech-recognition",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="automatic-speech-recognition", modality="audio/transcription",
     )
-    for repo in repos:
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="audio/transcription",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

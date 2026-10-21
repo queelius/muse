@@ -25,6 +25,11 @@ from typing import Any, Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+)
 
 
 _WAN_RUNTIME_PATH = (
@@ -42,17 +47,6 @@ _PIP_EXTRAS = (
     "Pillow>=9.1.0",
     "imageio[ffmpeg]>=2.31.0",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _infer_defaults(repo_id: str) -> tuple[str, dict[str, Any]]:
@@ -159,11 +153,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     runtime_path, capabilities = _infer_defaults(repo_id)
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "video/generation",
         "hf_repo": repo_id,
         "description": f"text-to-video model: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -186,20 +180,10 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="text-to-video",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="text-to-video", modality="video/generation",
     )
-    for repo in repos:
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="video/generation",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

@@ -19,6 +19,7 @@ from muse.core.resolvers import (
     SearchResult,
     hf_commit_revision,
 )
+from muse.core.hf_plugin_helpers import hf_model_id, hf_repo_license
 
 
 _UTMOS_RUNTIME = "muse.modalities.audio_quality.runtimes.utmos:UTMOSRuntime"
@@ -86,15 +87,6 @@ _FAMILIES = (
 )
 
 
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    return getattr(card, "license", None) if card is not None else None
-
-
 def _family_for_name(repo_id: str) -> _Family | None:
     name = repo_id.lower()
     return next(
@@ -128,11 +120,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         )
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "audio/quality",
         "hf_repo": repo_id,
         "description": f"{family.description}: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(family.pip_extras),
         "system_packages": list(family.system_packages),
         "capabilities": {
@@ -218,11 +210,11 @@ def _search(
                 continue
             candidates[repo.id] = SearchResult(
                 uri=f"hf://{repo.id}",
-                model_id=_model_id(repo.id),
+                model_id=hf_model_id(repo.id),
                 modality="audio/quality",
                 size_gb=None,
                 downloads=getattr(info, "downloads", None),
-                license=_repo_license(info),
+                license=hf_repo_license(info),
                 description=family.description,
                 metadata={
                     "likes": getattr(info, "likes", None),

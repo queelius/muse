@@ -26,6 +26,12 @@ from muse.core.resolvers import (
     SearchResult,
     hf_commit_revision,
 )
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+    transformers_allow_patterns,
+)
 
 
 _RUNTIME_PATH = (
@@ -46,17 +52,6 @@ _NAME_PATTERNS = (
     "wav2vec",
     "audio-embedding",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _sniff(info) -> bool:
@@ -133,11 +128,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         )
 
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "audio/embedding",
         "hf_repo": repo_id,
         "description": f"Audio embedder: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -149,14 +144,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         # Prefer safetensors. Pull preprocessor_config.json (mandatory
         # for AutoFeatureExtractor load). Include *.py so trust_remote_code
         # paths can read the custom feature extractor (e.g. MERT).
-        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
-        has_fp16 = any(".fp16." in f for f in siblings)
-        if has_fp16:
-            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
-        else:
-            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
-        # Some repos still ship pytorch_model.bin (no safetensors).
-        allow_patterns.append("pytorch_model.bin")
+        allow_patterns = transformers_allow_patterns(info)
         allow_patterns.extend([
             "preprocessor_config.json",
             "*.py",
@@ -185,23 +173,11 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
     Filter: feature-extraction task tag. Returns one row per repo
     whose id contains a recognized audio-embedding family marker.
     """
-    repos = api.list_models(
-        search=query, filter="feature-extraction",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="feature-extraction", modality="audio/embedding",
+        keep=lambda rid: any(s in rid.lower() for s in _NAME_PATTERNS),
     )
-    for repo in repos:
-        rid = (repo.id or "").lower()
-        if not any(s in rid for s in _NAME_PATTERNS):
-            continue
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="audio/embedding",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

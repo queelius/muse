@@ -24,6 +24,12 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+    transformers_allow_patterns,
+)
 
 
 _RUNTIME_PATH = (
@@ -43,17 +49,6 @@ _PIP_EXTRAS = (
     "transformers>=4.40.0",
     "Pillow",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _sniff(info) -> bool:
@@ -94,11 +89,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "image/ocr",
         "hf_repo": repo_id,
         "description": f"OCR model: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -107,14 +102,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         manifest["revision"] = revision
 
     def _download(cache_root: Path) -> Path:
-        siblings = [s.rfilename for s in getattr(info, "siblings", [])]
-        has_fp16 = any(".fp16." in f for f in siblings)
-        if has_fp16:
-            allow_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.md"]
-        else:
-            allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.md"]
-        # Older OCR repos still ship pytorch_model.bin (no safetensors).
-        allow_patterns.append("pytorch_model.bin")
+        allow_patterns = transformers_allow_patterns(info)
         # Tokenizer + processor files. AutoProcessor reads
         # preprocessor_config.json to dispatch to TrOCRProcessor /
         # NougatProcessor / etc.
@@ -138,20 +126,10 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="image-to-text",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="image-to-text", modality="image/ocr",
     )
-    for repo in repos:
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="image/ocr",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

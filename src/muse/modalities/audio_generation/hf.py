@@ -24,6 +24,11 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+)
 
 
 _RUNTIME_PATH = (
@@ -37,17 +42,6 @@ _PIP_EXTRAS = (
     "accelerate",
     "soundfile",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _sniff(info) -> bool:
@@ -99,11 +93,11 @@ def _stable_audio_capabilities() -> dict:
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "audio/generation",
         "hf_repo": repo_id,
         "description": f"Stable Audio Open: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         # ffmpeg optional for mp3/opus codec; declaring so muse pull
         # can install when available. Not required for wav/flac.
@@ -157,22 +151,11 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
     Filter: text-to-audio tag. Post-filter requires `stable-audio`
     in the repo name to keep the result set narrow.
     """
-    repos = api.list_models(
-        search=query, filter="text-to-audio",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="text-to-audio", modality="audio/generation",
+        keep=lambda rid: "stable-audio" in rid.lower(),
     )
-    for repo in repos:
-        if "stable-audio" not in (repo.id or "").lower():
-            continue
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="audio/generation",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

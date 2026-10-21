@@ -32,6 +32,11 @@ from typing import Any, Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+)
 
 
 _RUNTIME_PATH = (
@@ -44,17 +49,6 @@ _PIP_EXTRAS = (
     "Pillow>=9.1.0",
     "numpy",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _infer_capabilities(repo_id: str) -> dict[str, Any]:
@@ -127,11 +121,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     }
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "image/segmentation",
         "hf_repo": repo_id,
         "description": f"Promptable segmenter: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -164,21 +158,10 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="mask-generation",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="mask-generation", modality="image/segmentation",
     )
-    for repo in repos:
-        repo_id = getattr(repo, "id", "") or ""
-        yield SearchResult(
-            uri=f"hf://{repo_id}",
-            model_id=_model_id(repo_id),
-            modality="image/segmentation",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo_id,
-        )
 
 
 HF_PLUGIN = {

@@ -25,6 +25,11 @@ from typing import Any, Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import (
+    hf_model_id,
+    hf_repo_license,
+    hf_tag_search,
+)
 
 
 _RUNTIME_PATH = (
@@ -47,17 +52,6 @@ _UPSCALER_NAMES = (
     "ldm-super",
     "esrgan",
 )
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _is_upscaler_name(repo_id: str) -> bool:
@@ -105,11 +99,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     }
     revision = hf_commit_revision(info)
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "image/upscale",
         "hf_repo": repo_id,
         "description": f"Diffusers super-resolution upscaler: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": capabilities,
@@ -155,22 +149,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    repos = api.list_models(
-        search=query, filter="image-to-image",
-        sort=sort, limit=limit,
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit,
+        tag="image-to-image", modality="image/upscale",
+        keep=_is_upscaler_name,
     )
-    for repo in repos:
-        if not _is_upscaler_name(getattr(repo, "id", "") or ""):
-            continue
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="image/upscale",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
 
 
 HF_PLUGIN = {

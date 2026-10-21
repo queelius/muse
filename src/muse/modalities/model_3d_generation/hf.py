@@ -28,6 +28,7 @@ from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.artifacts import download_hf_artifact_bundle
 from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.hf_plugin_helpers import hf_model_id, hf_repo_license
 
 
 _TRIPOSR_RUNTIME_PATH = (
@@ -263,8 +264,6 @@ _NAME_HINTS = (
 )
 # Tag-based fallback. The canonical 3D generation tags on HF.
 _TAG_HINTS = ("image-to-3d", "text-to-3d")
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
 
 
 def _download_hunyuan_bundle(
@@ -291,13 +290,6 @@ def _download_hunyuan_bundle(
         ),
         snapshot_download_fn=snapshot_download,
     )
-
-
-def _repo_license(info) -> str | None:
-    card = getattr(info, "card_data", None)
-    if card is None:
-        return None
-    return getattr(card, "license", None)
 
 
 def _sniff(info) -> bool:
@@ -340,11 +332,11 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         })
 
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "3d/generation",
         "hf_repo": repo_id,
         "description": f"3D generation: {repo_id}",
-        "license": _repo_license(info),
+        "license": hf_repo_license(info),
         "pip_extras": list(family.pip_extras),
         "system_packages": list(family.system_packages),
         "capabilities": capabilities,
@@ -420,7 +412,7 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
             seen.add(repo_id)
             yield SearchResult(
                 uri=f"hf://{repo_id}",
-                model_id=_model_id(repo_id),
+                model_id=hf_model_id(repo_id),
                 modality="3d/generation",
                 size_gb=None,
                 downloads=getattr(repo, "downloads", None),
