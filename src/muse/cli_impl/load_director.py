@@ -345,8 +345,9 @@ class LoadDirector:
         self.recent_decisions: collections.deque = collections.deque(maxlen=20)
         self.lock = threading.RLock()
         # Monotonic counter bumped under the lock on every memory-mutating
-        # event: a cold load claimed (_decide) OR an eviction victim popped
-        # (_evict_lru_until_fits). _load_and_commit snapshots it around a
+        # event: a cold load claimed (_decide) OR an eviction claim popping a
+        # loaded entry (_begin_eviction_locked: LRU, idle, or admin
+        # teardown). _load_and_commit snapshots it around a
         # load's free_before .. free_after window to detect whether ANOTHER
         # load or an eviction happened during that window (either pollutes the
         # global free-memory delta the observed-peak writeback infers a peak
@@ -755,32 +756,45 @@ class LoadDirector:
         reason: str,
         keep_blocked: bool,
         was_blocked: bool,
+        free_before_gb: float | None = None,
     ) -> ModelEviction:
-        """Publish one exact eviction claim. Caller holds ``self.lock``."""
+        """Publish one exact eviction claim. Caller holds ``self.lock``.
+
+        Every director-owned teardown (admin disable, idle sweep, LRU
+        pressure) goes through this claim and its matching
+        ``finish_eviction``. ``free_before_gb`` lets a caller that already
+        measured the pool (LRU eviction, which needs the reading as its
+        release-poll baseline) skip the best-effort measurement here.
+        """
         if model_id in self._eviction_claims:
             raise RuntimeError(f"model {model_id!r} already has an eviction claim")
 
-        free_before_gb: float | None = None
         self._evicting[model_id] = EvictingReservation()
         try:
             if entry is not None:
                 # Reserve before pop: configured-budget admission must continue
                 # to count the worker throughout its out-of-lock shutdown.
-                try:
-                    free_before_gb = self._free_for_device(entry.pool)
-                except Exception:  # noqa: BLE001
-                    # Measurement is observability only. A transient probe
-                    # failure must not prevent publishing a settleable claim.
-                    free_before_gb = None
-                    logger.warning(
-                        "could not measure memory before eviction of %r",
-                        model_id,
-                        exc_info=True,
-                    )
+                if free_before_gb is None:
+                    try:
+                        free_before_gb = self._free_for_device(entry.pool)
+                    except Exception:  # noqa: BLE001
+                        # Measurement is observability only. A transient
+                        # probe failure must not prevent publishing a
+                        # settleable claim.
+                        free_before_gb = None
+                        logger.warning(
+                            "could not measure memory before eviction of %r",
+                            model_id,
+                            exc_info=True,
+                        )
                 self._evicting[model_id] = EvictingReservation(
                     pool=entry.pool, memory_gb=entry.memory_gb,
                 )
                 self.loaded.pop(model_id, None)
+                # An eviction frees memory, which pollutes any concurrent
+                # load's free_before..free_after delta just like a concurrent
+                # load does; the bump lets _load_and_commit's solo gate skip
+                # that load's observed-peak writeback.
                 self._inflight_epoch += 1
 
             claim = ModelEviction(
@@ -805,20 +819,45 @@ class LoadDirector:
                 self._blocked_models.discard(model_id)
             raise
 
+    def release_eviction_reservation(self, claim: ModelEviction) -> None:
+        """Stop debiting a claim's memory once its worker is confirmed down.
+
+        The ``evicting`` marker itself stays until ``finish_eviction`` so
+        concurrent capacity failures remain retryable while a live driver
+        counter catches up; only the configured-budget reservation is
+        dropped. LRU eviction calls this right after disable_fn succeeds and
+        before its release poll: a budget-only pool never observes memory
+        freeing otherwise, and the loop would over-evict.
+        """
+        with self.lock:
+            if self._eviction_claims.get(claim.model_id) is not claim:
+                return
+            reservation = self._evicting.get(claim.model_id)
+            if reservation is not None:
+                reservation.memory_gb = 0.0
+
     def finish_eviction(
         self,
         claim: ModelEviction,
         *,
         success: bool,
         error: BaseException | None = None,
+        notify: bool = True,
     ) -> bool:
-        """Settle one exact claim and wake capacity waiters outside the lock.
+        """Settle one exact claim; record it and wake waiters outside the lock.
 
         Failed teardown restores the claimed LoadEntry because the worker may
-        still own its memory.  Explicit-disable blocking is intentionally not
-        cleared here: the admin wrapper decides from the catalog's committed
-        state whether failure should remain fail-closed or restore allowance.
+        still own its memory, and logs a ``disable_fn_raised`` decision.
+        Explicit-disable blocking is intentionally not cleared here: the admin
+        wrapper decides from the catalog's committed state whether failure
+        should remain fail-closed or restore allowance.
+
+        A successful eviction of a loaded entry emits one ``model_evict``
+        telemetry event (never allowed to raise). ``notify=False`` skips the
+        capacity-listener fire for a caller (LRU eviction) that fires at its
+        own exit points.
         """
+        evicted_entry: LoadEntry | None = None
         with self.lock:
             if self._eviction_claims.get(claim.model_id) is not claim:
                 return False
@@ -858,14 +897,41 @@ class LoadDirector:
                     reason=claim.reason,
                     evicted=[claim.model_id],
                 ))
+                evicted_entry = entry
             elif error is not None:
+                if entry is not None:
+                    # Nothing was evicted (evicted=[]); free_after_gb stays
+                    # None because no release was observed.
+                    self.recent_decisions.append(DecisionLogEntry(
+                        timestamp=time.time(),
+                        model_id=claim.model_id,
+                        action="evict",
+                        memory_gb=entry.memory_gb,
+                        free_before_gb=float(claim.free_before_gb or 0.0),
+                        free_after_gb=None,
+                        reason=f"disable_fn_raised: {error}",
+                        evicted=[],
+                    ))
                 logger.warning(
                     "eviction of %r failed; restored director accounting: %s",
                     claim.model_id,
                     error,
                 )
 
-        self._fire_capacity_listener()
+        if evicted_entry is not None:
+            # Fire-and-forget; telemetry can never break a real eviction.
+            try:
+                record(
+                    "model_evict",
+                    model_id=claim.model_id,
+                    pool=evicted_entry.pool,
+                    gb=evicted_entry.memory_gb,
+                    reason=claim.reason,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if notify:
+            self._fire_capacity_listener()
         return True
 
     def _fire_capacity_listener(self) -> None:
@@ -1628,26 +1694,30 @@ class LoadDirector:
         (-> load) instead of raising a spurious 503 that the gateway would
         surface verbatim with no retry.
 
+        Each victim goes through the same eviction-claim lifecycle as idle
+        and admin eviction (``_begin_eviction_locked`` / ``finish_eviction``),
+        which owns the evicting marker + reservation, the ``loaded`` pop, the
+        epoch bump, the decision log, telemetry, and re-inserting the entry
+        when disable_fn fails.
+
         Lock discipline (the critical detail of eviction):
           1. Acquire the lock briefly to snapshot evictable candidates
-             and pop the LRU victim from self.loaded. Append a partial
-             DecisionLogEntry under the lock so the admin endpoint sees
-             the in-progress eviction as soon as it commits to one.
+             and claim the LRU victim (pops it from self.loaded and
+             publishes its evicting reservation).
           2. RELEASE the lock for the slow steps (disable_fn invocation
              + memory release polling). Other threads can hot-acquire
              during this window: their _decide call takes the lock,
              observes the (still-loaded) other entries, and proceeds.
              Cold acquires that race here will see a smaller free pool
-             until our poll completes, but that's accurate.
-          3. REACQUIRE the lock to update the DecisionLogEntry's
-             free_after_gb once the poll returns.
+             until our poll completes, but that's accurate. Once
+             disable_fn returns the claim's budget reservation is
+             released, before the poll.
+          3. Settle the claim (finish_eviction, without notifying: this
+             loop fires the capacity listener at its own exit points),
+             which logs the decision with the post-poll free_after_gb.
           4. If the cumulative freed memory still falls short of the
              original shortfall, loop and pick the next victim. If no
              candidates remain: lazy-import OperationError and raise 503.
-
-        The reacquire step is intentionally minimal (just the entry
-        mutation), so other admin endpoints don't stall behind the
-        post-poll commit.
         """
         cumulative_freed_gb = 0.0
         # Track victims whose disable_fn raised so we don't re-pick them
@@ -1683,7 +1753,7 @@ class LoadDirector:
             # (which must never run under self.lock) happens outside it.
             fits_now = False
             capacity_failure: BaseException | None = None
-            # ---- under-lock: pick + pop a victim ----
+            # ---- under-lock: pick + claim a victim ----
             with self.lock:
                 # Re-snapshot every iteration: another thread may have
                 # released a model since the last pass, making it newly
@@ -1695,6 +1765,7 @@ class LoadDirector:
                         and e.refcount == 0
                         and e.model_id not in failed_victims
                         and e.model_id not in self._worker_transitions
+                        and e.model_id not in self._eviction_claims
                     )
                 ]
                 if not candidates:
@@ -1767,61 +1838,23 @@ class LoadDirector:
                         )
                 else:
                     # LRU first.
-                    candidates.sort(key=lambda e: e.last_touched_at)
-                    victim = candidates[0]
-                    victim_id = victim.model_id
-                    victim_memory_gb = victim.memory_gb
-
-                    # Capture before removing the accounting entry. Live
-                    # probes are unchanged by this ordering, while a static
-                    # budget correctly observes the victim's declared memory
-                    # becoming available after the pop.
+                    victim = min(candidates, key=lambda e: e.last_touched_at)
+                    # Measured strictly (a probe failure propagates with no
+                    # state changed): it is the release-poll baseline.
+                    # Captured before the claim pops the accounting entry, so
+                    # a static budget observes the victim's declared memory
+                    # becoming available only once its reservation drops.
                     free_before_gb = self._free_for_device(device)
-
-                    # Pop from loaded so other threads see the eviction
-                    # commitment immediately. If disable_fn raises, the
-                    # state is already consistent (no zombie LoadEntry
-                    # claiming a worker port that isn't running).
-                    self.loaded.pop(victim_id, None)
-                    # Mark the eviction in-flight so concurrent decides that
-                    # fail their fit check during the out-of-lock disable_fn
-                    # window raise retryable=True (capacity WILL free when
-                    # this eviction completes) instead of mass-503ing while
-                    # the director looks idle.
-                    self._evicting[victim_id] = EvictingReservation(
-                        pool=target_pool, memory_gb=victim_memory_gb,
-                    )
-                    # Bump the epoch: an eviction frees VRAM, which pollutes any
-                    # concurrent load's free_before..free_after delta just like a
-                    # concurrent load does. Counting it here lets _load_and_commit's
-                    # solo gate skip that load's observed-peak writeback instead of
-                    # recording an under-estimate.
-                    self._inflight_epoch += 1
-
-                    decision = DecisionLogEntry(
-                        timestamp=time.time(),
-                        model_id=victim_id,
-                        action="evict",
-                        memory_gb=victim_memory_gb,
-                        free_before_gb=free_before_gb,
-                        free_after_gb=None,
+                    # LRU never changes an explicit admin block: a blocked
+                    # entry (e.g. a restored failed disable) stays blocked.
+                    claim = self._begin_eviction_locked(
+                        victim.model_id,
+                        entry=victim,
                         reason=f"evicted_for_{model_id}",
-                        evicted=[victim_id],
+                        keep_blocked=True,
+                        was_blocked=victim.model_id in self._blocked_models,
+                        free_before_gb=free_before_gb,
                     )
-                    self.recent_decisions.append(decision)
-
-                    # Fire-and-forget telemetry event for this
-                    # eviction. Guarded the same way as the load-site record()
-                    # call above: telemetry can never break a real eviction.
-                    try:
-                        record(
-                            "model_evict",
-                            model_id=victim_id,
-                            pool=self._resolve_pool_device(device),
-                            reason=f"evicted_for_{model_id}",
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
 
             # ---- lock released ----
             if capacity_failure is not None:
@@ -1837,106 +1870,79 @@ class LoadDirector:
                 return
 
             # ---- slow steps ----
-            # The evicting marker must clear on
-            # EVERY exit of this out-of-lock region -- including a
-            # poll/probe exception below, which would otherwise leak the
-            # marker and make every future capacity 503 spuriously
-            # retryable forever. Hence the try/finally, not inline
-            # discards on the known-good paths only.
-            disable_failed = False
+            # The claim must settle on EVERY exit of this out-of-lock
+            # region -- including a poll/probe exception below, which would
+            # otherwise leak the evicting marker and make every future
+            # capacity 503 spuriously retryable forever. Hence the
+            # try/finally, not settlement on the known-good paths only.
+            victim_id = claim.model_id
+            disabled = False
+            settled = False
             try:
                 try:
                     self.disable_fn(victim_id)
                 except Exception as exc:  # noqa: BLE001
-                    # disable_fn raised. The worker is still alive holding
-                    # memory: the OS has NOT reclaimed its slot. Polling for
-                    # release would observe ~0 freed and the loop would
-                    # iterate to the next victim, but the orphan worker
-                    # would persist indefinitely with no remediation path.
-                    #
-                    # Remediation: re-insert the victim's LoadEntry into
-                    # self.loaded so accounting matches reality (worker
-                    # alive, slot occupied). Append a structured "evict"
-                    # decision log entry recording the failure for the
-                    # admin endpoint. Skip cumulative_freed_gb (the slot
-                    # did not free). Continue to the next candidate.
+                    # The worker is still alive holding memory: the OS has
+                    # NOT reclaimed its slot. Settling as a failure re-inserts
+                    # the victim's LoadEntry (refcount 0, as at selection) so
+                    # accounting matches reality and logs a
+                    # disable_fn_raised decision. Nothing is added to
+                    # cumulative_freed_gb, and the victim is off-limits for
+                    # the rest of this call: re-picking would loop forever
+                    # (it still has the oldest last_touched_at).
                     #
                     # KeyboardInterrupt + SystemExit pass through (we catch
                     # Exception, not BaseException) so the user can still
-                    # Ctrl-C out of a stuck eviction.
+                    # Ctrl-C out of a stuck eviction; the finally below
+                    # restores the entry for those too.
                     logger.error(
                         "disable_fn failed for evicted victim %r; re-inserted into loaded set",
                         victim_id,
                         exc_info=True,
                     )
-                    with self.lock:
-                        # Re-insert the popped LoadEntry. refcount was 0 at
-                        # eviction time (only refcount==0 entries are
-                        # candidates) and we preserve that.
-                        self.loaded[victim_id] = victim
-                        # Update the existing decision entry's reason
-                        # in-place. The deque already holds it; mutating
-                        # the dataclass is sufficient. evicted=[] because
-                        # nothing was actually evicted.
-                        decision.reason = f"disable_fn_raised: {exc}"
-                        decision.evicted = []
-                        # free_after_gb stays None: no poll, no measurement.
-                    # Mark this victim as off-limits for the rest of this
-                    # eviction call. Re-picking would loop forever (the
-                    # re-inserted victim still has the oldest
-                    # last_touched_at and would sort to LRU position).
+                    self.finish_eviction(
+                        claim, success=False, error=exc, notify=False,
+                    )
+                    settled = True
                     failed_victims.add(victim_id)
-                    disable_failed = True
-                else:
-                    # The shutdown owner has settled, so configured-budget
-                    # bookkeeping may now release the victim. Keep the
-                    # `evicting` marker itself until the whole iteration
-                    # settles so concurrent failures remain retryable while
-                    # a live driver counter catches up.
-                    with self.lock:
-                        rec = self._evicting.get(victim_id)
-                        if rec is not None:
-                            rec.memory_gb = 0.0
-                    # disable_fn returns only after the worker shutdown has
-                    # settled. If the model already fits (notably because a
-                    # configured working-set budget was the binding limit),
-                    # do not spend two seconds waiting for a noisy physical
-                    # free-memory counter to show the declared-size delta.
-                    with self.lock:
-                        _, available_after_shutdown = self._available_for_device(
-                            device,
-                        )
-                        reserved_after_shutdown = self._reserved_for_pool(
-                            target_pool, exclude=model_id,
-                        )
-                        fits_after_shutdown = (
-                            available_after_shutdown - reserved_after_shutdown
-                            >= required_gb
-                        )
-                    if fits_after_shutdown:
-                        freed_this_round = shortfall_gb - cumulative_freed_gb
-                    else:
-                        freed_this_round = self._wait_for_memory_release(
-                            min_freed_gb=victim_memory_gb,
-                            free_at_eviction_start_gb=free_before_gb,
-                            device=device,
-                        )
+                    continue
+                disabled = True
 
-                    # ---- reacquire the lock briefly: writeback free_after ----
-                    with self.lock:
-                        free_after_gb = self._free_for_device(device)
-                        decision.free_after_gb = free_after_gb
-
-                    cumulative_freed_gb += freed_this_round
-            finally:
-                # Eviction settled (worker down + release observed, or
-                # disable failed and the victim was re-inserted, or an
-                # unexpected exception is propagating): the in-flight
-                # marker must not outlive this iteration.
+                # The shutdown owner has settled, so configured-budget
+                # bookkeeping may now release the victim (the evicting
+                # marker itself stays until finish_eviction).
+                self.release_eviction_reservation(claim)
+                # If the model already fits (notably because a configured
+                # working-set budget was the binding limit), do not spend two
+                # seconds waiting for a noisy physical free-memory counter to
+                # show the declared-size delta.
                 with self.lock:
-                    self._evicting.pop(victim_id, None)
-            if disable_failed:
-                continue
+                    _, available_after_shutdown = self._available_for_device(
+                        device,
+                    )
+                    reserved_after_shutdown = self._reserved_for_pool(
+                        target_pool, exclude=model_id,
+                    )
+                    fits_after_shutdown = (
+                        available_after_shutdown - reserved_after_shutdown
+                        >= required_gb
+                    )
+                if fits_after_shutdown:
+                    freed_this_round = shortfall_gb - cumulative_freed_gb
+                else:
+                    freed_this_round = self._wait_for_memory_release(
+                        min_freed_gb=victim.memory_gb,
+                        free_at_eviction_start_gb=free_before_gb,
+                        device=device,
+                    )
+                cumulative_freed_gb += freed_this_round
+            finally:
+                if not settled:
+                    # Normal success, or an unexpected exception propagating
+                    # (from the poll after a confirmed shutdown, or a
+                    # BaseException out of disable_fn, where the worker may
+                    # still be alive and its entry is restored).
+                    self.finish_eviction(claim, success=disabled, notify=False)
 
         # Loop exited normally: cumulative_freed_gb >= shortfall_gb, i.e.
         # eviction freed enough. Outside the lock (the last statement above
