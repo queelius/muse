@@ -224,7 +224,7 @@ def test_remove_waits_for_same_model_pull_lock(tmp_path, monkeypatch):
 
     holder = threading.Thread(target=hold_pull)
     remover = threading.Thread(target=perform_remove)
-    with patch("muse.core.catalog._remove_locked") as remove_locked:
+    with patch("muse.core.catalog_remove._remove_locked") as remove_locked:
         holder.start()
         assert holding.wait(2)
         remover.start()

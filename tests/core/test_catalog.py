@@ -645,7 +645,7 @@ def test_remove_with_purge_rechecks_hf_repo_references_under_storage_lock(
     """A different model may acquire the repository after unregistering."""
     from contextlib import contextmanager
 
-    from muse.core import catalog as catalog_module
+    from muse.core import catalog_remove as catalog_module
     from muse.core.catalog import _write_catalog
 
     repo = tmp_catalog / "weights" / "models--org--raced"
