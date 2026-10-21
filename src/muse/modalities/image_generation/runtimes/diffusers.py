@@ -5,7 +5,7 @@ and default_guidance are injected at construction time from manifest
 capabilities. Heavy imports (torch, diffusers) are lazy: discovery must
 work without them on the host python.
 
-Mirrors the lazy-import pattern from src/muse/models/sd_turbo.py: tests
+The bundled sd-turbo script aliases this class as its Model. Tests
 patch the module-level `torch` and `AutoPipelineForText2Image` sentinels
 directly; `_ensure_deps()` short-circuits when sentinels are non-None
 (mocked) so the patches survive.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +148,11 @@ class DiffusersText2ImageModel:
         self._dtype = dtype
         self._i2i_pipe = None
         self._inp_pipe = None
+        # Guard the lazy img2img/inpaint builds against a double-build race
+        # (two concurrent first requests both calling from_pipe, briefly
+        # doubling VRAM and leaking one pipeline).
+        self._i2i_lock = threading.Lock()
+        self._inp_lock = threading.Lock()
         self._lora_adapter = bool(lora_adapter)
         self._default_lora_scale = float(lora_scale)
 
@@ -204,7 +210,10 @@ class DiffusersText2ImageModel:
             )
             self._pipe.load_lora_weights(self._src)
         if self._device != "cpu":
-            self._pipe = self._pipe.to(self._device)
+            # Diffusers pipelines move in place. Keep the object created
+            # above rather than trusting a fluent return value; wrappers and
+            # test doubles need not return ``self`` from ``to()``.
+            self._pipe.to(self._device)
 
     def generate(
         self,
@@ -291,23 +300,25 @@ class DiffusersText2ImageModel:
     ) -> ImageResult:
         # Lazy-load the img2img pipeline, cached on the instance.
         if self._i2i_pipe is None:
-            import muse.modalities.image_generation.runtimes.diffusers as _mod
-            _i2i = _mod.AutoPipelineForImage2Image
-            if _i2i is None:
-                raise RuntimeError(
-                    "diffusers AutoPipelineForImage2Image is not available; "
-                    "ensure museq[images] extras are installed in the per-model venv"
-                )
-            logger.info(
-                "loading img2img pipeline from %s (model_id=%s, device=%s, dtype=%s)",
-                self._src, self.model_id, self._device, self._dtype,
-            )
-            # Share UNet/VAE/text-encoders with the already-loaded t2i pipeline so we
-            # don't double VRAM on small GPUs. AutoPipelineForImage2Image.from_pipe
-            # is the canonical diffusers idiom for this; from_pretrained allocates a
-            # fresh copy and OOMs.
-            # Reference: https://huggingface.co/docs/diffusers/api/pipelines/auto_pipeline
-            self._i2i_pipe = _i2i.from_pipe(self._pipe)
+            with self._i2i_lock:
+                if self._i2i_pipe is None:
+                    import muse.modalities.image_generation.runtimes.diffusers as _mod
+                    _i2i = _mod.AutoPipelineForImage2Image
+                    if _i2i is None:
+                        raise RuntimeError(
+                            "diffusers AutoPipelineForImage2Image is not available; "
+                            "ensure museq[images] extras are installed in the per-model venv"
+                        )
+                    logger.info(
+                        "loading img2img pipeline from %s (model_id=%s, device=%s, dtype=%s)",
+                        self._src, self.model_id, self._device, self._dtype,
+                    )
+                    # Share UNet/VAE/text-encoders with the already-loaded t2i pipeline so we
+                    # don't double VRAM on small GPUs. AutoPipelineForImage2Image.from_pipe
+                    # is the canonical diffusers idiom for this; from_pretrained allocates a
+                    # fresh copy and OOMs.
+                    # Reference: https://huggingface.co/docs/diffusers/api/pipelines/auto_pipeline
+                    self._i2i_pipe = _i2i.from_pipe(self._pipe)
 
         n_steps = steps if steps is not None else self._default_steps
         cfg = guidance if guidance is not None else self._default_guidance
@@ -402,18 +413,20 @@ class DiffusersText2ImageModel:
         for img2img; same risk applies here).
         """
         if self._inp_pipe is None:
-            import muse.modalities.image_generation.runtimes.diffusers as _mod
-            _inp = _mod.AutoPipelineForInpainting
-            if _inp is None:
-                raise RuntimeError(
-                    "diffusers AutoPipelineForInpainting is not available; "
-                    "ensure museq[images] extras are installed in the per-model venv"
-                )
-            logger.info(
-                "loading inpaint pipeline from %s (model_id=%s, device=%s, dtype=%s)",
-                self._src, self.model_id, self._device, self._dtype,
-            )
-            self._inp_pipe = _inp.from_pipe(self._pipe)
+            with self._inp_lock:
+                if self._inp_pipe is None:
+                    import muse.modalities.image_generation.runtimes.diffusers as _mod
+                    _inp = _mod.AutoPipelineForInpainting
+                    if _inp is None:
+                        raise RuntimeError(
+                            "diffusers AutoPipelineForInpainting is not available; "
+                            "ensure museq[images] extras are installed in the per-model venv"
+                        )
+                    logger.info(
+                        "loading inpaint pipeline from %s (model_id=%s, device=%s, dtype=%s)",
+                        self._src, self.model_id, self._device, self._dtype,
+                    )
+                    self._inp_pipe = _inp.from_pipe(self._pipe)
 
         # Normalize mask to grayscale (mode L). Diffusers accepts L or
         # RGB; mode L is the documented contract. RGBA masks (alpha as
