@@ -153,7 +153,20 @@ def _validated_hf_result(
         for item in receipt
     ):
         raise ResolverError("HF artifact provenance omits the resolved primary repository")
-    return replace(resolved, artifact_provenance=tuple(receipt))
+    allow_patterns = resolved.allow_patterns
+    if allow_patterns is not None:
+        if (
+            isinstance(allow_patterns, (str, bytes))
+            or not isinstance(allow_patterns, Sequence)
+            or not all(isinstance(value, str) and value for value in allow_patterns)
+        ):
+            raise ResolverError("HF plugin returned invalid allow_patterns")
+        allow_patterns = tuple(allow_patterns)
+    return replace(
+        resolved,
+        artifact_provenance=tuple(receipt),
+        allow_patterns=allow_patterns,
+    )
 
 # Transient-failure retry for Hub metadata fetches. repo_info() can fail
 # under rapid calls (rate-limit 429, 5xx, flaky socket) or return a

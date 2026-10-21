@@ -66,11 +66,15 @@ class ResolvedModel:
       - artifact_provenance: complete immutable repository receipt for every
         artifact consumed by the download callable. HFResolver validates and
         fills the primary artifact centrally.
+      - allow_patterns: fnmatch patterns (or exact relative paths) of the
+        primary repo's files the download fetches. None means the whole
+        repo. Pull uses it to seed only those files from the shared HF cache.
     """
     manifest: dict
     backend_path: str
     download: Callable[[Path], Path]
     artifact_provenance: tuple[dict[str, Any], ...] = ()
+    allow_patterns: tuple[str, ...] | None = None
 
 
 @dataclass

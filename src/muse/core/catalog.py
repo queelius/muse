@@ -2291,8 +2291,21 @@ def _pull_resolved_transaction(
 
     weights_cache = _catalog_dir() / "weights"
     _ensure_owned_directory(weights_cache, private=True)
+    # Seed only the files the download will fetch: a GGUF repo can hold
+    # many quants, and hashing and linking all of them would be wasted work.
+    seed_patterns = getattr(resolved, "allow_patterns", None)
+    if seed_patterns is None:
+        seed_patterns = next(
+            (
+                item.get("allow_patterns") for item in artifact_provenance
+                if item.get("repo_id") == manifest["hf_repo"]
+            ),
+            None,
+        )
     with _storage_cache_lock():
-        seeded = seed_repo(weights_cache, manifest["hf_repo"])
+        seeded = seed_repo(
+            weights_cache, manifest["hf_repo"], allow_patterns=seed_patterns,
+        )
         try:
             with _hf_quiet_if_needed():
                 local_dir = resolved.download(weights_cache)

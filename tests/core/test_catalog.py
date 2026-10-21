@@ -4145,3 +4145,41 @@ class TestCheckSystemPackages:
         from muse.core.catalog import check_system_packages
         mock_which.return_value = "/usr/bin/cmd"
         assert check_system_packages(["ffmpeg"]) == []
+
+
+@pytest.mark.parametrize("source", ["resolved", "receipt"])
+def test_resolver_pull_seeds_only_the_files_it_downloads(tmp_catalog, source):
+    """A resolver pull seeds the shared HF cache with the download's
+    allow_patterns (or the primary receipt's), not the whole repo."""
+    from muse.core.catalog import pull
+    from muse.core.resolvers import ResolvedModel
+
+    revision = "1" * 40
+    patterns = ["model-q4_k_m.gguf", "tokenizer*", "config.json"]
+    receipt = {"repo_id": "org/repo", "revision": revision, "subdir": "."}
+    if source == "receipt":
+        receipt["allow_patterns"] = patterns
+    fake_resolved = ResolvedModel(
+        manifest={
+            "model_id": "repo",
+            "modality": "embedding/text",
+            "hf_repo": "org/repo",
+            "revision": revision,
+        },
+        backend_path="fake.mod:Cls",
+        download=lambda cache_root: cache_root / "weights" / "repo",
+        artifact_provenance=(receipt,),
+        allow_patterns=tuple(patterns) if source == "resolved" else None,
+    )
+
+    with patch("muse.core.resolvers.resolve", return_value=fake_resolved), \
+         patch("muse.core.catalog.seed_repo", return_value=[]) as seed, \
+         patch("muse.core.catalog.create_venv"), \
+         patch("muse.core.catalog.install_into_venv"), \
+         patch("muse.core.catalog.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog.venv_python", return_value="/fake/py"):
+        pull("hf://org/repo")
+
+    seed.assert_called_once()
+    assert seed.call_args.args[1] == "org/repo"
+    assert list(seed.call_args.kwargs["allow_patterns"]) == patterns

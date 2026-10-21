@@ -592,6 +592,34 @@ def test_resolve_with_modality_forwards_base_override_when_accepted():
     assert out.manifest["base_override"] == "flux-schnell"
 
 
+@pytest.mark.parametrize("patterns, expected", [
+    (None, None),
+    (["a.gguf", "tokenizer*"], ("a.gguf", "tokenizer*")),
+    ("a.gguf", ResolverError),
+    ([""], ResolverError),
+])
+def test_resolve_validates_plugin_allow_patterns(patterns, expected):
+    from dataclasses import replace
+
+    from muse.core.resolvers_hf import HFResolver
+
+    plugin = {
+        "modality": "chat/completion",
+        "sniff": MagicMock(return_value=True),
+        "resolve": lambda repo_id, variant, info: replace(
+            _fake_resolved(repo_id, info.sha), allow_patterns=patterns,
+        ),
+    }
+    resolver = HFResolver(plugins=[plugin])
+    info = SimpleNamespace(siblings=[], tags=[], id="org/repo", sha=_FAKE_REVISION)
+    with patch.object(resolver._api, "repo_info", return_value=info):
+        if expected is ResolverError:
+            with pytest.raises(ResolverError, match="allow_patterns"):
+                resolver.resolve("hf://org/repo")
+        else:
+            assert resolver.resolve("hf://org/repo").allow_patterns == expected
+
+
 def test_resolve_with_modality_raises_when_no_plugin_for_modality():
     from muse.core.resolvers_hf import HFResolver
 
