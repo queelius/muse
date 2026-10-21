@@ -48,6 +48,16 @@ from muse.core.memory_probe import (
     probe_method,
     resolve_memory_pool,
 )
+from muse.core.owned_process import (
+    REAL_POPEN_TYPE,
+    concrete_safe_id,
+    kill_signal,
+    observe_leader,
+    reap_exited_leader,
+    signal_isolated_group,
+    supports_pinned_leader,
+    validated_isolated_group,
+)
 from muse.core.resource_registry import (
     ResourceRegistryError,
     register_process,
@@ -68,7 +78,7 @@ _WORKER_LOG_READ_BYTES = 16 * 1024
 _WORKER_LOG_LINE_BYTES = 64 * 1024
 _WORKER_LOG_TRUNCATION = b"...[truncated]\n"
 _OS_NAME = os.name
-_REAL_POPEN_TYPE = subprocess.Popen
+_REAL_POPEN_TYPE = REAL_POPEN_TYPE
 
 
 @dataclass
@@ -342,33 +352,16 @@ def clear_supervisor_state() -> None:
     _state = None
 
 
-def _concrete_worker_id(value: Any) -> int | None:
-    """Return a signal-safe concrete PID/PGID, rejecting mocks and PID 1."""
-    if type(value) is not int or value <= 1:
-        return None
-    return value
+_concrete_worker_id = concrete_safe_id
 
 
 def _validated_worker_process_group(proc: Any) -> int | None:
     """Capture the child's isolated POSIX group immediately after spawn."""
-    if _OS_NAME != "posix":
-        return None
-    pid = _concrete_worker_id(getattr(proc, "pid", None))
-    if pid is None:
-        return None
-    try:
-        process_group = _concrete_worker_id(os.getpgid(pid))
-        own_group = _concrete_worker_id(os.getpgrp())
-    except OSError as exc:
-        logger.warning("could not validate worker process group for %s: %s", pid, exc)
-        return None
-    if process_group != pid or own_group is None or process_group == own_group:
-        logger.error(
-            "refusing worker process-group ownership pid=%r pgid=%r own_pgid=%r",
-            pid, process_group, own_group,
-        )
-        return None
-    return process_group
+    return validated_isolated_group(
+        _concrete_worker_id(getattr(proc, "pid", None)),
+        os_name=_OS_NAME,
+        label="worker",
+    )
 
 
 def _publish_worker_log(hub: "Any", model_id: str, raw: bytes) -> None:
@@ -590,17 +583,7 @@ def _supports_pinned_worker_leader(
     proc: Any, pid: int | None, process_group_id: int | None,
 ) -> bool:
     """Whether WNOWAIT can preserve this exact real POSIX group identity."""
-    return bool(
-        _OS_NAME == "posix"
-        and pid is not None
-        and process_group_id == pid
-        and isinstance(proc, _REAL_POPEN_TYPE)
-        and callable(getattr(os, "waitid", None))
-        and getattr(os, "P_PID", None) is not None
-        and getattr(os, "WEXITED", None) is not None
-        and getattr(os, "WNOHANG", None) is not None
-        and getattr(os, "WNOWAIT", None) is not None
-    )
+    return supports_pinned_leader(proc, pid, process_group_id, os_name=_OS_NAME)
 
 
 def _worker_process_state_locked(spec: WorkerSpec, proc: Any) -> bool | None:
@@ -617,35 +600,17 @@ def _worker_process_state_locked(spec: WorkerSpec, proc: Any) -> bool | None:
         return None
     if type(getattr(proc, "returncode", None)) is int:
         return False
-    if _supports_pinned_worker_leader(proc, pid, spec.process_group_id):
-        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
-        try:
-            status = os.waitid(os.P_PID, pid, flags)
-        except InterruptedError:
-            return True
-        except (ChildProcessError, OSError) as exc:
-            logger.warning("could not observe worker leader %s safely: %s", pid, exc)
-            return None
-        return not (
-            status is not None
-            and getattr(status, "si_pid", pid) == pid
-        )
-    if _OS_NAME == "posix" and isinstance(proc, _REAL_POPEN_TYPE):
-        # A real worker is spawned into a new session. If its PID==PGID could
-        # not be validated and stored at spawn, polling could reap the leader
-        # and make that unknown numeric group reusable before descendants are
-        # drained. Retain ownership and fail closed instead.
-        return None
-    try:
-        observed = proc.poll()
-        if type(observed) is int and type(
-            getattr(proc, "returncode", None)
-        ) is not int:
-            proc.returncode = observed
-        return observed is None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("could not inspect worker leader %s: %s", pid, exc)
-        return None
+    # A real worker is spawned into a new session. If its PID==PGID could not
+    # be validated and stored at spawn, polling could reap the leader and
+    # make that unknown numeric group reusable before descendants are
+    # drained, so observe_leader retains ownership and fails closed instead.
+    return observe_leader(
+        proc,
+        pid,
+        pinned=_supports_pinned_worker_leader(proc, pid, spec.process_group_id),
+        os_name=_OS_NAME,
+        label="worker",
+    )
 
 
 def _require_worker_generation_alive(spec: WorkerSpec, proc: Any) -> None:
@@ -1064,24 +1029,14 @@ def _signal_worker_target(
             # reused by the OS.
             if not force and state is not True:
                 return state is False
-            try:
-                os.killpg(target.process_group_id, sig)
-            except ProcessLookupError:
-                # With the unreaped PID==PGID leader still pinning identity,
-                # ESRCH proves there are no signalable members left.
-                if force:
-                    target.final_signal_delivered = True
-                return True
-            except (OSError, TypeError, ValueError) as exc:
-                logger.warning(
-                    "could not signal worker process group %s: %s",
-                    target.process_group_id,
-                    exc,
-                )
-                return False
-            if force:
+            # With the unreaped PID==PGID leader still pinning identity,
+            # ESRCH proves there are no signalable members left.
+            delivered = signal_isolated_group(
+                target.pid, target.process_group_id, sig, label="worker",
+            )
+            if delivered and force:
                 target.final_signal_delivered = True
-            return True
+            return delivered
 
         if state is False:
             # Exact-child fallback has no separately owned group to drain.
@@ -1147,22 +1102,8 @@ def _reap_worker_target(target: _WorkerShutdownTarget) -> bool:
         state = _worker_process_state_locked(spec, proc)
         if state is not False:
             return False
-        try:
-            returncode = proc.wait(timeout=0.0)
-        except (subprocess.TimeoutExpired, ChildProcessError, OSError) as exc:
-            logger.warning(
-                "could not reap worker leader %s safely: %s", target.pid, exc,
-            )
+        if reap_exited_leader(proc, target.pid, label="worker") is None:
             return False
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "could not reap worker leader %s: %s", target.pid, exc,
-            )
-            return False
-        if type(returncode) is not int:
-            return False
-        if type(getattr(proc, "returncode", None)) is not int:
-            proc.returncode = returncode
         target.leader_reaped = True
         spec.process_group_released = True
         return True
@@ -1233,7 +1174,7 @@ def _shutdown_workers(
     # Phase 2: every pinned POSIX group receives one final KILL before its
     # leader is reaped, including groups whose leader already honored TERM.
     # Exact-child fallbacks receive KILL only while still alive.
-    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    final_signal = kill_signal()
     survivor_ids = {id(target) for target in survivors}
     for target in targets:
         if id(target) in survivor_ids:
@@ -1243,7 +1184,7 @@ def _shutdown_workers(
                 grace,
             )
         try:
-            _signal_worker_target(target, kill_signal, force=True)
+            _signal_worker_target(target, final_signal, force=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "failed to kill worker on port %d: %s",
