@@ -1,4 +1,4 @@
-"""LoadDirector: lazy-load coordinator for v0.40.0.
+"""LoadDirector: lazy-load coordinator.
 
 Holds the in-memory map of currently-loaded models, gates concurrent loads
 of the same model behind a per-model threading.Event (singleton-load
@@ -9,12 +9,13 @@ Three-phase acquire (decide / load / commit):
 
   Decision (under self.lock)
     - Hot path: increment refcount, update last_touched_at, return port.
-    - Cold path: claim ownership of the load by stashing a fresh
-      threading.Event in `in_flight_loads`. Other threads racing on the
-      same model_id see the Event, drop the lock, and wait. When woken,
+    - Cold path: claim ownership of the load by stashing an InFlightLoad
+      (event + memory reservation) in `in_flight_loads`. Other threads
+      racing on the same model_id see the Event, drop the lock, and wait.
+      When woken,
       they re-enter the decision phase to read the freshly populated
       LoadEntry.
-    - Eviction (Task C): if the requested memory does not fit live free
+    - Eviction: if the requested memory does not fit live free
       (minus headroom), the decision phase returns ("evict_and_retry",
       shortfall_gb, device) WITHOUT claiming an in-flight slot. The
       acquire outer loop runs eviction outside the lock and re-calls
@@ -34,7 +35,7 @@ Three-phase acquire (decide / load / commit):
   Commit (under self.lock)
     - Insert LoadEntry, pop the in_flight_loads Event, append a
       DecisionLogEntry, set() the Event so any concurrent waiters wake.
-    - Schedule the observed-peak writeback (Task D): a fire-and-forget
+    - Schedule the observed-peak writeback: a fire-and-forget
       daemon thread compares observed delta vs the recorded
       `measurements.<device>.peak_bytes` and raises it if observation
       exceeds the seed. Errors are logged + swallowed so the request
@@ -43,11 +44,10 @@ Three-phase acquire (decide / load / commit):
 This module does NOT import enable_model / disable_model from
 muse.admin.operations at import time (it does lazy-import OperationError
 inside the eviction failure path). The callable injection seam
-(enable_fn, disable_fn, memory_probe) is what tests use; production
-wiring (Task E) will inject the real supervisor's spawn / shutdown
-callables.
+(enable_fn, disable_fn, memory_probe) is what tests use; the supervisor
+(`build_load_director`) injects its real worker spawn / shutdown callables.
 
-H4 (event.wait timeout): waiters on an in-flight cold load call
+Bounded in-flight wait: waiters on an in-flight cold load call
   event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS) rather than an
   unbounded wait(). If the load-winner thread is killed non-cooperatively
   (SIGKILL/OOM during wait_for_ready), _abort/set() never runs and every
@@ -75,7 +75,7 @@ from typing import Any, Callable, Literal
 # `test_swallows_ioerror_during_write` etc.).
 from muse.core.catalog import _CATALOG_WRITE_LOCK, _read_catalog, _write_catalog
 
-# H4: maximum seconds a waiter will block on an in-flight Event before
+# Maximum seconds a waiter will block on an in-flight Event before
 # re-entering the decision phase. The value must exceed the load timeout
 # used by wait_for_ready (120s in production) plus some margin so normal
 # loads never time out. 180s is 60s of headroom above the worst-case
@@ -94,15 +94,12 @@ from muse.core.memory_probe import (
     resolve_memory_pool,
 )
 
-# Task 9: fire-and-forget telemetry. Import the NAME (not the module) so
-# `record` is a module global here; tests monkeypatch
+# Fire-and-forget telemetry. Import the NAME (not the module) so `record`
+# is a module global here; tests monkeypatch
 # `muse.cli_impl.load_director.record` directly, which is only effective
-# because the calls below reference the bare name. The observability
-# package-level re-export (`from muse.observability import record`) lands
-# in a later task; importing straight from the submodule avoids depending
-# on that re-export existing yet. This import is import-light (stdlib +
-# two observability siblings, no torch), so it is safe on the CLI import
-# path.
+# because the calls below reference the bare name. The submodule import is
+# import-light (stdlib + two observability siblings, no fastapi or torch),
+# so it is safe on the CLI import path.
 from muse.observability.recorder import record
 
 logger = logging.getLogger(__name__)
@@ -120,8 +117,8 @@ class LoadEntry:
     """One currently-loaded model.
 
     `memory_gb` is what we accounted for at load time (from the
-    manifest's capabilities.memory_gb, falling back to 0.0). Task D
-    will add observed-peak writeback so this drifts toward measured
+    manifest's capabilities.memory_gb, falling back to 0.0). The
+    observed-peak writeback raises the catalog measurement toward measured
     reality as cold loads happen.
 
     `last_touched_at` is monotonic seconds, updated on each acquire and
@@ -268,7 +265,7 @@ class LoadDirector:
 
         self.loaded: dict[str, LoadEntry] = {}
         self.in_flight_loads: dict[str, InFlightLoad] = {}
-        # v0.57.2: model ids whose eviction is mid-flight (victim popped
+        # Model ids whose eviction is mid-flight (victim popped
         # from `loaded`, disable_fn still shutting the worker down, VRAM
         # not yet freed). During that multi-second out-of-lock window the
         # director otherwise looks idle, so concurrent capacity 503s must
@@ -484,7 +481,7 @@ class LoadDirector:
                 # We did not own the load; another thread did. Wait for
                 # its Event to fire and then re-decide.
                 #
-                # H4: use a bounded wait instead of unbounded wait().
+                # Bounded wait instead of unbounded wait().
                 # If the winner is killed non-cooperatively (SIGKILL/OOM
                 # during the ~120s wait_for_ready), _abort/set() never
                 # runs. With no timeout, every waiter blocks forever.
@@ -1286,8 +1283,8 @@ class LoadDirector:
         `initial_refcount` is 1 for acquire (a request is being served)
         and 0 for warmup (no request, just pre-load).
 
-        After a successful commit, schedules the observed-peak writeback
-        (Task D): a daemon thread compares the observed `free_before -
+        After a successful commit, schedules the observed-peak writeback:
+        a daemon thread compares the observed `free_before -
         free_after` delta against the catalog's recorded peak and raises
         the recorded value if observation exceeds it. The thread starts
         OFF the request hot path so the caller is unaffected by catalog
@@ -1492,13 +1489,13 @@ class LoadDirector:
         if rec is not None:
             rec.event.set()
 
-        # v0.57.1: a committed load resolves its reservation into real
+        # A committed load resolves its reservation into real
         # residency (evictable once its refcount drops). Wake parked
         # capacity-waiters to re-decide; a futile wake costs one cheap
         # _decide pass.
         self._fire_capacity_listener()
 
-        # Task D: schedule the observed-peak writeback ONLY for a solo load.
+        # Schedule the observed-peak writeback ONLY for a solo load.
         # With overlapping loads the free_before..free_after delta reflects
         # BOTH models, and the writeback (monotonic-upward only) would
         # permanently inflate this model's recorded peak. Skipping just loses
@@ -1540,12 +1537,12 @@ class LoadDirector:
                 rec = self.in_flight_loads.pop(model_id, None)
         if rec is not None:
             rec.event.set()
-        # v0.57.1: an aborted load frees its reservation -- capacity may
+        # An aborted load frees its reservation -- capacity may
         # now fit a parked waiter; wake them to re-decide.
         self._fire_capacity_listener()
 
     # ------------------------------------------------------------------
-    # Eviction (Task C)
+    # Eviction
     # ------------------------------------------------------------------
 
     def _evict_lru_until_fits(
@@ -1585,7 +1582,7 @@ class LoadDirector:
         (-> load) instead of raising a spurious 503 that the gateway would
         surface verbatim with no retry.
 
-        Lock discipline (the critical detail of Task C):
+        Lock discipline (the critical detail of eviction):
           1. Acquire the lock briefly to snapshot evictable candidates
              and pop the LRU victim from self.loaded. Append a partial
              DecisionLogEntry under the lock so the admin endpoint sees
@@ -1675,24 +1672,20 @@ class LoadDirector:
                     if (available_gb - reserved_gb) >= required_gb:
                         fits_now = True
                     else:
-                        # Spec 2026-07-08: if a same-pool loaded model is
-                        # currently in-use (refcount > 0), capacity may free
-                        # once its request finishes -- worth the gateway
-                        # parking and retrying instead of surfacing a hard
-                        # 503.
-                        # v0.57.1 (stress-test finding): a capacity 503
-                        # is ALSO transient when OTHER cold loads are in
-                        # flight -- their reservations made the fit fail,
-                        # and each will either commit (reservation becomes
-                        # evictable residency) or abort (reservation
-                        # freed). Without this, a cold-start burst of
-                        # distinct models on an empty card mass-503s
-                        # instantly instead of queueing behind the first
-                        # load.
-                        # v0.57.2: an eviction mid-flight (self.evicting)
-                        # is the third transient state -- its VRAM frees
-                        # when disable_fn completes, so the failure is
-                        # worth parking on too.
+                        # The capacity 503 is retryable (the gateway parks
+                        # and retries instead of surfacing it) when it is
+                        # TRANSIENT in this pool:
+                        #   - a loaded model is in use (refcount > 0) and
+                        #     frees once its request finishes;
+                        #   - OTHER cold loads are in flight: their
+                        #     reservations made the fit fail, and each will
+                        #     commit (evictable residency) or abort (freed).
+                        #     Without this a cold-start burst of distinct
+                        #     models on an empty card mass-503s instead of
+                        #     queueing behind the first load;
+                        #   - an eviction is mid-flight (self.evicting): its
+                        #     VRAM frees when disable_fn completes;
+                        #   - a loaded worker is mid-transition.
                         evicting_in_pool = any(
                             self._evicting_pools.get(mid, target_pool)
                             == target_pool
@@ -1715,8 +1708,7 @@ class LoadDirector:
                             )
                         )
                         # Lazy import to avoid a cycle: load_director ->
-                        # admin.operations -> supervisor -> load_director
-                        # (Task E will wire the supervisor to LoadDirector).
+                        # admin.operations -> supervisor -> load_director.
                         from muse.admin.operations import OperationError
                         capacity_failure = OperationError(
                             "model_too_large_for_device",
@@ -1750,7 +1742,7 @@ class LoadDirector:
                     # fail their fit check during the out-of-lock disable_fn
                     # window raise retryable=True (capacity WILL free when
                     # this eviction completes) instead of mass-503ing while
-                    # the director looks idle (v0.57.2 stress finding).
+                    # the director looks idle.
                     self.evicting.add(victim_id)
                     self._evicting_pools[victim_id] = target_pool
                     self._evicting_memory_gb[victim_id] = victim_memory_gb
@@ -1773,7 +1765,7 @@ class LoadDirector:
                     )
                     self.recent_decisions.append(decision)
 
-                    # Task 9: fire-and-forget telemetry event for this
+                    # Fire-and-forget telemetry event for this
                     # eviction. Guarded the same way as the load-site record()
                     # call above: telemetry can never break a real eviction.
                     try:
@@ -1800,7 +1792,7 @@ class LoadDirector:
                 return
 
             # ---- slow steps ----
-            # v0.57.3 (review finding): the evicting marker must clear on
+            # The evicting marker must clear on
             # EVERY exit of this out-of-lock region -- including a
             # poll/probe exception below, which would otherwise leak the
             # marker and make every future capacity 503 spuriously
@@ -1972,8 +1964,7 @@ class LoadDirector:
         eviction against:
 
           - "gpu"        -> "cuda" (legacy alias)
-          - "auto" / ""  -> "cuda" if a GPU is visible, else "cpu". This is
-                            THE fix for the v0.48.0 control-plane bug: an
+          - "auto" / ""  -> "cuda" if a GPU is visible, else "cpu". An
                             auto-device model on a GPU host loads on the GPU,
                             so it must be sized against the VRAM pool, not
                             host RAM.

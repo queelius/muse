@@ -235,7 +235,7 @@ class SupervisorState:
     monitor_thread: "threading.Thread | None" = None
     idle_sweeper: "IdleSweeper | None" = None
     idle_sweeper_thread: "threading.Thread | None" = None
-    # Observability (Task 11). Both are None unless `telemetry.enabled` is
+    # Observability. Both are None unless `telemetry.enabled` is
     # true, in which case `_init_telemetry` populates them during
     # `run_supervisor` boot, before the gateway is built, so the mounted
     # dashboard router can read them. `telemetry_store` is the sqlite-backed
@@ -250,7 +250,7 @@ class SupervisorState:
     # with the singleton when any subordinate cleanup fails, so a later
     # repair/retry path never loses the ownership record.
     supervisor_resource_id: str | None = None
-    # #319 same-model cold-load coalescing (v0.51.0). model_id -> asyncio.Future
+    # #319 same-model cold-load coalescing. model_id -> asyncio.Future
     # gate. The FIRST request for a cold model becomes the loader (dispatches
     # one off-loop director.acquire); concurrent requests for the SAME model
     # await the gate on the event loop (no thread), so only one thread parks
@@ -827,7 +827,7 @@ def _attempt_restart(
         # deleted, or its python symlink broke on a system upgrade). Without
         # catching it, the exception escapes _monitor_workers and kills the
         # monitor daemon thread, silently disabling health-monitoring and
-        # auto-restart for ALL workers (M10).
+        # auto-restart for ALL workers.
         logger.error("worker on port %d: restart failed: %s", spec.port, e)
         _shutdown_workers([spec])
         spec.restart_count += 1
@@ -846,7 +846,7 @@ def _monitor_workers(
     """Poll each worker; restart after `failure_threshold` consecutive failures.
 
     Exits when stop_event is set. Called from the monitor daemon thread
-    started by run_supervisor (Task B4).
+    started by run_supervisor.
 
     Concurrency: `specs` is the live `state.workers` list shared with
     admin operations (enable/disable) that may call `state.workers.remove`

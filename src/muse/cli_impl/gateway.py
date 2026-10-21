@@ -2,14 +2,14 @@
 
 The gateway is the user-facing process (port 8000 by default). Workers
 live on internal ports (9001+). The gateway:
-  1. (v0.40.0+) Routes requests via state.director.acquire(model_id, manifest=...).
+  1. Routes requests via state.director.acquire(model_id, manifest=...).
      The director may load the model on demand if it isn't currently
      loaded (lazy load), evict an LRU model under memory pressure, or
      short-circuit 503 if the requested model exceeds device capacity.
   2. Extracts `model` from each request (body for POST, query for GET)
-  3. Forwards the request to the hosting worker, streaming the response (D4)
-  4. Aggregates /v1/models and /health across all workers (D3)
-  5. Mounts /v1/admin/* with bearer-token auth (v0.28.0+)
+  3. Forwards the request to the hosting worker, streaming the response
+  4. Aggregates /v1/models and /health across all workers
+  5. Mounts /v1/admin/* with bearer-token auth
 
 The legacy static-routes path (build_gateway(routes=...)) survives for
 tests that pre-date the lazy-load wiring. When `state.director` is set,
@@ -42,7 +42,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # `muse.cli_impl.gateway.get_manifest` / `._read_catalog` to inject
 # manifests or a catalog snapshot without touching state on disk.
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
-# models (v0.47.3); it is mtime-cached so per-request reads are cheap.
+# models; it is mtime-cached so per-request reads are cheap.
 from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, is_enabled, known_models
 from muse.core.discovery import (
@@ -690,7 +690,7 @@ def build_gateway(
                 continue
             aggregated.extend(items)
 
-        # v0.47.4: fill last_loaded_at on resident entries. Workers
+        # Fill last_loaded_at on resident entries. Workers
         # self-report it as null (they run outside a supervisor and have
         # no director); the gateway owns the load timestamps via
         # state.director.loaded[id].loaded_at, so we join them in here
@@ -698,7 +698,7 @@ def build_gateway(
         state = app.state.routes_state
         if state is not None:
             _enrich_loaded_at(state, aggregated)
-        # v0.47.3: also advertise enabled-but-unloaded catalog models so
+        # Also advertise enabled-but-unloaded catalog models so
         # /v1/models reflects the catalog, not just resident workers. The
         # loaded workers above are authoritative for loaded=True; here we
         # append every enabled catalog row not already present, with
@@ -750,10 +750,9 @@ def build_gateway(
                 models.update(
                     value for value in raw_models if isinstance(value, str)
                 )
-        # v0.47.4: also report enabled-but-unloaded catalog models so the
-        # serviceable surface matches /v1/models. A request naming one of
-        # these triggers an on-demand load; reporting only resident
-        # workers under-stated what the gateway can actually serve.
+        # Also report enabled-but-unloaded catalog models so the
+        # serviceable surface matches /v1/models: a request naming one of
+        # these triggers an on-demand load.
         state = app.state.routes_state
         if state is not None:
             already = [{"id": m} for m in models]
@@ -789,18 +788,16 @@ def build_gateway(
     # endpoints). Gated on BOTH: telemetry.enabled (a global off-switch)
     # AND state is not None (the legacy static-routes test path passes no
     # SupervisorState, so there is no state.telemetry_store/log_hub for
-    # the data endpoints to read). Mounting here is safe even before Task
-    # 11 wires telemetry_store/log_hub onto SupervisorState: the /dashboard
-    # HTML shell itself never touches state, only the gated data endpoints
-    # do, and those aren't hit until a client actually requests them.
+    # the data endpoints to read). The /dashboard HTML shell itself never
+    # touches state; only the gated data endpoints do.
     if config.get("telemetry.enabled") and state is not None:
         app.include_router(build_dashboard_router(state))
 
     @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(request: Request, full_path: str):
-        # NOTE: aggregated endpoints (/v1/models, /health) land in D3 as
-        # explicit routes registered BEFORE this catch-all, so they win
-        # via FastAPI's registration order.
+        # The aggregated endpoints (/v1/models, /health) are explicit routes
+        # registered BEFORE this catch-all, so they win via FastAPI's
+        # registration order.
 
         try:
             body = await cache_bounded_request_body(
@@ -861,7 +858,7 @@ def build_gateway(
             )
             model_id = default_id
 
-        # Director-driven path (v0.40.0+ lazy load). When the SupervisorState
+        # Director-driven path (lazy load). When the SupervisorState
         # carries a LoadDirector, every request acquires the worker port
         # via director.acquire and releases on completion. The director
         # transparently handles cold load, LRU eviction, and singleton-
@@ -875,8 +872,8 @@ def build_gateway(
             )
 
         # Legacy static-routes path: look up the worker URL in a frozen
-        # dict and forward. No acquire/release. Used by tests that
-        # pre-date Task F.
+        # dict and forward. No acquire/release. Used by tests that build
+        # the gateway with build_gateway(routes=...).
         cur = app.state.routes_now()
         route = cur.get(model_id)
         if route is None:
@@ -1071,7 +1068,7 @@ async def _route_via_director(
     *,
     cancellable_paths: frozenset[str] = frozenset(),
 ) -> Response:
-    """Director-driven request routing for v0.40.0 lazy load.
+    """Director-driven request routing for lazy load.
 
     `cancellable_paths` is the CANCEL_ON_DISCONNECT_PATHS set, computed once
     by build_gateway.
@@ -1208,7 +1205,7 @@ async def _route_via_director(
         )
     except QueueTimeout:
         # Report the ACTUAL elapsed wait, not the configured budget: an
-        # early fast-fail would otherwise claim "waited 300s" (v0.57.3).
+        # early fast-fail would otherwise claim "waited 300s".
         return error_response(
             503, "queue_timeout",
             f"waited {time.monotonic() - queue_t0:.0f}s for a slot on "
@@ -1240,7 +1237,7 @@ async def _route_via_director(
     # 3b. Acquire, OFF the event loop and COALESCED per model, wrapped in a
     # bounded capacity wait. director.acquire may block for tens of seconds on
     # a cold load; running it synchronously would freeze the single gateway
-    # event loop (v0.50.3). _acquire_coalesced elects ONE loader per cold model
+    # event loop. _acquire_coalesced elects ONE loader per cold model
     # (#319). _acquire_with_capacity_wait parks on a retryable capacity 503
     # until a release/eviction fires capacity_notifier or the deadline lapses.
     try:
@@ -1624,7 +1621,7 @@ async def _forward_with_release(
     # the refcount. A ClientDisconnect (client vanished mid-body) here --
     # reachable for a body-bearing GET, whose body is unread during model
     # extraction -- would otherwise skip release and strand the refcount,
-    # wedging eviction. Release the slot first, then re-raise (L16).
+    # wedging eviction. Release the slot first, then re-raise.
     try:
         body = await request.body()
     except BaseException:
