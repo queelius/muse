@@ -1556,6 +1556,24 @@ def test_get_manifest_also_ignores_resolver_collision_with_bundled(tmp_catalog):
     assert manifest["modality"] == "audio/speech"
 
 
+def test_get_manifest_for_aliased_script_uses_the_discovery_cache(tmp_catalog):
+    """A script whose Model aliases a shared runtime gets its MANIFEST from
+    the cached discovery scan, not a fresh discover_models() per call."""
+    from muse.core.catalog import get_manifest
+
+    known_models()
+    with patch(
+        "muse.core.catalog.discover_models",
+        side_effect=AssertionError("discovery must not re-run"),
+    ):
+        manifest = get_manifest("smolvlm-256m-instruct")
+        manifest["model_id"] = "mutated"
+        again = get_manifest("smolvlm-256m-instruct")
+
+    assert manifest["capabilities"]["supports_vision"] is True
+    assert again["model_id"] == "smolvlm-256m-instruct"
+
+
 def test_invalid_persisted_manifest_isolated_from_valid_entries(
     tmp_catalog, caplog,
 ):

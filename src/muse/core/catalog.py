@@ -245,8 +245,10 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
 # Discovery projection cache: the importlib-driven scan of model script
 # dirs. Built once per process (script imports execute module bodies, and
 # bundled/user scripts do not change under a running server); reset via
-# _reset_known_models_cache().
+# _reset_known_models_cache(). The scripts' MANIFEST dicts are kept beside
+# their projected entries for get_manifest().
 _discovered_entries_cache: dict[str, CatalogEntry] | None = None
+_discovered_manifests_cache: dict[str, dict] | None = None
 
 # Merged known-models cache, keyed by the catalog.json identity
 # (path_str, mtime_ns) it was built against. A catalog write from ANY
@@ -775,6 +777,7 @@ def known_models() -> dict[str, CatalogEntry]:
     which is always acquired before _CATALOG_WRITE_LOCK.
     """
     global _known_models_cache, _discovered_entries_cache
+    global _discovered_manifests_cache
     # Fast path: cache built against the current catalog file identity.
     key = _catalog_cache_key()
     cached = _known_models_cache
@@ -794,6 +797,9 @@ def known_models() -> dict[str, CatalogEntry]:
             _discovered_entries_cache = {
                 model_id: _manifest_to_catalog_entry(d)
                 for model_id, d in discovered.items()
+            }
+            _discovered_manifests_cache = {
+                model_id: d.manifest for model_id, d in discovered.items()
             }
         entries = dict(_discovered_entries_cache)
         catalog = _read_catalog()
@@ -877,9 +883,11 @@ def _reset_known_models_cache() -> None:
     rebuild, so the next known_models() call always rebuilds fresh.
     """
     global _known_models_cache, _discovered_entries_cache
+    global _discovered_manifests_cache
     with _KNOWN_MODELS_LOCK:
         _known_models_cache = None
         _discovered_entries_cache = None
+        _discovered_manifests_cache = None
 
 
 def _catalog_dir() -> Path:
@@ -2900,7 +2908,7 @@ def get_manifest(model_id: str) -> dict:
          uses, so a curated.yaml edit affects gating (this function) and
          construction (known_models() -> load_backend) identically --
          see `_apply_manifest_overlays` for why that matters.
-      2. The model script's module-level MANIFEST (bundled scripts).
+      2. The model script's module-level MANIFEST, cached by discovery.
 
     Returns a copy so callers can mutate without affecting the source.
 
@@ -2911,10 +2919,7 @@ def get_manifest(model_id: str) -> dict:
     entry_data = catalog.get(model_id, {})
     persisted = entry_data.get("manifest")
     with _KNOWN_MODELS_LOCK:
-        is_discovered = (
-            _discovered_entries_cache is not None
-            and model_id in _discovered_entries_cache
-        )
+        discovered_manifest = (_discovered_manifests_cache or {}).get(model_id)
     if model_id not in catalog_known:
         if persisted is not None:
             try:
@@ -2924,7 +2929,7 @@ def get_manifest(model_id: str) -> dict:
                     f"catalog entry for {model_id!r} has an invalid manifest: {exc}"
                 ) from exc
         raise KeyError(f"unknown model {model_id!r}; known: {sorted(catalog_known)}")
-    if persisted is not None and not is_discovered:
+    if persisted is not None and discovered_manifest is None:
         try:
             overlaid = _apply_manifest_overlays(model_id, persisted, entry_data)
             return _validated_persisted_manifest(model_id, overlaid)
@@ -2932,20 +2937,11 @@ def get_manifest(model_id: str) -> dict:
             raise CatalogError(
                 f"catalog entry for {model_id!r} has an invalid manifest: {exc}"
             ) from exc
-    entry = catalog_known[model_id]
-    module_path, _ = entry.backend_path.split(":", 1)
-    module = _import_backend_module(module_path)
-    manifest = getattr(module, "MANIFEST", None)
-    # Most bundled scripts define `class Model` in the script itself, so
-    # backend_path's module IS the script and carries the MANIFEST. But a
-    # script may alias its Model to a shared runtime class (e.g.
-    # `from ...runtimes.transformers_vlm import HFVisionLanguageModel as Model`),
-    # which makes backend_path point at the runtime module - and that module
-    # has no MANIFEST (or one for a different model). In that case the
-    # capabilities (supports_vision, etc.) would be silently lost and routes
-    # would mis-gate the model. Recover the real MANIFEST from discovery.
-    if not manifest or manifest.get("model_id") != model_id:
-        discovered = discover_models(_model_dirs()).get(model_id)
-        if discovered is not None:
-            return dict(discovered.manifest)
-    return dict(manifest or {})
+    if discovered_manifest is None:
+        # The discovery cache was reset after known_models() built it.
+        known_models()
+        with _KNOWN_MODELS_LOCK:
+            discovered_manifest = (_discovered_manifests_cache or {}).get(model_id)
+    # The script's own MANIFEST, from discovery: a script may alias its Model
+    # to a shared runtime class, so backend_path's module need not carry it.
+    return dict(discovered_manifest or {})
