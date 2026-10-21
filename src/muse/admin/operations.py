@@ -211,15 +211,22 @@ def _require_model_python_path(model_id: str) -> str:
             f"model {model_id!r} not pulled; run pull first",
             status=409,
         )
-    entry = _read_catalog().get(model_id)
-    python_path = entry.get("python_path") if isinstance(entry, dict) else None
-    if not python_path:
+    python_path = _catalog_python_path(model_id)
+    if python_path is None:
         raise OperationError(
             "missing_venv",
             f"model {model_id!r} has no per-model venv on record",
             status=409,
         )
-    return str(python_path)
+    return python_path
+
+
+def _catalog_python_path(model_id: str) -> str | None:
+    """Return the per-model venv interpreter on record, or None."""
+    entry = _read_catalog().get(model_id)
+    if isinstance(entry, dict) and entry.get("python_path"):
+        return str(entry["python_path"])
+    return None
 
 
 def _wait_for_worker_operation(
@@ -668,7 +675,7 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
         try:
             transition = _claim_worker_siblings(state, python_path, model_id)
             spec_to_shutdown: WorkerSpec | None = None
-            shutdown_index: int | None = None
+            shutdown_index = 0
             spec_to_restart: WorkerSpec | None = None
             planned_models: tuple[str, ...] = ()
             retry = False
@@ -706,26 +713,10 @@ def unload_model_from_worker(model_id: str, *, state: SupervisorState) -> None:
                     isinstance(shutdown_result, WorkerShutdownResult)
                     and shutdown_result.retained_spec(spec_to_shutdown)
                 ):
-                    with state.lock:
-                        spec_to_shutdown.status = "dead"
-                        spec_to_shutdown.job_id = None
-                        if not any(
-                            candidate is spec_to_shutdown
-                            for candidate in state.workers
-                        ):
-                            index = min(
-                                shutdown_index
-                                if shutdown_index is not None
-                                else len(state.workers),
-                                len(state.workers),
-                            )
-                            state.workers.insert(index, spec_to_shutdown)
-                    raise OperationError(
-                        "worker_shutdown_incomplete",
-                        f"worker on port {spec_to_shutdown.port} could not "
-                        "be fully released",
-                        status=503,
+                    _reinsert_retained_workers(
+                        state, [(shutdown_index, spec_to_shutdown)],
                     )
+                    raise WorkerCleanupError(spec_to_shutdown.port)
                 return
 
             assert spec_to_restart is not None
@@ -797,10 +788,10 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
     in-place phase runs OUTSIDE the lock. The auto-restart monitor
     skips the spec while we own it via `job_id`.
 
-    Three paths:
-      1. model unknown -> OperationError(404).
-      2. model not loaded in any worker -> catalog flip only.
-      3. model is loaded -> drop it from the worker; if it was the only
+    The caller (`disable_model`) has already rejected unknown ids. Two
+    paths:
+      1. model not loaded in any worker -> catalog flip only.
+      2. model is loaded -> drop it from the worker; if it was the only
          model in that worker, pop the spec then terminate it (slow
          step outside the lock); else restart-in-place with the reduced
          load list (slow step outside the lock).
@@ -810,27 +801,14 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
     desynchronize the auto-restart monitor thread, which captured the
     original list reference at supervisor boot.
     """
-    catalog_known = known_models()
-    if model_id not in catalog_known:
-        raise OperationError(
-            "model_not_found", f"unknown model {model_id!r}", status=404,
-        )
-
     while True:
-        catalog_entry = _read_catalog().get(model_id)
+        catalog_python_path = _catalog_python_path(model_id)
         with state.lock:
             initial = next(
                 (s for s in state.workers if model_id in s.models), None,
             )
         python_path = (
-            initial.python_path
-            if initial is not None
-            else (
-                str(catalog_entry.get("python_path"))
-                if isinstance(catalog_entry, dict)
-                and catalog_entry.get("python_path")
-                else None
-            )
+            initial.python_path if initial is not None else catalog_python_path
         )
 
         # Bundled-but-unpulled models have no venv and therefore no worker
@@ -860,19 +838,13 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
         transition_failed = False
         try:
             spec_to_shutdown: WorkerSpec | None = None
-            shutdown_index: int | None = None
+            shutdown_index = 0
             spec_to_restart: WorkerSpec | None = None
             result_unloaded: dict | None = None
             planned_models: tuple[str, ...] = ()
             retry = False
 
-            current_entry = _read_catalog().get(model_id)
-            current_python_path = (
-                str(current_entry.get("python_path"))
-                if isinstance(current_entry, dict)
-                and current_entry.get("python_path")
-                else None
-            )
+            current_python_path = _catalog_python_path(model_id)
             if current_python_path is not None and current_python_path != python_path:
                 continue
 
@@ -920,26 +892,10 @@ def _disable_model_worker(model_id: str, *, state: SupervisorState) -> dict:
                     isinstance(shutdown_result, WorkerShutdownResult)
                     and shutdown_result.retained_spec(spec_to_shutdown)
                 ):
-                    with state.lock:
-                        spec_to_shutdown.status = "dead"
-                        spec_to_shutdown.job_id = None
-                        if not any(
-                            candidate is spec_to_shutdown
-                            for candidate in state.workers
-                        ):
-                            index = min(
-                                shutdown_index
-                                if shutdown_index is not None
-                                else len(state.workers),
-                                len(state.workers),
-                            )
-                            state.workers.insert(index, spec_to_shutdown)
-                    raise OperationError(
-                        "worker_shutdown_incomplete",
-                        f"worker on port {spec_to_shutdown.port} could not "
-                        "be fully released",
-                        status=503,
+                    _reinsert_retained_workers(
+                        state, [(shutdown_index, spec_to_shutdown)],
                     )
+                    raise WorkerCleanupError(spec_to_shutdown.port)
                 return {
                     "model_id": model_id,
                     "loaded": False,
@@ -1115,19 +1071,13 @@ def remove_model(model_id: str, *, state: SupervisorState, purge: bool) -> dict:
         raise OperationError(
             "model_not_found", f"unknown model {model_id!r}", status=404,
         )
-    catalog_entry = _read_catalog().get(model_id)
+    catalog_python_path = _catalog_python_path(model_id)
     with state.lock:
         initial = next(
             (s for s in state.workers if model_id in s.models), None,
         )
     python_path = (
-        initial.python_path
-        if initial is not None
-        else (
-            str(catalog_entry.get("python_path"))
-            if isinstance(catalog_entry, dict) and catalog_entry.get("python_path")
-            else None
-        )
+        initial.python_path if initial is not None else catalog_python_path
     )
 
     # A malformed pulled entry with no interpreter cannot be loaded, so it
@@ -1148,9 +1098,7 @@ def remove_model(model_id: str, *, state: SupervisorState, purge: bool) -> dict:
             _wait_for_worker_operation(state, operation)
             # The completed operation may have replaced the catalog entry
             # with a different venv. Recompute before claiming a generation.
-            refreshed = _read_catalog().get(model_id)
-            if isinstance(refreshed, dict) and refreshed.get("python_path"):
-                python_path = str(refreshed["python_path"])
+            python_path = _catalog_python_path(model_id) or python_path
             continue
 
         try:
@@ -1158,12 +1106,7 @@ def remove_model(model_id: str, *, state: SupervisorState, purge: bool) -> dict:
             # first is now visible and blocks deletion; a load that arrives
             # later waits until removal completes and then fails its catalog
             # revalidation rather than spawning from a deleted venv.
-            refreshed = _read_catalog().get(model_id)
-            refreshed_python_path = (
-                str(refreshed.get("python_path"))
-                if isinstance(refreshed, dict) and refreshed.get("python_path")
-                else None
-            )
+            refreshed_python_path = _catalog_python_path(model_id)
             if (
                 refreshed_python_path is not None
                 and refreshed_python_path != python_path
