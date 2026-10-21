@@ -36,6 +36,7 @@ import httpx
 from muse.cli_impl.serve_util import run_uvicorn
 
 from muse.cli_impl.idle_sweeper import IdleSweeper
+from muse.cli_impl.queueing import CapacityNotifier, ConcurrencyGate
 from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, model_load_blocker
 
@@ -176,23 +177,6 @@ class WorkerOperation:
         return f"{self.owner}@{self.generation}"
 
 
-def _new_gate():
-    """Default factory for SupervisorState.concurrency_gate.
-
-    Lazy import keeps the dataclass default construction free of any module
-    the field type names (queueing.py imports only stdlib + config, so this
-    is cheap; the lazy form simply keeps the import off supervisor's top).
-    """
-    from muse.cli_impl.queueing import ConcurrencyGate
-    return ConcurrencyGate()
-
-
-def _new_notifier():
-    """Default factory for SupervisorState.capacity_notifier."""
-    from muse.cli_impl.queueing import CapacityNotifier
-    return CapacityNotifier()
-
-
 @dataclass
 class SupervisorState:
     """Runtime state shared across the supervisor and admin endpoints.
@@ -280,8 +264,8 @@ class SupervisorState:
     # and re-decide. Both are default-constructed so a bare test state gets
     # real, usable primitives; run_supervisor wires
     # director.capacity_listener -> capacity_notifier.notify.
-    concurrency_gate: "ConcurrencyGate" = field(default_factory=_new_gate)
-    capacity_notifier: "CapacityNotifier" = field(default_factory=_new_notifier)
+    concurrency_gate: ConcurrencyGate = field(default_factory=ConcurrencyGate)
+    capacity_notifier: CapacityNotifier = field(default_factory=CapacityNotifier)
     # Exclusive worker transitions keyed by per-model venv Python path.
     # Admin enable/disable, director load/unload, removal, and monitor
     # restart all share this registry.  Entries are waitable and removed by
