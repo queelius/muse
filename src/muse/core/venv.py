@@ -35,6 +35,20 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Sequence
 
+from muse.core.owned_process import (
+    MANAGED_JOB_GROUP_ENV,
+    REAL_POPEN_TYPE,
+    BoundedTail,
+    cleanup_deadlines,
+    concrete_safe_id,
+    drain_stream_into,
+    kill_signal,
+    leader_exited_nowait,
+    new_process_group_kwargs,
+    signal_isolated_group,
+    supports_pinned_leader,
+    validated_isolated_group,
+)
 from muse.core.resolvers import COMMIT_RE
 
 logger = logging.getLogger(__name__)
@@ -73,8 +87,8 @@ _CAPTURE_JOIN_TIMEOUT = 1.0
 # TERM and KILL share the budget instead of each receiving a full timeout.
 _CLEANUP_TIMEOUT = 5.0
 _OS_NAME = os.name
-_REAL_POPEN_TYPE = subprocess.Popen
-_MANAGED_JOB_GROUP_ENV = "MUSE_MANAGED_JOB_PROCESS_GROUP"
+_REAL_POPEN_TYPE = REAL_POPEN_TYPE
+_MANAGED_JOB_GROUP_ENV = MANAGED_JOB_GROUP_ENV
 
 
 # Thread-local verbose flag. The CLI flips this via
@@ -162,36 +176,22 @@ class _GitPythonSourceSpec:
     submodules: tuple[_GitSubmoduleSpec, ...]
 
 
-class _BoundedCapture:
-    """Keep the tail of one binary pipe while accounting for truncation."""
+class _BoundedCapture(BoundedTail):
+    """Keep the tail of one binary pipe while accounting for truncation.
+
+    Installer output is decoded with the locale encoding. Read errors are
+    not rendered: installer readers swallow them when cleanup closes a pipe.
+    """
 
     def __init__(self, limit: int = _CAPTURE_LIMIT_BYTES) -> None:
-        self._limit = max(0, int(limit))
-        self._buffer = bytearray()
-        self._discarded = 0
-        self._lock = threading.Lock()
-
-    def append(self, chunk: bytes | str) -> None:
-        if isinstance(chunk, str):
-            data = chunk.encode(locale.getpreferredencoding(False), errors="replace")
-        else:
-            data = bytes(chunk)
-        if not data:
-            return
-        with self._lock:
-            self._buffer.extend(data)
-            excess = len(self._buffer) - self._limit
-            if excess > 0:
-                del self._buffer[:excess]
-                self._discarded += excess
+        super().__init__(limit)
 
     def text(self) -> str:
-        encoding = locale.getpreferredencoding(False)
-        with self._lock:
-            body = self._buffer.decode(encoding, errors="replace")
-            if not self._discarded:
-                return body
-            return f"[... {self._discarded} output bytes truncated ...]\n{body}"
+        data, discarded, _read_error = self.snapshot()
+        body = data.decode(locale.getpreferredencoding(False), errors="replace")
+        if not discarded:
+            return body
+        return f"[... {discarded} output bytes truncated ...]\n{body}"
 
 
 @dataclass
@@ -201,30 +201,12 @@ class _CaptureReader:
     thread: threading.Thread
 
 
-def _concrete_safe_id(value: Any) -> int | None:
-    """Return a concrete signal-safe PID/PGID, rejecting bools and mocks."""
-    if type(value) is not int or value <= 1:
-        return None
-    return value
+_concrete_safe_id = concrete_safe_id
 
 
 def _validated_isolated_group(pid: int | None) -> int | None:
     """Return a child-owned POSIX process group only when fully proven."""
-    if _OS_NAME != "posix" or pid is None:
-        return None
-    try:
-        process_group = _concrete_safe_id(os.getpgid(pid))
-        own_group = _concrete_safe_id(os.getpgrp())
-    except OSError as exc:
-        logger.warning("could not validate installer process group for pid %s: %s", pid, exc)
-        return None
-    if process_group != pid or own_group is None or process_group == own_group:
-        logger.error(
-            "refusing installer process-group ownership for pid=%r pgid=%r own_pgid=%r",
-            pid, process_group, own_group,
-        )
-        return None
-    return process_group
+    return validated_isolated_group(pid, os_name=_OS_NAME, label="installer")
 
 
 def _spawn_owned(
@@ -235,15 +217,14 @@ def _spawn_owned(
 ) -> _OwnedProcess:
     """Start one installer in an isolated group and retain its exact handle."""
     popen_kwargs: dict[str, Any] = {}
-    if (
+    # Inside an admin job the job's outer group is authoritative: a nested
+    # session would escape the group JobStore drains, so the installer stays
+    # in it and owns no group of its own (exact-handle fallback cleanup).
+    if not (
         _OS_NAME == "posix"
-        and os.environ.get(_MANAGED_JOB_GROUP_ENV) != "1"
+        and os.environ.get(_MANAGED_JOB_GROUP_ENV) == "1"
     ):
-        popen_kwargs["start_new_session"] = True
-    elif _OS_NAME == "nt":
-        create_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        if create_group:
-            popen_kwargs["creationflags"] = create_group
+        popen_kwargs.update(new_process_group_kwargs(_OS_NAME))
     if capture_output:
         # Unbuffered FileIO lets cleanup close the stream object itself. A raw
         # os.close(fd) would leave a Python wrapper holding the old number and
@@ -268,11 +249,7 @@ def _spawn_owned(
 def _drain_pipe(stream: BinaryIO, capture: _BoundedCapture) -> None:
     """Continuously drain one child pipe, retaining only its bounded tail."""
     try:
-        while True:
-            chunk = stream.read(_CAPTURE_READ_BYTES)
-            if not chunk:
-                break
-            capture.append(chunk)
+        drain_stream_into(stream, capture, read_bytes=_CAPTURE_READ_BYTES)
     except (OSError, ValueError):
         # Cleanup may close a pipe to release a reader whose writer did not
         # exit cleanly. The captured prefix/tail remains useful diagnostics.
@@ -372,16 +349,8 @@ def _target_alive(target: _OwnedProcess) -> bool:
 
 def _supports_pinned_leader(target: _OwnedProcess) -> bool:
     """Whether WNOWAIT can pin this exact real POSIX child identity."""
-    return (
-        _OS_NAME == "posix"
-        and target.pid is not None
-        and target.process_group == target.pid
-        and isinstance(target.process, _REAL_POPEN_TYPE)
-        and callable(getattr(os, "waitid", None))
-        and getattr(os, "P_PID", None) is not None
-        and getattr(os, "WEXITED", None) is not None
-        and getattr(os, "WNOHANG", None) is not None
-        and getattr(os, "WNOWAIT", None) is not None
+    return supports_pinned_leader(
+        target.process, target.pid, target.process_group, os_name=_OS_NAME,
     )
 
 
@@ -397,10 +366,9 @@ def _observe_owned_leader(
             "WNOWAIT requested for an unsupported installer child"
         )
     deadline = time.monotonic() + max(0.0, timeout)
-    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
     while True:
         try:
-            status = os.waitid(os.P_PID, target.pid, flags)
+            exited = leader_exited_nowait(target.pid)
         except InterruptedError:
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(list(command), timeout)
@@ -416,7 +384,7 @@ def _observe_owned_leader(
             raise _OwnedProcessCleanupError(
                 f"could not observe installer leader {target.pid} safely"
             ) from exc
-        if status is not None and getattr(status, "si_pid", target.pid) == target.pid:
+        if exited:
             target.leader_exit_observed = True
             return
         remaining = deadline - time.monotonic()
@@ -503,40 +471,18 @@ def _signal_owned(target: _OwnedProcess, sig: signal.Signals, *, force: bool) ->
                 target.pid, process_group,
             )
             return False
-        try:
-            own_group = _concrete_safe_id(os.getpgrp())
-        except OSError:
-            own_group = None
-        group_is_safe = (
-            own_group is not None
-            and process_group > 1
-            and process_group == target.pid
-            and process_group != own_group
-        )
-        if group_is_safe:
-            if mocked_group and not _target_alive(target):
-                logger.warning(
-                    "refusing installer signal after leader exit during "
-                    "group revalidation (pid=%r pgid=%r)",
-                    target.pid, process_group,
-                )
-                return False
-            try:
-                os.killpg(process_group, sig)
-            except ProcessLookupError:
-                return True
-            except OSError as exc:
-                logger.warning("could not signal installer process group %s: %s", process_group, exc)
-            else:
-                return True
-        else:
-            logger.error(
-                "refusing unsafe installer group signal pid=%r pgid=%r own_pgid=%r",
-                target.pid, process_group, own_group,
-            )
         # A verified group that failed signaling must not fall through to a
-        # second numeric identity. The caller reports cleanup failure.
-        return False
+        # second numeric identity; the caller reports cleanup failure. Mock
+        # children re-poll between validation and killpg (double poll).
+        return signal_isolated_group(
+            target.pid,
+            process_group,
+            sig,
+            label="installer",
+            still_owned=(
+                (lambda: _target_alive(target)) if mocked_group else None
+            ),
+        )
 
     if not _target_alive(target):
         logger.warning(
@@ -564,8 +510,7 @@ def _terminate_owned_fallback(
     if _target_alive(target):
         _signal_owned(target, signal.SIGTERM, force=False)
         if not _wait_until_gone(target, term_deadline):
-            kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-            _signal_owned(target, kill_signal, force=True)
+            _signal_owned(target, kill_signal(), force=True)
             if not _wait_until_gone(target, deadline):
                 raise _OwnedProcessCleanupError(
                     f"installer child {target.pid} did not exit before "
@@ -595,9 +540,7 @@ def _terminate_owned(target: _OwnedProcess, *, timeout: float | None = None) -> 
     """
     if timeout is None:
         timeout = _CLEANUP_TIMEOUT
-    started = time.monotonic()
-    deadline = started + max(0.0, timeout)
-    term_deadline = started + max(0.0, timeout) * 0.6
+    term_deadline, deadline = cleanup_deadlines(timeout)
     if not _supports_pinned_leader(target):
         _terminate_owned_fallback(
             target, deadline=deadline, term_deadline=term_deadline,
@@ -619,8 +562,7 @@ def _terminate_owned(target: _OwnedProcess, *, timeout: float | None = None) -> 
 
     # Always send the terminal signal while the leader identity is pinned:
     # the leader may have honored TERM while a descendant ignored it.
-    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-    kill_ok = _signal_owned(target, kill_signal, force=True)
+    kill_ok = _signal_owned(target, kill_signal(), force=True)
     if not term_ok:
         logger.warning(
             "could not deliver TERM to installer group pid=%r pgid=%r",
@@ -663,8 +605,7 @@ def _run_owned(
             # The exited leader remains an unreaped zombie, pinning the
             # validated equal PID/PGID. Kill any descendants that survived
             # their leader before releasing that identity.
-            kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-            if not _signal_owned(target, kill_signal, force=True):
+            if not _signal_owned(target, kill_signal(), force=True):
                 raise _OwnedProcessCleanupError(
                     f"could not clean completed installer group "
                     f"{target.process_group}"
