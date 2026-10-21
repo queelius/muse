@@ -106,6 +106,18 @@ def _in_transaction(entries: list[Path]) -> set[str]:
     }
 
 
+def is_package_file(rel: Path, size: int) -> bool:
+    """Whether a file at `rel` (relative to its venv) of `size` bytes is one
+    dedupe may share: a large file under lib/python*/site-packages, outside
+    __pycache__. venv_transaction hardlinks the same files when it clones."""
+    parts = rel.parts
+    return (
+        size >= MIN_BYTES and len(parts) > 3 and parts[0] == "lib"
+        and parts[1].startswith("python") and parts[2] == "site-packages"
+        and "__pycache__" not in parts
+    )
+
+
 def _package_files(venv: Path) -> list[_File]:
     out = []
     for site in sorted(venv.glob("lib/python*/site-packages")):

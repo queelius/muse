@@ -838,8 +838,34 @@ def ensure_venv(
         )
 
 
+def _clone_file(prior: Path, target: Path):
+    """copytree copy_function for cloning `prior` back to `target`.
+
+    Large package files are hardlinked rather than copied. The prior venv
+    stays a valid rollback because pip unlinks an installed file before
+    writing its replacement (the invariant venv_dedupe relies on), and the
+    clone keeps the links dedupe made. Anything else is copied.
+    """
+    from muse.core.venv_dedupe import is_package_file
+
+    def clone(src: str, dst: str) -> str:
+        rel = Path(dst).relative_to(target)
+        try:
+            if is_package_file(rel, os.lstat(src).st_size):
+                os.link(src, dst)
+                return dst
+        except OSError:
+            pass  # e.g. EXDEV or a link-count limit: fall back to a copy
+        return shutil.copy2(src, dst)
+
+    return clone
+
+
 def _venv_clone_bytes(source: Path) -> int:
-    """Conservatively estimate bytes needed to copy one venv tree."""
+    """Conservatively estimate bytes needed to clone one venv tree (files
+    the clone hardlinks cost nothing; see `_clone_file`)."""
+    from muse.core.venv_dedupe import is_package_file
+
     total = 0
     try:
         for root, directories, files in os.walk(source, followlinks=False):
@@ -848,6 +874,10 @@ def _venv_clone_bytes(source: Path) -> int:
             for entry in entries:
                 metadata = entry.lstat()
                 if stat.S_ISLNK(metadata.st_mode):
+                    continue
+                if stat.S_ISREG(metadata.st_mode) and is_package_file(
+                    entry.relative_to(source), metadata.st_size,
+                ):
                     continue
                 allocated = int(getattr(metadata, "st_blocks", 0)) * 512
                 total += max(4096, int(metadata.st_size), allocated)
@@ -951,7 +981,7 @@ class _VenvTransaction:
                 prior,
                 self.path,
                 symlinks=True,
-                copy_function=shutil.copy2,
+                copy_function=_clone_file(prior, self.path),
             )
             ensure_venv(self.path)
         except BaseException as exc:

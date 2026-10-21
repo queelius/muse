@@ -556,6 +556,29 @@ class TestVenvTransaction:
         assert (target / "marker").read_text(encoding="utf-8") == "prior"
         assert list(tmp_path.glob(".model.transaction-*")) == []
 
+    def test_large_package_files_are_linked_and_survive_rollback(self, tmp_path):
+        import os
+
+        target = _complete_test_venv(tmp_path / "model")
+        site = target / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        big = site / "torch" / "lib.so"
+        big.parent.mkdir()
+        big.write_bytes(b"x" * (1 << 20))
+        small = site / "torch" / "RECORD"
+        small.write_text("prior")
+        inode = os.stat(big).st_ino
+
+        with venv_transaction(target):
+            assert os.stat(big).st_ino == inode
+            assert os.stat(small).st_nlink == 1
+            # pip-style upgrade: unlink, then write the replacement.
+            big.unlink()
+            big.write_bytes(b"y" * (1 << 20))
+
+        assert os.stat(big).st_ino == inode
+        assert big.read_bytes() == b"x" * (1 << 20)
+
     def test_new_uncommitted_venv_is_removed(self, tmp_path):
         target = tmp_path / "model"
 
