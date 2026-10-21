@@ -25,7 +25,6 @@ import copy
 import importlib
 from importlib import metadata as importlib_metadata
 import contextlib
-import hashlib
 import logging
 import os
 import shutil
@@ -39,7 +38,18 @@ from typing import Any
 
 from huggingface_hub import snapshot_download
 
-from muse.core import config, securefs
+from muse.core import config
+from muse.core.catalog_locks import (
+    _PULL_LOCKS_GUARD,
+    _PULL_THREAD_LOCKS,
+    _RESOURCE_LOCKS_GUARD,
+    _RESOURCE_THREAD_LOCKS,
+    _STORAGE_THREAD_LOCK,
+    _advisory_lock,
+    _model_pull_lock,
+    _model_resource_lease,
+    _storage_cache_lock,
+)
 from muse.core.catalog_store import (
     _CATALOG_WRITE_LOCK,
     _MAX_CATALOG_BYTES,
@@ -269,93 +279,6 @@ _KNOWN_MODELS_LOCK: threading.Lock = threading.Lock()
 def check_system_packages(packages: list[str]) -> list[str]:
     """Return the subset of system packages not found on PATH."""
     return [p for p in packages if shutil.which(p) is None]
-
-
-# The catalog transaction lock protects JSON consistency, but two processes
-# installing into the same venv can corrupt site-packages before either one
-# writes catalog.json. Pair a per-identity thread lock with an advisory file
-# lock that spans the complete pull helper call. Resolver URIs are digested so
-# untrusted identifier text never becomes part of a filesystem path.
-_PULL_LOCKS_GUARD = threading.Lock()
-_PULL_THREAD_LOCKS: dict[str, threading.RLock] = {}
-_RESOURCE_LOCKS_GUARD = threading.Lock()
-_RESOURCE_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_STORAGE_THREAD_LOCK = threading.RLock()
-
-
-@contextlib.contextmanager
-def _advisory_lock(path: Path, thread_lock, *, wait: bool, busy_exc: Exception):
-    """Hold ``thread_lock`` then an advisory file lock at ``path``.
-
-    Acquires the in-process lock first and the file lock second, releasing
-    in reverse. With ``wait=False`` either being busy raises ``busy_exc``.
-    """
-    if not thread_lock.acquire(blocking=wait):
-        raise busy_exc
-    try:
-        _ensure_owned_directory(path.parent, private=True)
-        handle = _open_catalog_lock(path)
-        try:
-            if not securefs.lock_file(handle, blocking=wait):
-                raise busy_exc
-            try:
-                yield
-            finally:
-                securefs.unlock_file(handle)
-        finally:
-            handle.close()
-    finally:
-        thread_lock.release()
-
-
-def _model_pull_lock(identity: str, *, wait: bool = True):
-    """Thread/process lock covering one model's complete pull transaction."""
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-    with _PULL_LOCKS_GUARD:
-        thread_lock = _PULL_THREAD_LOCKS.setdefault(digest, threading.RLock())
-    return _advisory_lock(
-        _catalog_dir() / "locks" / f"pull-{digest}.lock",
-        thread_lock,
-        wait=wait,
-        busy_exc=ModelInUseError(
-            f"model {identity!r} has an active pull or update; retry later"
-        ),
-    )
-
-
-def _storage_cache_lock(*, wait: bool = True):
-    """Serialize mutation of the Muse-owned weights cache across processes."""
-    return _advisory_lock(
-        _catalog_dir() / "locks" / "storage-cache.lock",
-        _STORAGE_THREAD_LOCK,
-        wait=wait,
-        busy_exc=StorageBusyError(
-            "Muse's weights cache is busy with another pull or cleanup"
-        ),
-    )
-
-
-def _model_resource_lease(model_id: str, *, wait: bool = False):
-    """Exclusive lifetime lease for one model's venv and weight resources.
-
-    Workers acquire a blocking lease for their whole lifetime. Commands that
-    mutate or probe the environment use ``wait=False`` and fail clearly when
-    a live worker still owns it. The advisory file lock makes this contract
-    work across the supervisor, worker venv, and direct CLI processes.
-    """
-    if not isinstance(model_id, str) or not model_id:
-        raise ValueError("model resource lease requires a non-empty model id")
-    digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()
-    with _RESOURCE_LOCKS_GUARD:
-        thread_lock = _RESOURCE_THREAD_LOCKS.setdefault(digest, threading.Lock())
-    return _advisory_lock(
-        _catalog_dir() / "locks" / f"resource-{digest}.lock",
-        thread_lock,
-        wait=wait,
-        busy_exc=ModelInUseError(
-            f"model {model_id!r} is in use; stop or unload it and retry"
-        ),
-    )
 
 
 def _persisted_manifest_to_catalog_entry(
