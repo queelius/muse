@@ -1618,27 +1618,31 @@ class TestAcquireOffEventLoop:
         assert not forward_called  # forward never reached (cancelled first)
         state.director.release.assert_called_once_with("fake-model")
 
-    async def test_shutdown_cancellation_returns_clean_503(self):
+    async def test_shutdown_cancellation_is_left_to_the_middleware(self):
         """Uvicorn marks stop_event before cancelling overdue handlers.
 
-        That cancellation is expected shutdown control flow, not an ASGI
-        application error: return a stable 503 instead of re-raising into
-        Uvicorn's traceback/500 path.
+        The route re-raises the cancellation; ShutdownCancellationMiddleware,
+        which build_gateway installs for every state-driven gateway, turns
+        it into a stable 503 instead of Uvicorn's traceback/500 path.
         """
-        from muse.cli_impl.gateway import _route_via_director
+        from muse.cli_impl.gateway import (
+            ShutdownCancellationMiddleware,
+            _route_via_director,
+        )
 
         state = _make_state_with_director()
+        app = build_gateway(state=state)
+        assert any(
+            m.cls is ShutdownCancellationMiddleware for m in app.user_middleware
+        )
         state.stop_event.set()
         with _patch_get_manifest(), patch(
             "muse.cli_impl.gateway._acquire_with_capacity_wait",
             new=AsyncMock(side_effect=asyncio.CancelledError()),
-        ):
-            response = await _route_via_director(
+        ), pytest.raises(asyncio.CancelledError):
+            await _route_via_director(
                 MagicMock(), "v1/audio/speech", "fake-model", state, 1.0,
             )
-
-        assert response.status_code == 503
-        assert b'"code":"server_shutting_down"' in response.body
 
     async def test_forward_release_fires_on_cancellation_during_stream_open(self):
         """A CancelledError while opening the worker connection (client

@@ -1296,23 +1296,11 @@ async def _route_via_director(
             f"load of {model_id!r} failed",
             error_type="server_error",
         )
-    except asyncio.CancelledError:
-        # The off-loop callback releases any refcount acquired after this
-        # coroutine is cancelled. During normal client disconnects preserve
-        # cancellation semantics. During supervisor shutdown, Uvicorn sets
-        # stop_event before cancelling overdue handlers; return a clean 503
-        # so shutdown does not log an ASGI exception and emit a bare 500.
-        _release_slot()
-        stop_event = getattr(state, "stop_event", None)
-        is_set = getattr(stop_event, "is_set", None)
-        if callable(is_set) and is_set() is True:
-            return _openai_error(
-                503, "server_shutting_down",
-                "request cancelled because the server is shutting down",
-                error_type="server_error",
-            )
-        raise
     except BaseException:
+        # Includes cancellation: the off-loop callback releases any refcount
+        # acquired after this coroutine is cancelled, and
+        # ShutdownCancellationMiddleware turns a shutdown-driven cancel into
+        # a clean 503.
         _release_slot()
         raise
     queued_ms = (gate_wait_seconds + capacity_wait_seconds) * 1000.0
@@ -1334,16 +1322,6 @@ async def _route_via_director(
     except ClientDisconnected:
         # Nobody receives this response; it is recorded as a 499 below.
         response = _openai_error(499, "client_disconnected", "the client disconnected")
-    except asyncio.CancelledError:
-        stop_event = getattr(state, "stop_event", None)
-        is_set = getattr(stop_event, "is_set", None)
-        if callable(is_set) and is_set() is True:
-            return _openai_error(
-                503, "server_shutting_down",
-                "request cancelled because the server is shutting down",
-                error_type="server_error",
-            )
-        raise
     except httpx.TimeoutException:
         return _openai_error(
             504, "worker_timeout",
