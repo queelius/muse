@@ -516,9 +516,7 @@ VRAM info is available): `LoadDirector._resolve_pool_device` (admission /
 LRU eviction), `supervisor._servability_reason` (boot + request-path
 capacity check), and `memory._resolve_auto_side` (the `/v1/admin/memory`
 per-model breakdown, which also honors the supervisor `--device` flag
-first). The `IdleSweeper` does not resolve independently -- it delegates
-to `LoadDirector._free_for_device` so its decision-log readings can't
-drift from the director's. `mps` is its own case: it pools against host RAM for sizing
+first). `mps` is its own case: it pools against host RAM for sizing
 (pynvml is CUDA-only, and MPS is unified memory) but keeps its own `mps`
 measurements bucket in `_record_observed_peak`, matching what
 `muse models probe` persists. This bug never surfaced in CI because a
@@ -945,9 +943,9 @@ Lock discipline:
   to commit. Same plan-then-execute pattern as the existing admin
   endpoints; lets `acquire` and admin endpoints share the runtime
   without serializing on slow I/O.
-- Module-level `_WRITEBACK_LOCK` (in `load_director.py`) serializes
-  the read-modify-write on `measurements` across observed-peak writebacks
-  for *different* models so catalog.json round-trips stay atomic.
+- `catalog._CATALOG_WRITE_LOCK` serializes the read-modify-write on
+  `measurements` across observed-peak writebacks for *different* models
+  (and every other catalog RMW), so catalog.json round-trips stay atomic.
 
 ### Idle eviction (v0.40.1+)
 

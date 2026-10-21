@@ -488,14 +488,6 @@ async def extract_model_from_request(request: Any) -> Any:
     return None
 
 
-def _openai_error(
-    status: int, code: str, message: str, *, error_type: str | None = None,
-) -> JSONResponse:
-    """Compatibility alias for federation.py; `error_type` is derived from
-    `status` by `error_response` (every caller passes the matching type)."""
-    return error_response(status, code, message)
-
-
 def _resolve_default_model(modality: str) -> str | None:
     """First ENABLED catalog model whose modality matches `modality`.
 

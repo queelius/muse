@@ -273,9 +273,8 @@ _KNOWN_MODELS_LOCK: threading.Lock = threading.Lock()
 # _CATALOG_WRITE_LOCK (below) serializes every catalog read-modify-write.
 # The atomic write-then-rename in _write_catalog prevents corruption but not
 # lost updates between concurrent read -> mutate -> write sequences (probe
-# writes, admin enable/disable, load_director's observed-peak writeback,
-# which uses it under the alias load_director._WRITEBACK_LOCK). Hold it for
-# the whole sequence.
+# writes, admin enable/disable, load_director's observed-peak writeback).
+# Hold it for the whole sequence.
 #
 # Lock ordering (acquire in this order to prevent deadlocks):
 #   1. _KNOWN_MODELS_LOCK  (only when building the known_models cache)
