@@ -7,12 +7,7 @@ continuous measurements, not a class-probability distribution.
 """
 from __future__ import annotations
 
-import math
-import os
-import struct
-import tempfile
-import wave
-
+from muse.modalities._common.probe_audio import probe_wav
 from muse.modalities.audio_quality.client import AudioQualityClient
 from muse.modalities.audio_quality.protocol import (
     AudioDurationExceededError,
@@ -28,25 +23,9 @@ MODEL_OPTIONAL_PATHS = ("/v1/audio/quality",)
 
 
 def _probe_call(model):
-    """Assess a short 16kHz tone and always remove the temporary WAV."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        path = tmp.name
-    try:
-        frames = b"".join(
-            struct.pack("<h", int(2500 * math.sin(2 * math.pi * 220 * i / 16000)))
-            for i in range(16000)
-        )
-        with wave.open(path, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(16000)
-            wav.writeframes(frames)
+    """Assess a short 16kHz tone."""
+    with probe_wav(1.0, tone_hz=220) as path:
         return model.assess(path)
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
 
 
 PROBE_DEFAULTS = {

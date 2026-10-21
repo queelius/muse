@@ -10,6 +10,7 @@ Wire contract (OpenAI-compat):
   - POST /v1/audio/transcriptions
   - POST /v1/audio/translations
 """
+from muse.modalities._common.probe_audio import probe_wav
 from muse.modalities.audio_transcription.protocol import (
     Word,
     Segment,
@@ -24,35 +25,10 @@ MODALITY = "audio/transcription"
 
 
 def _probe_call(model):
-    """Build 5s of silence as a wav and pass to model.transcribe.
-
-    Backends accept either a path or bytes; we serialize to a tempfile
-    so any backend signature works, then clean up. Silence is fine for
-    a memory probe -- we want the activation working set, not output
-    quality.
-    """
-    import io
-    import os
-    import tempfile
-    import wave
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x00" * 16000 * 5)
-    buf.seek(0)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(buf.read())
-        path = f.name
-    try:
+    """Transcribe 5s of 16kHz silence: the activation working set is what
+    a memory probe wants, not output quality."""
+    with probe_wav(5.0) as path:
         return model.transcribe(path)
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
 
 
 # Per-modality probe defaults read by `muse models probe`.

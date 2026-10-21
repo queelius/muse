@@ -7,12 +7,7 @@ answers where known words occur, rather than deciding what was spoken.
 """
 from __future__ import annotations
 
-import math
-import os
-import struct
-import tempfile
-import wave
-
+from muse.modalities._common.probe_audio import probe_wav
 from muse.modalities.audio_alignment.client import AudioAlignmentClient
 from muse.modalities.audio_alignment.protocol import (
     AlignmentWord,
@@ -31,27 +26,9 @@ MODEL_OPTIONAL_PATHS = ("/v1/audio/alignments",)
 
 
 def _probe_call(model):
-    """Align one word against a short tone and remove the temporary WAV."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        path = tmp.name
-    try:
-        frames = b"".join(
-            struct.pack(
-                "<h", int(2500 * math.sin(2 * math.pi * 220 * i / 16000))
-            )
-            for i in range(16000)
-        )
-        with wave.open(path, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(16000)
-            wav.writeframes(frames)
+    """Align one word against a short tone."""
+    with probe_wav(1.0, tone_hz=220) as path:
         return model.align(path, "test", language="English")
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
 
 
 PROBE_DEFAULTS = {

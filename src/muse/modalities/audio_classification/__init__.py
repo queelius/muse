@@ -17,6 +17,7 @@ out, not per-file labels) and lives in a future audio/diarization
 modality. Speaker verification (paired-input similarity) similarly
 deferred.
 """
+from muse.modalities._common.probe_audio import probe_wav
 from muse.modalities.audio_classification.client import (
     AudioClassificationsClient,
 )
@@ -31,29 +32,9 @@ MODALITY = "audio/classification"
 
 
 def _probe_call(model):
-    """Probe-default body: 1 second of silence at 16kHz, written to
-    a temp WAV, then classified.
-
-    The temp file is unlinked unconditionally so a failed classify
-    (transient OOM, model error) doesn't leak a WAV under /tmp.
-    """
-    import os
-    import tempfile
-    import wave
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        path = f.name
-    try:
-        with wave.open(path, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(16000)
-            wav.writeframes(b"\x00\x00" * 16000)  # 1 second silence
+    """Classify 1 second of 16kHz silence (temp WAV always removed)."""
+    with probe_wav(1.0) as path:
         return model.classify(path)
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
 
 
 PROBE_DEFAULTS = {
