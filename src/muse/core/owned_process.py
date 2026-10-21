@@ -1,7 +1,7 @@
 """Shared primitives for subprocesses that own an isolated process group.
 
 Three call sites own child process groups: the bounded installer runner
-(``muse.core.venv.run_owned_command``), the admin job store
+(``muse.core.owned_command.run_owned_command``), the admin job store
 (``muse.admin.jobs.JobStore``), and the supervisor's worker teardown
 (``muse.cli_impl.supervisor``). Each keeps its own lifecycle policy (lock
 discipline, timing, fallback rules); this module holds only the identity

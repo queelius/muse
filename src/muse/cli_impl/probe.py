@@ -29,11 +29,8 @@ from muse.core.catalog import (
     is_pulled,
     known_models,
 )
-from muse.core.venv import (
-    _OwnedProcessCleanupError,
-    run_owned_command,
-    venv_python,
-)
+from muse.core.owned_command import _OwnedProcessCleanupError, run_owned_command
+from muse.core.venv import venv_python
 
 
 log = logging.getLogger("muse.probe")

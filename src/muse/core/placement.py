@@ -10,7 +10,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 
-from muse.core.venv import run_owned_command
+from muse.core.owned_command import run_owned_command
 
 
 @dataclass(frozen=True)

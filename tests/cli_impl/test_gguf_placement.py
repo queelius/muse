@@ -270,7 +270,7 @@ def test_native_placement_contract(device, layers, supported, want):
 def test_owned_query_tracks_package_and_native_library(tmp_path, monkeypatch):
     """Exercise the query producer with a fake package, never host ML libraries."""
     from muse.core import placement
-    from muse.core.venv import run_owned_command
+    from muse.core.owned_command import run_owned_command
 
     package = tmp_path / "llama_cpp"
     package.mkdir()

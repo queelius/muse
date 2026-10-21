@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import muse.core.owned_command as owned_command_module
 import muse.core.venv as venv_module
 from muse.core.venv import (
     create_venv,
@@ -360,7 +361,7 @@ class TestVenvPython:
 class TestCreateVenv:
     def test_managed_job_child_does_not_escape_outer_process_group(self):
         process = _mock_process()
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch.dict(
                  os.environ,
                  {"MUSE_MANAGED_JOB_PROCESS_GROUP": "1"},
@@ -368,7 +369,7 @@ class TestCreateVenv:
              patch("muse.core.venv.os.getpgid", return_value=31337), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.subprocess.Popen", return_value=process) as popen:
-            owned = venv_module._spawn_owned(["mock-installer"], capture_output=False)
+            owned = owned_command_module._spawn_owned(["mock-installer"], capture_output=False)
 
         assert owned.process is process
         assert "start_new_session" not in popen.call_args.kwargs
@@ -376,7 +377,7 @@ class TestCreateVenv:
     def test_calls_python_venv_module_in_isolated_group(self, tmp_path):
         process = _mock_process()
         target = tmp_path / "myenv"
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=ProcessLookupError), \
@@ -406,7 +407,7 @@ class TestCreateVenv:
     def test_completed_failure_never_signals_reusable_group(self, tmp_path, capsys):
         process = _mock_process(returncode=1, stdout=b"venv out\n", stderr=b"venv err\n")
         signals, killpg, _ = _group_signal_that_exits_on(signal.SIGTERM)
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -431,7 +432,7 @@ class TestCreateVenv:
         ]
         signals, killpg, alive = _group_signal_that_exits_on(signal.SIGTERM)
         process.poll.side_effect = lambda: None if alive["value"] else 0
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -450,7 +451,7 @@ class TestCreateVenv:
         process.wait.side_effect = [KeyboardInterrupt, 0]
         signals, killpg, alive = _group_signal_that_exits_on(signal.SIGTERM)
         process.poll.side_effect = lambda: None if alive["value"] else 0
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -628,7 +629,7 @@ class TestInstallIntoVenv:
         # Simulate a venv layout
         (tmp_path / "bin").mkdir()
         (tmp_path / "bin" / "python").touch()
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=ProcessLookupError), \
@@ -658,7 +659,7 @@ class TestInstallIntoVenv:
         (tmp_path / "bin" / "python").touch()
         process = _mock_process(returncode=1)
         signals, killpg, _ = _group_signal_that_exits_on(signal.SIGTERM)
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -671,7 +672,7 @@ class TestInstallIntoVenv:
         (tmp_path / "bin").mkdir()
         (tmp_path / "bin" / "python").touch()
         process = _mock_process()
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=ProcessLookupError), \
@@ -689,7 +690,7 @@ class TestInstallIntoVenv:
         (tmp_path / "bin" / "python").touch()
         process = _mock_process(returncode=0)
         signals, killpg, _ = _group_signal_that_exits_on(signal.SIGTERM)
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -708,12 +709,12 @@ class TestInstallIntoVenv:
         ]
         signals, killpg, alive = _group_signal_that_exits_on(signal.SIGKILL)
         process.poll.side_effect = lambda: None if alive["value"] else 1
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
              patch("muse.core.venv.subprocess.Popen", return_value=process), \
-             patch("muse.core.venv._CLEANUP_TIMEOUT", 0.0):
+             patch("muse.core.owned_command._CLEANUP_TIMEOUT", 0.0):
             with pytest.raises(subprocess.TimeoutExpired):
                 install_into_venv(tmp_path, ["bogus"])
 
@@ -725,10 +726,10 @@ class TestInstallIntoVenv:
         (tmp_path / "bin" / "python").touch()
         process = _mock_process(returncode=1, pid=MagicMock(name="unsafe-pid"))
         process.poll.return_value = None
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.killpg") as killpg, \
              patch("muse.core.venv.subprocess.Popen", return_value=process), \
-             patch("muse.core.venv._CLEANUP_TIMEOUT", 0.0):
+             patch("muse.core.owned_command._CLEANUP_TIMEOUT", 0.0):
             with pytest.raises(subprocess.CalledProcessError):
                 install_into_venv(tmp_path, ["bogus"])
 
@@ -762,16 +763,16 @@ class TestInstallIntoVenv:
     def test_group_revalidation_exit_never_falls_back_to_reusable_pid(self):
         process = _mock_process(returncode=1)
         process.poll.side_effect = [None, 1]
-        target = venv_module._OwnedProcess(
+        target = owned_command_module._OwnedProcess(
             process=process,
             pid=4242,
             process_group=4242,
         )
 
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg") as killpg:
-            signalled = venv_module._signal_owned(
+            signalled = owned_command_module._signal_owned(
                 target, signal.SIGTERM, force=False,
             )
 
@@ -793,7 +794,7 @@ class TestInstallIntoVenv:
             1,
         ]
         create_group = 0x200
-        with patch("muse.core.venv._OS_NAME", "nt"), \
+        with patch("muse.core.owned_command._OS_NAME", "nt"), \
              patch(
                  "muse.core.venv.subprocess.CREATE_NEW_PROCESS_GROUP",
                  create_group,
@@ -811,10 +812,10 @@ class TestInstallIntoVenv:
     def test_quiet_capture_retains_only_bounded_tail(self, tmp_path):
         (tmp_path / "bin").mkdir()
         (tmp_path / "bin" / "python").touch()
-        payload = b"x" * (venv_module._CAPTURE_LIMIT_BYTES + 64) + b"useful-tail"
+        payload = b"x" * (owned_command_module._CAPTURE_LIMIT_BYTES + 64) + b"useful-tail"
         process = _mock_process(returncode=1, stdout=payload)
         signals, killpg, _ = _group_signal_that_exits_on(signal.SIGTERM)
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -826,12 +827,12 @@ class TestInstallIntoVenv:
         assert captured.startswith("[... ")
         assert "output bytes truncated" in captured
         assert captured.endswith("useful-tail")
-        assert len(captured.encode()) <= venv_module._CAPTURE_LIMIT_BYTES + 80
+        assert len(captured.encode()) <= owned_command_module._CAPTURE_LIMIT_BYTES + 80
 
     def test_public_owned_runner_can_return_nonzero_without_raising(self):
         process = _mock_process(returncode=9, stderr=b"failed safely")
         signals, killpg, _ = _group_signal_that_exits_on(signal.SIGTERM)
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg", side_effect=killpg), \
@@ -851,17 +852,17 @@ class TestInstallIntoVenv:
         thread = MagicMock()
         thread.name = "mock-stuck-reader"
         thread.is_alive.side_effect = [True, False]
-        reader = venv_module._CaptureReader(
+        reader = owned_command_module._CaptureReader(
             stream=stream,
-            capture=venv_module._BoundedCapture(),
+            capture=owned_command_module._BoundedCapture(),
             thread=thread,
         )
 
-        with patch("muse.core.venv._OS_NAME", "posix"), \
+        with patch("muse.core.owned_command._OS_NAME", "posix"), \
              patch("muse.core.venv.os.getpgid", return_value=4242), \
              patch("muse.core.venv.os.getpgrp", return_value=31337), \
              patch("muse.core.venv.os.killpg") as killpg, \
-             patch("muse.core.venv._start_capture", return_value=[reader]), \
+             patch("muse.core.owned_command._start_capture", return_value=[reader]), \
              patch("muse.core.venv.subprocess.Popen", return_value=process):
             result = run_owned_command(
                 ["fake-command"], timeout=1.0,

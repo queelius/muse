@@ -127,7 +127,7 @@ def test_run_probe_subprocess_failure_returns_error(tmp_catalog, capsys):
 
 
 def test_run_probe_cleanup_failure_returns_clean_error(tmp_catalog, capsys):
-    from muse.core.venv import _OwnedProcessCleanupError
+    from muse.core.owned_command import _OwnedProcessCleanupError
 
     _seed_pulled_entry(tmp_catalog)
     with patch(
