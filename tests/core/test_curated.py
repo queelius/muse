@@ -5,7 +5,6 @@ import pytest
 
 from muse.core.curated import (
     CuratedEntry,
-    expand_curated_pull,
     find_curated,
     find_curated_by_uri,
     load_curated,
@@ -133,38 +132,6 @@ def test_find_curated_returns_entry():
     assert b is not None
     assert b.bundled is True
     assert none is None
-
-
-def test_expand_curated_pull_returns_uri_for_resolver_entry():
-    yaml_text = """
-- id: friendly-id
-  uri: hf://Qwen/Qwen3-8B-GGUF@q4_k_m
-  modality: chat/completion
-  description: friendly
-"""
-    with _patch_yaml(yaml_text):
-        target = expand_curated_pull("friendly-id")
-    assert target == "hf://Qwen/Qwen3-8B-GGUF@q4_k_m"
-
-
-def test_expand_curated_pull_returns_id_for_bundled_entry():
-    yaml_text = """
-- id: kokoro-82m
-  bundled: true
-"""
-    with _patch_yaml(yaml_text):
-        target = expand_curated_pull("kokoro-82m")
-    assert target == "kokoro-82m"
-
-
-def test_expand_curated_pull_returns_none_for_unknown_id():
-    yaml_text = """
-- id: known
-  bundled: true
-"""
-    with _patch_yaml(yaml_text):
-        target = expand_curated_pull("unknown")
-    assert target is None
 
 
 def test_load_curated_optional_fields_default_correctly():

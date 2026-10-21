@@ -5,7 +5,7 @@ package) and exposes helpers for the CLI:
 
   load_curated() -> list[CuratedEntry]
   find_curated(id) -> CuratedEntry | None
-  expand_curated_pull(id) -> str | None  # returns URI or bundled-id
+  find_curated_by_uri(uri) -> CuratedEntry | None
 
 Two entry shapes:
   - Resolver entry: has `uri` field (e.g. "hf://Qwen/Qwen3-8B-GGUF@q4_k_m").
@@ -32,12 +32,13 @@ discovery model).
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import Any
 
 import yaml
+
+from muse.core.resolvers import COMMIT_RE
 
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,6 @@ class CuratedEntry:
 
 
 _CURATED_CACHE: list[CuratedEntry] | None = None
-_CONCRETE_HF_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _curated_yaml_path():
@@ -142,7 +142,7 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
     ):
         if value is not None and (
             not isinstance(value, str)
-            or not _CONCRETE_HF_REVISION_RE.fullmatch(value)
+            or not COMMIT_RE.fullmatch(value)
         ):
             raise ValueError(
                 f"entry {d['id']!r}: '{field_name}' must be a full "
@@ -172,16 +172,6 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
     )
 
 
-def all_curated() -> list[CuratedEntry]:
-    """Return every curated entry. Thin alias for load_curated().
-
-    Prefer this over load_curated() in code that reads entries for
-    iteration: the name makes intent explicit and lets callers avoid
-    importing load_curated directly.
-    """
-    return load_curated()
-
-
 def find_curated(model_id: str) -> CuratedEntry | None:
     """Return the curated entry with this id, or None."""
     for e in load_curated():
@@ -205,24 +195,6 @@ def find_curated_by_uri(uri: str) -> CuratedEntry | None:
         if e.uri and e.uri == uri:
             return e
     return None
-
-
-def expand_curated_pull(identifier: str) -> str | None:
-    """Map a curated id to whatever `pull()` should actually receive.
-
-    Returns:
-      - the URI (e.g. "hf://...") for resolver entries
-      - the bundled script's model_id for bundled entries (which equals
-        the curated id by convention)
-      - None if `identifier` is not a curated id
-
-    `pull()` calls this first; if non-None, the original identifier was
-    a curated alias and we substitute the underlying target.
-    """
-    entry = find_curated(identifier)
-    if entry is None:
-        return None
-    return entry.uri if entry.uri else entry.id
 
 
 def _reset_curated_cache_for_tests() -> None:

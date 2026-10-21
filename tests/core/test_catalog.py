@@ -3156,46 +3156,6 @@ def test_load_backend_bundled_script_device_capability_honored(tmp_catalog):
     assert fake_class.call_args.kwargs["device"] == "cpu"
 
 
-def test_dir_size_bytes_returns_zero_for_missing_path(tmp_path):
-    """_dir_size_bytes returns 0 for a path that doesn't exist."""
-    from muse.core.catalog import _dir_size_bytes
-    assert _dir_size_bytes(str(tmp_path / "does-not-exist")) == 0
-
-
-def test_dir_size_bytes_returns_zero_for_empty_dir(tmp_path):
-    """_dir_size_bytes returns 0 for an empty directory."""
-    from muse.core.catalog import _dir_size_bytes
-    assert _dir_size_bytes(str(tmp_path)) == 0
-
-
-def test_dir_size_bytes_sums_file_sizes_recursively(tmp_path):
-    """_dir_size_bytes walks subdirectories and totals all file sizes."""
-    from muse.core.catalog import _dir_size_bytes
-    (tmp_path / "a.bin").write_bytes(b"x" * 1024)
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "b.bin").write_bytes(b"y" * 2048)
-    deeper = sub / "deeper"
-    deeper.mkdir()
-    (deeper / "c.bin").write_bytes(b"z" * 4096)
-    assert _dir_size_bytes(str(tmp_path)) == 1024 + 2048 + 4096
-
-
-def test_dir_size_bytes_does_not_follow_symlinks(tmp_path):
-    """Symlinks must not double-count contents from elsewhere."""
-    import os
-    from muse.core.catalog import _dir_size_bytes
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "big.bin").write_bytes(b"x" * 1024 * 1024)  # 1 MB
-    pulled = tmp_path / "pulled"
-    pulled.mkdir()
-    os.symlink(str(target), str(pulled / "link"))
-    # _dir_size_bytes(pulled) walks pulled/ but does not descend into
-    # the symlinked target directory.
-    assert _dir_size_bytes(str(pulled)) == 0
-
-
 @pytest.mark.parametrize("nbytes,expected", [
     (0, "-"),
     (1024, "1 KB"),
@@ -4165,3 +4125,17 @@ class TestTransactionalPullRollback:
 
         assert (venv_path / "marker").read_text() == "prior"
         assert _read_catalog() == prior_catalog
+
+
+class TestCheckSystemPackages:
+    @patch("muse.core.catalog.shutil.which")
+    def test_returns_missing(self, mock_which):
+        from muse.core.catalog import check_system_packages
+        mock_which.side_effect = lambda x: "/usr/bin/ffmpeg" if x == "ffmpeg" else None
+        assert check_system_packages(["ffmpeg", "espeak-ng"]) == ["espeak-ng"]
+
+    @patch("muse.core.catalog.shutil.which")
+    def test_empty_when_all_present(self, mock_which):
+        from muse.core.catalog import check_system_packages
+        mock_which.return_value = "/usr/bin/cmd"
+        assert check_system_packages(["ffmpeg"]) == []

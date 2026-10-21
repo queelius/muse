@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -46,8 +47,8 @@ from huggingface_hub import snapshot_download
 from muse.core import config
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.discovery import DiscoveredModel, discover_models
-from muse.core.install import check_system_packages
 from muse.core.hf_seed import drop_unused_seeds, seed_repo
+from muse.core.resolvers import COMMIT_RE
 from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.venv import (
     _is_verbose,
@@ -352,6 +353,11 @@ def _release_catalog_file_lock(handle) -> None:
     import fcntl
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def check_system_packages(packages: list[str]) -> list[str]:
+    """Return the subset of system packages not found on PATH."""
+    return [p for p in packages if shutil.which(p) is None]
 
 
 def _ensure_owned_directory(path: Path, *, private: bool = False) -> None:
@@ -684,7 +690,6 @@ def _persisted_manifest_to_catalog_entry(
 
 
 _MODEL_ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_CONCRETE_HF_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _validate_model_id_for_fs(model_id: str) -> None:
@@ -996,7 +1001,7 @@ def _validate_artifact_receipt(value: Any, *, path: str) -> None:
                     f"{item_path}.{field_name} must be a string"
                 )
         revision = item["revision"]
-        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        if COMMIT_RE.fullmatch(revision) is None:
             raise _CatalogSchemaError(
                 f"{item_path}.revision must be a 40-character commit"
             )
@@ -1842,7 +1847,7 @@ def _bundled_download_spec(
         revision = None
     elif (
         not isinstance(raw_revision, str)
-        or _CONCRETE_HF_REVISION_RE.fullmatch(raw_revision) is None
+        or COMMIT_RE.fullmatch(raw_revision) is None
     ):
         raise CatalogError(
             f"bundled model {model_id!r} has an invalid immutable revision"
@@ -2180,7 +2185,7 @@ def _pull_via_resolver(
     if capabilities.get("trust_remote_code"):
         resolved_revision = manifest.get("revision")
         if not isinstance(resolved_revision, str) or not (
-            _CONCRETE_HF_REVISION_RE.fullmatch(resolved_revision)
+            COMMIT_RE.fullmatch(resolved_revision)
         ):
             from muse.core.resolvers import ResolverError
 
@@ -2198,7 +2203,7 @@ def _pull_via_resolver(
         code_revision = capabilities.get("code_revision")
         if code_revision is not None and (
             not isinstance(code_revision, str)
-            or not _CONCRETE_HF_REVISION_RE.fullmatch(code_revision)
+            or not COMMIT_RE.fullmatch(code_revision)
         ):
             from muse.core.resolvers import ResolverError
 
@@ -2394,7 +2399,7 @@ def _owned_weights_purge_path(
         if (
             len(relative.parts) != 3
             or relative.parts[1] != "snapshots"
-            or _CONCRETE_HF_REVISION_RE.fullmatch(relative.parts[2]) is None
+            or COMMIT_RE.fullmatch(relative.parts[2]) is None
         ):
             raise CatalogError(
                 f"refusing to purge model {model_id!r}: catalog local_dir "
@@ -2925,29 +2930,6 @@ def load_backend(model_id: str, **kwargs) -> Any:
     if gpu_layers is not None:
         merged["n_gpu_layers"] = gpu_layers
     return cls(hf_repo=entry.hf_repo, local_dir=local_dir, **merged)
-
-
-def _dir_size_bytes(path: str) -> int:
-    """Recursive du-style size calc. Returns 0 if path missing/inaccessible.
-
-    Used by `muse models list` to surface on-disk weight size per pulled
-    model. Symlinks are not followed, so HuggingFace's snapshot cache
-    layout (where snapshots/<sha>/* are symlinks into blobs/*) does not
-    double-count blobs already attributed to a sibling pulled model.
-    Per-file getsize errors (permissions, race vs deletion) are swallowed.
-    """
-    total = 0
-    try:
-        for dirpath, _, filenames in os.walk(path, followlinks=False):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                try:
-                    total += os.path.getsize(fp)
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
 
 
 def _human_size(b: int) -> str:

@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Sequence
 
+from muse.core.resolvers import COMMIT_RE
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,7 +52,6 @@ _SOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _GITHUB_GIT_URL_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$"
 )
-_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _GIT_SAFE_CONFIG = (
     "-c", "protocol.allow=never",
     "-c", "protocol.https.allow=always",
@@ -1160,7 +1161,7 @@ def _parse_git_python_source(raw: object) -> _GitPythonSourceSpec:
             "python source url must be an HTTPS github.com repository ending in .git"
         )
     revision = raw.get("revision")
-    if not isinstance(revision, str) or not _GIT_COMMIT_RE.fullmatch(revision):
+    if not isinstance(revision, str) or not COMMIT_RE.fullmatch(revision):
         raise ValueError("python source revision must be a full lowercase commit SHA")
 
     sparse_paths = _source_string_sequence(
@@ -1190,7 +1191,7 @@ def _parse_git_python_source(raw: object) -> _GitPythonSourceSpec:
         sub_revision = item.get("revision")
         if (
             not isinstance(sub_revision, str)
-            or not _GIT_COMMIT_RE.fullmatch(sub_revision)
+            or not COMMIT_RE.fullmatch(sub_revision)
         ):
             raise ValueError(
                 "python source submodule revision must be a full lowercase commit SHA"

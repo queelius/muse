@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
-_HF_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+# A full, lowercase 40-hex commit id (Hugging Face and Git revisions).
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class ResolverError(Exception):
@@ -42,7 +43,7 @@ def hf_commit_revision(info: Any) -> str | None:
     absent synthetic field as a mutable revision.
     """
     revision = getattr(info, "sha", None)
-    if not isinstance(revision, str) or _HF_COMMIT_RE.fullmatch(revision) is None:
+    if not isinstance(revision, str) or COMMIT_RE.fullmatch(revision) is None:
         return None
     return revision
 

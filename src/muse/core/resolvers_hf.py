@@ -28,7 +28,7 @@ from muse.core.resolvers import (
     ResolvedModel,
     ResolverError,
     SearchResult,
-    _HF_COMMIT_RE,
+    COMMIT_RE,
     hf_commit_revision,
     parse_uri,
     register_resolver,
@@ -112,7 +112,7 @@ def _validated_hf_result(
             raise ResolverError(f"HF artifact provenance item {index} has invalid repo_id")
         if (
             not isinstance(item_revision, str)
-            or _HF_COMMIT_RE.fullmatch(item_revision) is None
+            or COMMIT_RE.fullmatch(item_revision) is None
         ):
             raise ResolverError(
                 f"HF artifact provenance item {index} lacks an immutable commit"

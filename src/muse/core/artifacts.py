@@ -14,12 +14,12 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
+from muse.core.resolvers import COMMIT_RE
 from muse.core.venv import remove_owned_entry
 
 
 logger = logging.getLogger(__name__)
 
-_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SAFE_LEAF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
@@ -132,7 +132,7 @@ def normalize_hf_artifacts(
             )
         if (
             not isinstance(artifact.revision, str)
-            or _COMMIT_RE.fullmatch(artifact.revision) is None
+            or COMMIT_RE.fullmatch(artifact.revision) is None
         ):
             raise ArtifactBundleError(
                 f"hf_artifacts[{index}].revision must be a 40-character commit"

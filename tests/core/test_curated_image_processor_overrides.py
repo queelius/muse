@@ -8,9 +8,9 @@ import pytest
 
 
 def _curated_entries_with_overrides():
-    from muse.core.curated import all_curated
+    from muse.core.curated import load_curated
     out = []
-    for entry in all_curated():
+    for entry in load_curated():
         caps = entry.capabilities or {}
         overrides = caps.get("image_processor_overrides")
         if overrides:
@@ -48,8 +48,8 @@ def test_texteller_curated_has_overrides():
     assert overrides["image_size"] == 448
 
 
-def test_all_curated_includes_texteller():
-    """all_curated() exposes the texteller entry (smoke-tests the new public API)."""
-    from muse.core.curated import all_curated
-    ids = {e.id for e in all_curated()}
+def test_load_curated_includes_texteller():
+    """load_curated() exposes the texteller entry."""
+    from muse.core.curated import load_curated
+    ids = {e.id for e in load_curated()}
     assert "texteller" in ids
