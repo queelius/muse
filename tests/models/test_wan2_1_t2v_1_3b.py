@@ -1,18 +1,23 @@
 """Tests for the bundled wan2_1_t2v_1_3b script.
 
-Imports of MANIFEST and Model are done lazily inside each test
-function (matches the sd_turbo / animatediff_motion_v3 pattern). The
-discovery edge-case test in tests/core/test_discovery.py pops
-bundled-model modules out of sys.modules and re-imports them, which
-would leave a top-level `from muse.models.wan2_1_t2v_1_3b import Model`
-in this file pointing at the stale (popped) module object. Lazy
-imports sidestep that.
+The script aliases the generic `WanRuntime` as its `Model`; runtime
+behavior is covered by tests/modalities/video_generation/runtimes/
+test_wan_runtime.py. These tests pin the MANIFEST and check that the
+runtime honors it when constructed the way `load_backend` does
+(`model_id` + capabilities splatted as kwargs).
+
+Imports are done lazily inside each test function: the discovery
+edge-case test in tests/core/test_discovery.py pops bundled-model
+modules out of sys.modules and re-imports them, which would leave a
+top-level import here pointing at a stale module object.
 """
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
+import numpy as np
+
+_RT = "muse.modalities.video_generation.runtimes.wan_runtime"
 
 
 def test_manifest_required_fields():
@@ -45,177 +50,46 @@ def test_manifest_capabilities_advertise_defaults():
     assert caps["vae_tiling"] is True
 
 
-def _patched_pipe(n_frames=25):
+def test_model_is_wan_runtime():
+    from muse.models.wan2_1_t2v_1_3b import Model
+    from muse.modalities.video_generation.runtimes.wan_runtime import (
+        WanRuntime,
+    )
+    assert Model is WanRuntime
+
+
+def _fake_pipe(n_frames=25):
     fake_pipe = MagicMock()
-    import numpy as np
-    # Real numpy HWC frame -- what diffusers video pipelines return by
-    # default. (A numpy array's .size is an int, which is exactly what broke
-    # the old getattr(frame, "size")[0] code.)
     fake_frame = np.zeros((480, 832, 3), dtype=np.uint8)  # H=480, W=832
     fake_pipe.return_value.frames = [[fake_frame] * n_frames]
-    # Mirror real diffusers pipelines: .to(device) returns self.
     fake_pipe.to.return_value = fake_pipe
     return fake_pipe
 
 
-def test_construction_uses_wan_pipeline_when_present():
-    fake_wan_pipeline = MagicMock()
-    fake_wan_pipeline.from_pretrained.return_value = _patched_pipe()
-    fake_diffusion = MagicMock()
-    fake_diffusion.from_pretrained.return_value = _patched_pipe()
+def test_manifest_capabilities_drive_runtime_construction_and_defaults():
+    """load_backend-shaped construction: sequential offload + VAE tiling
+    from the MANIFEST, and the MANIFEST generation defaults."""
+    from muse.models.wan2_1_t2v_1_3b import MANIFEST, Model
 
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", fake_diffusion,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ):
-        from muse.models.wan2_1_t2v_1_3b import MANIFEST, Model
-        m = Model(
-            hf_repo=MANIFEST["hf_repo"],
-            local_dir="/fake/cache",
-            device="cpu",
-        )
-    fake_wan_pipeline.from_pretrained.assert_called_once()
-    fake_diffusion.from_pretrained.assert_not_called()
-    assert m.model_id == MANIFEST["model_id"]
-
-
-def test_construction_falls_back_to_diffusion_pipeline_when_wan_absent():
-    fake_diffusion = MagicMock()
-    fake_diffusion.from_pretrained.return_value = _patched_pipe()
-
-    # _ensure_deps must be suppressed: if WanPipeline is patched to None,
-    # _ensure_deps would re-import the real WanPipeline (diffusers 0.32+
-    # exports it) and overwrite the sentinel, defeating the fallback test.
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b._ensure_deps", lambda: None,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", None,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", fake_diffusion,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ):
-        from muse.models.wan2_1_t2v_1_3b import MANIFEST, Model
-        m = Model(hf_repo="x", local_dir="/fake", device="cpu")
-    fake_diffusion.from_pretrained.assert_called_once()
-    assert m.model_id == MANIFEST["model_id"]
-
-
-def test_construction_raises_when_no_pipeline_class():
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", None,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", None,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b._ensure_deps", lambda: None,
-    ):
-        from muse.models.wan2_1_t2v_1_3b import Model
-        with pytest.raises(RuntimeError, match="diffusers is not installed"):
-            Model(hf_repo="x", local_dir="/fake", device="cpu")
-
-
-def test_generate_returns_video_result():
-    from muse.modalities.video_generation.protocol import VideoResult
-
-    fake_wan_pipeline = MagicMock()
-    fake_wan_pipeline.from_pretrained.return_value = _patched_pipe(n_frames=25)
-
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", MagicMock(),
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ):
-        from muse.models.wan2_1_t2v_1_3b import Model
-        m = Model(hf_repo="x", local_dir="/fake", device="cpu")
+    inner_pipe = _fake_pipe()
+    fake_wan = MagicMock()
+    fake_wan.from_pretrained.return_value = inner_pipe
+    kwargs = {"model_id": MANIFEST["model_id"], **MANIFEST["capabilities"]}
+    with patch(f"{_RT}.WanPipeline", fake_wan), \
+            patch(f"{_RT}.DiffusionPipeline", MagicMock()), \
+            patch(f"{_RT}.torch", MagicMock()):
+        m = Model(hf_repo=MANIFEST["hf_repo"], local_dir="/fake", **kwargs)
         r = m.generate("a flag waving in the wind")
-    assert isinstance(r, VideoResult)
-    assert len(r.frames) == 25
-    assert r.fps == 5  # MANIFEST default
-    assert r.metadata["model"] == "wan2-1-t2v-1-3b"
 
-
-def test_construction_honors_manifest_cpu_offload_capability():
-    """The bundled Model class must actually consult cpu_offload /
-    vae_tiling -- declaring them in MANIFEST is inert unless the
-    constructor wires them through to the shared place_pipeline helper
-    (mirrors WanRuntime; catalog.load_backend splats capabilities into
-    the constructor kwargs)."""
-    fake_wan_pipeline = MagicMock()
-    inner_pipe = _patched_pipe()
-    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
-
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", MagicMock(),
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ):
-        from muse.models.wan2_1_t2v_1_3b import Model
-        Model(
-            hf_repo="x", local_dir="/fake", device="cuda",
-            cpu_offload="sequential", vae_tiling=True,
-        )
-    inner_pipe.enable_sequential_cpu_offload.assert_called_once_with(device="cuda")
+    inner_pipe.enable_sequential_cpu_offload.assert_called_once_with(
+        device="cuda",
+    )
     inner_pipe.to.assert_not_called()
     inner_pipe.enable_vae_tiling.assert_called_once()
-    inner_pipe.enable_vae_slicing.assert_called_once()
-
-
-def test_construction_without_cpu_offload_calls_to_as_before():
-    fake_wan_pipeline = MagicMock()
-    inner_pipe = _patched_pipe()
-    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
-
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", MagicMock(),
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ):
-        from muse.models.wan2_1_t2v_1_3b import Model
-        Model(hf_repo="x", local_dir="/fake", device="cuda")
-    inner_pipe.to.assert_called_once_with("cuda")
-    inner_pipe.enable_sequential_cpu_offload.assert_not_called()
-    inner_pipe.enable_model_cpu_offload.assert_not_called()
-
-
-def test_generate_forwards_request_overrides_to_pipeline():
-    fake_wan_pipeline = MagicMock()
-    inner_pipe = _patched_pipe()
-    fake_wan_pipeline.from_pretrained.return_value = inner_pipe
-
-    with patch(
-        "muse.models.wan2_1_t2v_1_3b.WanPipeline", fake_wan_pipeline,
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.DiffusionPipeline", MagicMock(),
-    ), patch(
-        "muse.models.wan2_1_t2v_1_3b.torch", MagicMock(),
-    ):
-        from muse.models.wan2_1_t2v_1_3b import Model
-        m = Model(hf_repo="x", local_dir="/fake", device="cpu")
-        m.generate(
-            "test",
-            duration_seconds=3.0,
-            fps=8,
-            width=640,
-            height=384,
-            steps=20,
-            guidance=4.0,
-            negative_prompt="blurry",
-        )
-    kwargs = inner_pipe.call_args.kwargs
-    assert kwargs["num_frames"] == 24
-    assert kwargs["num_inference_steps"] == 20
-    assert kwargs["guidance_scale"] == 4.0
-    assert kwargs["width"] == 640
-    assert kwargs["height"] == 384
-    assert kwargs["negative_prompt"] == "blurry"
+    call = inner_pipe.call_args.kwargs
+    assert call["num_frames"] == 25  # 5.0s * 5fps
+    assert call["num_inference_steps"] == 30
+    assert call["guidance_scale"] == 5.0
+    assert (call["width"], call["height"]) == (832, 480)
+    assert r.fps == 5
+    assert r.metadata["model"] == "wan2-1-t2v-1-3b"
