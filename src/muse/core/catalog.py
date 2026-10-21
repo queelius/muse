@@ -1986,7 +1986,10 @@ def _pull_bundled_transaction(
                 download_kwargs["allow_patterns"] = list(allow_patterns)
             if revision:
                 download_kwargs["revision"] = revision
-            seeded = seed_repo(weights_cache, entry.hf_repo, allow_patterns=allow_patterns)
+            seeded = seed_repo(
+                weights_cache, entry.hf_repo,
+                allow_patterns=allow_patterns, revision=revision,
+            )
             try:
                 with _hf_quiet_if_needed():
                     local_dir = snapshot_download(**download_kwargs)
@@ -2248,7 +2251,8 @@ def _pull_resolved_transaction(
         )
     with _storage_cache_lock():
         seeded = seed_repo(
-            weights_cache, manifest["hf_repo"], allow_patterns=seed_patterns,
+            weights_cache, manifest["hf_repo"],
+            allow_patterns=seed_patterns, revision=manifest.get("revision"),
         )
         try:
             with _hf_quiet_if_needed():

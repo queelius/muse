@@ -59,6 +59,16 @@ def test_resolve_returns_resolved_model_with_correct_manifest():
     assert result.backend_path.endswith(":LlamaCppModel")
 
 
+def test_resolve_names_only_the_variant_files_for_seeding():
+    info = _fake_info(siblings=["model-q4_k_m.gguf", "model-q8_0.gguf", "model-f16.gguf"])
+    with patch("muse.modalities.chat_completion.hf._try_sniff_tools_from_repo", return_value=False), \
+         patch("muse.modalities.chat_completion.hf._try_sniff_context_length_from_repo", return_value=None), \
+         patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={}):
+        result = HF_PLUGIN["resolve"]("org/Model-GGUF", "q4_k_m", info)
+    assert "model-q4_k_m.gguf" in result.allow_patterns
+    assert not {"model-q8_0.gguf", "model-f16.gguf"} & set(result.allow_patterns)
+
+
 def test_resolve_applies_chat_format_hints_from_yaml():
     """When chat_formats.yaml has both chat_format and supports_tools, both land in capabilities."""
     info = _fake_info(siblings=["model-q4_k_m.gguf"])

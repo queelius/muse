@@ -241,8 +241,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     if revision is not None:
         manifest["revision"] = revision
 
+    allow_patterns = [*variant_files, "tokenizer*", "config.json", "*.md"]
+
     def _download(cache_root: Path) -> Path:
-        allow_patterns = [*variant_files, "tokenizer*", "config.json", "*.md"]
         return Path(snapshot_download(
             repo_id=repo_id, allow_patterns=allow_patterns,
             cache_dir=str(cache_root) if cache_root else None,
@@ -253,6 +254,7 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
         manifest=manifest,
         backend_path=_RUNTIME_PATH,
         download=_download,
+        allow_patterns=tuple(allow_patterns),
     )
 
 
