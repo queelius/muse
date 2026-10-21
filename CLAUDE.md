@@ -420,7 +420,8 @@ Modality backends implementing modality-specific protocols
   OpenAI-style `{"error":{...}}` envelope instead of FastAPI's `{"detail":...}`.
 - `muse.core.securefs`: the one implementation of owned-directory checks, no-follow regular-file opens, advisory locks and atomic fsynced writes; catalog, resource_registry and config call it with their own error class.
 - `muse.core.owned_process`: the one implementation of owned subprocess groups (new session per child, PID==PGID validation, WNOWAIT leader pinning so a group is only signalled while its unreaped leader holds the id, never our own group, TERM-then-KILL deadlines, bounded output tails). Used by the installer runner, admin jobs and the supervisor's worker teardown and restart.
-- `muse.core.venv`: venv creation (`create_venv`, `install_into_venv`, `find_free_port`). Each `muse pull` creates `~/.muse/venvs/<model-id>/`; catalog records the `python_path`.
+- `muse.core.venv`: venv creation and `venv_transaction` (rollback-safe in-place mutation). Each `muse pull` creates `~/.muse/venvs/<model-id>/`; catalog records the `python_path`. Siblings: `pip_install` (`install_into_venv`, `pip_install_commands`), `python_sources` (pinned git sources), `owned_command` (`run_owned_command`, the installer's owned-process runner), `ports` (`find_free_port`).
+- `muse.core.catalog` is the facade (enable/device/GPU-layer state, `load_backend`, provenance checks) over `catalog_store` (catalog.json I/O, schema, read cache, `_CATALOG_WRITE_LOCK`), `catalog_locks` (pull lock, storage-cache lock, resource lease), `catalog_models` (`CatalogEntry`, discovery caches, `known_models`, `get_manifest`), `catalog_pull` (`pull()` and its transactions) and `catalog_remove`. Tests patch names where they are looked up, i.e. in the submodule.
 - `muse.cli_impl.worker`: single-worker mode (runs one uvicorn in one venv). Invoked via `muse _worker` (hidden subcommand).
 - `muse.cli_impl.gateway`: FastAPI proxy app. Routes by `model` field in request body/query; aggregates `/v1/models` and `/health` across workers.
 - `muse.cli_impl.supervisor`: orchestrates workers + gateway. `plan_workers` groups catalog by venv; `spawn_worker` + `wait_for_ready` manage subprocess lifecycle; `run_supervisor` is the entrypoint `muse serve` delegates to.
@@ -540,7 +541,7 @@ without `nvcc`. `install.llama_cpp_wheel: cu130` (env `MUSE_LLAMA_CPP_WHEEL`)
 makes `muse pull` / `muse models refresh` install llama-cpp-python
 binary-only from the abetlen cu130 index, capped at the verified version in
 `muse.core.llama_cuda.WHEELS`, plus `nvidia-cuda-runtime`/`nvidia-cublas`
-(`venv.pip_install_commands`; a same-version CPU build is force-reinstalled
+(`pip_install.pip_install_commands`; a same-version CPU build is force-reinstalled
 `--no-deps`). The cap is folded into the requirement (`>=0.2.90,<=0.3.33`): a separate
 `<=` requirement makes pip download the newest ~800 MB wheel first. The wheel step
 uses `--no-cache-dir` because the index serves signed one-off URLs pip never reuses. The wheel does not ship libcudart/libcublas and its RPATH is
@@ -1752,7 +1753,7 @@ download, so `hf://alice/Foo-GGUF` and `hf://bob/Foo-GGUF` can't replace
 each other; install the second with `muse pull <uri> --id <new-id>`.
 Same-repo re-pulls (any case, any variant) and curated pulls, which own
 their curated id, proceed as before. The check runs in
-`catalog._check_resolver_target`, once before and once under the model's
+`catalog_pull._check_resolver_target`, once before and once under the model's
 resource lease.
 
 ## Adding a new modality (rare)
