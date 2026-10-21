@@ -1271,17 +1271,6 @@ class LoadDirector:
             retryable=True,
         )
 
-    def _get_in_flight_event(self, model_id: str) -> threading.Event | None:
-        """Read the current in-flight Event under the lock.
-
-        The Event may have been removed between _decide returning "wait"
-        and this call (the winner committed and pop'd it). In that case
-        we return None and the caller falls through to re-decide.
-        """
-        with self.lock:
-            rec = self.in_flight_loads.get(model_id)
-            return rec.event if rec is not None else None
-
     def _reserved_for_pool(self, pool: str, *, exclude: str | None = None) -> float:
         """Sum of memory_gb for claimed-but-not-yet-resident loads drawing on
         `pool`. Callers hold self.lock. `exclude` drops one model_id (its own

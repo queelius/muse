@@ -1866,25 +1866,6 @@ def _capacity_pools(
     return cpu_available_gb, gpu_available_gb, cuda_available
 
 
-def _available_pools(
-    memory_probe: "Any",
-    *,
-    gpu_headroom_gb: float,
-    cpu_headroom_gb: float,
-    gpu_budget_gb: "float | None" = None,
-    cpu_budget_gb: "float | None" = None,
-) -> tuple[float, "float | None"]:
-    """Compatibility view of the CPU/GPU available-capacity pair."""
-    cpu_available_gb, gpu_available_gb, _cuda_available = _capacity_pools(
-        memory_probe,
-        gpu_headroom_gb=gpu_headroom_gb,
-        cpu_headroom_gb=cpu_headroom_gb,
-        gpu_budget_gb=gpu_budget_gb,
-        cpu_budget_gb=cpu_budget_gb,
-    )
-    return cpu_available_gb, gpu_available_gb
-
-
 def _servability_reason(
     entry: dict,
     *,

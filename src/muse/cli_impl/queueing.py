@@ -36,7 +36,7 @@ class ConcurrencyGate:
     """Per-model concurrency slots with FIFO waiters.
 
     A model with cap None/<=0 is UNLIMITED: no semaphore is created and
-    slot() is a no-op context (today's behavior, zero overhead).
+    acquiring is a no-op (zero overhead).
     CPython asyncio.Semaphore wakes waiters FIFO, so fairness is free.
     Semaphores are created lazily. A LOWER cap takes effect live: the
     surplus permits are retired (free ones at once, held ones as their
@@ -55,7 +55,7 @@ class ConcurrencyGate:
         self._entered: dict[str, int] = {}
         # Permits still to retire after a live cap decrease (see class doc).
         self._retire: dict[str, int] = {}
-        # Captured on the first acquire_slot / slot entry so release_slot can
+        # Captured on every acquire_slot so release_slot can
         # schedule its (loop-affine) decrement + semaphore release from a
         # non-loop thread via call_soon_threadsafe. asyncio primitives are NOT
         # threadsafe; the gateway relay / finally paths may call release_slot
@@ -186,37 +186,20 @@ class ConcurrencyGate:
         self, model_id: str, cap: int | None, *, deadline: float,
         max_queue_depth: int | None = None,
     ):
-        if not cap or cap <= 0:
-            yield  # unlimited: no gating at all
-            return
-        sem = self._sem(model_id, cap)
-        await self._retire_free_permits(model_id, sem)
-        # Synchronous entry check: no await between the read and the
-        # increment, so this is accurate even under a concurrent burst
-        # of arrivals on one event loop (no interleaving is possible
-        # between here and the increment below).
-        with self._mutex:
-            self._check_and_enter_locked(model_id, cap, max_queue_depth)
+        """acquire_slot/release_slot as a lexical async context."""
+        held = await self.acquire_slot(
+            model_id, cap, deadline=deadline, max_queue_depth=max_queue_depth,
+        )
         try:
-            await self._acquire_permit(sem, model_id, deadline)
-            try:
-                yield
-            finally:
-                self._release_permit(model_id, sem)
+            yield
         finally:
-            self._decr_entered(model_id)
+            if held:
+                self.release_slot(model_id)
 
-    # ------------------------------------------------------------------
-    # Split acquire/release variant (used by the gateway request path).
-    #
-    # slot() is a self-contained async ctx manager; it is ideal when the
-    # held region is a lexical block. The gateway instead holds the slot
-    # across a NON-lexical span: acquire happens in _route_via_director,
-    # but release fires later from _forward_with_release's buffered/stream
-    # finally (possibly OFF the event loop). acquire_slot/release_slot expose
-    # the same entry semantics as slot()'s __aenter__ without the held-region
-    # context, and release_slot is threadsafe. slot() is untouched.
-    # ------------------------------------------------------------------
+    # The gateway holds a slot across a NON-lexical span: acquire happens in
+    # _route_via_director, but release fires later from
+    # _forward_with_release's buffered/stream finally (possibly OFF the event
+    # loop), so it uses acquire_slot/release_slot directly.
 
     async def acquire_slot(
         self, model_id: str, cap: int | None, *, deadline: float,
@@ -224,7 +207,7 @@ class ConcurrencyGate:
     ) -> bool:
         """Acquire one concurrency slot (no context manager).
 
-        Same entry semantics as slot()'s __aenter__: QueueFull if the
+        QueueFull if the
         per-model queue is already at server.max_queue_depth, QueueTimeout
         if the deadline passes before a slot frees. cap None/<=0 is a no-op
         (unlimited): nothing is reserved and False is returned.
@@ -252,7 +235,7 @@ class ConcurrencyGate:
         await self._retire_free_permits(model_id, sem)
         # Synchronous compare-and-increment (no await between the read and the
         # increment), so a concurrent burst on one loop cannot slip past the
-        # depth bound -- mirrors slot()'s entry check exactly.
+        # depth bound.
         with self._mutex:
             self._check_and_enter_locked(model_id, cap, max_queue_depth)
         try:

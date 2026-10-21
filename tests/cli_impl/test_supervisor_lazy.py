@@ -241,20 +241,20 @@ class TestSupervisorStateLazyFields:
 
 
 class TestValidateCatalogAtBoot:
-    def test_available_pools_preserves_pair_contract_with_budgets(self):
-        from muse.cli_impl.supervisor import _available_pools
+    def test_capacity_pools_apply_budgets_and_headroom(self):
+        from muse.cli_impl.supervisor import _capacity_pools
 
         probe = MagicMock()
         probe.cpu_free_gb.return_value = 16.0
         probe.gpu_free_gb.return_value = None
 
-        assert _available_pools(
+        assert _capacity_pools(
             probe,
             gpu_budget_gb=8.0,
             cpu_budget_gb=12.0,
             gpu_headroom_gb=1.0,
             cpu_headroom_gb=2.0,
-        ) == (10.0, 7.0)
+        )[:2] == (10.0, 7.0)
 
     def test_flags_model_with_no_memory_data(self, tmp_catalog):
         """Enabled model with no memory_gb annotation and no measurements
