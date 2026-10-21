@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import re
 from pathlib import Path
 
@@ -43,6 +44,9 @@ MODULE_TO_PYPI: dict[str, str] = {
     "supertonic": "supertonic",
     "einops": "einops",
     "imageio": "imageio",
+    "acestep": "ace-step",
+    "trimesh": "trimesh",
+    "tsr": "tsr",
 }
 
 # Top-level module names that the audit should skip:
@@ -127,6 +131,25 @@ def _walk_imports(tree: ast.AST) -> set[str]:
     return out
 
 
+def _aliased_runtime_source(tree: ast.AST) -> Path | None:
+    """Source file of the runtime a script aliases as `Model`, if any.
+
+    Scripts like `from muse.modalities.x.runtimes.y import Runtime as Model`
+    carry no heavy imports themselves; the runtime module does, and the
+    script's pip_extras must cover them.
+    """
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.module):
+            continue
+        if not node.module.startswith("muse.modalities."):
+            continue
+        if any((a.asname or a.name) == "Model" for a in node.names):
+            spec = importlib.util.find_spec(node.module)
+            if spec is not None and spec.origin:
+                return Path(spec.origin)
+    return None
+
+
 def _read_manifest(script: Path) -> dict:
     """Parse MANIFEST = { ... } from a script via importlib.
 
@@ -140,15 +163,15 @@ def _read_manifest(script: Path) -> dict:
 
 
 def _strip_pip_extras_to_dists(extras: tuple[str, ...]) -> set[str]:
-    """('torch>=2.1', 'misaki[en]') -> {'torch', 'misaki'}.
+    """('torch>=2.1', 'misaki[en]', 'x @ git+https://...') -> dist names.
 
-    Drops version specifiers and bracketed extras so the audit can
-    compare bare PyPI dist names.
+    Drops version specifiers, bracketed extras and PEP 508 direct
+    references so the audit can compare bare PyPI dist names.
     """
     out: set[str] = set()
     for entry in extras:
         bare = re.sub(r"\[.*?\]", "", entry)
-        bare = re.split(r"[<>=!~]", bare, maxsplit=1)[0]
+        bare = re.split(r"[<>=!~@]", bare, maxsplit=1)[0]
         out.add(bare.strip())
     return out
 
@@ -183,6 +206,9 @@ def test_pip_extras_covers_runtime_imports(script: Path):
     src = script.read_text()
     tree = ast.parse(src)
     imported = _walk_imports(tree)
+    runtime_src = _aliased_runtime_source(tree)
+    if runtime_src is not None:
+        imported |= _walk_imports(ast.parse(runtime_src.read_text()))
     needed: set[str] = set()
     for module_name in imported:
         dist = _classify_module(module_name)
