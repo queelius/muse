@@ -1471,11 +1471,8 @@ def _configured_max_concurrency(manifest: dict) -> int | None:
                 return n
         except (TypeError, ValueError):
             pass
-    default = config.get("server.default_max_concurrency") or 0
-    try:
-        return int(default) if int(default) > 0 else None
-    except (TypeError, ValueError):
-        return None
+    # The registry guarantees an int >= 0; 0 means unlimited.
+    return config.get("server.default_max_concurrency") or None
 
 
 async def _acquire_with_capacity_wait(acquire_once, notifier, *, deadline,

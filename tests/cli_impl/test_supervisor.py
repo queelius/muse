@@ -877,43 +877,24 @@ class TestCheckWorkerHealth:
             assert check_worker_health(port=9001) is False
 
 
-class TestResolveIdleSweepInterval:
+class TestIdleSweepIntervalSetting:
     """A 0/negative/non-finite MUSE_IDLE_SWEEP_INTERVAL_SECONDS would make
     `_stop_event.wait(interval)` return immediately, busy-looping
-    IdleSweeper.tick() against the director lock. The adjacent
-    default_idle_timeout resolution already guards <= 0; the sweep
-    interval must too, falling back to the documented 30.0s default.
+    IdleSweeper.tick() against the director lock. run_supervisor reads the
+    interval straight from the config registry, whose bounds must reject
+    those values and fall back to the documented 30.0s default.
     """
-    def test_default_is_thirty(self):
-        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", None)
-            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
-
-    def test_positive_value_passes_through(self):
-        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
-        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "5"}):
-            assert _resolve_idle_sweep_interval() == pytest.approx(5.0)
-
-    def test_zero_falls_back_to_default(self):
-        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
-        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "0"}):
-            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
-
-    def test_negative_falls_back_to_default(self):
-        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
-        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "-5"}):
-            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
-
-    def test_nan_falls_back_to_default(self):
-        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
-        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "nan"}):
-            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
-
-    def test_infinite_falls_back_to_default(self):
-        from muse.cli_impl.supervisor import _resolve_idle_sweep_interval
-        with patch.dict(os.environ, {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": "inf"}):
-            assert _resolve_idle_sweep_interval() == pytest.approx(30.0)
+    @pytest.mark.parametrize("raw,expected", [
+        (None, 30.0), ("5", 5.0), ("0", 30.0), ("-5", 30.0),
+        ("nan", 30.0), ("inf", 30.0),
+    ])
+    def test_interval_is_positive_and_finite(self, raw, expected):
+        from muse.core import config
+        env = {} if raw is None else {"MUSE_IDLE_SWEEP_INTERVAL_SECONDS": raw}
+        with patch.dict(os.environ, env):
+            if raw is None:
+                os.environ.pop("MUSE_IDLE_SWEEP_INTERVAL_SECONDS", None)
+            assert config.get("server.idle_sweep_interval_seconds") == pytest.approx(expected)
 
 
 class TestRunSupervisorMonitor:

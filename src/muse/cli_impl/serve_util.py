@@ -20,7 +20,6 @@ second Ctrl-C remains an immediate force-quit, unchanged.
 """
 from __future__ import annotations
 
-import math
 import signal
 import threading
 from collections.abc import Iterator
@@ -78,21 +77,14 @@ class _ShutdownAwareServer(uvicorn.Server):
 
 
 def shutdown_grace_seconds() -> float:
-    """Resolve the graceful-shutdown window from the environment.
+    """Resolve the graceful-shutdown window from the config registry.
 
-    Falls back to the default on a missing, non-numeric, or negative
-    value, so a fat-fingered env var can never re-introduce the
-    hang-forever behavior.
+    The registry rejects non-numeric, negative and non-finite values (an
+    `inf` grace is precisely the hang-forever behavior this module exists
+    to prevent), so an unset or invalid value lands on the default here.
     """
     value = config.get("server.shutdown_grace_seconds")
-    if value is None:
-        return _DEFAULT_GRACE_SECONDS
-    # Reject non-finite (inf/nan) as well as negative: `inf` parses and is
-    # `>= 0`, but timeout_graceful_shutdown=inf is precisely the
-    # hang-forever behavior this module exists to prevent.
-    if not math.isfinite(value) or value < 0:
-        return _DEFAULT_GRACE_SECONDS
-    return value
+    return _DEFAULT_GRACE_SECONDS if value is None else value
 
 
 def build_uvicorn_server(

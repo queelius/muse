@@ -2256,28 +2256,7 @@ def _build_load_director(state: SupervisorState) -> "Any":
     )
 
 
-# Fallback when the configured idle-sweep interval is not usable (see
-# _resolve_idle_sweep_interval). Matches the documented / registry default
-# for server.idle_sweep_interval_seconds.
-_DEFAULT_IDLE_SWEEP_INTERVAL_SECONDS = 30.0
 _BACKGROUND_JOIN_TIMEOUT_SECONDS = 5.0
-
-
-def _resolve_idle_sweep_interval() -> float:
-    """Resolve the idle-sweep tick interval, clamped to a safe value.
-
-    `IdleSweeper._run` sleeps via `stop_event.wait(interval_seconds)`
-    between ticks. A 0, negative, or non-finite (NaN/inf) interval makes
-    `wait` return (almost) immediately, busy-looping `tick()` against the
-    director lock on every iteration. The adjacent default_idle_timeout
-    resolution already guards its own <= 0 case; this mirrors that guard
-    (and `serve_util.shutdown_grace_seconds`'s analogous guard for the
-    graceful-shutdown timeout) for the sweep interval.
-    """
-    value = config.get("server.idle_sweep_interval_seconds")
-    if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-        return _DEFAULT_IDLE_SWEEP_INTERVAL_SECONDS
-    return float(value)
 
 
 def _join_background_thread(
@@ -2544,7 +2523,9 @@ def run_supervisor(*, host: str, port: int, device: str) -> int:
             _MAX_RESTARTS,
         )
 
-        sweep_interval = _resolve_idle_sweep_interval()
+        # The registry rejects 0/negative/non-finite intervals (which would
+        # busy-loop the sweeper) and falls back to the 30s default.
+        sweep_interval = config.get("server.idle_sweep_interval_seconds")
         raw_default_idle = config.get("server.idle_timeout_seconds")
         default_idle_timeout: float | None = (
             raw_default_idle
