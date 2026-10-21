@@ -68,7 +68,7 @@ def install_output_mode(verbose: bool):
     verbose=False), pip is run with `-q` and stdout/stderr is
     captured, only emitted on non-zero exit.
 
-    Catalog.py wraps snapshot_download similarly using the
+    catalog_pull.py wraps snapshot_download similarly using the
     `HF_HUB_DISABLE_PROGRESS_BARS` env var whose value is read from
     `_is_verbose()`.
     """

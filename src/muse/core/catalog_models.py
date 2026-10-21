@@ -50,7 +50,7 @@ class CatalogEntry:
 
 def _bundled_models_dir() -> Path:
     """Path to the in-repo `src/muse/models/` directory."""
-    # catalog.py sits at src/muse/core/catalog.py; parents[1] is src/muse/.
+    # catalog_models.py sits at src/muse/core/catalog_models.py; parents[1] is src/muse/.
     return Path(__file__).resolve().parents[1] / "models"
 
 

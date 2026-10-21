@@ -136,7 +136,7 @@ def _is_muse_pyproject(pyproject: Path) -> bool:
 
 
 def _muse_repo_root() -> Path | None:
-    """Resolve the muse source tree that contains this catalog.py, or None.
+    """Resolve the muse source tree that contains this catalog_pull.py, or None.
 
     Walks parents of this file for a pyproject.toml that actually declares
     the museq project. Returns None from a wheel/PyPI install (no such
