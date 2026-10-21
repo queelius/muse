@@ -17,67 +17,51 @@ Structure:
         venv_path,                     # dedicated venv for this model
         python_path,                   # <venv_path>/bin/python for workers
     }]
+
+This module is the public catalog facade. It owns per-model operator state
+(enable/disable, device and GPU-layer pins) and backend loading with its
+provenance checks, and re-exports the names callers use from the modules
+that implement the rest:
+
+    catalog_store   catalog.json location, I/O, schema, transaction lock
+    catalog_locks   per-model pull lock, resource lease, storage lock
+    catalog_models  CatalogEntry, known_models(), get_manifest()
+    catalog_pull    pull() and its bundled/resolver transactions
+    catalog_remove  remove() and owned-path purging
 """
 from __future__ import annotations
 
 import importlib
-import logging
 import os
 from pathlib import Path
 from typing import Any
 
+# Imported names this module does not use itself are re-exported: callers
+# import them from muse.core.catalog.
 from muse.core.catalog_locks import (
-    _PULL_LOCKS_GUARD,
-    _PULL_THREAD_LOCKS,
-    _RESOURCE_LOCKS_GUARD,
-    _RESOURCE_THREAD_LOCKS,
-    _STORAGE_THREAD_LOCK,
-    _advisory_lock,
     _model_pull_lock,
     _model_resource_lease,
     _storage_cache_lock,
 )
 from muse.core.catalog_models import (
     _KNOWN_MODELS_LOCK,
-    _MISSING_CATALOG_KEY,
     CatalogEntry,
-    _apply_manifest_overlays,
     _bundled_models_dir,
-    _catalog_cache_key,
-    _env_models_dir,
     _manifest_to_catalog_entry,
-    _model_dirs,
-    _persisted_manifest_to_catalog_entry,
     _reset_known_models_cache,
-    _script_model_ids,
-    _user_models_dir,
     get_manifest,
     known_models,
     list_known,
 )
 from muse.core.catalog_pull import (
-    _OPERATOR_STATE_FIELDS,
-    _PYPI_DIST,
-    _BundledDownloadSpec,
-    _artifact_provenance_item,
     _bundled_download_spec,
-    _check_resolver_target,
-    _curated_resolver_kwargs,
-    _hf_quiet_if_needed,
     _installed_muse_requirement,
-    _is_muse_pyproject,
     _muse_repo_root,
     _muse_server_install_args,
-    _preserve_operator_state,
     _pull_bundled,
     _pull_bundled_transaction,
-    _pull_bundled_with_lease,
     _pull_resolved_transaction,
-    _pull_uri_as,
     _pull_via_resolver,
-    _run_automatic_storage_maintenance,
-    _same_source,
-    _source_key,
     _validate_lora_capabilities,
     check_system_packages,
     pull,
@@ -86,47 +70,23 @@ from muse.core.catalog_remove import (
     _other_catalog_path_reference,
     _owned_weights_purge_path,
     _purge_owned_directory,
-    _remove_locked,
-    _strict_owned_purge_path,
     remove,
 )
 from muse.core.catalog_store import (
     _CATALOG_WRITE_LOCK,
-    _MAX_CATALOG_BYTES,
-    _MAX_CATALOG_CONTAINER_ITEMS,
-    _MAX_CATALOG_DEPTH,
-    _MAX_CATALOG_ENTRIES,
-    _MAX_CATALOG_STRING_CHARS,
-    _MODEL_ID_CHARSET_RE,
     CatalogError,
     ModelIdConflictError,
     ModelInUseError,
     StorageBusyError,
-    _CatalogFileKey,
-    _CatalogSchemaError,
-    _CatalogWriteLock,
     _catalog_dir,
-    _catalog_file_key,
     _catalog_path,
-    _catalog_read_failure,
-    _deep_copy_catalog,
     _ensure_owned_directory,
-    _open_catalog_lock,
-    _open_catalog_regular_file,
     _read_catalog,
     _reset_read_catalog_cache,
-    _validate_artifact_receipt,
-    _validate_catalog_entry,
-    _validate_catalog_json_value,
-    _validate_catalog_shape,
-    _validate_measurements,
     _validate_model_id_for_fs,
-    _validated_persisted_manifest,
     _write_catalog,
     is_pulled,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def is_enabled(model_id: str) -> bool:
