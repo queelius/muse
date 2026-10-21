@@ -59,6 +59,7 @@ Bounded in-flight wait: waiters on an in-flight cold load call
 from __future__ import annotations
 
 import collections
+import collections.abc
 import logging
 import math
 import threading
@@ -183,12 +184,62 @@ class InFlightLoad:
     device: str | None = None  # resolved measurement bucket; MPS still pools on CPU
 
 
+@dataclass
+class EvictingReservation:
+    """Accounting for one model whose worker shutdown is in progress.
+
+    ``pool`` is the concrete accounting pool of the popped entry, or None for
+    a marker with no entry (an admin disable of an unloaded model, or a bare
+    marker inserted through the ``evicting`` view): an unknown pool stays
+    conservatively relevant to every pool's capacity-wait decision.
+    ``memory_gb`` stays debited from configured budgets until the shutdown
+    owner confirms the worker has stopped (then it drops to 0.0 while the
+    marker itself lingers until the eviction settles).
+    """
+
+    pool: str | None = None
+    memory_gb: float = 0.0
+
+
+class _EvictingIds(collections.abc.MutableSet):
+    """Set-shaped live view of ``LoadDirector._evicting``'s keys.
+
+    Keeps the historical ``director.evicting`` set surface (membership,
+    iteration, equality with a set, ``add``/``discard``) working on top of the
+    single id -> EvictingReservation mapping. ``add`` inserts an unknown-pool,
+    zero-memory marker.
+    """
+
+    __slots__ = ("_records",)
+
+    def __init__(self, records: dict[str, EvictingReservation]):
+        self._records = records
+
+    def __contains__(self, model_id: object) -> bool:
+        return model_id in self._records
+
+    def __iter__(self):
+        return iter(list(self._records))
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def add(self, model_id: str) -> None:
+        self._records.setdefault(model_id, EvictingReservation())
+
+    def discard(self, model_id: str) -> None:
+        self._records.pop(model_id, None)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({set(self._records)!r})"
+
+
 @dataclass(eq=False)
 class ModelEviction:
     """Identity token for one director-owned model teardown.
 
     The entry is removed from ``loaded`` and, when present, remains accounted
-    in the evicting-memory maps until this exact token settles.  Admin disable
+    in ``LoadDirector._evicting`` until this exact token settles.  Admin disable
     claims additionally keep the model blocked after success; idle claims are
     only transiently blocked by the ordinary ``evicting`` marker.
     """
@@ -265,24 +316,17 @@ class LoadDirector:
 
         self.loaded: dict[str, LoadEntry] = {}
         self.in_flight_loads: dict[str, InFlightLoad] = {}
-        # Model ids whose eviction is mid-flight (victim popped
-        # from `loaded`, disable_fn still shutting the worker down, VRAM
-        # not yet freed). During that multi-second out-of-lock window the
-        # director otherwise looks idle, so concurrent capacity 503s must
-        # consult this set to stay retryable. Guarded by self.lock.
-        self.evicting: set[str] = set()
-        # Concrete pool for director-owned markers. Keep the public set for
-        # compatibility/status tests; this side map prevents a CPU eviction
-        # from making an unrelated CUDA capacity failure look retryable (and
-        # vice versa). Unknown markers inserted by older callers remain
-        # conservatively relevant to both pools.
-        self._evicting_pools: dict[str, str] = {}
-        # Declared memory remains reserved from configured budgets until
-        # disable_fn confirms the worker has stopped. Without this, popping
-        # a victim from `loaded` makes a static-budget pool look free during
-        # the out-of-lock shutdown window and another cold load can overlap
-        # the still-resident victim.
-        self._evicting_memory_gb: dict[str, float] = {}
+        # Models whose eviction is mid-flight (victim popped from `loaded`,
+        # disable_fn still shutting the worker down, VRAM not yet freed),
+        # keyed to their pool + still-reserved memory. During that
+        # multi-second out-of-lock window the director otherwise looks idle,
+        # so concurrent capacity 503s consult it to stay retryable (only for
+        # the victim's pool), and configured-budget admission keeps debiting
+        # the victim's declared memory until disable_fn confirms the worker
+        # stopped (else another cold load could overlap the still-resident
+        # victim). `evicting` is a set-shaped view of its keys. Guarded by
+        # self.lock.
+        self._evicting: dict[str, EvictingReservation] = {}
         # Explicit admin disable is persistent: once claimed, new acquires
         # remain blocked until the matching enable path calls allow_model().
         # Idle/LRU eviction uses the transient `evicting` marker instead.
@@ -329,6 +373,11 @@ class LoadDirector:
         # capacity-waiters wake and re-decide. Never allowed to raise into
         # the caller (wrapped at each call site).
         self.capacity_listener: Callable[[], None] | None = None
+
+    @property
+    def evicting(self) -> _EvictingIds:
+        """Set-shaped live view of the model ids whose eviction is in flight."""
+        return _EvictingIds(self._evicting)
 
     @staticmethod
     def _validate_capacity_knob(
@@ -592,7 +641,7 @@ class LoadDirector:
                 if (
                     model_id in self._worker_transitions
                     or model_id in self.in_flight_loads
-                    or model_id in self.evicting
+                    or model_id in self._evicting
                     or (entry is not None and entry.refcount > 0)
                 ):
                     raise OperationError(
@@ -640,7 +689,7 @@ class LoadDirector:
             self._blocked_models.add(model_id)
             entry = self.loaded.get(model_id)
             busy = (
-                model_id in self.evicting
+                model_id in self._evicting
                 or model_id in self._worker_transitions
                 or model_id in self._eviction_claims
                 or model_id in self.in_flight_loads
@@ -679,7 +728,7 @@ class LoadDirector:
         with self.lock:
             if (
                 model_id in self._blocked_models
-                or model_id in self.evicting
+                or model_id in self._evicting
                 or model_id in self._worker_transitions
             ):
                 return None
@@ -712,7 +761,7 @@ class LoadDirector:
             raise RuntimeError(f"model {model_id!r} already has an eviction claim")
 
         free_before_gb: float | None = None
-        self.evicting.add(model_id)
+        self._evicting[model_id] = EvictingReservation()
         try:
             if entry is not None:
                 # Reserve before pop: configured-budget admission must continue
@@ -728,8 +777,9 @@ class LoadDirector:
                         model_id,
                         exc_info=True,
                     )
-                self._evicting_pools[model_id] = entry.pool
-                self._evicting_memory_gb[model_id] = entry.memory_gb
+                self._evicting[model_id] = EvictingReservation(
+                    pool=entry.pool, memory_gb=entry.memory_gb,
+                )
                 self.loaded.pop(model_id, None)
                 self._inflight_epoch += 1
 
@@ -748,9 +798,7 @@ class LoadDirector:
             # marker under the same lock so an interruption or unexpected
             # publication failure cannot leave the model permanently blocked.
             self._eviction_claims.pop(model_id, None)
-            self.evicting.discard(model_id)
-            self._evicting_pools.pop(model_id, None)
-            self._evicting_memory_gb.pop(model_id, None)
+            self._evicting.pop(model_id, None)
             if entry is not None:
                 self.loaded.setdefault(model_id, entry)
             if keep_blocked and not was_blocked:
@@ -781,9 +829,7 @@ class LoadDirector:
             elif success:
                 self._failed_rollbacks.discard(claim.model_id)
 
-            self.evicting.discard(claim.model_id)
-            self._evicting_pools.pop(claim.model_id, None)
-            self._evicting_memory_gb.pop(claim.model_id, None)
+            self._evicting.pop(claim.model_id, None)
 
             if not claim.keep_blocked:
                 # Idle eviction is transient and must never leave a persistent
@@ -1092,7 +1138,7 @@ class LoadDirector:
                     status=409,
                     retryable=False,
                 )
-            if model_id in self.evicting:
+            if model_id in self._evicting:
                 from muse.admin.operations import OperationError
                 raise OperationError(
                     "model_eviction_in_progress",
@@ -1683,13 +1729,12 @@ class LoadDirector:
                         #     Without this a cold-start burst of distinct
                         #     models on an empty card mass-503s instead of
                         #     queueing behind the first load;
-                        #   - an eviction is mid-flight (self.evicting): its
+                        #   - an eviction is mid-flight (self._evicting): its
                         #     VRAM frees when disable_fn completes;
                         #   - a loaded worker is mid-transition.
                         evicting_in_pool = any(
-                            self._evicting_pools.get(mid, target_pool)
-                            == target_pool
-                            for mid in self.evicting
+                            rec.pool in (None, target_pool)
+                            for rec in self._evicting.values()
                         )
                         any_inuse = (
                             any(
@@ -1743,9 +1788,9 @@ class LoadDirector:
                     # window raise retryable=True (capacity WILL free when
                     # this eviction completes) instead of mass-503ing while
                     # the director looks idle.
-                    self.evicting.add(victim_id)
-                    self._evicting_pools[victim_id] = target_pool
-                    self._evicting_memory_gb[victim_id] = victim_memory_gb
+                    self._evicting[victim_id] = EvictingReservation(
+                        pool=target_pool, memory_gb=victim_memory_gb,
+                    )
                     # Bump the epoch: an eviction frees VRAM, which pollutes any
                     # concurrent load's free_before..free_after delta just like a
                     # concurrent load does. Counting it here lets _load_and_commit's
@@ -1849,7 +1894,9 @@ class LoadDirector:
                     # settles so concurrent failures remain retryable while
                     # a live driver counter catches up.
                     with self.lock:
-                        self._evicting_memory_gb.pop(victim_id, None)
+                        rec = self._evicting.get(victim_id)
+                        if rec is not None:
+                            rec.memory_gb = 0.0
                     # disable_fn returns only after the worker shutdown has
                     # settled. If the model already fits (notably because a
                     # configured working-set budget was the binding limit),
@@ -1887,9 +1934,7 @@ class LoadDirector:
                 # unexpected exception is propagating): the in-flight
                 # marker must not outlive this iteration.
                 with self.lock:
-                    self.evicting.discard(victim_id)
-                    self._evicting_pools.pop(victim_id, None)
-                    self._evicting_memory_gb.pop(victim_id, None)
+                    self._evicting.pop(victim_id, None)
             if disable_failed:
                 continue
 
@@ -1992,9 +2037,9 @@ class LoadDirector:
                 if entry.pool == pool
             )
             evicting_gb = sum(
-                self._evicting_memory_gb.get(model_id, 0.0)
-                for model_id, evicting_pool in self._evicting_pools.items()
-                if evicting_pool == pool
+                rec.memory_gb
+                for rec in self._evicting.values()
+                if rec.pool == pool
             )
             return resident_gb + evicting_gb
 

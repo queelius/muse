@@ -145,8 +145,7 @@ def test_interrupted_eviction_claim_publication_rolls_back_every_marker():
     assert resident.model_id not in director.evicting
     assert resident.model_id not in director._blocked_models
     assert resident.model_id not in director._eviction_claims
-    assert resident.model_id not in director._evicting_pools
-    assert resident.model_id not in director._evicting_memory_gb
+    assert resident.model_id not in director._evicting
 
 
 def test_admin_disable_wrapper_settles_director_and_blocks_until_enable():

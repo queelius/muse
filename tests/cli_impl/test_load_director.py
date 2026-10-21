@@ -2150,7 +2150,7 @@ class TestAutoDevicePoolSelection:
         assert observed == [(4.0, 3.0)]
         assert raced_decisions[0][0] == "evict_and_retry"
         assert "racer" not in director.in_flight_loads
-        assert director._evicting_memory_gb == {}
+        assert director._evicting == {}
 
     def test_live_cpu_budget_debits_resident_models(self):
         """A CPU budget caps the whole Muse working set, not each load."""
