@@ -30,27 +30,28 @@ class TestRegistry:
 
 class TestGenerateVideo:
     def test_returns_envelope(self, server):
-        server.client.generate_video = MagicMock(return_value={
+        # The real /v1/video/generations shape: clip metadata is nested
+        # under `metadata`, not at the top level.
+        envelope = {
+            "data": [{"b64_json": "AAAA"}],
             "model": "wan2_1_t2v_1_3b",
-            "duration_seconds": 4.0,
-            "fps": 24,
-            "size": "640x480",
-            "data": [{"b64": "AAAA"}],
-        })
+            "metadata": {
+                "frames": 96,
+                "fps": 24,
+                "duration_seconds": 4.0,
+                "format": "mp4",
+                "size": [640, 480],
+            },
+        }
+        server.client.generate_video = MagicMock(return_value=envelope)
         blocks = server.call_handler("muse_generate_video", {
             "prompt": "a sunset",
         })
-        body = _parse(blocks)
-        assert body["model"] == "wan2_1_t2v_1_3b"
-        assert body["duration_seconds"] == 4.0
-        assert body["fps"] == 24
-        assert body["data"][0]["b64"] == "AAAA"
+        assert _parse(blocks) == envelope
 
     def test_default_format_mp4(self, server):
         server.client.generate_video = MagicMock(return_value={"data": []})
-        blocks = server.call_handler("muse_generate_video", {"prompt": "x"})
-        body = _parse(blocks)
-        assert body["format"] == "mp4"
+        server.call_handler("muse_generate_video", {"prompt": "x"})
         call = server.client.generate_video.call_args
         assert call.kwargs["response_format"] == "mp4"
 

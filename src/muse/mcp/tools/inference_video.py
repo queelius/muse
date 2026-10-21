@@ -33,15 +33,9 @@ def _filter_keys(args: dict) -> dict:
 def _handle_generate_video(client: MuseClient, args: dict) -> list[dict]:
     body = _filter_keys(args)
     body.setdefault("response_format", "mp4")
-    out = client.generate_video(**body)
-    return [_json_block({
-        "model": out.get("model"),
-        "format": body["response_format"],
-        "duration_seconds": out.get("duration_seconds"),
-        "fps": out.get("fps"),
-        "size": out.get("size"),
-        "data": out.get("data"),
-    })]
+    # The route's envelope is {data, model, metadata: {frames, fps,
+    # duration_seconds, format, size}}; pass it through unchanged.
+    return [_json_block(client.generate_video(**body))]
 
 
 # ---- tool definition ----
