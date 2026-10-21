@@ -198,7 +198,7 @@ class ConcurrencyGate:
 
     # The gateway holds a slot across a NON-lexical span: acquire happens in
     # _route_via_director, but release fires later from
-    # _forward_with_release's buffered/stream finally (possibly OFF the event
+    # _forward's buffered/stream finally (possibly OFF the event
     # loop), so it uses acquire_slot/release_slot directly.
 
     async def acquire_slot(

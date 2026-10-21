@@ -418,6 +418,7 @@ Modality backends implementing modality-specific protocols
   with shared `/health` and `/v1/models`, mounts per-modality routers, and
   registers the `ModelNotFoundError` exception handler so 404s use the
   OpenAI-style `{"error":{...}}` envelope instead of FastAPI's `{"detail":...}`.
+- `muse.core.securefs`: the one implementation of owned-directory checks, no-follow regular-file opens, advisory locks and atomic fsynced writes; catalog, resource_registry and config call it with their own error class.
 - `muse.core.venv`: venv creation (`create_venv`, `install_into_venv`, `find_free_port`). Each `muse pull` creates `~/.muse/venvs/<model-id>/`; catalog records the `python_path`.
 - `muse.cli_impl.worker`: single-worker mode (runs one uvicorn in one venv). Invoked via `muse _worker` (hidden subcommand).
 - `muse.cli_impl.gateway`: FastAPI proxy app. Routes by `model` field in request body/query; aggregates `/v1/models` and `/health` across workers.
@@ -712,7 +713,7 @@ companion safety fixes the serialized path had masked:
    disconnect / timeout) while its off-loop acquire is still running,
    `shield` keeps the acquire alive and a done-callback releases the
    refcount if the acquire later succeeds -- else a bumped refcount leaks
-   and pins the model non-evictable forever. `_forward_with_release`'s
+   and pins the model non-evictable forever. `_forward`'s single idempotent
    cleanup was likewise widened to `except BaseException` so a cancel on
    the forward leg also releases.
 3. **Overlap-gated observed-peak writeback.** `_load_and_commit` only
