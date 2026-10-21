@@ -1716,12 +1716,12 @@ def test_read_catalog_caches_consecutive_reads(tmp_catalog):
     _write_catalog({"alpha": {"hf_repo": "x/y", "enabled": True}})
     _reset_read_catalog_cache()
 
-    from muse.core import catalog as catalog_module
+    from muse.core import catalog_store
 
     with patch.object(
-        catalog_module,
+        catalog_store,
         "_open_catalog_regular_file",
-        wraps=catalog_module._open_catalog_regular_file,
+        wraps=catalog_store._open_catalog_regular_file,
     ) as safe_open:
         c1 = _read_catalog()
         c2 = _read_catalog()
@@ -2035,12 +2035,12 @@ def test_get_manifest_does_not_re_read_catalog_each_call(tmp_catalog):
     _reset_known_models_cache()
     _reset_read_catalog_cache()
 
-    from muse.core import catalog as catalog_module
+    from muse.core import catalog_store
 
     with patch.object(
-        catalog_module,
+        catalog_store,
         "_open_catalog_regular_file",
-        wraps=catalog_module._open_catalog_regular_file,
+        wraps=catalog_store._open_catalog_regular_file,
     ) as safe_open:
         get_manifest("q3-gguf-q4")
         baseline = safe_open.call_count

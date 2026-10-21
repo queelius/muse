@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from muse.core import catalog
+from muse.core import catalog, catalog_store
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +86,7 @@ def test_catalog_rejects_filesystem_unsafe_model_ids(model_id: str) -> None:
 def test_catalog_read_rejects_oversized_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(catalog, "_MAX_CATALOG_BYTES", 32)
+    monkeypatch.setattr(catalog_store, "_MAX_CATALOG_BYTES", 32)
     (tmp_path / "catalog.json").write_text(json.dumps({"model": {"x": "y" * 64}}))
 
     with pytest.raises(catalog.CatalogError, match="exceeds 32 bytes"):
