@@ -35,7 +35,8 @@ parent package is not initialized.
 What you may import:
 - stdlib
 - `huggingface_hub` (base dep)
-- `muse.core.*` (lightweight: resolvers, chat_formats, errors)
+- `muse.core.*` (lightweight: resolvers, chat_formats, errors, and
+  `hf_plugin_helpers` for the repeated id/license/search/allow-list code)
 
 What you may NOT import:
 - relative siblings (`.protocol`, `.codec`, `.routes`)
@@ -65,15 +66,14 @@ from typing import Iterable
 
 from huggingface_hub import HfApi, snapshot_download
 
+from muse.core.hf_plugin_helpers import (
+    hf_model_id, hf_repo_license, hf_tag_search, transformers_allow_patterns,
+)
 from muse.core.resolvers import ResolvedModel, SearchResult
 
 
 _RUNTIME_PATH = "muse.modalities.my_modality.runtimes.my_runtime:MyModel"
 _PIP_EXTRAS = ("my-dep>=1.0",)
-
-
-def _model_id(repo_id: str) -> str:
-    return repo_id.split("/", 1)[-1].lower()
 
 
 def _sniff(info) -> bool:
@@ -83,36 +83,35 @@ def _sniff(info) -> bool:
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     manifest = {
-        "model_id": _model_id(repo_id),
+        "model_id": hf_model_id(repo_id),
         "modality": "my/modality",
         "hf_repo": repo_id,
         "description": f"My modality: {repo_id}",
-        "license": getattr(getattr(info, "card_data", None), "license", None),
+        "license": hf_repo_license(info),
         "pip_extras": list(_PIP_EXTRAS),
         "system_packages": [],
         "capabilities": {},
     }
+    # fp16 safetensors when present, else safetensors; *.bin only when the
+    # repo has no safetensors at all.
+    allow_patterns = transformers_allow_patterns(info)
+
     def _download(cache_root: Path) -> Path:
         return Path(snapshot_download(
-            repo_id=repo_id,
+            repo_id=repo_id, allow_patterns=allow_patterns,
             cache_dir=str(cache_root) if cache_root else None,
         ))
     return ResolvedModel(
         manifest=manifest, backend_path=_RUNTIME_PATH, download=_download,
+        # Lets the pull seed only these files from the shared HF cache.
+        allow_patterns=tuple(allow_patterns),
     )
 
 
 def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[SearchResult]:
-    for repo in api.list_models(search=query, filter="my-task-tag", sort=sort, limit=limit):
-        yield SearchResult(
-            uri=f"hf://{repo.id}",
-            model_id=_model_id(repo.id),
-            modality="my/modality",
-            size_gb=None,
-            downloads=getattr(repo, "downloads", None),
-            license=None,
-            description=repo.id,
-        )
+    return hf_tag_search(
+        api, query, sort=sort, limit=limit, tag="my-task-tag", modality="my/modality",
+    )
 
 
 HF_PLUGIN = {

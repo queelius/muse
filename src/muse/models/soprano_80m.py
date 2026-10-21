@@ -3,8 +3,8 @@
 Wraps the Soprano-1.1-80M model (Qwen3 LLM + Vocos decoder) to implement
 the :class:`~muse.modalities.audio_speech.protocol.TTSModel` protocol.
 
-The encode/decode split, hidden-state IR (``.soprano`` files), and Vocos
-decoder are all internal to this backend -- the server and clients never
+The encode/decode split, hidden-state IR, and Vocos decoder are all
+internal to this backend -- the server and clients never
 see them. Delegates to the Narro engine (in muse.modalities.audio_speech.tts)
 for actual inference.
 """

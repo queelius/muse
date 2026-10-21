@@ -141,8 +141,9 @@ from muse.core.resolvers import (
 class CivitaiResolver(Resolver):
     scheme = "civitai"
 
-    def resolve(self, uri):
-        # parse uri, hit civitai API, synthesize MANIFEST
+    def resolve(self, uri, **options):
+        # parse uri, hit civitai API, synthesize MANIFEST. `options` carries
+        # only what the caller set: modality, base_override, revision.
         return ResolvedModel(
             manifest={...},
             backend_path="muse.modalities.image_generation.runtimes.diffusers:DiffusersModel",

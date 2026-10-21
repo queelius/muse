@@ -320,7 +320,7 @@ The `image/generation` modality also exposes `/v1/images/edits` (inpainting) and
 
 `video/generation` (v0.27.0) is muse's narrative-clip modality, the heaviest yet. Wire shape at `POST /v1/video/generations` is JSON-only (no multipart) with `prompt` plus optional `model`, `duration_seconds` (0.5 to 30), `fps` (1 to 60), `size` (WxH string), `seed`, `negative_prompt`, `steps`, `guidance`, `response_format` (`mp4` default, `webm`, or `frames_b64`), and `n` (capped at 2 because each video is heavy). Output envelope mirrors `/v1/images/animations`: `{data: [{b64_json}], model, metadata: {frames, fps, duration_seconds, format, size}}`. Two distinct runtimes ship under the same MIME tag: `WanRuntime` (`diffusers.WanPipeline` or `DiffusionPipeline` fallback) and `CogVideoXRuntime` (`diffusers.CogVideoXPipeline`); the HF resolver dispatches per architecture. The bundled `wan2-1-t2v-1-3b` (Apache 2.0, 5s clips at 832x480) bundles a UMT5-XXL text encoder (~11GB at fp16) alongside its 1.3B transformer, so a full-resident load is ~11-12GB and OOMs a 12GB card; the earlier "~3GB / fits 8GB" claim counted only the transformer and was wrong. Curated additions: `cogvideox-2b` (~6GB at fp16, 6s at 720x480, fits 12GB) and `ltx-video` (~13GB, 30fps at 1216x704, requires 16GB+). The HF plugin (priority 105) sniffs `text-to-video`-tagged repos whose name matches one of `wan`, `cogvideox`, `ltx-video`, `mochi`, or `hunyuan`. LTX/Mochi/Hunyuan currently fall back to `WanRuntime`; their dedicated runtimes ship in v1.next. Distinction from `image/animation`: animation is short looping clips (16 frames @ 8fps = 2s, default `loop=true`, animated WebP), video is narrative clips (5s+, single play, no loop field, mp4). The codec includes vp9 webm with vp8 fallback (when ffmpeg lacks vp9) and an explicit `UnsupportedFormatError` when neither codec is available. All bundled video models declare `device: "cuda"`; CPU inference would take 10 to 30 minutes per clip and isn't a useful default.
 
-CPU offload (v0.52.1) is a per-model capability, not a bool: `capabilities.cpu_offload` is `"model"` (`pipe.enable_model_cpu_offload(device=...)`, whole-component granularity, peak VRAM ~ largest single component), `"sequential"` (`pipe.enable_sequential_cpu_offload(device=...)`, sub-module granularity, fits <=12GB but slower), or absent/`false` (today's plain `.to(device)` move, unchanged default for models that do not set it). Offload and `.to(device)` are mutually exclusive; offload only applies when the resolved device is cuda, mirroring the existing `device != "cpu"` guard. `capabilities.vae_tiling: true` calls `enable_vae_tiling()` plus `enable_vae_slicing()` (best-effort, guarded by `hasattr`) after placement, to cap the VAE-decode spike at higher resolutions. Both `WanRuntime` and `CogVideoXRuntime`, plus the bundled `wan2_1_t2v_1_3b.py` script's own `Model` class (which duplicates the runtime's construction logic rather than aliasing `WanRuntime`, so it needs the same wiring to actually honor the capability), dispatch through one shared helper, `muse.modalities.video_generation.runtimes._offload.place_pipeline`, so all three call sites stay in lockstep. The registry setting `server.video_cpu_offload` (env `MUSE_VIDEO_CPU_OFFLOAD`, opt_str, default unset) globally overrides the per-model capability across every video model: `model`, `sequential`, or `off`/`false`/`none` to force plain placement even on a model that declares offload; unset falls through to the capability. `wan2-1-t2v-1-3b` sets `cpu_offload: "sequential"` and `vae_tiling: true` by default (guarantees load+generate on 8-12GB out of the box) and a corrected `memory_gb: 3.0` (an honest sequential-peak estimate; `muse models probe` self-heals it to the measured value). A bigger-card operator who wants speed over headroom sets `server.video_cpu_offload model` (or `off`).
+CPU offload (v0.52.1) is a per-model capability, not a bool: `capabilities.cpu_offload` is `"model"` (`pipe.enable_model_cpu_offload(device=...)`, whole-component granularity, peak VRAM ~ largest single component), `"sequential"` (`pipe.enable_sequential_cpu_offload(device=...)`, sub-module granularity, fits <=12GB but slower), or absent/`false` (today's plain `.to(device)` move, unchanged default for models that do not set it). Offload and `.to(device)` are mutually exclusive; offload only applies when the resolved device is cuda, mirroring the existing `device != "cpu"` guard. `capabilities.vae_tiling: true` calls `enable_vae_tiling()` plus `enable_vae_slicing()` (best-effort, guarded by `hasattr`) after placement, to cap the VAE-decode spike at higher resolutions. `WanRuntime` and `CogVideoXRuntime` (which the bundled `wan2-1-t2v-1-3b` script aliases as its `Model`) dispatch through one shared helper, `muse.modalities.video_generation.runtimes._offload.place_pipeline`. The registry setting `server.video_cpu_offload` (env `MUSE_VIDEO_CPU_OFFLOAD`, opt_str, default unset) globally overrides the per-model capability across every video model: `model`, `sequential`, or `off`/`false`/`none` to force plain placement even on a model that declares offload; unset falls through to the capability. `wan2-1-t2v-1-3b` sets `cpu_offload: "sequential"` and `vae_tiling: true` by default (guarantees load+generate on 8-12GB out of the box) and a corrected `memory_gb: 3.0` (an honest sequential-peak estimate; `muse models probe` self-heals it to the measured value). A bigger-card operator who wants speed over headroom sets `server.video_cpu_offload model` (or `off`).
 
 `3d/generation` (v0.41.0 through v0.45.0) hosts four concrete runtimes under one MIME tag, dispatched per-family via `_family_for(repo_id)` in `model_3d_generation/hf.py`. `TripoSRRuntime` (v0.41.0+) is the bundled default for image-to-3D. `ShapERuntime` (v0.43.0+) wraps `diffusers.ShapEPipeline` for text-to-3D; it follows the deferred-imports pattern (module-level sentinels for `torch`, `ShapEPipeline`, `trimesh`; `_ensure_deps()` populates them lazily). `TRELLISRuntime` (v0.44.0+) wraps Microsoft's TRELLIS SDK via `transformers` AutoPipeline with `trust_remote_code=True` for image-to-3D. `Hunyuan3DRuntime` (v0.45.0+) is the fourth runtime and the first to support BOTH image-to-3D and text-to-3D from one model; it wraps Tencent's `hy3dgen` SDK with `trust_remote_code=True`. Internally, text-to-3D is a two-stage pipeline: text generates an image via `HunyuanDiTPipeline`, then the image is lifted to a mesh via `Hunyuan3DDiTFlowMatchingPipeline`. The `_Family.trust_remote_code` flag flows into the synthesized manifest's `capabilities.trust_remote_code`, which the runtime constructor reads via the kwargs splat. The per-family dispatch adds one `_Family` constant plus one dispatch branch in `_family_for` plus one runtime file under `runtimes/` per new runtime. Shap-E is text-only: the curated `shap-e` entry declares `supports_image_to_3d: False` and `supports_text_to_3d: True`; a request to `/v1/3d/from-image` with `model=shap-e` returns 400 before the runtime is invoked. TRELLIS is image-only: the curated entry (renamed from `trellis-text-image` to `trellis-image` in v0.44.0) declares `supports_text_to_3d: False`. Hunyuan3D-2 declares both flags True. GLB output flows through the existing codec: `trimesh.Trimesh` assembles vertices and faces from the pipeline output, then `mesh.export(file_type="glb")` yields the bytes. A companion `_pip_extras_for(runtime_path)` helper mirrors the dispatch shape so each runtime's venv installs only the deps it needs. After v0.45.0, task #108 is closed. Wonder3D is deferred indefinitely (multi-view plus NeuS reconstruction does not fit muse's one-pipeline-call runtime model).
 
@@ -398,7 +398,7 @@ Modality backends implementing modality-specific protocols
   both modalities with per-variant deduping (sharded GGUFs don't emit
   one row per shard). Registers `hf://` scheme on import.
 - `muse.core.curated`: loads `src/muse/curated.yaml` (hand-edited
-  recommendations list). `find_curated(id)` / `expand_curated_pull(id)`.
+  recommendations list). `find_curated(id)` / `find_curated_by_uri(uri)`.
   Curated entries either alias a bundled script (`bundled: true`) or
   point at a URI; the curated id is preserved as the catalog key even
   when the URI would synthesize a different one, so newbie-friendly ids
@@ -434,7 +434,7 @@ Each modality subpackage (`src/muse/modalities/<mime_name>/`) contains:
 - `codec.py`: modality-specific encoding (wav/opus for audio; png/jpeg for images; base64 float32 for embeddings; SSE+OpenAI chunk shape for chat)
 - `runtimes/` (optional): *generic* runtime classes that serve many models from one implementation. `chat_completion/runtimes/llama_cpp.py:LlamaCppModel` wraps any GGUF; `embedding_text/runtimes/sentence_transformers.py:SentenceTransformerModel` wraps any sentence-transformers repo. Runtime class paths are referenced by resolver-synthesized manifests.
 - `backends/` (optional): *private helpers* used by this modality's own model scripts. NOT a plugin surface. Only `audio_speech/backends/` exists (`base.py` with `voices_dir` + `BaseModel`; `transformers.py` with the Narro engine Soprano delegates to).
-- `audio_transcription/` was muse's first modality with multipart/form-data uploads (OpenAI Whisper wire shape). `routes.py` handles UploadFile + Form fields inline. As of v0.21.0, `image_generation/` is the second multipart consumer (`/v1/images/edits` + `/v1/images/variations`); v0.25.0 adds `image_upscale/` (`/v1/images/upscale`) as the third. All three implement multipart inline; if a fourth multipart modality lands, factor out to `muse.modalities._common.uploads`.
+- `audio_transcription/` was muse's first modality with multipart/form-data uploads (OpenAI Whisper wire shape). `routes.py` handles UploadFile + Form fields inline. As of v0.21.0, `image_generation/` is the second multipart consumer (`/v1/images/edits` + `/v1/images/variations`); v0.25.0 adds `image_upscale/` (`/v1/images/upscale`) as the third. Shared helpers live in `muse.modalities._common` (`uploads`: bounded upload reads, spooled temp files that are removed only after the backend returns, the audio decode-error check; `client`: server URL and upload coercion; `probe_audio`: the probe WAV). Image inputs go through `image_generation/image_input.py`. Routes look backends up with `registry.get_or_404(modality, model)` and read `registry.capabilities(modality, model)` (always a dict). Positive size caps read `config.get_positive(key)`.
 - `text_classification/` is muse's first modality whose internal MIME tag (`text/classification`) is broader than its primary URL route (`/v1/moderations`). The wire path is OpenAI-specific; v0.35.0 added the second route `/v1/text/classifications` on the same modality tag, sharing dataclasses + protocols. Two runtimes coexist: `HFTextClassifier` (existing, for fine-tuned classifier heads) and `HFZeroShotPipeline` (v0.35.0, wraps `transformers.pipeline("zero-shot-classification")`). Capability flags `supports_classification` and `supports_zero_shot` on the manifest gate which routes / runtime calls each model accepts: a request with `candidate_labels` against a model with `supports_zero_shot=False` returns 400 `zero_shot_not_supported`; the inverse mismatch returns 400 `candidate_labels_required`. The HF plugin's `_resolve` dispatches to either runtime based on tag (`zero-shot-classification`) or repo-name fallback (`zero-shot`, `mnli`, `nli`, `xnli`).
 
 Four distinct concepts worth keeping straight:
@@ -444,11 +444,15 @@ Four distinct concepts worth keeping straight:
 | `muse/models/*.py` | bundled muse + users | public model scripts, one per model, discoverable |
 | `modalities/*/runtimes/*.py` | muse internal | generic runtimes, one class serves many models (GGUF, ST) |
 | `modalities/*/backends/*.py` | muse internal | private helpers shared inside a modality |
-| `muse.core.runtime_helpers` | muse internal | cross-modality utilities every runtime imports: `select_device` (cuda/mps/cpu auto-detect), `dtype_for_name` (string-to-torch.dtype map with `fp16`/`bf16`/`fp32` aliases), `set_inference_mode` (no-grad switch; literal token kept out of caller bodies via shared helper), `LoadTimer` (opt-in load-time logging context). Added v0.31.0; consolidated ~30 per-runtime copies. The meta-test `tests/core/test_runtime_helpers_meta.py` AST-walks every runtime and bundled script to flag re-implementations |
+| `muse.core.runtime_helpers` | muse internal | cross-modality utilities every runtime imports: `select_device` (cuda/mps/cpu auto-detect), `dtype_for_name` (string-to-torch.dtype map with `fp16`/`bf16`/`fp32` aliases), `set_inference_mode` (no-grad switch; literal token kept out of caller bodies via shared helper), `LoadTimer` (opt-in load-time logging context), `GGUF_DEFAULT_CONTEXT_LENGTH` (the 8192 default both the GGUF runtime and the chat resolver use). Added v0.31.0; consolidated ~30 per-runtime copies. The meta-test `tests/core/test_runtime_helpers_meta.py` AST-walks every runtime and bundled script to flag re-implementations |
 
 Each model script (`src/muse/models/<id>.py`) contains:
 - Top-level `MANIFEST: dict` with required keys `model_id`, `modality`, `hf_repo` and optional `description`, `license`, `pip_extras`, `system_packages`, `capabilities`. Anything else passes through.
 - A class named exactly `Model` (tests alias it: `from muse.models.kokoro_82m import Model as KokoroModel`).
+  When a generic runtime already serves the model, the script just aliases it
+  (`from muse.modalities.<m>.runtimes.<x> import <Runtime> as Model`) and puts
+  per-model defaults in `MANIFEST["capabilities"]`, which `load_backend`
+  splats into the constructor (plus `revision`); most bundled scripts do.
 
 Each `Model` class:
 - Satisfies the modality's Protocol structurally (no base class required).
@@ -552,7 +556,14 @@ docs/CHAT_COMPLETION.md "GPU builds of llama-cpp-python".
 (SHA-256 + size + mode + uid) regular files >= 1 MiB under each model venv's
 `site-packages` (never `bin/`, `__pycache__`, dot-prefixed transaction
 workspaces, or files changed in the last 60s), via link-to-temp + rename after
-re-checking both files. Safe because pip unlinks before writing installed files.
+re-checking both files' stat and comparing their bytes (the digest cache in
+`venv-digests.json` only groups candidates and is pruned to live inodes); the
+linked name must still be the keeper's inode. A venv with a live
+`.<name>.transaction-*` workspace is skipped: a refresh or re-pull runs pip in
+the canonical path. Safe because pip unlinks before writing installed files,
+which is also why `venv_transaction` hardlinks those same files
+(`venv_dedupe.is_package_file`) instead of copying when it clones a venv, so
+re-pulls keep dedupe's links and need far less free space.
 `muse storage dedupe [--dry-run]` does every venv; `dedupe_after_install` runs an
 `only=<venv>` pass after each successful pull/refresh (`storage.dedupe_venvs`,
 default true; never fails the install). Saves disk and shared-library page
@@ -561,7 +572,12 @@ cache, not VRAM. First pass on the dev host: 118.5 GiB of 154 GiB.
 (`HF_HUB_CACHE`) into `<catalog_dir>/weights` before cache-mode downloads (bundled
 `snapshot_download` and resolver `resolved.download`), so huggingface_hub reuses
 them by etag name instead of re-downloading; `drop_unused_seeds` removes the ones
-the snapshot did not reference. `muse doctor storage` names catalog models still
+the snapshot did not reference. It links first and verifies the linked inode,
+links only blobs this user owns (clearing group/world write, since the inode is
+shared), honors trailing-`/` patterns like huggingface_hub, and reads only the
+pinned revision's snapshot when present. Resolver plugins pass their download
+allow-list as `ResolvedModel.allow_patterns` (the GGUF plugin's names only the
+chosen quant), so seeding hashes only what the pull will fetch. `muse doctor storage` names catalog models still
 loading from the shared cache (`StorageReport.shared_hf_models`): pre-0.61 pulls
 with no provenance receipt, which are unservable until re-pulled.
 The chat HF resolver caps the active `context_length` at 8192 and records the
@@ -837,12 +853,15 @@ optimization, not a gate.
 The probe IS a gate on the pull itself (v0.61.0): it proves the model
 loads and runs a representative inference. A successful pull leaves the
 model `enabled: true`. If the probe fails (load error, inference error,
-timeout, or the pulled id cannot be identified), `muse pull` exits 1 and
+or timeout), `muse pull` exits 1 and
 the entry is kept but set `enabled: false`, so weights and venv survive
 for a retry; the message points at `muse models probe <id>` then
 `muse models enable <id>`. `catalog.pull()` returns the id it installed,
 so the probe targets the right entry even on a URI re-pull. The admin
 pull job runs `muse pull` as a subprocess and therefore ends `failed`.
+Admin probe jobs wait the model's own probe timeout plus 120 s; admin pull jobs
+wait 1800 s plus the largest declared probe timeout plus 120 s (the modality is
+unknown before resolution).
 The in-venv probe worker exits 0 when the model loads but its inference
 raises (the record carries `inference_error`); `run_probe` treats that
 record as a failure (returns 6), so it fails the pull too.
@@ -1070,8 +1089,9 @@ Admin error envelope: auth failures use the bare OpenAI envelope
 which FastAPI's default handler would double-wrap as `{"detail":
 {"error": ...}}`; `muse.admin.errors.install_admin_error_handler`
 (installed by `build_gateway` right after mounting the admin router)
-unwraps any HTTPException whose `detail` is already OpenAI-shaped and
-delegates to FastAPI's default for everything else (so plain-string
+unwraps any HTTPException whose `detail` is already OpenAI-shaped, renders
+`OperationError` from any admin route as the same envelope, and delegates to
+FastAPI's default for everything else (so plain-string
 details elsewhere keep their `{"detail": ...}` shape). Safe-degrading: an
 includer that forgets the handler still gets a valid (if double-wrapped)
 error, never a 500. `AdminClient` parses both shapes (v0.47.4).
@@ -1177,10 +1197,12 @@ returns the buffered history for a late-connecting client.
   the handler (not via the `require_dashboard_auth` dependency, since
   `EventSource` sends no custom headers): a valid `?ticket=` OR an
   `Authorization: Bearer <token>` header (for curl-style clients)
-  is accepted; `?access_token=<token>` is NOT. Once authenticated, drains
-  `hub.snapshot(model_id)` then polls `hub.subscribe(model_id)` every
-  250ms until the client disconnects, unsubscribing in a `finally` so a
-  disconnect/cancel/exception never leaks a subscriber queue.
+  is accepted; `?access_token=<token>` is NOT. Once authenticated, it
+  takes the buffered history and a subscription atomically
+  (`hub.subscribe_with_snapshot`, so no line falls between them), then
+  polls every 250ms until the client disconnects, unsubscribing in a
+  `finally` so a disconnect/cancel/exception never leaks a subscriber
+  queue.
 
 **Auth.** `muse.observability.dashboard_auth.check_dashboard_token`
 mirrors the admin API's closed-by-default policy: with no `admin.token`
@@ -1222,20 +1244,6 @@ thread; `store.close()` closes the sqlite connection).
   series therefore undercounts real evictions on a lightly-loaded box
   where idle timeout, not memory pressure, is doing most of the
   reclaiming.
-- **Pool attribution is best-effort.** `summary.loaded[].pool` and the
-  `model_evict` event's `pool` field both read `getattr(entry, "pool",
-  None)`, but `LoadEntry` has no `pool`/`device` field today, so this is
-  currently always `None` in practice. A future `LoadEntry.pool` field
-  would need to land before this attribution becomes real.
-- **The live log tail can miss a single line emitted in the brief window
-  between the initial history snapshot and the SSE subscription.**
-  `_stream_model_logs` drains `hub.snapshot(model_id)` (buffered history)
-  and then calls `hub.subscribe(model_id)`; a line appended to the hub in
-  that narrow window lands in neither the snapshot nor the subscription
-  queue and is dropped. Buffered history and every subsequent line are
-  unaffected. Not fixed: subscribing before draining the snapshot would
-  trade this rare lost line for rare duplicate lines, which is a
-  different (not obviously better) trade-off.
 
 ## Federation
 
@@ -1278,7 +1286,7 @@ CLI entries winning on url collision:
 every node concurrently on a background interval
 (`federation.refresh_interval_seconds`, default 3.0s) and caches a
 `NodeState` snapshot per node: `GET <node>/v1/models` (reachability +
-per-model `loaded`), `GET <node>/health`, and (only if that node has a
+per-model `loaded`) and (only if that node has a
 configured token) `GET <node>/v1/telemetry/summary` for `in_flight`.
 Route handlers read the cache via `.snapshot()`, so routing is a fast
 local lookup, never a per-request fan-out. A node whose poll fails is
@@ -1548,7 +1556,7 @@ PY
   without any ML deps installed; pulling a model installs them on demand.
 - **FakeModel-pattern tests:** Server and router tests use plain classes that
   satisfy the modality protocol, no real weights. Backend tests also mock
-  heavy libs (see `tests/models/test_sd_turbo.py`).
+  heavy libs (see `tests/modalities/image_generation/runtimes/test_diffusers.py`).
 - **Registry is a singleton at module level** (`muse.core.registry.registry`),
   but tests create their own `ModalityRegistry()` instances to avoid coupling.
 - **Audio is float32 in `[-1, 1]`** at the protocol boundary; codec converts
