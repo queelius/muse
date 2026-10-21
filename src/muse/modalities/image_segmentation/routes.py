@@ -72,10 +72,7 @@ def _max_input_side() -> int:
     non-positive (parseable but nonsensical as a side cap) falls back
     to the registry default, mirroring image_generation/image_input.py's
     _default_max_bytes guard."""
-    n = config.get("limits.segmentation_max_input_side")
-    if n is None or n <= 0:
-        return config.SETTINGS_BY_KEY["limits.segmentation_max_input_side"].default
-    return n
+    return config.get_positive("limits.segmentation_max_input_side")
 
 
 def _parse_points_json(raw: str) -> list[list[int]] | None:

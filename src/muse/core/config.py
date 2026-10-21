@@ -986,3 +986,16 @@ def unset_value(key: str, *, path: pathlib.Path | None = None) -> bool:
     if changed and (path is None or _same_path(path, config_path())):
         reset_config()
     return changed
+
+
+def get_positive(key: str) -> Any:
+    """`get(key)`, falling back to the registry default when the resolved
+    value is None or <= 0.
+
+    For caps and limits where zero / negative is parseable but meaningless
+    (`minimum=0` admits 0). Read live, so changes apply per request.
+    """
+    value = get(key)
+    if value is None or value <= 0:
+        return SETTINGS_BY_KEY[key].default
+    return value

@@ -26,25 +26,18 @@ MODALITY = "audio/alignment"
 logger = logging.getLogger(__name__)
 
 
-def _positive_setting(key: str) -> int | float:
-    value = config.get(key)
-    if value is None or value <= 0:
-        return config.SETTINGS_BY_KEY[key].default
-    return value
-
-
 def _max_bytes() -> int:
-    return int(_positive_setting("limits.audio_alignment_max_bytes"))
+    return int(config.get_positive("limits.audio_alignment_max_bytes"))
 
 
 def _max_duration_seconds() -> float:
-    return float(_positive_setting(
+    return float(config.get_positive(
         "limits.audio_alignment_max_duration_seconds"
     ))
 
 
 def _max_text_chars() -> int:
-    return int(_positive_setting("limits.audio_alignment_max_text_chars"))
+    return int(config.get_positive("limits.audio_alignment_max_text_chars"))
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

@@ -43,10 +43,7 @@ def _max_input_side() -> int:
     falls back to the registry default, mirroring
     image_generation/image_input.py's _default_max_bytes guard.
     """
-    n = config.get("limits.upscale_max_input_side")
-    if n is None or n <= 0:
-        return config.SETTINGS_BY_KEY["limits.upscale_max_input_side"].default
-    return n
+    return config.get_positive("limits.upscale_max_input_side")
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

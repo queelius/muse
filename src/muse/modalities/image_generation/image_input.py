@@ -38,40 +38,23 @@ _DATA_URL_RE = re.compile(
 _ALLOWED_IMAGE_MIME = frozenset({
     "image/png", "image/jpeg", "image/jpg", "image/webp",
 })
-_HARD_DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10MB
-_HARD_DEFAULT_MAX_PIXELS = 4096 * 4096
-_HARD_DEFAULT_MAX_TOTAL_PIXELS = 32 * 1024 * 1024
 _HTTP_TIMEOUT = 30.0
 
 
 def _default_max_bytes() -> int:
-    """Read the image-input byte cap via muse.core.config (env:
-    MUSE_IMAGE_INPUT_MAX_BYTES), so operators can raise the cap without
-    a server restart. config.get() already warns and falls back to the
-    registry default on an unparseable value; a resolved value that is
-    zero or negative (parseable but nonsensical as a byte cap) also
-    falls back to the hardcoded default here, since the registry has no
-    notion of "must be positive"."""
-    n = config.get("limits.image_input_max_bytes")
-    if n is None or n <= 0:
-        return _HARD_DEFAULT_MAX_BYTES
-    return n
+    """Image-input byte cap (env MUSE_IMAGE_INPUT_MAX_BYTES), read live so
+    operators can raise it without a restart; <= 0 means the default."""
+    return config.get_positive("limits.image_input_max_bytes")
 
 
 def _default_max_pixels() -> int:
     """Decoded-raster cap shared by every image ingress shape."""
-    n = config.get("limits.image_input_max_pixels")
-    if n is None or n <= 0:
-        return _HARD_DEFAULT_MAX_PIXELS
-    return int(n)
+    return int(config.get_positive("limits.image_input_max_pixels"))
 
 
 def _default_max_total_pixels() -> int:
     """Aggregate decoded-raster cap shared by batched image routes."""
-    n = config.get("limits.image_input_max_total_pixels")
-    if n is None or n <= 0:
-        return _HARD_DEFAULT_MAX_TOTAL_PIXELS
-    return int(n)
+    return int(config.get_positive("limits.image_input_max_total_pixels"))
 
 
 def validate_total_image_pixels(

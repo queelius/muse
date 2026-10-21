@@ -29,12 +29,7 @@ _MAX_SEED = 2**63 - 1
 
 
 def _max_input_side() -> int:
-    value = config.get("limits.vectorization_max_input_side")
-    if value is None or value <= 0:
-        return config.SETTINGS_BY_KEY[
-            "limits.vectorization_max_input_side"
-        ].default
-    return value
+    return config.get_positive("limits.vectorization_max_input_side")
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

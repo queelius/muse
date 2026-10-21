@@ -410,11 +410,9 @@ async def test_decode_image_file_falls_back_on_zero_env(monkeypatch):
 
 
 def test_default_max_bytes_helper_returns_default_when_unset(monkeypatch):
-    from muse.modalities.image_generation.image_input import (
-        _default_max_bytes, _HARD_DEFAULT_MAX_BYTES,
-    )
+    from muse.modalities.image_generation.image_input import _default_max_bytes
     monkeypatch.delenv("MUSE_IMAGE_INPUT_MAX_BYTES", raising=False)
-    assert _default_max_bytes() == _HARD_DEFAULT_MAX_BYTES
+    assert _default_max_bytes() == 10 * 1024 * 1024
 
 
 def test_default_max_bytes_helper_reads_env(monkeypatch):

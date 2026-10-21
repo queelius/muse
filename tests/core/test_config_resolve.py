@@ -302,3 +302,20 @@ def test_non_bootstrap_key_still_reads_file(tmp_path):
     c = _cfg(tmp_path, "limits:\n  rerank_max_documents: 7\n")
     assert c.get("limits.rerank_max_documents") == 7
     assert c.source("limits.rerank_max_documents") == "file"
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("77", 77),
+    ("0", 1024),
+    ("-5", 1024),
+])
+def test_get_positive_falls_back_on_non_positive(monkeypatch, raw, expected):
+    monkeypatch.setenv("MUSE_UPSCALE_MAX_INPUT_SIDE", raw)
+    assert cfg.get_positive("limits.upscale_max_input_side") == expected
+
+
+def test_get_positive_falls_back_on_none(monkeypatch):
+    monkeypatch.setenv("MUSE_AUDIO_CLS_MAX_BYTES", "")
+    assert cfg.get_positive("limits.audio_cls_max_bytes") == (
+        cfg.SETTINGS_BY_KEY["limits.audio_cls_max_bytes"].default
+    )

@@ -23,19 +23,12 @@ logger = logging.getLogger(__name__)
 
 def _max_bytes() -> int:
     """Return the live upload cap, falling back on invalid opt-int values."""
-    value = config.get("limits.audio_quality_max_bytes")
-    if value is None or value <= 0:
-        return config.SETTINGS_BY_KEY["limits.audio_quality_max_bytes"].default
-    return value
+    return config.get_positive("limits.audio_quality_max_bytes")
 
 
 def _max_duration_seconds() -> float:
     """Return the live decoded-duration cap with a safe fallback."""
-    key = "limits.audio_quality_max_duration_seconds"
-    value = config.get(key)
-    if value is None or value <= 0:
-        return config.SETTINGS_BY_KEY[key].default
-    return float(value)
+    return float(config.get_positive("limits.audio_quality_max_duration_seconds"))
 
 
 def _looks_like_decode_error(exc: Exception) -> bool:

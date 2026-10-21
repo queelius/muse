@@ -40,10 +40,7 @@ def _max_bytes() -> int:
     that is None (empty env) or non-positive (parseable but nonsensical
     as a byte cap) also falls back to the registry default, mirroring
     image_generation/image_input.py's _default_max_bytes guard."""
-    n = config.get("limits.audio_cls_max_bytes")
-    if n is None or n <= 0:
-        return config.SETTINGS_BY_KEY["limits.audio_cls_max_bytes"].default
-    return n
+    return config.get_positive("limits.audio_cls_max_bytes")
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:

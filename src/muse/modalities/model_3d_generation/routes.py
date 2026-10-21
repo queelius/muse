@@ -61,10 +61,7 @@ def _max_bytes() -> int:
     but nonsensical as a byte cap) also falls back to the registry
     default, mirroring image_generation/image_input.py's
     _default_max_bytes guard."""
-    n = config.get("limits.model_3d_input_max_bytes")
-    if n is None or n <= 0:
-        return config.SETTINGS_BY_KEY["limits.model_3d_input_max_bytes"].default
-    return n
+    return config.get_positive("limits.model_3d_input_max_bytes")
 
 
 class _Generation3DRequest(BaseModel):
