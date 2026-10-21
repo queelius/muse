@@ -541,3 +541,28 @@ async def test_active_stream_shutdown_cleans_up_without_cancelled_error():
     extra_release.assert_called_once_with()
     assert context.exit_calls == 1
     assert client.close_calls == 1
+
+
+def test_lru_eviction_of_blocked_entry_keeps_admin_block():
+    # A failed admin disable restores the entry but keeps the model blocked.
+    # Memory pressure may still evict that idle entry through the shared
+    # claim lifecycle, but it must never clear the explicit block.
+    director = _director()
+    resident = _entry()
+    director.loaded[resident.model_id] = resident
+    claim = director.begin_model_disable(resident.model_id)
+    assert director.finish_eviction(
+        claim, success=False, error=RuntimeError("teardown failed"),
+    )
+    assert director.loaded[resident.model_id] is resident
+    assert resident.model_id in director._blocked_models
+
+    assert director.acquire("newcomer", manifest=_manifest(memory_gb=3.0)) == 9002
+
+    director.disable_fn.assert_called_once_with(resident.model_id)
+    assert resident.model_id not in director.loaded
+    assert resident.model_id not in director.evicting
+    assert resident.model_id in director._blocked_models
+    with pytest.raises(OperationError) as caught:
+        director.acquire(resident.model_id, manifest=_manifest())
+    assert caught.value.code == "model_disabled"

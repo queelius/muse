@@ -139,7 +139,61 @@ class TestEvictionEmitsTelemetry:
         assert kwargs["model_id"] == "victim"
         assert kwargs["pool"] in ("cuda", "cpu")
         assert kwargs["reason"] == "evicted_for_newcomer"
+        # gb is the victim's accounted memory, not the newcomer's.
+        assert kwargs["gb"] == 5.0
 
         # A model_load event for "newcomer" is also emitted.
         load_events = [c for c in capture_records if c[0] == "model_load"]
         assert any(kw["model_id"] == "newcomer" for _, kw in load_events)
+
+    def test_failed_lru_eviction_records_no_event(self, capture_records):
+        # A victim whose disable_fn raises was never evicted: no event.
+        def disable_fn(model_id: str) -> None:
+            raise RuntimeError("worker stuck")
+
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.return_value = 4.0
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9002),
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
+        )
+        director.acquire("victim", manifest=_manifest(memory_gb=1.0, device="cpu"))
+        director.release("victim")
+        capture_records.clear()
+
+        with pytest.raises(Exception):
+            director.acquire("newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"))
+
+        assert [c for c in capture_records if c[0] == "model_evict"] == []
+        assert "victim" in director.loaded
+
+    def test_raising_recorder_never_breaks_lru_eviction(self, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("telemetry down")
+
+        monkeypatch.setattr("muse.cli_impl.load_director.record", boom)
+        cpu_free_state = {"value": 4.0}
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 32.0
+        probe.cpu_free_gb.side_effect = lambda: cpu_free_state["value"]
+
+        def disable_fn(model_id: str) -> None:
+            cpu_free_state["value"] = 9.0
+
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9002),
+            disable_fn=disable_fn,
+            memory_probe=probe,
+            cpu_headroom_gb=2.0,
+        )
+        director.acquire("victim", manifest=_manifest(memory_gb=1.0, device="cpu"))
+        director.release("victim")
+
+        assert director.acquire(
+            "newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"),
+        ) == 9002
+        assert "victim" not in director.loaded
+        assert director.evicting == set()

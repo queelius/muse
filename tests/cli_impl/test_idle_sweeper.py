@@ -706,3 +706,76 @@ class TestGlobalDefaultIdleTimeout:
             default_idle_timeout_seconds=0.0,
         )
         assert sweeper.tick() == []
+
+
+# ----------------------------------------------------------------------
+# Idle-sweep evictions are recorded as model_evict telemetry
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def capture_records(monkeypatch):
+    """Capture `record(...)` calls made by the director's eviction settle."""
+    calls: list[tuple[str, dict]] = []
+
+    def fake_record(event_type, **kwargs):
+        calls.append((event_type, kwargs))
+
+    monkeypatch.setattr("muse.cli_impl.load_director.record", fake_record)
+    return calls
+
+
+class TestIdleEvictionTelemetry:
+    def _sweeper(self, director: LoadDirector) -> IdleSweeper:
+        catalog = {"fake-model": _manifest(memory_gb=2.5, idle_timeout_seconds=30.0)}
+        return IdleSweeper(
+            director=director,
+            catalog_lookup=_catalog_lookup_factory(catalog),
+        )
+
+    def test_idle_eviction_records_model_evict_event(self, capture_records):
+        director = _director()
+        _preload(
+            director, "fake-model", memory_gb=2.5,
+            last_touched_at=time.monotonic() - 60.0,
+        )
+
+        assert self._sweeper(director).tick() == ["fake-model"]
+
+        evicts = [kw for t, kw in capture_records if t == "model_evict"]
+        assert evicts == [{
+            "model_id": "fake-model",
+            "pool": "cpu",
+            "gb": 2.5,
+            "reason": "idle_timeout:30s",
+        }]
+
+    def test_failed_idle_eviction_records_no_event(self, capture_records):
+        director = _director(disable_fn=MagicMock(side_effect=RuntimeError("stuck")))
+        entry = _preload(
+            director, "fake-model", memory_gb=2.5,
+            last_touched_at=time.monotonic() - 60.0,
+        )
+
+        assert self._sweeper(director).tick() == []
+
+        assert [t for t, _ in capture_records if t == "model_evict"] == []
+        assert director.loaded["fake-model"] is entry
+        assert "fake-model" not in director.evicting
+        failure = director.recent_decisions[-1]
+        assert failure.reason.startswith("disable_fn_raised")
+        assert failure.evicted == []
+
+    def test_raising_recorder_never_breaks_idle_eviction(self, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("telemetry down")
+
+        monkeypatch.setattr("muse.cli_impl.load_director.record", boom)
+        director = _director()
+        _preload(
+            director, "fake-model", memory_gb=2.5,
+            last_touched_at=time.monotonic() - 60.0,
+        )
+
+        assert self._sweeper(director).tick() == ["fake-model"]
+        assert "fake-model" not in director.loaded
+        assert "fake-model" not in director.evicting

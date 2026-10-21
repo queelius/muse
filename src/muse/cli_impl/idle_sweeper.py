@@ -21,8 +21,10 @@ Lock discipline mirrors the on-demand LRU eviction path:
      by traffic-driven eviction before removing it from ``loaded``.
   4. Run `director.disable_fn(candidate.model_id)` OUTSIDE the lock, then
      settle the exact claim.  Settlement restores accounting on failure,
-     clears every transient marker, records the decision, and wakes capacity
-     waiters outside the director lock.
+     clears every transient marker, records the decision (and, on success,
+     a ``model_evict`` telemetry event), and wakes capacity waiters outside
+     the director lock.  Memory-pressure LRU eviction settles through the
+     same claim lifecycle.
 
 Thread loop: `while not stop_event.is_set(): self.tick();
 stop_event.wait(self.interval_seconds)`. The wait()-based sleep allows
