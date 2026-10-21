@@ -12,7 +12,6 @@ from muse.cli_impl.refresh import (
     RefreshResult,
     _infer_extras,
     _muse_repo_root,
-    _pip_target,
     _pip_target_args,
     _select_targets,
     refresh_one,
@@ -59,28 +58,7 @@ class TestInferExtras:
 
     def test_modality_with_no_extras_returns_empty(self):
         assert _infer_extras("text/rerank") == []
-        assert "audio/alignment" in MODALITY_EXTRAS
         assert _infer_extras("audio/alignment") == []
-
-
-class TestPipTarget:
-    def test_includes_server_unconditionally(self):
-        target = _pip_target([])
-        assert "[server]" in target
-
-    def test_appends_modality_extras(self):
-        target = _pip_target(["audio"])
-        assert "[server,audio]" in target
-
-    def test_multiple_extras_comma_separated(self):
-        target = _pip_target(["images", "embeddings"])
-        assert "[server,images,embeddings]" in target
-
-    def test_path_points_at_repo_root(self):
-        target = _pip_target([])
-        # The path part precedes the bracket
-        path = target.split("[", 1)[0]
-        assert (Path(path) / "pyproject.toml").exists()
 
 
 class TestPipTargetArgs:
@@ -759,19 +737,16 @@ class TestModalityExtrasMap:
         for k, v in MODALITY_EXTRAS.items():
             assert isinstance(v, list), f"{k} maps to non-list {type(v)}"
 
-    def test_known_muse_modalities_are_mapped(self):
-        """Sanity: every modality the muse server can serve has a row."""
-        # Spot-check the public set; not a hard guard against new modalities.
+    def test_modalities_with_extras_are_mapped(self):
+        """Sanity: modalities that need a muse extra have a row; the rest
+        fall through to [] and need none."""
         for mod in (
             "audio/speech",
-            "audio/transcription",
-            "audio/quality",
             "image/generation",
             "embedding/text",
-            "chat/completion",
             "video/generation",
         ):
-            assert mod in MODALITY_EXTRAS
+            assert MODALITY_EXTRAS[mod]
 
 
 def test_muse_repo_root_finds_pyproject():

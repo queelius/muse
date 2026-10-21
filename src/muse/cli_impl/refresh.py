@@ -33,9 +33,9 @@ from muse.core.catalog import (
     _catalog_dir,
     _ensure_owned_directory,
     _installed_muse_requirement,
-    _is_muse_pyproject,
     _model_pull_lock,
     _model_resource_lease,
+    _muse_repo_root,
     _read_catalog,
     _validate_model_id_for_fs,
     get_manifest,
@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 
 # 30 minutes: long enough for a slow PyPI mirror to complete a full
 # torch+diffusers install, short enough that a hung mirror is detected
-# before the operator gives up. Probe and admin/operations.refresh use
-# the same value.
+# before the operator gives up. Matches the pip timeout `muse pull` uses
+# (muse.core.venv._PIP_TIMEOUT).
 _PIP_TIMEOUT = 1800
 
 
@@ -65,26 +65,14 @@ _PIP_TIMEOUT = 1800
 # hand-maintained: each entry corresponds to a pyproject [project.
 # optional-dependencies] block (see pyproject.toml). New modalities
 # either bring a new extra (then add a row here) or reuse `server`
-# (then map to []).
+# (then need no row; unknown modalities map to []).
 MODALITY_EXTRAS: dict[str, list[str]] = {
     "audio/speech": ["audio"],
-    "audio/transcription": [],
-    "audio/embedding": [],
-    "audio/quality": [],
-    "audio/alignment": [],
-    "audio/generation": [],
     "image/generation": ["images"],
     "image/animation": ["images"],
     "image/upscale": ["images"],
-    "image/embedding": [],
-    "image/segmentation": [],
-    "image/vectorization": [],
     "embedding/text": ["embeddings"],
-    "text/classification": [],
-    "text/rerank": [],
-    "text/summarization": [],
     "video/generation": ["images"],
-    "chat/completion": [],
 }
 
 
@@ -106,39 +94,6 @@ def _infer_extras(modality: str) -> list[str]:
 
 # The source-tree sniff and exact installed-distribution requirement are shared
 # with core.catalog, which applies the same fork to `muse pull` venv creation.
-
-
-def _muse_repo_root() -> Path | None:
-    """Locate the muse source tree for an editable refresh, or None.
-
-    Walks parents of this file for a pyproject.toml that actually
-    declares the museq project. Returns None when running from a
-    wheel/PyPI install (no such pyproject in any parent), so the caller
-    installs the published `museq` distribution from PyPI instead of
-    editable-installing whatever unrelated project happens to sit in the
-    current working directory.
-    """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        pyproject = parent / "pyproject.toml"
-        if pyproject.exists() and _is_muse_pyproject(pyproject):
-            return parent
-    return None
-
-
-def _pip_target(extras: list[str]) -> str:
-    """Build the museq install spec: <target>[server,extra1,extra2,...].
-
-    `<target>` is the local source tree (editable refresh) when muse runs
-    from a checkout, else the exact invoking `museq` distribution version.
-    `server` is always present; modality extras append. Bracket-comma syntax
-    matches PEP 508 extras.
-    """
-    root = _muse_repo_root()
-    if root is not None:
-        spec = ",".join(["server", *extras])
-        return f"{root}[{spec}]"
-    return _installed_muse_requirement(["server", *extras])
 
 
 def _pip_target_args(extras: list[str]) -> list[str]:
@@ -273,6 +228,31 @@ def _refresh_one_locked(
     return result
 
 
+def _run_pip(
+    cmd: list[str], label: str, *, model_id: str, muse_extras: list[str],
+) -> RefreshResult | None:
+    """Run one pip command; return a failed RefreshResult, or None on success."""
+    try:
+        proc = run_owned_command(
+            cmd, capture_output=True, timeout=_PIP_TIMEOUT, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        message = f"{label} install timed out after {_PIP_TIMEOUT}s"
+        return RefreshResult(model_id, "failed", message, extras=muse_extras)
+    except (OSError, ValueError) as exc:
+        message = f"could not start {label} install: {exc}"
+        return RefreshResult(model_id, "failed", message, extras=muse_extras)
+    if proc.returncode != 0:
+        return RefreshResult(
+            model_id,
+            "failed",
+            f"{label} install failed",
+            (proc.stdout or "") + (proc.stderr or ""),
+            extras=muse_extras,
+        )
+    return None
+
+
 def _refresh_staged_venv(
     model_id: str,
     *,
@@ -288,32 +268,11 @@ def _refresh_staged_venv(
 
     cmd = [python_path, "-m", "pip", "install", "--upgrade", *target_args]
     logger.info("refresh %s: %s", model_id, " ".join(cmd))
-    try:
-        proc = run_owned_command(
-            cmd, capture_output=True, timeout=_PIP_TIMEOUT, check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return RefreshResult(
-            model_id,
-            "failed",
-            f"museq[server] install timed out after {_PIP_TIMEOUT}s",
-            extras=muse_extras,
-        )
-    except (OSError, ValueError) as exc:
-        return RefreshResult(
-            model_id,
-            "failed",
-            f"could not start museq[server] install: {exc}",
-            extras=muse_extras,
-        )
-    if proc.returncode != 0:
-        return RefreshResult(
-            model_id,
-            "failed",
-            "museq[server] install failed",
-            (proc.stdout or "") + (proc.stderr or ""),
-            extras=muse_extras,
-        )
+    failed = _run_pip(
+        cmd, "museq[server]", model_id=model_id, muse_extras=muse_extras,
+    )
+    if failed is not None:
+        return failed
 
     commands = (
         pip_install_commands(python_path, pip_extras_list, upgrade=True)
@@ -321,32 +280,11 @@ def _refresh_staged_venv(
     )
     for cmd2 in commands:
         logger.info("refresh %s extras: %s", model_id, " ".join(cmd2))
-        try:
-            proc2 = run_owned_command(
-                cmd2, capture_output=True, timeout=_PIP_TIMEOUT, check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return RefreshResult(
-                model_id,
-                "failed",
-                f"pip_extras install timed out after {_PIP_TIMEOUT}s",
-                extras=muse_extras,
-            )
-        except (OSError, ValueError) as exc:
-            return RefreshResult(
-                model_id,
-                "failed",
-                f"could not start pip_extras install: {exc}",
-                extras=muse_extras,
-            )
-        if proc2.returncode != 0:
-            return RefreshResult(
-                model_id,
-                "failed",
-                "pip_extras install failed",
-                (proc2.stdout or "") + (proc2.stderr or ""),
-                extras=muse_extras,
-            )
+        failed = _run_pip(
+            cmd2, "pip_extras", model_id=model_id, muse_extras=muse_extras,
+        )
+        if failed is not None:
+            return failed
 
     if not no_extras:
         try:
