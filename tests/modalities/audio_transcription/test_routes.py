@@ -225,6 +225,8 @@ def test_backend_decoder_error_returns_415_envelope():
     assert r.status_code == 415
     body = r.json()
     assert body["error"]["code"] == "unsupported_media_type"
+    # The raw backend exception text is logged, not echoed to the client.
+    assert "invalid data found" not in body["error"]["message"]
 
 
 def test_backend_unrelated_error_re_raised_not_as_415():

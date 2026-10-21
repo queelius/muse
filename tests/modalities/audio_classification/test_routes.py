@@ -96,7 +96,7 @@ def test_empty_audio_returns_400():
     assert "empty" in r.json()["error"]["message"]
 
 
-def test_oversized_audio_returns_400(monkeypatch):
+def test_oversized_audio_returns_413(monkeypatch):
     """MUSE_AUDIO_CLS_MAX_BYTES env cap rejects oversized uploads."""
     backend = _FakeAudioClassifier()
     client = _client(backend)
@@ -105,8 +105,9 @@ def test_oversized_audio_returns_400(monkeypatch):
         "/v1/audio/classifications",
         files={"file": ("a.wav", b"x" * 200, "audio/wav")},
     )
-    assert r.status_code == 400
-    assert "exceeds" in r.json()["error"]["message"]
+    assert r.status_code == 413
+    assert r.json()["error"]["code"] == "payload_too_large"
+    assert "MUSE_AUDIO_CLS_MAX_BYTES=100" in r.json()["error"]["message"]
 
 
 def test_audio_cls_cap_zero_env_falls_back(monkeypatch):

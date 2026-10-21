@@ -1,11 +1,7 @@
 """FastAPI route for reference-text forced alignment."""
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import tempfile
-from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -13,6 +9,11 @@ from fastapi.responses import JSONResponse
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.uploads import (
+    read_upload,
+    run_on_spooled_upload,
+    upload_suffix,
+)
 from muse.modalities.audio_alignment.codec import encode_audio_alignment
 from muse.modalities.audio_alignment.protocol import (
     AudioAlignmentDecodeError,
@@ -65,34 +66,27 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         cap = _max_bytes()
-        raw = await file.read(cap + 1)
-        if not raw:
-            return error_response(400, "invalid_parameter", "empty audio file")
-        if len(raw) > cap:
-            return error_response(
-                413,
-                "payload_too_large",
-                f"audio file exceeds MUSE_AUDIO_ALIGNMENT_MAX_BYTES={cap}",
-            )
+        raw = await read_upload(
+            file, max_bytes=cap, limit=f"MUSE_AUDIO_ALIGNMENT_MAX_BYTES={cap}",
+        )
+        if isinstance(raw, JSONResponse):
+            return raw
 
         backend = registry.get_or_404(MODALITY, model)
 
-        suffix = Path(file.filename or "audio").suffix or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = tmp.name
-
-        def _call():
+        def _call(path: str):
             with backend._inference_lock:
                 return backend.align(
-                    tmp_path,
+                    path,
                     reference_text,
                     language=language,
                     max_duration_seconds=_max_duration_seconds(),
                 )
 
         try:
-            result = await asyncio.to_thread(_call)
+            result = await run_on_spooled_upload(
+                raw, _call, suffix=upload_suffix(file.filename),
+            )
         except AudioAlignmentDurationExceededError as exc:
             return error_response(413, "payload_too_large", str(exc))
         except AudioAlignmentDecodeError:
@@ -111,11 +105,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "internal_error",
                 "audio alignment backend failed; see server logs",
             )
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
         return JSONResponse(content=encode_audio_alignment(
             result, model_id=backend.model_id,

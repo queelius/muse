@@ -1,7 +1,7 @@
 """FastAPI routes for /v1/audio/classifications.
 
 Multipart in (file + optional model + optional top_k), JSON out
-mirroring /v1/text/classifications. Saves the upload to a temp file
+mirroring /v1/text/classifications. Spools the upload to a temp file
 before invoking librosa (which expects a path).
 
 Per-backend _inference_lock (v0.34.0) serializes calls. Size cap via
@@ -9,11 +9,7 @@ MUSE_AUDIO_CLS_MAX_BYTES env (default 50MB), read per-request.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import tempfile
-from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -21,6 +17,11 @@ from fastapi.responses import JSONResponse
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.uploads import (
+    read_upload,
+    run_on_spooled_upload,
+    upload_suffix,
+)
 from muse.modalities.audio_classification.codec import (
     encode_audio_classifications,
 )
@@ -58,34 +59,23 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"top_k must be >= 1; got {top_k}",
             )
 
-        # Bounded read so a malicious giant upload doesn't OOM the worker.
         cap = _max_bytes()
-        raw = await file.read(cap + 1)
-        if not raw:
-            return error_response(400, "invalid_parameter", "empty audio file")
-        if len(raw) > cap:
-            return error_response(
-                400, "invalid_parameter",
-                f"audio bytes exceeds max ({len(raw)} > {cap}); "
-                f"raise MUSE_AUDIO_CLS_MAX_BYTES if intentional",
-            )
+        raw = await read_upload(
+            file, max_bytes=cap, limit=f"MUSE_AUDIO_CLS_MAX_BYTES={cap}",
+        )
+        if isinstance(raw, JSONResponse):
+            return raw
 
         backend = registry.get_or_404(MODALITY, model)
 
-        # librosa needs a filesystem path; write the upload to a temp
-        # file. Using delete=False so the inference thread can read it
-        # after the with-block; we clean up explicitly.
-        suffix = Path(file.filename or "audio").suffix or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = tmp.name
-
-        def _call():
+        def _call(path: str):
             with backend._inference_lock:
-                return backend.classify(tmp_path)
+                return backend.classify(path)
 
         try:
-            results = await asyncio.to_thread(_call)
+            results = await run_on_spooled_upload(
+                raw, _call, suffix=upload_suffix(file.filename),
+            )
         except Exception:  # noqa: BLE001
             # Log the real exception server-side but never leak it to the
             # client: str(e) can carry internal filesystem paths, CUDA
@@ -95,11 +85,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 500, "internal_error",
                 "audio classification backend failed; see server logs",
             )
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
         body = encode_audio_classifications(
             results, model_id=backend.model_id, top_k=top_k,

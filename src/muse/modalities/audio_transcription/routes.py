@@ -1,10 +1,8 @@
 """FastAPI routes for /v1/audio/transcriptions and /v1/audio/translations.
 
 First muse modality with multipart/form-data uploads. Pattern: FastAPI
-UploadFile + Form fields, saved to a tempfile, passed as path to the
-backend. If a second multipart modality (images/edits, audio input)
-lands, factor out into muse.modalities._common.uploads (TODO in
-CLAUDE.md).
+UploadFile + Form fields, spooled to a temp file via
+muse.modalities._common.uploads, passed as path to the backend.
 
 Size cap: MUSE_ASR_MAX_MB env var (default 100). 4x OpenAI's 25 MB
 since we're self-hosted.
@@ -22,17 +20,21 @@ ModelNotFoundError and RequestValidationError.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import tempfile
 from typing import Literal
 
 from fastapi import APIRouter, File, Form, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.uploads import (
+    looks_like_audio_decode_error,
+    read_upload,
+    run_on_spooled_upload,
+    upload_suffix,
+)
 from muse.modalities.audio_transcription.codec import encode_transcription
 
 
@@ -73,75 +75,54 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         max_bytes = _max_upload_bytes()
-        data = await file.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            return error_response(
-                413,
-                "payload_too_large",
-                f"file exceeds MUSE_ASR_MAX_MB={max_bytes // (1024 * 1024)}",
-            )
-        if not data:
-            return error_response(400, "invalid_parameter", "file is empty")
+        data = await read_upload(
+            file, max_bytes=max_bytes, label="file",
+            limit=f"MUSE_ASR_MAX_MB={max_bytes // (1024 * 1024)}",
+        )
+        if isinstance(data, JSONResponse):
+            return data
 
         backend = registry.get_or_404(MODALITY, model)
 
         want_words = "word" in timestamp_granularities
 
-        with tempfile.NamedTemporaryFile(
-            suffix=_suffix_for_upload(file.filename), delete=True,
-        ) as tmp:
-            tmp.write(data)
-            tmp.flush()
-            try:
-                # Whisper inference is sync and CPU/GPU-bound; offload
-                # so a long transcription (large-v3 on a 60s clip is
-                # multi-second wall time) doesn't block /health, the
-                # gateway's per-worker probing, or sibling requests.
-                # The `with` stays open across the await -- tmp.name is
-                # valid for the duration of the thread.
-                def _transcribe():
-                    with backend._inference_lock:
-                        return backend.transcribe(
-                            tmp.name,
-                            task=task,
-                            language=None if task == "translate" else language,
-                            prompt=prompt,
-                            temperature=temperature,
-                            word_timestamps=want_words,
-                            vad_filter=vad_filter,
-                        )
-                result = await asyncio.to_thread(_transcribe)
-            except Exception as e:  # noqa: BLE001
-                # PyAV/ffmpeg decode failures land here; we don't try to
-                # distinguish finely (message surface is good enough).
-                msg = str(e).lower()
-                # Keep this list narrow: "format" alone matches too many unrelated
-                # errors (e.g. "invalid response_format"). The tokens below are
-                # characteristic of PyAV/ffmpeg/ctranslate2 decode failures.
-                if (
-                    "decoder" in msg
-                    or "decode" in msg
-                    or "ffmpeg" in msg
-                    or "invalid data" in msg
-                    or "invaliddata" in msg  # PyAV's InvalidDataError class name lowercased
-                ):
-                    logger.warning(
-                        "backend.transcribe raised a decoder-looking exception; returning 415. "
-                        "If this is a false positive, see routes.py._handle's exception gate. "
-                        "Error: %s", e,
-                    )
-                    return error_response(
-                        415,
-                        "unsupported_media_type",
-                        f"audio decode failed: {e}",
-                    )
-                # Deliberately re-raise everything else so a real bug
-                # surfaces instead of being masked as a 415. This used to
-                # escape as FastAPI's bare `{"detail": "Internal Server
-                # Error"}`; create_app's global Exception handler (added
-                # v0.58.1) now catches it and returns the OpenAI-shape
-                # 500 envelope, logging the real exception server-side.
-                raise
+        # Whisper inference is sync and CPU/GPU-bound; run it off-loop so a
+        # long transcription doesn't block /health, the gateway's
+        # per-worker probing, or sibling requests.
+        def _transcribe(path: str):
+            with backend._inference_lock:
+                return backend.transcribe(
+                    path,
+                    task=task,
+                    language=None if task == "translate" else language,
+                    prompt=prompt,
+                    temperature=temperature,
+                    word_timestamps=want_words,
+                    vad_filter=vad_filter,
+                )
+
+        try:
+            result = await run_on_spooled_upload(
+                data, _transcribe, suffix=upload_suffix(file.filename, default=""),
+            )
+        except Exception as e:  # noqa: BLE001
+            # PyAV/ffmpeg decode failures map to 415; the raw exception
+            # text stays in the server log, not the client body.
+            if looks_like_audio_decode_error(e):
+                logger.warning(
+                    "backend.transcribe raised a decoder-looking exception; "
+                    "returning 415. Error: %s", e,
+                )
+                return error_response(
+                    415,
+                    "unsupported_media_type",
+                    "audio decode failed; provide a supported audio file",
+                )
+            # Deliberately re-raise everything else so a real bug
+            # surfaces instead of being masked as a 415. create_app's
+            # global Exception handler (v0.58.1) returns the OpenAI-shape
+            # 500 envelope and logs the real exception server-side.
+            raise
 
         body, content_type = encode_transcription(
             result, response_format, include_words=want_words,
@@ -191,9 +172,3 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     return router
 
-
-def _suffix_for_upload(filename: str | None) -> str:
-    """Preserve the upload's suffix so ffmpeg/PyAV can sniff the format."""
-    if not filename or "." not in filename:
-        return ""
-    return "." + filename.rsplit(".", 1)[-1]

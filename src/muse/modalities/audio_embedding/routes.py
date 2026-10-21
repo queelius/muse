@@ -27,12 +27,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
-
 from fastapi import APIRouter, File, Form, UploadFile
+from fastapi.responses import JSONResponse
 
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.uploads import (
+    looks_like_audio_decode_error,
+    read_upload,
+)
 from muse.modalities.audio_embedding.codec import embedding_to_base64
 
 
@@ -49,7 +53,7 @@ _MAX_TOTAL_UPLOAD_BYTES = 64 * 1024 * 1024
 def _max_upload_bytes() -> int:
     """Per-file byte cap via muse.core.config (env:
     MUSE_AUDIO_EMBEDDINGS_MAX_BYTES). Default 50MB; tunable via env."""
-    return config.get("limits.audio_embeddings_max_bytes")
+    return config.get_positive("limits.audio_embeddings_max_bytes")
 
 
 _VALID_FORMATS = {"float", "base64"}
@@ -87,24 +91,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         audio_bytes_list: list[bytes] = []
         total_bytes = 0
         for idx, upload in enumerate(file):
-            try:
-                data = await upload.read(max_bytes + 1)
-            finally:
-                try:
-                    await upload.close()
-                except Exception:  # noqa: BLE001
-                    logger.debug("failed to close audio upload", exc_info=True)
-            if len(data) > max_bytes:
-                return error_response(
-                    413, "payload_too_large",
-                    f"file[{idx}] exceeds MUSE_AUDIO_EMBEDDINGS_MAX_BYTES="
-                    f"{max_bytes}",
-                )
-            if not data:
-                return error_response(
-                    400, "invalid_parameter",
-                    f"file[{idx}] is empty",
-                )
+            data = await read_upload(
+                upload, max_bytes=max_bytes, label=f"file[{idx}]",
+                limit=f"MUSE_AUDIO_EMBEDDINGS_MAX_BYTES={max_bytes}",
+            )
+            if isinstance(data, JSONResponse):
+                return data
             total_bytes += len(data)
             if total_bytes > _MAX_TOTAL_UPLOAD_BYTES:
                 return error_response(
@@ -126,28 +118,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         try:
             result = await asyncio.to_thread(_call)
         except Exception as e:  # noqa: BLE001
-            # librosa decode failures land here. Use the same heuristic
-            # gate as audio_transcription/routes: treat decoder-shaped
-            # error messages as 415; re-raise everything else so a real
-            # bug surfaces instead of being masked.
-            msg = str(e).lower()
-            if (
-                "audioread" in msg
-                or "decoder" in msg
-                or "decode" in msg
-                or "ffmpeg" in msg
-                or "soundfile" in msg
-                or "format not recognised" in msg
-                or "format not recognized" in msg
-                or "no backend available" in msg
-            ):
+            # librosa decode failures map to 415 (same heuristic as
+            # audio_transcription); the raw exception text stays in the
+            # server log, not the client body.
+            if looks_like_audio_decode_error(e):
                 logger.warning(
                     "backend.embed raised a decoder-looking exception; "
                     "returning 415. Error: %s", e,
                 )
                 return error_response(
                     415, "unsupported_media_type",
-                    f"audio decode failed: {e}",
+                    "audio decode failed; provide a supported audio file",
                 )
             # Deliberately re-raise everything else so a real bug
             # surfaces instead of being masked as a 415. This used to

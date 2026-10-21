@@ -173,9 +173,9 @@ def test_embeddings_user_field_accepted_and_ignored():
 def test_embeddings_payload_too_large(monkeypatch):
     """File exceeding MUSE_AUDIO_EMBEDDINGS_MAX_BYTES returns 413.
 
-    Set the cap to 0 bytes so any non-empty file overflows.
+    (A cap <= 0 means "use the default", like every other byte cap.)
     """
-    monkeypatch.setenv("MUSE_AUDIO_EMBEDDINGS_MAX_BYTES", "0")
+    monkeypatch.setenv("MUSE_AUDIO_EMBEDDINGS_MAX_BYTES", "5")
     backend = _fake_backend(_fake_result())
     client = _make_client(backend)
     r = client.post(
@@ -237,6 +237,7 @@ def test_embeddings_decoder_error_returns_415():
     assert r.status_code == 415
     body = r.json()
     assert body["error"]["code"] == "unsupported_media_type"
+    assert "NoBackendError" not in body["error"]["message"]
 
 
 def test_embeddings_unrelated_error_not_415():

@@ -1,11 +1,7 @@
 """FastAPI route for single-ended audio-quality assessment."""
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import tempfile
-from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -13,6 +9,12 @@ from fastapi.responses import JSONResponse
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.uploads import (
+    looks_like_audio_decode_error,
+    read_upload,
+    run_on_spooled_upload,
+    upload_suffix,
+)
 from muse.modalities.audio_quality.codec import encode_audio_quality
 from muse.modalities.audio_quality.protocol import AudioDurationExceededError
 
@@ -31,21 +33,6 @@ def _max_duration_seconds() -> float:
     return float(config.get_positive("limits.audio_quality_max_duration_seconds"))
 
 
-def _looks_like_decode_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return any(token in message for token in (
-        "audioread",
-        "decode",
-        "decoder",
-        "ffmpeg",
-        "format not recognised",
-        "format not recognized",
-        "no backend available",
-        "soundfile",
-        "torchcodec",
-    ))
-
-
 def build_router(registry: ModalityRegistry) -> APIRouter:
     router = APIRouter()
 
@@ -55,32 +42,25 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         model: str | None = Form(None),
     ):
         cap = _max_bytes()
-        raw = await file.read(cap + 1)
-        if not raw:
-            return error_response(400, "invalid_parameter", "empty audio file")
-        if len(raw) > cap:
-            return error_response(
-                413,
-                "payload_too_large",
-                f"audio file exceeds MUSE_AUDIO_QUALITY_MAX_BYTES={cap}",
-            )
+        raw = await read_upload(
+            file, max_bytes=cap, limit=f"MUSE_AUDIO_QUALITY_MAX_BYTES={cap}",
+        )
+        if isinstance(raw, JSONResponse):
+            return raw
 
         backend = registry.get_or_404(MODALITY, model)
 
-        suffix = Path(file.filename or "audio").suffix or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = tmp.name
-
-        def _call():
+        def _call(path: str):
             with backend._inference_lock:
                 return backend.assess(
-                    tmp_path,
+                    path,
                     max_duration_seconds=_max_duration_seconds(),
                 )
 
         try:
-            result = await asyncio.to_thread(_call)
+            result = await run_on_spooled_upload(
+                raw, _call, suffix=upload_suffix(file.filename),
+            )
         except AudioDurationExceededError as exc:
             return error_response(
                 413,
@@ -88,7 +68,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 str(exc),
             )
         except Exception as exc:  # noqa: BLE001
-            if _looks_like_decode_error(exc):
+            if looks_like_audio_decode_error(exc):
                 logger.warning("audio quality decode failed", exc_info=True)
                 return error_response(
                     415,
@@ -101,11 +81,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "internal_error",
                 "audio quality backend failed; see server logs",
             )
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
         return JSONResponse(content=encode_audio_quality(
             result, model_id=backend.model_id,
