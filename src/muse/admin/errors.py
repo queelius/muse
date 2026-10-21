@@ -14,6 +14,12 @@ other HTTPException so plain-string details elsewhere keep their
 `{"detail": ...}` shape. The handler is safe-degrading: an includer that
 forgets to register it still gets a valid (if double-wrapped) error
 response, never a 500.
+
+It also registers the handler that renders an `OperationError` raised by
+an admin route as its bound (status, code, message) envelope, so routes
+can let operation failures propagate instead of converting each one.
+An includer that skips `install_admin_error_handler` turns those into
+500s, so every app mounting the admin router must call it.
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 def install_admin_error_handler(app: FastAPI) -> None:
-    """Register the OpenAI-envelope-unwrapping HTTPException handler."""
+    """Register the admin HTTPException and OperationError handlers."""
 
     async def _handler(request, exc: StarletteHTTPException):
         detail = exc.detail
@@ -38,3 +44,11 @@ def install_admin_error_handler(app: FastAPI) -> None:
         return await http_exception_handler(request, exc)
 
     app.add_exception_handler(StarletteHTTPException, _handler)
+
+    from muse.admin.operations import OperationError
+    from muse.core.errors import error_response
+
+    async def _operation_error_handler(request, exc: OperationError):
+        return error_response(exc.status, exc.code, exc.message)
+
+    app.add_exception_handler(OperationError, _operation_error_handler)

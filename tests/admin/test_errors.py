@@ -33,6 +33,11 @@ def _app() -> FastAPI:
         # A dict detail WITHOUT an "error" key must NOT be unwrapped.
         raise HTTPException(status_code=422, detail={"field": "missing"})
 
+    @app.get("/operation-error")
+    def operation_error():
+        from muse.admin.operations import OperationError
+        raise OperationError("model_loaded", "model 'm' is loaded", status=409)
+
     install_admin_error_handler(app)
     return app
 
@@ -70,3 +75,11 @@ def test_dict_detail_without_error_key_keeps_default_shape():
     r = c.get("/dict-no-error")
     assert r.status_code == 422
     assert r.json() == {"detail": {"field": "missing"}}
+
+
+def test_operation_error_renders_its_bound_envelope():
+    c = TestClient(_app(), raise_server_exceptions=False)
+    r = c.get("/operation-error")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "model_loaded"
+    assert r.json()["error"]["message"] == "model 'm' is loaded"

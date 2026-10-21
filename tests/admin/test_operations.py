@@ -2369,17 +2369,3 @@ class TestLaunchAsync:
         job = launch_async(op, op_name="enable", model_id="m", store=store)
         job.thread.join(timeout=2.0)
         assert job.thread.daemon is True
-
-    def test_op_args_override_default_positional(self, store):
-        captured = {}
-
-        def op(a, b, *, job, store):  # noqa: ARG001
-            captured["a"] = a
-            captured["b"] = b
-
-        job = launch_async(
-            op, op_name="enable", model_id="ignored",
-            store=store, op_args=("x", "y"),
-        )
-        job.thread.join(timeout=2.0)
-        assert captured == {"a": "x", "b": "y"}

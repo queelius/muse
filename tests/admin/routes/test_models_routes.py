@@ -26,12 +26,15 @@ from muse.cli_impl.supervisor import (
 @pytest.fixture
 def auth_app():
     """A FastAPI app mounting the models router with auth applied."""
+    from muse.admin.errors import install_admin_error_handler
+
     app = FastAPI()
     app.include_router(
         build_models_router(),
         prefix="/v1/admin",
         dependencies=[Depends(verify_admin_token)],
     )
+    install_admin_error_handler(app)
     return app
 
 
@@ -229,7 +232,7 @@ class TestPullRoute:
 
         def fake_launch(op, **kwargs):
             captured["model_id"] = kwargs["model_id"]
-            captured["op_args"] = kwargs.get("op_args")
+            captured["kwargs"] = kwargs
             return Job(job_id="j", op="pull", model_id=kwargs["model_id"])
 
         monkeypatch.setattr(
@@ -241,7 +244,7 @@ class TestPullRoute:
             json={"identifier": "hf://Qwen/Qwen3-8B-GGUF@q4_k_m"},
         )
         assert r.status_code == 202
-        assert captured["op_args"] == ("hf://Qwen/Qwen3-8B-GGUF@q4_k_m",)
+        assert "op_args" not in captured["kwargs"]
         assert captured["model_id"] == "hf://Qwen/Qwen3-8B-GGUF@q4_k_m"
 
     def test_pull_with_path_id_no_body(self, client, headers, tmp_catalog, monkeypatch):
@@ -250,7 +253,7 @@ class TestPullRoute:
 
         def fake_launch(op, **kwargs):
             captured["model_id"] = kwargs["model_id"]
-            captured["op_args"] = kwargs.get("op_args")
+            captured["kwargs"] = kwargs
             return Job(job_id="j", op="pull", model_id=kwargs["model_id"])
 
         monkeypatch.setattr(
@@ -262,7 +265,7 @@ class TestPullRoute:
             json={},
         )
         assert r.status_code == 202
-        assert captured["op_args"] == ("qwen3.5-9b-q4",)
+        assert captured["model_id"] == "qwen3.5-9b-q4"
 
     def test_pull_with_underscore_path_no_body_returns_400(
         self, client, headers, tmp_catalog,

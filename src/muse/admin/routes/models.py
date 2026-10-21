@@ -12,7 +12,9 @@ Endpoints (all under /v1/admin):
   DELETE /models/{id}            sync; catalog removal (?purge=bool)
   GET   /models/{id}/status      sync; merged catalog + worker view
 
-All routes return JSON with the OpenAI envelope on errors. Async ops
+All routes return JSON with the OpenAI envelope on errors: an
+OperationError raised by an operation is rendered by the handler that
+`muse.admin.errors.install_admin_error_handler` registers. Async ops
 return 202 + {job_id, status}; clients poll /v1/admin/jobs/{job_id}.
 """
 from __future__ import annotations
@@ -20,12 +22,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
-from muse.admin.jobs import get_default_store
+from muse.admin.jobs import Job, get_default_store
 from muse.admin.operations import (
-    OperationError,
     disable_model,
     enable_model,
     find_worker_for_model,
@@ -44,8 +45,12 @@ from muse.core.catalog import _read_catalog, known_models
 from muse.core.errors import error_response
 
 
-def _operation_error_to_response(e: OperationError) -> JSONResponse:
-    return error_response(e.status, e.code, e.message)
+def _accepted(job: Job) -> JSONResponse:
+    """202 envelope for a launched async job; clients poll /jobs/{id}."""
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job.job_id, "status": job.state},
+    )
 
 
 def build_models_router() -> APIRouter:
@@ -61,28 +66,18 @@ def build_models_router() -> APIRouter:
             return error_response(
                 404, "model_not_found", f"unknown model {model_id!r}",
             )
-        try:
-            job = launch_async(
-                enable_model,
-                op_name="enable",
-                model_id=model_id,
-                store=store,
-                state=state,
-            )
-        except OperationError as e:
-            return _operation_error_to_response(e)
-        return JSONResponse(
-            status_code=202,
-            content={"job_id": job.job_id, "status": job.state},
-        )
+        return _accepted(launch_async(
+            enable_model,
+            op_name="enable",
+            model_id=model_id,
+            store=store,
+            state=state,
+        ))
 
     @router.post("/models/{model_id}/disable")
     def disable(model_id: str, _body: dict | None = Body(default=None)):
         state = get_supervisor_state()
-        try:
-            return disable_model(model_id, state=state)
-        except OperationError as e:
-            return _operation_error_to_response(e)
+        return disable_model(model_id, state=state)
 
     @router.post("/models/{model_id}/warmup")
     def warmup(model_id: str, _body: dict | None = Body(default=None)):
@@ -96,10 +91,7 @@ def build_models_router() -> APIRouter:
         202 + job_id pattern.
         """
         state = get_supervisor_state()
-        try:
-            return warmup_model(model_id, state=state)
-        except OperationError as e:
-            return _operation_error_to_response(e)
+        return warmup_model(model_id, state=state)
 
     @router.post("/models/{model_id}/probe")
     def probe(model_id: str, body: dict | None = Body(default=None)):
@@ -112,21 +104,14 @@ def build_models_router() -> APIRouter:
         body = body or {}
         no_inference = bool(body.get("no_inference", False))
         device = body.get("device")
-        try:
-            job = launch_async(
-                probe_model,
-                op_name="probe",
-                model_id=model_id,
-                store=store,
-                no_inference=no_inference,
-                device=device,
-            )
-        except OperationError as e:
-            return _operation_error_to_response(e)
-        return JSONResponse(
-            status_code=202,
-            content={"job_id": job.job_id, "status": job.state},
-        )
+        return _accepted(launch_async(
+            probe_model,
+            op_name="probe",
+            model_id=model_id,
+            store=store,
+            no_inference=no_inference,
+            device=device,
+        ))
 
     @router.post("/models/{model_id}/pull")
     def pull(model_id: str, body: dict | None = Body(default=None)):
@@ -149,22 +134,14 @@ def build_models_router() -> APIRouter:
             )
         # The job tracks the operand under model_id even when the path
         # was the `_` placeholder; that way job.model_id is the meaningful
-        # identifier the user pulled. op_args supplies the positional
-        # identifier argument that pull_model expects.
-        try:
-            job = launch_async(
-                pull_model,
-                op_name="pull",
-                model_id=identifier,
-                store=store,
-                op_args=(identifier,),
-            )
-        except OperationError as e:
-            return _operation_error_to_response(e)
-        return JSONResponse(
-            status_code=202,
-            content={"job_id": job.job_id, "status": job.state},
-        )
+        # identifier the user pulled, and it is also pull_model's
+        # positional identifier argument.
+        return _accepted(launch_async(
+            pull_model,
+            op_name="pull",
+            model_id=identifier,
+            store=store,
+        ))
 
     @router.delete("/models/{model_id}")
     def delete(
@@ -172,10 +149,7 @@ def build_models_router() -> APIRouter:
         purge: bool = Query(default=False),
     ):
         state = get_supervisor_state()
-        try:
-            return remove_model(model_id, state=state, purge=purge)
-        except OperationError as e:
-            return _operation_error_to_response(e)
+        return remove_model(model_id, state=state, purge=purge)
 
     @router.get("/models/{model_id}/status")
     def status(model_id: str):

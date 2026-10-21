@@ -222,12 +222,15 @@ class TestWarmupBackfillsMemory:
 @pytest.fixture
 def auth_app():
     """A FastAPI app mounting the models router with auth applied."""
+    from muse.admin.errors import install_admin_error_handler
+
     app = FastAPI()
     app.include_router(
         build_models_router(),
         prefix="/v1/admin",
         dependencies=[Depends(verify_admin_token)],
     )
+    install_admin_error_handler(app)
     return app
 
 

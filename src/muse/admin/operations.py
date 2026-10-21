@@ -1543,20 +1543,18 @@ def launch_async(
     op_name: str,
     model_id: str,
     store: JobStore,
-    op_args: tuple = (),
     **kwargs: Any,
 ) -> Job:
     """Create a Job + spawn a daemon thread that runs op_fn(...).
 
-    `op_fn` must accept (positional args from `op_args`, keyword args
-    `job=Job`, `store=JobStore`, **kwargs). The thread is daemonized so
-    a Ctrl+C on the supervisor takes it down with the process;
-    JobStore.shutdown joins them with a timeout on graceful exit.
+    `op_fn` must accept (model_id, keyword args `job=Job`,
+    `store=JobStore`, **kwargs). The thread is daemonized so a Ctrl+C on
+    the supervisor takes it down with the process; JobStore.shutdown
+    joins them with a timeout on graceful exit.
 
-    `model_id` is the JobStore label (for /v1/admin/jobs/{id} display);
-    if `op_args` is empty, model_id is ALSO passed as the first
-    positional argument (the common case for enable_model / probe_model
-    / pull_model whose signature starts with `model_id`).
+    `model_id` is both the JobStore label (for /v1/admin/jobs/{id}
+    display) and op_fn's first positional argument (enable_model /
+    probe_model's model id, pull_model's identifier).
     """
     try:
         job = store.create(op_name, model_id)
@@ -1568,11 +1566,9 @@ def launch_async(
         raise OperationError(
             "server_shutting_down", str(e), status=503, retryable=True,
         ) from e
-    if not op_args:
-        op_args = (model_id,)
     thread = threading.Thread(
         target=op_fn,
-        args=op_args,
+        args=(model_id,),
         kwargs={"job": job, "store": store, **kwargs},
         daemon=True,
         name=f"muse-admin-{op_name}-{job.job_id}",
