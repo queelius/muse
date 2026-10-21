@@ -1,4 +1,5 @@
 """Tests for the gateway proxy FastAPI app."""
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -1099,3 +1100,168 @@ class TestAggregationTimeout:
             client.get("/v1/models")
 
         mock_client_cls.assert_called_once_with(timeout=9.0)
+
+
+# ---------------------------------------------------------------------------
+# _forward's single cleanup: release exactly once and first, then the
+# upstream stream and client, on every success and failure path.
+# ---------------------------------------------------------------------------
+
+
+class _ForwardHarness:
+    """Mock worker client whose close steps and release log into `events`."""
+
+    def __init__(
+        self,
+        *,
+        content_type: str = "application/json",
+        chunks: list[bytes] | None = None,
+        raise_after: BaseException | None = None,
+        open_error: BaseException | None = None,
+        aexit_error: BaseException | None = None,
+        aclose_error: BaseException | None = None,
+        release_error: BaseException | None = None,
+    ) -> None:
+        self.events: list[str] = []
+        chunks = [b'{"ok": true}'] if chunks is None else chunks
+
+        def aiter_raw(*, chunk_size=None):
+            async def gen():
+                for chunk in chunks:
+                    yield chunk
+                if raise_after is not None:
+                    raise raise_after
+            return gen()
+
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {"content-type": content_type}
+        response.aiter_raw = aiter_raw
+
+        def logged(name, error):
+            async def step(*_args):
+                self.events.append(name)
+                if error is not None:
+                    raise error
+            return step
+
+        self.stream_ctx = MagicMock()
+        if open_error is not None:
+            self.stream_ctx.__aenter__ = AsyncMock(side_effect=open_error)
+        else:
+            self.stream_ctx.__aenter__ = AsyncMock(return_value=response)
+        self.stream_ctx.__aexit__ = AsyncMock(side_effect=logged("aexit", aexit_error))
+        self.client = MagicMock()
+        self.client.stream.return_value = self.stream_ctx
+        self.client.aclose = AsyncMock(side_effect=logged("aclose", aclose_error))
+        self._release_error = release_error
+
+        self.request = MagicMock()
+        self.request.body = AsyncMock(return_value=b"")
+        self.request.headers = {}
+        self.request.method = "POST"
+        self.request.query_params = {}
+
+    def release(self) -> None:
+        self.events.append("release")
+        if self._release_error is not None:
+            raise self._release_error
+
+    async def forward(self, **kwargs):
+        from muse.cli_impl.gateway import _forward
+
+        kwargs.setdefault("release", self.release)
+        with patch(
+            "muse.cli_impl.gateway.httpx.AsyncClient", return_value=self.client,
+        ):
+            return await _forward(
+                self.request, "http://127.0.0.1:9001/x", 1.0, **kwargs,
+            )
+
+
+async def _drive_asgi(response) -> list[dict]:
+    sent: list[dict] = []
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    await response(
+        {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+         "method": "POST", "path": "/x", "headers": []},
+        receive, send,
+    )
+    return sent
+
+
+class TestForwardCleanup:
+    async def test_buffered_releases_before_closing_upstream(self):
+        h = _ForwardHarness()
+        response = await h.forward()
+        assert response.status_code == 200
+        assert response.body == b'{"ok": true}'
+        assert h.events == ["release", "aexit", "aclose"]
+
+    async def test_buffered_response_survives_raising_close_steps(self):
+        h = _ForwardHarness(
+            aexit_error=RuntimeError("aexit"), aclose_error=RuntimeError("aclose"),
+        )
+        response = await h.forward()
+        assert response.status_code == 200
+        assert h.events == ["release", "aexit", "aclose"]
+
+    async def test_raising_release_still_closes_upstream(self):
+        h = _ForwardHarness(release_error=RuntimeError("director down"))
+        response = await h.forward()
+        assert response.status_code == 200
+        assert h.events == ["release", "aexit", "aclose"]
+
+    @pytest.mark.parametrize("error", [
+        httpx.ReadError("worker died mid-body"), asyncio.CancelledError(),
+    ])
+    async def test_prefetch_failure_cleans_up_once_and_reraises(self, error):
+        h = _ForwardHarness(raise_after=error)
+        with pytest.raises(type(error)):
+            await h.forward()
+        assert h.events == ["release", "aexit", "aclose"]
+
+    async def test_sse_full_lifecycle_releases_once_after_last_chunk(self):
+        h = _ForwardHarness(
+            content_type="text/event-stream",
+            chunks=[b"data: 1\n\n", b"data: 2\n\n"],
+        )
+        response = await h.forward()
+        assert h.events == []  # nothing released while the stream is open
+        sent = await _drive_asgi(response)
+        body = b"".join(
+            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+        )
+        assert body == b"data: 1\n\ndata: 2\n\n"
+        # The relay finally and the outer response lifecycle both ran the
+        # cleanup; it acted once.
+        assert h.events == ["release", "aexit", "aclose"]
+
+    async def test_sse_relay_error_releases_once(self):
+        h = _ForwardHarness(
+            content_type="text/event-stream",
+            chunks=[b"data: 1\n\n"],
+            raise_after=httpx.ReadError("worker died"),
+        )
+        response = await h.forward()
+        with pytest.raises(httpx.ReadError):
+            await _drive_asgi(response)
+        assert h.events == ["release", "aexit", "aclose"]
+
+    @pytest.mark.parametrize("error", [
+        httpx.ConnectError("refused"), httpx.ConnectTimeout("slow"),
+    ])
+    async def test_open_failure_without_release_reraises_unchanged(self, error):
+        """Federation calls _forward with no release and fails over on these
+        exact exception types, which must surface before any response."""
+        h = _ForwardHarness(open_error=error)
+        with pytest.raises(type(error)) as info:
+            await h.forward(release=None)
+        assert info.value is error
+        assert h.events == ["aclose"]  # stream never entered: no __aexit__

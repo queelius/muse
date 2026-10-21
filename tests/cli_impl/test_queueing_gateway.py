@@ -247,6 +247,22 @@ class TestGatewayReleasePairing:
         assert state.concurrency_gate.depth("fake-model") == 0
         assert state.concurrency_gate._entered.get("fake-model", 0) == 0
 
+    def test_raising_director_release_still_returns_the_slot(self):
+        """The forward's one release callable guards each step, so a
+        director.release failure cannot strand the gate slot."""
+        state = _state()
+        state.director.release.side_effect = RuntimeError("director hiccup")
+        app = build_gateway(state=state)
+        client = TestClient(app)
+        with _patch_get_manifest(_manifest(max_concurrency=1)), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            _wire_json_client(mock_cls)
+            r = client.post("/v1/audio/speech",
+                            json={"input": "hi", "model": "fake-model"})
+        assert r.status_code == 200
+        state.director.release.assert_called_once_with("fake-model")
+        assert state.concurrency_gate._entered.get("fake-model", 0) == 0
+
     def test_hot_request_records_zero_queued_ms(self):
         """Uncontended request (free gate slot, no capacity retry): queued_ms
         must be exactly 0.0, not inflated by the (mocked, instant) director

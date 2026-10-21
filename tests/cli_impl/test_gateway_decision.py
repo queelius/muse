@@ -375,3 +375,36 @@ async def test_other_paths_do_not_watch_for_disconnect():
         call.cancel()
         with pytest.raises(asyncio.CancelledError):
             await call
+
+
+async def test_route_disconnect_records_499_and_returns_refcount_and_slot():
+    """Through _route_via_director: the decision ceiling takes a gate slot,
+    the client leaves mid-call, and the route answers 499, records it, closes
+    the worker connection and returns both the refcount and the slot."""
+    gone, opened, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    request, _ = _disconnecting_request(json.dumps(BODY).encode(), gone)
+    state = _state()
+    events = []
+    with patch("muse.cli_impl.gateway.get_manifest", return_value=_manifest()), \
+         patch("muse.cli_impl.gateway._read_catalog", return_value={DECISION: {"enabled": True}}), \
+         patch("muse.cli_impl.gateway.record",
+               side_effect=lambda kind, **fields: events.append((kind, fields))), \
+         patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+        client = _hanging_client(mock_cls, opened, cancelled)
+        call = asyncio.ensure_future(_route_via_director(
+            request, "v1/systemone", DECISION, state, 30.0,
+            cancellable_paths=frozenset({"/v1/systemone"}),
+        ))
+        await asyncio.wait_for(opened.wait(), 5)
+        assert state.concurrency_gate._entered.get(DECISION) == 1
+        gone.set()
+        response = await asyncio.wait_for(call, 5)
+    assert response.status_code == 499
+    assert cancelled.is_set()
+    client.aclose.assert_awaited_once()
+    state.director.release.assert_called_once_with(DECISION)
+    assert state.concurrency_gate._entered.get(DECISION, 0) == 0
+    [(kind, fields)] = events
+    assert kind == "request"
+    assert fields["status"] == 499 and fields["stream"] is False
+    assert {"latency_ms", "queued_ms", "modality"} <= fields.keys()

@@ -62,6 +62,41 @@ class TestRequestTelemetry:
         assert fields["status"] == r.status_code
         assert fields["stream"] is False
         assert fields["modality"] == "chat/completions"
+        assert isinstance(fields["queued_ms"], float)
+
+    def test_streamed_request_records_stream_true(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            "muse.cli_impl.gateway.record",
+            lambda event_type, **fields: captured.append((event_type, fields)),
+        )
+        state = _make_state_with_director(acquire_port=9001)
+        client = TestClient(build_gateway(state=state))
+
+        with _patch_get_manifest(), \
+             patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+            mock_client = _wire_async_client_json(
+                mock_cls, response_content_type="text/event-stream",
+            )
+            response = mock_client.stream.return_value.__aenter__.return_value
+
+            async def aiter_raw():
+                yield b"data: hi\n\n"
+
+            response.aiter_raw = aiter_raw
+            r = client.post(
+                "/v1/chat/completions",
+                json={"model": "fake-model", "messages": [], "stream": True},
+            )
+
+        assert r.status_code == 200
+        assert r.content == b"data: hi\n\n"
+        [(kind, fields)] = captured
+        assert kind == "request"
+        assert fields["stream"] is True
+        assert fields["status"] == 200
+        assert {"model_id", "modality", "latency_ms", "queued_ms"} <= fields.keys()
+        state.director.release.assert_called_once_with("fake-model")
 
     def test_record_failure_never_breaks_the_forward(self, monkeypatch):
         """record() raising must not propagate: telemetry is fire-and-forget."""
