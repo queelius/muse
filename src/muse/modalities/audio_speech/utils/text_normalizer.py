@@ -268,8 +268,6 @@ _link_header_re = re.compile(r'(https?://)')
 _dash_re = re.compile(r'(. - .)')
 _dot_re = re.compile(r'([A-Z]\.[A-Z])', re.IGNORECASE)
 _parentheses_re = re.compile(r'[\(\[\{].*[\)\]\}](.|$)')
-_camelcase_re = re.compile(r'\b([A-Z][a-z]*)+\b')
-
 def expand_preunicode_special_characters(text):
     for regex, replacement in _preunicode_special_characters:
         text = re.sub(regex, replacement, text)
@@ -298,26 +296,11 @@ def _expand_parantheses(m):
     match = re.sub(r'[\)\]\}]', '', match)
     return match
 
-def _split_mixedcase(m):
-    match = m.group(0)
-    matches = re.findall('[A-Z][a-z]*', match)
-    if len(matches) == 1:
-        return match # Single capital word
-    if len(matches) == len(match):
-        return match # All uppercase
-    if len(matches) == len(match)-1 and match[-1] == 's':
-        return f"{match[:-1]}'s" # plural uppercase word
-    return ' '.join(matches)
-
 def normalize_special(text):
     text = re.sub(_link_header_re, _expand_link_header, text)
     text = re.sub(_dash_re, _expand_dash, text)
     text = re.sub(_dot_re, _expand_dot, text)
     text = re.sub(_parentheses_re, _expand_parantheses, text)
-    return text
-
-def normalize_mixedcase(text):
-    text = re.sub(_camelcase_re, _split_mixedcase, text)
     return text
 
 ####################################################################################################

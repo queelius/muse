@@ -8,9 +8,6 @@ Converts checkpoint weights to the current optimized format:
 - ISTFTHead Linear (out, in) -> Conv1d (out, in, 1)
 """
 
-import torch
-from pathlib import Path
-
 
 def _needs_conv1d_migration(key: str) -> bool:
     """Check if key is a 2D weight that should be migrated to Conv1d (out, in) -> (out, in, 1)."""
@@ -54,30 +51,6 @@ def _is_layernorm_key(key: str) -> bool:
     return prefix.endswith('.norm') or prefix == 'norm' or prefix.endswith('.final_layer_norm') or prefix == 'final_layer_norm'
 
 
-def migrate_checkpoint_file(input_path: str, output_path: str | None = None) -> str:
-    """
-    Migrate a decoder checkpoint file from Linear to Conv1d format.
-
-    Args:
-        input_path: Path to original checkpoint file
-        output_path: Path to save migrated checkpoint (default: input_path with .migrated suffix)
-
-    Returns:
-        Path to migrated checkpoint file
-    """
-    input_path = Path(input_path)
-    if output_path is None:
-        output_path = input_path.parent / f"{input_path.stem}.migrated{input_path.suffix}"
-    else:
-        output_path = Path(output_path)
-
-    state_dict = torch.load(input_path, map_location='cpu', weights_only=True)
-    migrated_dict = migrate_decoder_weights(state_dict)
-    torch.save(migrated_dict, output_path)
-
-    return str(output_path)
-
-
 def is_migrated(state_dict: dict) -> bool:
     """
     Check if a state dict has already been migrated to the optimized format.
@@ -114,14 +87,3 @@ def load_with_migration(state_dict: dict) -> dict:
         return state_dict
     return migrate_decoder_weights(state_dict)
 
-
-if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Migrate decoder weights from Linear to Conv1d format')
-    parser.add_argument('input', help='Input checkpoint file')
-    parser.add_argument('--output', '-o', help='Output checkpoint file (default: input.migrated.pth)')
-
-    args = parser.parse_args()
-    output = migrate_checkpoint_file(args.input, args.output)
-    print(f"Migrated checkpoint saved to: {output}")

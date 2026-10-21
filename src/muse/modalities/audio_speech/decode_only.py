@@ -1,15 +1,7 @@
 """Lightweight decode-only module for Muse Soprano TTS.
 
 Loads only the Vocos decoder (~5MB) without the LLM (~374MB).
-Useful for decoding pre-encoded .soprano files on resource-constrained devices.
-
-Usage:
-    from muse.modalities.audio_speech.decode_only import decode, decode_to_wav
-    from muse.modalities.audio_speech.encoded import load
-
-    encoded = load("blog-post.soprano")
-    audio = decode(encoded)              # list[torch.Tensor]
-    decode_to_wav(encoded, "output.wav") # convenience
+Narro.decode() delegates here.
 """
 
 import logging
@@ -147,18 +139,3 @@ def write_wav(audio_tensor, out_path):
     wavfile.write(out_path, SAMPLE_RATE, pcm)
 
 
-def decode_to_wav(encoded, out_path, decoder=None, decoder_batch_size=4):
-    """Decode an EncodedSpeech and write to a WAV file.
-
-    All texts are concatenated into a single audio stream.
-
-    Args:
-        encoded: EncodedSpeech from encode_batch() or load().
-        out_path: Output WAV file path.
-        decoder: Pre-loaded SopranoDecoder. If None, loads from HuggingFace.
-        decoder_batch_size: Batch size for decoder.
-    """
-    audio_list = decode(encoded, decoder=decoder, decoder_batch_size=decoder_batch_size)
-    write_wav(torch.cat(audio_list), out_path)
-    logger.info("Wrote %s (%.1f seconds)", out_path,
-                sum(a.shape[0] for a in audio_list) / SAMPLE_RATE)

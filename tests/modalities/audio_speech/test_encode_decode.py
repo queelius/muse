@@ -1,11 +1,8 @@
 """Tests for the encode/decode API in narro/tts.py and narro/decode_only.py."""
 
-import os
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 import torch
 
 
@@ -24,12 +21,10 @@ def _make_batch_encoding(d):
 
 from muse.modalities.audio_speech.tts import (
     Narro,
-    SAMPLE_RATE,
-    INT16_MAX,
     TOKEN_SIZE,
     HIDDEN_DIM,
 )
-from muse.modalities.audio_speech.encoded import EncodedSpeech, SentenceEncoding, save, load
+from muse.modalities.audio_speech.encoded import EncodedSpeech, SentenceEncoding
 
 
 # ---------------------------------------------------------------------------
@@ -453,54 +448,6 @@ class TestRoundtrip:
         result = tts.infer("Hello world.")
         assert isinstance(result, torch.Tensor)
 
-    def test_encode_save_load_decode(self):
-        """Full pipeline: encode -> save -> load -> decode."""
-        tts = self._make_tts_with_mocks()
-        seq_len = 20
-        tts.pipeline.infer.return_value = [_make_pipeline_response(seq_len)]
-
-        encoded = tts.encode("Hello world.")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "test.soprano")
-            save(encoded, path)
-            loaded = load(path)
-
-            def decoder_side_effect(batch):
-                B, C, T = batch.shape
-                return torch.randn(B, T * TOKEN_SIZE)
-
-            tts.decoder.side_effect = decoder_side_effect
-
-            audio = tts.decode(loaded)
-            assert len(audio) >= 1
-            assert all(isinstance(a, torch.Tensor) for a in audio)
-
-    def test_decode_to_wav(self):
-        """decode_to_wav should write a valid WAV file."""
-        tts = self._make_tts_with_mocks()
-        seq_len = 20
-        tts.pipeline.infer.return_value = [_make_pipeline_response(seq_len)]
-
-        def decoder_side_effect(batch):
-            B, C, T = batch.shape
-            return torch.randn(B, T * TOKEN_SIZE) * 0.5
-
-        tts.decoder.side_effect = decoder_side_effect
-
-        encoded = tts.encode("Hello world.")
-
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            out_path = f.name
-
-        try:
-            tts.decode_to_wav(encoded, out_path)
-            assert os.path.exists(out_path)
-            assert os.path.getsize(out_path) > 0
-        finally:
-            os.unlink(out_path)
-
-
 # ---------------------------------------------------------------------------
 # Decode-only module tests
 # ---------------------------------------------------------------------------
@@ -522,28 +469,6 @@ class TestDecodeOnly:
         audio = decode(encoded, decoder=mock_decoder)
         assert len(audio) == 1
         assert isinstance(audio[0], torch.Tensor)
-
-    def test_decode_to_wav_with_mock_decoder(self):
-        """decode_only.decode_to_wav() should write a WAV file."""
-        from muse.modalities.audio_speech.decode_only import decode_to_wav
-
-        encoded = _make_encoded_speech([20], num_texts=1)
-
-        mock_decoder = MagicMock()
-        def decoder_side_effect(batch):
-            B, C, T = batch.shape
-            return torch.randn(B, T * TOKEN_SIZE) * 0.5
-        mock_decoder.side_effect = decoder_side_effect
-
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            out_path = f.name
-
-        try:
-            decode_to_wav(encoded, out_path, decoder=mock_decoder)
-            assert os.path.exists(out_path)
-            assert os.path.getsize(out_path) > 0
-        finally:
-            os.unlink(out_path)
 
     def test_decode_multiple_texts(self):
         """decode_only.decode() should handle multiple texts."""
@@ -684,7 +609,3 @@ class TestBaseModelEnrichedOutput:
         assert 'token_id' in tokens[0]
         assert 'token_entropy' in tokens[0]
 
-
-# CLI encode/decode subcommands were removed in the API-first refactoring.
-# The library functions (encoded.save/load, decode_only) are still tested
-# above via TestEncodedSpeechRoundTrip and related classes.

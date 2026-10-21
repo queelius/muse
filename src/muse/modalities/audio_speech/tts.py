@@ -299,27 +299,6 @@ class Narro:
             write_wav(results, out_path)
         return results
 
-    def infer_batch(self, texts, out_dir=None, top_p=0.95, temperature=0.0,
-                    repetition_penalty=1.2, retries=1):
-        """Encode + decode multiple texts. Optionally write WAVs to out_dir."""
-        encoded = self.encode_batch(texts, top_p=top_p, temperature=temperature,
-                                    repetition_penalty=repetition_penalty, retries=retries)
-        audio_concat = self.decode(encoded)
-
-        if out_dir:
-            from .decode_only import write_wav
-            os.makedirs(out_dir, exist_ok=True)
-            for i, audio in enumerate(audio_concat):
-                write_wav(audio, f"{out_dir}/{i}.wav")
-
-        return audio_concat
-
-    def decode_to_wav(self, encoded, out_path):
-        """Decode an EncodedSpeech and write concatenated audio to a WAV file."""
-        from .decode_only import write_wav
-        audio_list = self.decode(encoded)
-        write_wav(torch.cat(audio_list), out_path)
-
     def infer_stream(self, text, chunk_size=8, top_p=0.95, temperature=0.0, repetition_penalty=1.2):
         start_time = time.time()
         sentence_data = self._preprocess_text([text])
