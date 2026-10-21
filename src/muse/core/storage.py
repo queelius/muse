@@ -490,8 +490,7 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
             other_paths = []
         muse_bytes += sum(_du_sizes(other_paths, warnings).values())
 
-    venv_refs: set[str] = set()
-    weight_refs: set[str] = set()
+    venv_refs, weight_refs = _owned_references(catalog, venvs_root, weights_root)
     venv_references_safe = True
     weights_references_safe = True
     hf_cache, pip_cache = _shared_cache_roots()
@@ -508,9 +507,6 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
                 "catalog entry has no venv_path",
             ))
         else:
-            protected = _top_level_owned_path(raw_venv, venvs_root)
-            if protected is not None:
-                venv_refs.add(_path_key(protected))
             if _path_key(raw_venv) != _path_key(expected_venv):
                 venv_references_safe = False
                 issues.append(StorageIssue(
@@ -538,18 +534,11 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
             )
         except CatalogError as exc:
             weights_references_safe = False
-            protected = _top_level_owned_path(raw_weights, weights_root)
-            if protected is not None:
-                weight_refs.add(_path_key(protected))
             issues.append(StorageIssue(
                 "unsafe-reference", model_id, raw_weights_path, str(exc),
             ))
         else:
-            if owned_target is not None:
-                protected = _top_level_owned_path(owned_target, weights_root)
-                if protected is not None:
-                    weight_refs.add(_path_key(protected))
-            elif hf_cache is not None:
+            if owned_target is None and hf_cache is not None:
                 shared_root = _top_level_owned_path(raw_weights, hf_cache)
                 if shared_root is not None and shared_root.name.startswith("models--"):
                     shared_repo_refs.add(shared_root)
@@ -619,19 +608,14 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
                 "unexpected non-directory or symlink in venv root",
             ))
             continue
-        if _path_key(item.path) in venv_refs:
-            referenced_venvs.append(_replace_item(
-                item, status="referenced", reason="referenced by catalog",
-            ))
-        else:
-            item = _with_newest_mtime(item, warnings)
-            if item is None:
-                continue
-            unreferenced_venvs.append(_replace_item(
-                item,
-                status="unreferenced",
-                reason="not catalog-referenced; may be intentionally retained",
-            ))
+        item = _with_newest_mtime(item, warnings)
+        if item is None:
+            continue
+        unreferenced_venvs.append(_replace_item(
+            item,
+            status="unreferenced",
+            reason="not catalog-referenced; may be intentionally retained",
+        ))
 
     referenced_weights: list[StorageItem] = []
     unreferenced_weights: list[StorageItem] = []
@@ -676,19 +660,14 @@ def inspect_storage(*, include_shared: bool = True) -> StorageReport:
                 "unexpected non-directory or symlink in weights root",
             ))
             continue
-        if _path_key(item.path) in weight_refs:
-            referenced_weights.append(_replace_item(
-                item, status="referenced", reason="referenced by catalog",
-            ))
-        else:
-            item = _with_newest_mtime(item, warnings)
-            if item is None:
-                continue
-            unreferenced_weights.append(_replace_item(
-                item,
-                status="unreferenced",
-                reason="not catalog-referenced; may be intentionally retained",
-            ))
+        item = _with_newest_mtime(item, warnings)
+        if item is None:
+            continue
+        unreferenced_weights.append(_replace_item(
+            item,
+            status="unreferenced",
+            reason="not catalog-referenced; may be intentionally retained",
+        ))
 
     incomplete_downloads = _find_incomplete_files(weights_root, warnings)
 
@@ -837,35 +816,44 @@ def _same_identity(path: Path, expected: PathIdentity) -> bool:
         return False
 
 
+def _owned_references(
+    catalog: dict, venv_root: Path, weights_root: Path,
+) -> tuple[set[str], set[str]]:
+    """Return the top-level venv/weights paths that catalog entries reference.
+
+    A weights reference that fails purge validation still protects its
+    top-level directory, so an unsafe entry can never expose shared data.
+    """
+    venv_refs: set[str] = set()
+    weight_refs: set[str] = set()
+    for model_id, entry in catalog.items():
+        if not isinstance(entry, dict):
+            continue
+        protected_venv = _top_level_owned_path(entry.get("venv_path"), venv_root)
+        if protected_venv is not None:
+            venv_refs.add(_path_key(protected_venv))
+        raw_weights = entry.get("local_dir")
+        if not raw_weights:
+            continue
+        try:
+            target = _owned_weights_purge_path(
+                str(raw_weights), weights_root, model_id=model_id,
+            )
+        except CatalogError:
+            target = _top_level_owned_path(raw_weights, weights_root)
+        protected_weights = _top_level_owned_path(target, weights_root)
+        if protected_weights is not None:
+            weight_refs.add(_path_key(protected_weights))
+    return venv_refs, weight_refs
+
+
 def _current_owned_references() -> tuple[set[str], set[str]]:
     """Return current top-level venv/weights references under catalog lock."""
     catalog_dir = _catalog_dir()
-    venv_root = catalog_dir / "venvs"
-    weights_root = catalog_dir / "weights"
-    venv_refs: set[str] = set()
-    weight_refs: set[str] = set()
     with _CATALOG_WRITE_LOCK:
-        catalog = _read_catalog()
-        for model_id, entry in catalog.items():
-            if not isinstance(entry, dict):
-                continue
-            protected_venv = _top_level_owned_path(entry.get("venv_path"), venv_root)
-            if protected_venv is not None:
-                venv_refs.add(_path_key(protected_venv))
-            raw_weights = entry.get("local_dir")
-            if not raw_weights:
-                continue
-            try:
-                target = _owned_weights_purge_path(
-                    str(raw_weights), weights_root, model_id=model_id,
-                )
-            except CatalogError:
-                target = _top_level_owned_path(raw_weights, weights_root)
-            if target is not None:
-                protected_weights = _top_level_owned_path(target, weights_root)
-                if protected_weights is not None:
-                    weight_refs.add(_path_key(protected_weights))
-    return venv_refs, weight_refs
+        return _owned_references(
+            _read_catalog(), catalog_dir / "venvs", catalog_dir / "weights",
+        )
 
 
 def _refresh_item(item: StorageItem) -> StorageItem | None:
