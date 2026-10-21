@@ -2286,14 +2286,6 @@ def _pull_resolved_transaction(
                 f"resolver artifact provenance item {index} is not an object"
             )
         artifact_provenance.append(copy.deepcopy(dict(raw_item)))
-    if not artifact_provenance:
-        resolved_revision = manifest.get("revision")
-        if resolved_revision:
-            artifact_provenance.append({
-                "repo_id": manifest["hf_repo"],
-                "revision": resolved_revision,
-                "subdir": ".",
-            })
     if artifact_provenance:
         manifest["artifact_provenance"] = copy.deepcopy(artifact_provenance)
 

@@ -2754,6 +2754,12 @@ def test_pull_via_resolver_merges_curated_capabilities_overlay(tmp_catalog):
         },
         backend_path="fake.mod:Cls",
         download=lambda cache_root: cache_root / "weights" / "my-model",
+        # HFResolver always fills the primary receipt.
+        artifact_provenance=({
+            "repo_id": "org/repo",
+            "revision": revision,
+            "subdir": ".",
+        },),
     )
 
     # resolve() is imported locally inside _pull_via_resolver
