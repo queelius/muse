@@ -2557,7 +2557,7 @@ def test_pull_curated_resolver_id_uses_curated_id_in_catalog(tmp_catalog):
 
     class _FakeResolver(Resolver):
         scheme = "fake"
-        def resolve(self, uri):
+        def resolve(self, uri, **_options):
             return ResolvedModel(
                 manifest={
                     "model_id": "long-ugly-synthesized-id",

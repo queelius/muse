@@ -18,16 +18,12 @@ The resolver output feeds directly into the existing pull path:
 """
 from __future__ import annotations
 
-import inspect
-import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-
-logger = logging.getLogger(__name__)
 
 _HF_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -99,8 +95,12 @@ class Resolver(ABC):
     scheme: str  # subclasses MUST set, e.g. "hf"
 
     @abstractmethod
-    def resolve(self, uri: str) -> ResolvedModel:
-        """Translate a URI into a ResolvedModel."""
+    def resolve(self, uri: str, **options: Any) -> ResolvedModel:
+        """Translate a URI into a ResolvedModel.
+
+        `options` are the keyword arguments `resolve()` forwards when set:
+        `modality`, `base_override`, `revision`.
+        """
 
     @abstractmethod
     def search(self, query: str, **filters: Any) -> Iterable[SearchResult]:
@@ -151,46 +151,6 @@ def get_resolver(uri: str) -> Resolver:
         )
 
 
-def _accepts_kwarg(method: Callable, name: str) -> bool:
-    """Whether `method`'s signature declares a parameter named `name`
-    (positional-or-keyword, keyword-only, or **kwargs catch-all).
-
-    Used to forward optional cross-cutting kwargs (like `base_override`)
-    only to resolvers/plugins that opted in, so the many resolvers with
-    a plain `resolve(uri)` (or plugin `resolve(repo_id, variant, info)`)
-    signature keep working untouched rather than raising TypeError on
-    an unexpected keyword argument.
-    """
-    try:
-        sig = inspect.signature(method)
-    except (TypeError, ValueError):
-        return False
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-        if param.name == name:
-            return True
-    return False
-
-
-def _forward_reviewed_revision(
-    method: Callable,
-    revision: str | None,
-    kwargs: dict[str, Any],
-    *,
-    uri: str,
-) -> None:
-    """Forward a reviewed pin or fail before a resolver can ignore it."""
-    if revision is None:
-        return
-    if not _accepts_kwarg(method, "revision"):
-        raise ResolverError(
-            f"resolver for {uri!r} does not accept the reviewed immutable "
-            "revision; refusing a mutable resolution"
-        )
-    kwargs["revision"] = revision
-
-
 def resolve(
     uri: str,
     *,
@@ -198,63 +158,26 @@ def resolve(
     base_override: str | None = None,
     revision: str | None = None,
 ) -> ResolvedModel:
-    """Resolve a URI through the matching resolver.
+    """Resolve a URI through the resolver registered for its scheme.
 
-    When `modality` is None (default), uses priority-based sniff
-    dispatch: each plugin's sniff is consulted in order and the first
-    True wins.
-
-    When `modality` is set, bypasses sniff and routes directly to the
-    plugin claiming that modality. Used for curated aliases that
-    declare an explicit `modality:` field, so the operator's intent
-    beats the resolver's heuristic (e.g. reranker repos register as
-    sentence-transformers but should resolve via text/rerank, not
-    embedding/text).
-
-    `base_override` is the operator's `--base` pin for a LoRA adapter
-    pull (fix I2). It is forwarded to the resolver's `resolve` /
-    `resolve_via_modality` method ONLY when that method's signature
-    accepts a `base_override` keyword (checked via
-    `inspect.signature`); other resolvers are called exactly as before.
-    This lets a `--base` override re-derive resolve-time generation
-    defaults (e.g. turbo step/guidance counts) for the LoRA plugin
-    without touching any of the other resolvers.
-
+    `modality` bypasses sniff dispatch and routes to the plugin claiming
+    that modality (curated aliases with an explicit `modality:` field).
+    `base_override` is the operator's `--base` pin for a LoRA adapter pull.
     `revision` is an immutable repository commit selected by a curated
-    entry. It must be accepted by the selected resolver; silently dropping a
-    reviewed pin would turn a curated pull back into a mutable download.
+    entry. Only the options that are set are forwarded, so a resolver that
+    cannot honor a reviewed pin fails instead of silently ignoring it.
 
     Raises ResolverError if no resolver matches the scheme, or if
     `modality` is set and no plugin claims that modality.
     """
-    resolver = get_resolver(uri)
-    if modality is None:
-        method = resolver.resolve
-        kwargs: dict[str, Any] = {}
-        if base_override is not None and _accepts_kwarg(method, "base_override"):
-            kwargs["base_override"] = base_override
-        _forward_reviewed_revision(method, revision, kwargs, uri=uri)
-        return method(uri, **kwargs)
-    method = getattr(resolver, "resolve_via_modality", None)
-    if not callable(method):
-        # Resolver doesn't support modality override; warn and fall
-        # back to standard sniff dispatch. Future resolvers should
-        # implement resolve_via_modality.
-        logger.warning(
-            "resolver for %r does not support modality override; "
-            "falling back to sniff dispatch", uri,
-        )
-        plain = resolver.resolve
-        kwargs = {}
-        if base_override is not None and _accepts_kwarg(plain, "base_override"):
-            kwargs["base_override"] = base_override
-        _forward_reviewed_revision(plain, revision, kwargs, uri=uri)
-        return plain(uri, **kwargs)
-    kwargs = {}
-    if base_override is not None and _accepts_kwarg(method, "base_override"):
-        kwargs["base_override"] = base_override
-    _forward_reviewed_revision(method, revision, kwargs, uri=uri)
-    return method(uri, modality, **kwargs)
+    options = {
+        "modality": modality,
+        "base_override": base_override,
+        "revision": revision,
+    }
+    return get_resolver(uri).resolve(
+        uri, **{name: value for name, value in options.items() if value is not None},
+    )
 
 
 def search(query: str, *, backend: str | None = None, **filters: Any) -> Iterable[SearchResult]:

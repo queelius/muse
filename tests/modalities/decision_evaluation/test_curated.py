@@ -84,7 +84,7 @@ def test_curated_modality_resolves_through_the_decision_plugin(model_id):
     resolver = HFResolver(plugins=discover_hf_plugins(_default_hf_plugin_dirs()))
     resolver._api = MagicMock()
     resolver._api.repo_info.return_value = info
-    resolved = resolver.resolve_via_modality(uri, "decision/evaluation", revision=revision)
+    resolved = resolver.resolve(uri, modality="decision/evaluation", revision=revision)
     assert resolved.manifest["model_id"] == model_id
     resolver._api.repo_info.assert_called_with(repo, revision=revision)
 

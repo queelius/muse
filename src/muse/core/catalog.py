@@ -2115,10 +2115,8 @@ def _pull_via_resolver(
     """
     from muse.core.resolvers import resolve
 
-    # `modality_override` is forwarded to resolve() when set; the
-    # resolver dispatches via resolve_via_modality (bypassing sniff)
-    # so curated yaml's modality declaration beats the priority-based
-    # plugin pick. See resolvers.resolve docstring.
+    # A set `modality_override` makes the resolver bypass sniff dispatch,
+    # so curated yaml's modality declaration beats the priority pick.
     resolved = _resolved
     if resolved is None:
         resolved = resolve(

@@ -172,9 +172,9 @@ def test_resolve_rejects_missing_immutable_hub_commit(via_modality):
         resolver = HFResolver(plugins=[plugin])
         with pytest.raises(ResolverError, match="immutable 40-character commit"):
             if via_modality:
-                resolver.resolve_via_modality(
+                resolver.resolve(
                     "hf://org/repo",
-                    "embedding/text",
+                    modality="embedding/text",
                 )
             else:
                 resolver.resolve("hf://org/repo")
@@ -473,7 +473,7 @@ def test_resolve_unknown_error_message_includes_repo_diagnostics():
             raise AssertionError("expected ResolverError")
 
 
-def test_resolve_via_modality_picks_named_plugin_not_priority_winner():
+def test_resolve_with_modality_picks_named_plugin_not_priority_winner():
     """Regression for v0.41.1: a curated alias declaring `modality:
     text/rerank` for a sentence-transformers reranker repo
     (BAAI/bge-reranker-base) must route through the text/rerank plugin,
@@ -501,8 +501,8 @@ def test_resolve_via_modality_picks_named_plugin_not_priority_winner():
         siblings=[], tags=[], id="BAAI/bge-reranker-base", sha=_FAKE_REVISION,
     )
     with patch.object(resolver._api, "repo_info", return_value=info):
-        out = resolver.resolve_via_modality(
-            "hf://BAAI/bge-reranker-base", "text/rerank",
+        out = resolver.resolve(
+            "hf://BAAI/bge-reranker-base", modality="text/rerank",
         )
 
     assert out.manifest["modality"] == "text/rerank"
@@ -569,7 +569,7 @@ def test_resolve_does_not_forward_base_override_to_plain_plugin_resolve():
     assert calls == [("org/repo", None, info)]
 
 
-def test_resolve_via_modality_forwards_base_override_when_accepted():
+def test_resolve_with_modality_forwards_base_override_when_accepted():
     from muse.core.resolvers_hf import HFResolver
 
     def _lora_resolve(repo_id, variant, info, base_override=None):
@@ -585,20 +585,20 @@ def test_resolve_via_modality_forwards_base_override_when_accepted():
         siblings=[], tags=[], id="nerijs/pixel-art-xl", sha=_FAKE_REVISION,
     )
     with patch.object(resolver._api, "repo_info", return_value=info):
-        out = resolver.resolve_via_modality(
-            "hf://nerijs/pixel-art-xl", "image/generation",
+        out = resolver.resolve(
+            "hf://nerijs/pixel-art-xl", modality="image/generation",
             base_override="flux-schnell",
         )
     assert out.manifest["base_override"] == "flux-schnell"
 
 
-def test_resolve_via_modality_raises_when_no_plugin_for_modality():
+def test_resolve_with_modality_raises_when_no_plugin_for_modality():
     from muse.core.resolvers_hf import HFResolver
 
     plugin = {"modality": "audio/speech", "sniff": MagicMock(), "resolve": MagicMock()}
     resolver = HFResolver(plugins=[plugin])
     try:
-        resolver.resolve_via_modality("hf://x/y", "image/segmentation")
+        resolver.resolve("hf://x/y", modality="image/segmentation")
     except ResolverError as e:
         msg = str(e)
         assert "no HF plugin for modality" in msg

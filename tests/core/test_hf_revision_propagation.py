@@ -338,9 +338,9 @@ def test_curated_revision_reaches_metadata_manifest_and_snapshot(
         lambda **kwargs: download_calls.append(kwargs) or str(tmp_path / "snapshot"),
     )
 
-    resolved = resolver.resolve_via_modality(
+    resolved = resolver.resolve(
         "hf://Systran/faster-whisper-tiny",
-        "audio/transcription",
+        modality="audio/transcription",
         revision=_REVISION,
     )
     resolved.download(tmp_path)

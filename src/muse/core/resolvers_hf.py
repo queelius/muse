@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+import inspect
 import logging
 import time
 from typing import Iterable
@@ -28,13 +29,29 @@ from muse.core.resolvers import (
     ResolverError,
     SearchResult,
     _HF_COMMIT_RE,
-    _accepts_kwarg,
     hf_commit_revision,
     parse_uri,
     register_resolver,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _accepts_kwarg(method, name: str) -> bool:
+    """Whether ``method`` declares parameter ``name`` or a **kwargs catch-all.
+
+    Lets optional kwargs like ``base_override`` reach only the plugins that
+    opted in, while plain ``resolve(repo_id, variant, info)`` callables keep
+    working.
+    """
+    try:
+        sig = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD or param.name == name
+        for param in sig.parameters.values()
+    )
 
 
 def _validated_hf_result(
@@ -209,12 +226,31 @@ class HFResolver(Resolver):
         self,
         uri: str,
         *,
+        modality: str | None = None,
         base_override: str | None = None,
         revision: str | None = None,
     ) -> ResolvedModel:
+        """Resolve ``uri`` through the first plugin whose sniff matches.
+
+        A ``modality`` (from a curated entry) selects that modality's
+        plugin directly, bypassing sniff: reranker repos such as
+        BAAI/bge-reranker-base are sentence-transformers models that the
+        embedding/text plugin would otherwise claim. ``base_override`` is
+        forwarded only to plugin resolve callables that accept it.
+        """
         scheme, repo_id, variant = parse_uri(uri)
         if scheme != "hf":
             raise ResolverError(f"HFResolver cannot resolve scheme {scheme!r}")
+        candidates = [
+            plugin for plugin in self._plugins
+            if modality is None or plugin["modality"] == modality
+        ]
+        if not candidates:
+            supported = sorted({p["modality"] for p in self._plugins})
+            raise ResolverError(
+                f"no HF plugin for modality {modality!r}; "
+                f"registered: {supported}"
+            )
 
         info = self._repo_info(repo_id, revision=revision)
         resolved_revision = hf_commit_revision(info)
@@ -228,92 +264,28 @@ class HFResolver(Resolver):
                 f"Hugging Face resolved {repo_id!r} to an unexpected commit; "
                 f"requested {revision}, got {resolved_revision!r}"
             )
-        for plugin in self._plugins:
-            if plugin["sniff"](info):
-                resolved = self._call_plugin_resolve(
-                    plugin, repo_id, variant, info, base_override,
-                )
-                return _validated_hf_result(
-                    resolved,
-                    repo_id=repo_id,
-                    revision=resolved_revision,
-                )
-
-        tags = getattr(info, "tags", None) or []
-        siblings = [s.rfilename for s in getattr(info, "siblings", [])][:5]
-        raise ResolverError(
-            f"no HF plugin matched {repo_id!r}; tags={tags}, "
-            f"siblings={siblings}..."
+        plugin = next(
+            (p for p in candidates if modality is not None or p["sniff"](info)),
+            None,
         )
+        if plugin is None:
+            tags = getattr(info, "tags", None) or []
+            siblings = [s.rfilename for s in getattr(info, "siblings", [])][:5]
+            raise ResolverError(
+                f"no HF plugin matched {repo_id!r}; tags={tags}, "
+                f"siblings={siblings}..."
+            )
 
-    def resolve_via_modality(
-        self,
-        uri: str,
-        modality: str,
-        *,
-        base_override: str | None = None,
-        revision: str | None = None,
-    ) -> ResolvedModel:
-        """Resolve a URI through the plugin for the named modality,
-        bypassing priority-based sniff dispatch.
-
-        Used when curated.yaml declares a `modality:` field for a URI
-        that the priority-based resolve would otherwise misclassify.
-        Reranker repos (BAAI/bge-reranker-base) are sentence-transformers
-        models so the embedding/text plugin's sniff returns True; the
-        text/rerank plugin needs to win when the curated entry says so.
-
-        `base_override` is forwarded to the chosen plugin's `resolve`
-        callable only when that callable's signature accepts it (I2);
-        the many plugins with a plain `resolve(repo_id, variant, info)`
-        signature are called exactly as before.
-
-        Returns the chosen plugin's resolved model. Raises ResolverError
-        when no plugin claims the named modality.
-        """
-        scheme, repo_id, variant = parse_uri(uri)
-        if scheme != "hf":
-            raise ResolverError(f"HFResolver cannot resolve scheme {scheme!r}")
-
-        for plugin in self._plugins:
-            if plugin["modality"] == modality:
-                info = self._repo_info(repo_id, revision=revision)
-                resolved_revision = hf_commit_revision(info)
-                if resolved_revision is None:
-                    raise ResolverError(
-                        "Hugging Face did not return an immutable 40-character "
-                        f"commit for {repo_id!r}"
-                    )
-                if revision is not None and resolved_revision != revision:
-                    raise ResolverError(
-                        f"Hugging Face resolved {repo_id!r} to an unexpected "
-                        f"commit; requested {revision}, got "
-                        f"{resolved_revision!r}"
-                    )
-                resolved = self._call_plugin_resolve(
-                    plugin, repo_id, variant, info, base_override,
-                )
-                return _validated_hf_result(
-                    resolved,
-                    repo_id=repo_id,
-                    revision=resolved_revision,
-                )
-
-        supported = sorted({p["modality"] for p in self._plugins})
-        raise ResolverError(
-            f"no HF plugin for modality {modality!r}; "
-            f"registered: {supported}"
-        )
-
-    @staticmethod
-    def _call_plugin_resolve(plugin, repo_id, variant, info, base_override):
-        """Call a plugin's resolve callable, forwarding base_override
-        only when its signature accepts the kwarg (I2 inspect guard).
-        """
         resolve_fn = plugin["resolve"]
         if base_override is not None and _accepts_kwarg(resolve_fn, "base_override"):
-            return resolve_fn(repo_id, variant, info, base_override=base_override)
-        return resolve_fn(repo_id, variant, info)
+            resolved = resolve_fn(repo_id, variant, info, base_override=base_override)
+        else:
+            resolved = resolve_fn(repo_id, variant, info)
+        return _validated_hf_result(
+            resolved,
+            repo_id=repo_id,
+            revision=resolved_revision,
+        )
 
     def search(self, query: str, **filters) -> Iterable[SearchResult]:
         modality = filters.get("modality")

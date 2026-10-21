@@ -125,7 +125,7 @@ def test_parse_uri_rejects_bad_scheme():
 
 
 class _BaseAwareResolver(Resolver):
-    """A resolver whose resolve() accepts base_override (I2 opt-in shape)."""
+    """A resolver whose resolve() accepts base_override."""
 
     scheme = "based"
 
@@ -146,37 +146,16 @@ class _BaseAwareResolver(Resolver):
 
 
 def test_resolve_forwards_base_override_to_signature_accepting_resolver():
-    """I2: resolve() inspects the target resolver's signature and only
-    forwards base_override when the resolver actually declares the
-    kwarg, so the 15+ modality plugins with a plain resolve(uri) keep
-    working untouched."""
+    """resolve() forwards a set base_override to the resolver."""
     register_resolver(_BaseAwareResolver())
     rm = resolve("based://a/b", base_override="sdxl-turbo")
     assert rm.manifest["capabilities"]["base_model"] == "sdxl-turbo"
-
-
-def test_resolve_does_not_forward_base_override_to_signature_lacking_resolver():
-    """A resolver without a base_override parameter must not be called
-    with it (that would raise TypeError); resolve() must guard via
-    inspect.signature rather than blindly passing the kwarg through."""
-    register_resolver(_FakeResolver())
-    # No TypeError: base_override is silently dropped for resolvers
-    # that don't accept it.
-    rm = resolve("fake://a/b", base_override="sdxl-turbo")
-    assert rm.manifest["model_id"] == "fake-model"
 
 
 def test_resolve_base_override_none_is_harmless_for_plain_resolver():
     register_resolver(_FakeResolver())
     rm = resolve("fake://a/b")
     assert rm.manifest["model_id"] == "fake-model"
-
-
-def test_resolve_rejects_reviewed_revision_when_resolver_cannot_accept_it():
-    register_resolver(_FakeResolver())
-
-    with pytest.raises(ResolverError, match="does not accept.*revision"):
-        resolve("fake://a/b", revision="1" * 40)
 
 
 def test_resolve_forwards_reviewed_revision_to_opted_in_resolver():
