@@ -2412,3 +2412,18 @@ class TestLaunchAsync:
         job = launch_async(op, op_name="enable", model_id="m", store=store)
         job.thread.join(timeout=2.0)
         assert job.thread.daemon is True
+
+
+class TestBoundedByteTail:
+    def test_render_reports_omitted_bytes_and_read_error(self):
+        from muse.admin.operations import _BoundedByteTail
+
+        tail = _BoundedByteTail(limit=4, label="stdout")
+        tail.append(b"abcdef")
+        tail.append("é", encoding="utf-8")
+        tail.record_read_error(OSError("gone"))
+
+        assert tail.render() == (
+            "[... stdout truncated; 4 byte(s) omitted ...]\n"
+            "efé\n[... stdout capture failed: OSError ...]"
+        )

@@ -48,6 +48,7 @@ from muse.core.catalog import (
     remove as catalog_remove,
     set_enabled,
 )
+from muse.core.owned_process import BoundedTail, drain_stream_into
 from muse.core.venv import find_free_port
 
 logger = logging.getLogger(__name__)
@@ -1247,37 +1248,19 @@ _SUBPROCESS_FINAL_DRAIN_SECONDS = 1.0
 _SUBPROCESS_LOG_MAX_LINES = 2000
 
 
-class _BoundedByteTail:
-    """Thread-safe fixed-size tail of one subprocess byte stream."""
+class _BoundedByteTail(BoundedTail):
+    """Thread-safe fixed-size tail of one subprocess byte stream.
+
+    Admin job output is decoded as UTF-8 and a read failure is rendered
+    inline, so a job record shows that its captured log is incomplete.
+    """
 
     def __init__(self, *, limit: int, label: str) -> None:
-        self._limit = limit
+        super().__init__(limit)
         self._label = label
-        self._data = bytearray()
-        self._total = 0
-        self._read_error: str | None = None
-        self._lock = threading.Lock()
-
-    def append(self, chunk: bytes) -> None:
-        with self._lock:
-            self._total += len(chunk)
-            if len(chunk) >= self._limit:
-                self._data[:] = chunk[-self._limit:]
-                return
-            overflow = len(self._data) + len(chunk) - self._limit
-            if overflow > 0:
-                del self._data[:overflow]
-            self._data.extend(chunk)
-
-    def record_read_error(self, error: BaseException) -> None:
-        with self._lock:
-            self._read_error = type(error).__name__
 
     def render(self) -> str:
-        with self._lock:
-            data = bytes(self._data)
-            omitted = self._total - len(data)
-            read_error = self._read_error
+        data, omitted, read_error = self.snapshot()
 
         parts: list[str] = []
         if omitted:
@@ -1366,13 +1349,12 @@ class _ProcessOutputCapture:
             self._tails[label].record_read_error(RuntimeError("missing pipe"))
             return
         try:
-            while True:
-                chunk = stream.read(_SUBPROCESS_READ_CHUNK_BYTES)
-                if not chunk:
-                    return
-                if isinstance(chunk, str):
-                    chunk = chunk.encode("utf-8", errors="replace")
-                self._tails[label].append(bytes(chunk))
+            drain_stream_into(
+                stream,
+                self._tails[label],
+                read_bytes=_SUBPROCESS_READ_CHUNK_BYTES,
+                encoding="utf-8",
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("could not capture admin subprocess %s: %s", label, e)
             self._tails[label].record_read_error(e)
