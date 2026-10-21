@@ -18,12 +18,10 @@ order, same discipline as `muse.cli_impl.gateway.build_gateway`):
     model list, in_flight, last-poll age).
 
 The catch-all extracts `model` from the request, asks `select_node` for
-the best node, and forwards. `_forward` is imported from the existing
-gateway module and re-exported as a MODULE-LEVEL name here so tests can
-`monkeypatch.setattr(fed, "_forward", fake_forward)` -- re-binding the
-import target has no effect on the gateway module's own callers, and
-this module always calls its OWN `_forward` name (not
-`gateway._forward`), so the patch takes effect.
+the best node, and forwards via the gateway's `_forward`, imported as a
+module-level name here so tests can `monkeypatch.setattr(fed,
+"_forward", fake_forward)` (this module calls its own global, never
+`gateway._forward`).
 
 Every proxied request requires an explicit model, including translation:
 the coordinator has no cluster-wide default-model policy. LibreTranslate
@@ -65,22 +63,16 @@ from fastapi.responses import JSONResponse
 from muse.cli_impl.gateway import (
     RequestBodyLimitMiddleware,
     _forward,
-    _openai_error,
     _valid_model_id,
     extract_model_from_request,
 )
 from muse.core import config
+from muse.core.errors import error_response
 from muse.cli_impl.serve_util import run_uvicorn
 from muse.federation.nodes import load_nodes
 from muse.federation.registry import NodeRegistry
 from muse.federation.router import select_node
 from muse.federation.state import NodeState
-
-# Re-bound as a module-level name (not read through `gateway._forward`)
-# specifically so `monkeypatch.setattr(fed, "_forward", fake_forward)`
-# takes effect: this module's code paths all call the bare `_forward`
-# name below, which Python resolves against THIS module's globals.
-_forward = _forward
 
 # Connect-phase failures that make a node worth failing over from.
 # Deliberately NOT httpx.HTTPError broadly: a worker that connects and
@@ -225,14 +217,14 @@ def build_coordinator(
     async def proxy(request: Request, full_path: str) -> JSONResponse:
         model_id = await extract_model_from_request(request)
         if model_id is None:
-            return _openai_error(
+            return error_response(
                 400, "model_required",
                 "request is missing a `model` field (required for "
                 "federation routing)",
             )
 
         if not _valid_model_id(model_id):
-            return _openai_error(
+            return error_response(
                 400, "invalid_model",
                 "`model` must be a non-empty string of at most "
                 "512 characters without control characters",
@@ -241,67 +233,52 @@ def build_coordinator(
         states: list[NodeState] = registry.snapshot()
         node = select_node(model_id, states, rr_counter=app.state.rr_counter)
         if node is None:
-            return _openai_error(
+            return error_response(
                 404, "model_not_available",
                 f"no node serves model {model_id!r}",
             )
 
-        target_url = f"{node.spec.url}/{full_path}"
-        try:
-            return await _forward(request, target_url, app.state.timeout)
-        except _FAILOVER_EXCEPTIONS:
-            # Retry ONCE against another candidate for the same model,
-            # excluding the failed node's url. Re-running select_node
-            # against the filtered snapshot re-derives loaded-preference
-            # and in-flight tie-break rather than blindly grabbing
-            # "the other one" (there may be more than two candidates).
-            remaining = [s for s in states if s.spec.url != node.spec.url]
-            fallback = select_node(model_id, remaining, rr_counter=app.state.rr_counter)
-            if fallback is None:
-                return _openai_error(
-                    502, "no_node_available",
-                    f"node {node.spec.url!r} failed and no other node "
-                    f"serves model {model_id!r}",
-                    error_type="server_error",
-                )
-            fallback_url = f"{fallback.spec.url}/{full_path}"
+        # At most two attempts: the selected node, then ONE failover
+        # candidate when the first fails at connect time. Re-running
+        # select_node against the snapshot minus the failed node
+        # re-derives loaded-preference and in-flight tie-break rather than
+        # blindly grabbing "the other one" (there may be more than two).
+        failed: NodeState | None = None
+        while True:
             try:
-                return await _forward(request, fallback_url, app.state.timeout)
-            except _FAILOVER_EXCEPTIONS:
-                return _openai_error(
-                    502, "no_node_available",
-                    f"both {node.spec.url!r} and {fallback.spec.url!r} "
-                    f"failed for model {model_id!r}",
-                    error_type="server_error",
+                return await _forward(
+                    request, f"{node.spec.url}/{full_path}", app.state.timeout,
                 )
+            except _FAILOVER_EXCEPTIONS:
+                if failed is not None:
+                    return error_response(
+                        502, "no_node_available",
+                        f"both {failed.spec.url!r} and {node.spec.url!r} "
+                        f"failed for model {model_id!r}",
+                    )
+                failed = node
+                remaining = [s for s in states if s.spec.url != failed.spec.url]
+                node = select_node(
+                    model_id, remaining, rr_counter=app.state.rr_counter,
+                )
+                if node is None:
+                    return error_response(
+                        502, "no_node_available",
+                        f"node {failed.spec.url!r} failed and no other node "
+                        f"serves model {model_id!r}",
+                    )
             except httpx.TimeoutException:
-                return _openai_error(
+                return error_response(
                     504, "node_timeout",
-                    f"node {fallback.spec.url!r} timed out while serving "
+                    f"node {node.spec.url!r} timed out while serving "
                     f"model {model_id!r}",
-                    error_type="server_error",
                 )
             except httpx.TransportError:
-                return _openai_error(
+                return error_response(
                     502, "node_forward_failed",
-                    f"node {fallback.spec.url!r} failed while serving "
+                    f"node {node.spec.url!r} failed while serving "
                     f"model {model_id!r}",
-                    error_type="server_error",
                 )
-        except httpx.TimeoutException:
-            return _openai_error(
-                504, "node_timeout",
-                f"node {node.spec.url!r} timed out while serving "
-                f"model {model_id!r}",
-                error_type="server_error",
-            )
-        except httpx.TransportError:
-            return _openai_error(
-                502, "node_forward_failed",
-                f"node {node.spec.url!r} failed while serving "
-                f"model {model_id!r}",
-                error_type="server_error",
-            )
 
     return app
 

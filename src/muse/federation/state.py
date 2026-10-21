@@ -1,6 +1,6 @@
 """Node-state model + pure refresh reducer for the muse federation coordinator.
 
-`build_node_state` folds three polled payloads (`/v1/models`, `/health`,
+`build_node_state` folds two polled payloads (`/v1/models` and
 `/v1/telemetry/summary`) for one node into a `NodeState` snapshot. It is
 pure: no network calls, no clock reads. The caller fetches the payloads
 and passes the current time in via `now`, so this module stays stdlib
@@ -20,7 +20,6 @@ _MAX_NODE_MODELS = 4096
 @dataclass
 class ModelAvail:
     loaded: bool
-    enabled: bool
 
 
 @dataclass
@@ -36,7 +35,6 @@ def build_node_state(
     spec: NodeSpec,
     *,
     models_payload: dict | None,
-    health_payload: dict | None,
     summary_payload: dict | None,
     now: float,
 ) -> NodeState:
@@ -76,7 +74,6 @@ def build_node_state(
             loaded = entry.get("loaded", False)
             models[model_id] = ModelAvail(
                 loaded=loaded if isinstance(loaded, bool) else False,
-                enabled=True,
             )
 
     raw_in_flight = (

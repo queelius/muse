@@ -37,8 +37,8 @@ async def test_refresh_once_builds_snapshot():
 
     async def fake_fetch(url, token):
         if "a:" in url:
-            return ({"data": [{"id": "m1", "loaded": True}]}, {"status": "ok"}, {"in_flight": 0})
-        return (None, None, None)  # b unreachable
+            return ({"data": [{"id": "m1", "loaded": True}]}, {"in_flight": 0})
+        return (None, None)  # b unreachable
 
     reg = NodeRegistry(specs, refresh_interval=999, fetch=fake_fetch)
     await reg.refresh_once()
@@ -55,7 +55,7 @@ async def test_refresh_once_isolates_node_that_raises():
     async def fake_fetch(url, token):
         if "bad:" in url:
             raise RuntimeError("boom: differently-shaped /v1/models response")
-        return ({"data": [{"id": "m1", "loaded": True}]}, {"status": "ok"}, {"in_flight": 0})
+        return ({"data": [{"id": "m1", "loaded": True}]}, {"in_flight": 0})
 
     reg = NodeRegistry(specs, refresh_interval=999, fetch=fake_fetch)
     await reg.refresh_once()  # must not raise/abort
@@ -78,7 +78,7 @@ async def test_refresh_once_skips_id_less_entry_but_stays_reachable():
     specs = [NodeSpec(url="http://a:8000", name="a")]
 
     async def fake_fetch(url, token):
-        return ({"data": [{"name": "x"}]}, {"status": "ok"}, None)
+        return ({"data": [{"name": "x"}]}, None)
 
     reg = NodeRegistry(specs, refresh_interval=999, fetch=fake_fetch)
     await reg.refresh_once()
@@ -118,7 +118,7 @@ def test_injected_fetch_is_used_as_is():
     """An injected fetch is NOT wrapped (preserves the test-injection contract)."""
     from muse.federation.nodes import NodeSpec
     from muse.federation.registry import NodeRegistry
-    async def fake(url, token): return (None, None, None)
+    async def fake(url, token): return (None, None)
     reg = NodeRegistry([NodeSpec(url="http://a:8000", name="a")], refresh_interval=3.0, fetch=fake)
     assert reg._fetch is fake
 
@@ -136,7 +136,7 @@ async def test_start_is_idempotent_and_close_releases_the_only_task():
         nonlocal calls
         calls += 1
         fetched.set()
-        return ({"data": []}, {"status": "ok"}, None)
+        return ({"data": []}, None)
 
     reg = NodeRegistry(
         [NodeSpec(url="http://a:8000", name="a")],

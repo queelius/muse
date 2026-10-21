@@ -18,8 +18,8 @@ from muse.federation.state import ModelAvail, NodeState
 
 
 def _snap():
-    a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m1": ModelAvail(True, True)}, 0, 0.0)
-    b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m2": ModelAvail(True, True)}, 0, 0.0)
+    a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m1": ModelAvail(True)}, 0, 0.0)
+    b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m2": ModelAvail(True)}, 0, 0.0)
     return [a, b]
 
 
@@ -126,8 +126,8 @@ def test_failover_to_second_node(monkeypatch):
     and return its response, not 502."""
 
     def _snap_both():
-        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True, True)}, 0, 0.0)
-        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True, True)}, 0, 0.0)
+        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True)}, 0, 0.0)
+        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True)}, 0, 0.0)
         return [a, b]
 
     class FakeRegBoth:
@@ -168,8 +168,8 @@ def test_default_rr_counter_rotates_across_tied_same_model_nodes(monkeypatch):
     """
 
     def _snap_tied():
-        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True, True)}, None, 0.0)
-        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True, True)}, None, 0.0)
+        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True)}, None, 0.0)
+        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True)}, None, 0.0)
         return [a, b]
 
     class FakeRegTied:
@@ -197,8 +197,8 @@ def test_default_rr_counter_rotates_across_tied_same_model_nodes(monkeypatch):
 
 def test_failover_502_when_all_nodes_fail(monkeypatch):
     def _snap_both():
-        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True, True)}, 0, 0.0)
-        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True, True)}, 0, 0.0)
+        a = NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True)}, 0, 0.0)
+        b = NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True)}, 0, 0.0)
         return [a, b]
 
     class FakeRegBoth:
@@ -221,11 +221,11 @@ def test_read_timeout_maps_504_without_failover(monkeypatch):
             return [
                 NodeState(
                     NodeSpec("http://a:8000", "a"), True,
-                    {"m": ModelAvail(True, True)}, 0, 0.0,
+                    {"m": ModelAvail(True)}, 0, 0.0,
                 ),
                 NodeState(
                     NodeSpec("http://b:8000", "b"), True,
-                    {"m": ModelAvail(True, True)}, 0, 0.0,
+                    {"m": ModelAvail(True)}, 0, 0.0,
                 ),
             ]
 
@@ -252,7 +252,7 @@ def test_nonconnect_transport_failure_maps_502_without_failover(monkeypatch):
             return [
                 NodeState(
                     NodeSpec("http://a:8000", "a"), True,
-                    {"m": ModelAvail(True, True)}, 0, 0.0,
+                    {"m": ModelAvail(True)}, 0, 0.0,
                 ),
             ]
 

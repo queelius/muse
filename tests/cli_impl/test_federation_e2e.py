@@ -8,7 +8,7 @@ injection point to swap in an `httpx.ASGITransport` without
 monkeypatching `_forward` itself, and `test_federation_app.py` already
 covers that monkeypatched-`_forward` path. Standing up two tiny FastAPI
 "node" apps on real ports lets this test exercise the REAL `NodeRegistry`
-(real httpx polls of /v1/models + /health) AND the REAL `_forward` (real
+(real httpx polls of /v1/models) AND the REAL `_forward` (real
 httpx request/response over a real socket), including a genuine
 `httpx.ConnectError` when a node's process is stopped. It's slower than
 an ASGITransport-only test (two background threads, real socket binds)

@@ -8,7 +8,7 @@ task refreshes it on an interval via `start()` / `aclose()`.
 
 The fetch function is injectable so tests never touch the network or
 depend on wall-clock sleeps: `fetch(url, token) -> (models_payload,
-health_payload, summary_payload)`, each `None` on any per-call failure.
+summary_payload)`, each `None` on any per-call failure.
 """
 
 from __future__ import annotations
@@ -71,14 +71,12 @@ async def _get_json(client: httpx.AsyncClient, url: str, **kwargs) -> dict | Non
 
 async def _default_fetch(
     url: str, token: str | None, *, timeout: float = _FETCH_TIMEOUT_SECONDS
-) -> tuple[dict | None, dict | None, dict | None]:
-    """Default httpx-based fetch: GET /v1/models and /health always;
-    GET /v1/telemetry/summary (bearer-authed) only when `token` is
-    truthy. Every GET is isolated: a failure on one payload never
-    prevents the others from being fetched."""
+) -> tuple[dict | None, dict | None]:
+    """Default httpx-based fetch: GET /v1/models always; GET
+    /v1/telemetry/summary (bearer-authed) only when `token` is truthy.
+    Each GET is isolated: a failure on one never prevents the other."""
     async with httpx.AsyncClient(timeout=timeout) as client:
         models_payload = await _get_json(client, f"{url}/v1/models")
-        health_payload = await _get_json(client, f"{url}/health")
         summary_payload = None
         if token:
             summary_payload = await _get_json(
@@ -86,7 +84,7 @@ async def _default_fetch(
                 f"{url}/v1/telemetry/summary",
                 headers={"Authorization": f"Bearer {token}"},
             )
-    return models_payload, health_payload, summary_payload
+    return models_payload, summary_payload
 
 
 class NodeRegistry:
@@ -118,13 +116,10 @@ class NodeRegistry:
         self._closing = False
 
     async def _fetch_one(self, spec: NodeSpec) -> NodeState:
-        models_payload, health_payload, summary_payload = await self._fetch(
-            spec.url, spec.token
-        )
+        models_payload, summary_payload = await self._fetch(spec.url, spec.token)
         return build_node_state(
             spec,
             models_payload=models_payload,
-            health_payload=health_payload,
             summary_payload=summary_payload,
             now=self._clock(),
         )

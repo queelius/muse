@@ -5,7 +5,7 @@ from muse.federation.router import select_node
 
 def _st(url, model, loaded, in_flight=None, reachable=True):
     return NodeState(spec=NodeSpec(url=url, name=url), reachable=reachable,
-                     models={model: ModelAvail(loaded=loaded, enabled=True)} if model else {},
+                     models={model: ModelAvail(loaded=loaded)} if model else {},
                      in_flight=in_flight, last_poll_ts=0.0)
 
 
