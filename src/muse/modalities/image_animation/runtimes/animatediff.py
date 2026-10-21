@@ -97,6 +97,7 @@ class AnimateDiffRuntime:
         self._default_fps = default_fps
         self._default_steps = default_steps
         self._default_guidance = default_guidance
+        self._base_model = base_model
         self._device = _select_device(device)
 
         import muse.modalities.image_animation.runtimes.animatediff as _mod
@@ -217,5 +218,6 @@ class AnimateDiffRuntime:
                 "steps": n_steps,
                 "guidance": cfg,
                 "model": self.model_id,
+                "base_model": self._base_model,
             },
         )
