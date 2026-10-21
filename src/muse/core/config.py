@@ -24,12 +24,13 @@ import math
 import os
 import pathlib
 import stat
-import tempfile
 import threading
 from dataclasses import dataclass
 from typing import Any
 
 import yaml
+
+from muse.core import securefs
 
 logger = logging.getLogger("muse.config")
 
@@ -600,7 +601,14 @@ def _same_path(left: pathlib.Path, right: pathlib.Path) -> bool:
 
 
 def _prepare_config_parent(target: pathlib.Path) -> None:
-    """Create and validate the parent without following its leaf."""
+    """Create and validate the parent without following its leaf.
+
+    A parent Muse creates, and the standard catalog directory, are owned
+    and forced to mode 0700. Any other existing parent (an explicit
+    MUSE_CONFIG location may be a shared directory) is not chmodded; it
+    must instead be owned by this user or root and not group/other
+    writable, since whoever controls it can swap the config file.
+    """
     parent = target.parent
     try:
         before = parent.lstat()
@@ -616,97 +624,25 @@ def _prepare_config_parent(target: pathlib.Path) -> None:
             raise ConfigError(f"config parent is not a regular directory: {parent}")
 
     private = not parent_existed or _same_path(parent, _catalog_dir())
-    if os.name != "posix":  # pragma: no cover - Windows fallback
-        info = parent.lstat()
-        is_junction = getattr(parent, "is_junction", lambda: False)
-        if stat.S_ISLNK(info.st_mode) or is_junction() or not parent.is_dir():
-            raise ConfigError(f"config parent is not a safe directory: {parent}")
-        if private:
-            parent.chmod(_CONFIG_DIR_MODE)
-        return
-
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    shared_owners = None if private or os.name != "posix" else {os.geteuid(), 0}
     try:
-        descriptor = os.open(parent, flags)
-    except OSError as exc:
+        securefs.validate_directory(
+            parent,
+            error=ConfigError,
+            label="config parent",
+            private=private,
+            trusted_owners=shared_owners,
+        )
+    except FileNotFoundError as exc:
         raise ConfigError(f"config parent is not a safe directory: {parent}: {exc}") from exc
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISDIR(info.st_mode):
-            raise ConfigError(f"config parent is not a directory: {parent}")
-        if private:
-            if info.st_uid != os.geteuid():
-                raise ConfigError(f"config directory is not owned by this user: {parent}")
-            os.fchmod(descriptor, _CONFIG_DIR_MODE)
-        elif info.st_mode & 0o022:
-            raise ConfigError(
-                f"config parent is group/other writable: {parent}"
-            )
-    finally:
-        os.close(descriptor)
 
 
 def _open_config_lock(path: pathlib.Path):
     """Open a private regular lock file without following its leaf."""
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    else:  # pragma: no cover - Windows fallback
-        try:
-            before = path.lstat()
-        except FileNotFoundError:
-            before = None
-        if before is not None and stat.S_ISLNK(before.st_mode):
-            raise ConfigError(f"refusing symlink config lock {path}")
-        flags |= getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(path, flags, _CONFIG_FILE_MODE)
-    except OSError as exc:
+        return securefs.open_lock_file(path, error=ConfigError, label="config lock")
+    except FileNotFoundError as exc:
         raise ConfigError(f"cannot safely open config lock {path}: {exc}") from exc
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ConfigError(f"config lock is not a regular file: {path}")
-        if os.name == "posix":
-            if info.st_uid != os.geteuid():
-                raise ConfigError(f"config lock is not owned by this user: {path}")
-            if info.st_nlink != 1:
-                raise ConfigError(f"config lock has multiple links: {path}")
-            os.fchmod(descriptor, _CONFIG_FILE_MODE)
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return os.fdopen(descriptor, "a+b", buffering=0)
-
-
-def _lock_config_handle(handle) -> None:
-    if os.name == "nt":  # pragma: no cover - Windows fallback
-        import msvcrt
-
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-            os.fsync(handle.fileno())
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        return
-    import fcntl
-
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-
-
-def _unlock_config_handle(handle) -> None:
-    if os.name == "nt":  # pragma: no cover - Windows fallback
-        import msvcrt
-
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    import fcntl
-
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager
@@ -717,7 +653,7 @@ def _config_write_transaction(target: pathlib.Path):
         lock_path = target.parent / f".{target.name}.lock"
         handle = _open_config_lock(lock_path)
         try:
-            _lock_config_handle(handle)
+            securefs.lock_file(handle)
         except (ImportError, OSError) as exc:
             handle.close()
             raise ConfigError(f"cannot lock config file {target}: {exc}") from exc
@@ -725,7 +661,7 @@ def _config_write_transaction(target: pathlib.Path):
             yield
         finally:
             try:
-                _unlock_config_handle(handle)
+                securefs.unlock_file(handle)
             except (ImportError, OSError):
                 logger.warning(
                     "could not unlock config file %s", target, exc_info=True,
@@ -733,123 +669,37 @@ def _config_write_transaction(target: pathlib.Path):
             handle.close()
 
 
-def _fsync_config_directory(path: pathlib.Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
 def _write_config_text_unlocked(text: str, *, target: pathlib.Path) -> None:
     """Durably replace ``target``; caller owns its transaction lock."""
-    fd, raw_tmp = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
-    )
-    tmp = pathlib.Path(raw_tmp)
-    open_fd: int | None = fd
-    try:
-        if os.name == "posix":
-            os.fchmod(fd, _CONFIG_FILE_MODE)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            open_fd = None
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, target)
-        _fsync_config_directory(target.parent)
-    except BaseException:
-        if open_fd is not None:
-            os.close(open_fd)
-        tmp.unlink(missing_ok=True)
-        raise
+    securefs.atomic_write_text(target, text, mode=_CONFIG_FILE_MODE)
 
 
 def _create_config_text_unlocked(text: str, *, target: pathlib.Path) -> bool:
     """Durably create ``target`` without replacing any existing leaf."""
-    fd, raw_tmp = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
-    )
-    tmp = pathlib.Path(raw_tmp)
-    open_fd: int | None = fd
-    published = False
-    try:
-        if os.name == "posix":
-            os.fchmod(fd, _CONFIG_FILE_MODE)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            open_fd = None
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            if os.name == "posix":
-                # Same-directory hard-link publication is atomic and has no
-                # replacement mode: any existing file, symlink, or directory
-                # makes this fail with FileExistsError.
-                os.link(tmp, target)
-                published = True
-                try:
-                    tmp.unlink()
-                except BaseException:
-                    # Avoid leaving the just-created config with two links;
-                    # the secure reader deliberately rejects that topology.
-                    target.unlink(missing_ok=True)
-                    published = False
-                    raise
-            else:  # pragma: no cover - Windows no-replace rename semantics
-                os.rename(tmp, target)
-                published = True
-        except FileExistsError:
-            return False
-        _fsync_config_directory(target.parent)
-        return True
-    except BaseException:
-        if published:
-            target.unlink(missing_ok=True)
-        raise
-    finally:
-        if open_fd is not None:
-            os.close(open_fd)
-        tmp.unlink(missing_ok=True)
+    return securefs.atomic_create_text(target, text, mode=_CONFIG_FILE_MODE)
 
 
 def _read_config_for_update(
     target: pathlib.Path, *, require_owned: bool = False,
 ) -> Any:
     """Read one bounded regular config file without following its leaf."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    if os.name == "posix":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    else:  # pragma: no cover - Windows fallback
-        try:
-            before = target.lstat()
-        except FileNotFoundError:
-            return {}
-        if stat.S_ISLNK(before.st_mode):
-            raise ConfigError(f"refusing symlink config file {target}")
-        flags |= getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(target, flags)
+        descriptor = securefs.open_regular_file(
+            target,
+            os.O_RDONLY,
+            error=ConfigError,
+            label="config file",
+            action="read",
+            require_single_link=True,
+            # A root-owned config (e.g. provisioned by an admin) is trusted
+            # for reading; writers additionally pass ``require_owned``.
+            trusted_owners={os.geteuid(), 0} if os.name == "posix" else None,
+        )
     except FileNotFoundError:
         return {}
-    except OSError as exc:
-        raise ConfigError(f"cannot safely read config file {target}: {exc}") from exc
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ConfigError(f"config path is not a regular file: {target}")
         if os.name == "posix":
-            if info.st_nlink != 1:
-                raise ConfigError(f"config file has multiple links: {target}")
-            if info.st_uid not in {os.geteuid(), 0}:
-                raise ConfigError(f"config file has an untrusted owner: {target}")
             if require_owned and info.st_uid != os.geteuid():
                 raise ConfigError(f"config file is not owned by this user: {target}")
             if info.st_uid == os.geteuid():

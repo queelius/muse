@@ -139,6 +139,32 @@ def test_set_value_refuses_group_writable_existing_parent(tmp_path):
     assert list(parent.iterdir()) == []
 
 
+def test_set_value_refuses_existing_parent_owned_by_another_user(
+    tmp_path, monkeypatch,
+):
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o755)
+    real = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real + 1)
+
+    with pytest.raises(cfg.ConfigError, match="config parent has an untrusted owner"):
+        cfg.set_value("admin.token", "secret", path=parent / "config.yaml")
+
+    assert list(parent.iterdir()) == []
+
+
+def test_set_value_refuses_group_writable_transaction_lock(tmp_path):
+    lock = tmp_path / ".config.yaml.lock"
+    lock.write_bytes(b"\0")
+    lock.chmod(0o660)
+
+    with pytest.raises(cfg.ConfigError, match="config lock is group/other writable"):
+        cfg.set_value("admin.token", "secret", path=tmp_path / "config.yaml")
+
+    assert not (tmp_path / "config.yaml").exists()
+
+
 def test_set_value_refuses_hardlinked_config(tmp_path):
     source = tmp_path / "source.yaml"
     source.write_text("admin:\n  token: original\n")
