@@ -286,7 +286,7 @@ async def test_route_watches_disconnect_only_for_declared_paths(path, expected):
 
     with patch("muse.cli_impl.gateway.get_manifest", return_value=_manifest()), \
          patch("muse.cli_impl.gateway._read_catalog", return_value={DECISION: {"enabled": True}}), \
-         patch("muse.cli_impl.gateway._forward_with_release", new=fake_forward):
+         patch("muse.cli_impl.gateway._forward", new=fake_forward):
         await _route_via_director(
             req, "v1/systemone", DECISION, state, 1.0, cancellable_paths=paths,
         )
@@ -334,7 +334,7 @@ def _hanging_client(mock_cls, opened: asyncio.Event, cancelled: asyncio.Event):
 
 
 async def test_disconnect_drops_the_worker_call_and_releases():
-    from muse.cli_impl.gateway import _forward_with_release
+    from muse.cli_impl.gateway import _forward
     from muse.core.disconnect import ClientDisconnected
 
     gone, opened, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -343,10 +343,10 @@ async def test_disconnect_drops_the_worker_call_and_releases():
     released = []
     with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
         client = _hanging_client(mock_cls, opened, cancelled)
-        call = asyncio.ensure_future(_forward_with_release(
+        call = asyncio.ensure_future(_forward(
             request, "http://127.0.0.1:9001/v1/systemone", 30.0,
-            director=director, model_id=DECISION,
-            extra_release=lambda: released.append(1), cancel_on_disconnect=True,
+            release=lambda: (director.release(DECISION), released.append(1)),
+            cancel_on_disconnect=True,
         ))
         await asyncio.wait_for(opened.wait(), 5)
         gone.set()
@@ -359,15 +359,14 @@ async def test_disconnect_drops_the_worker_call_and_releases():
 
 
 async def test_other_paths_do_not_watch_for_disconnect():
-    from muse.cli_impl.gateway import _forward_with_release
+    from muse.cli_impl.gateway import _forward
 
     gone, opened, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     request, received = _disconnecting_request(json.dumps(BODY).encode(), gone)
     with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
         _hanging_client(mock_cls, opened, cancelled)
-        call = asyncio.ensure_future(_forward_with_release(
+        call = asyncio.ensure_future(_forward(
             request, "http://127.0.0.1:9001/v1/x", 30.0,
-            director=MagicMock(), model_id=DECISION,
         ))
         await asyncio.wait_for(opened.wait(), 5)
         gone.set()

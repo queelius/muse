@@ -76,7 +76,7 @@ async def test_worker_response_prefetch_hands_off_oversized_body():
 @pytest.mark.asyncio
 async def test_large_non_sse_response_streams_and_releases_after_consumption():
     from fastapi.responses import StreamingResponse
-    from muse.cli_impl.gateway import _forward_with_release
+    from muse.cli_impl.gateway import _forward
 
     chunks = [b"a" * 600_000, b"b" * 600_000, b"tail"]
     upstream = _RawResponse(chunks)
@@ -102,12 +102,11 @@ async def test_large_non_sse_response_streams_and_releases_after_consumption():
         "muse.cli_impl.gateway.httpx.AsyncClient",
         return_value=mock_client,
     ):
-        response = await _forward_with_release(
+        response = await _forward(
             request,
             "http://127.0.0.1:9001/artifact",
             1.0,
-            director=director,
-            model_id="artifact-model",
+            release=lambda: director.release("artifact-model"),
         )
 
     assert isinstance(response, StreamingResponse)
@@ -121,7 +120,7 @@ async def test_large_non_sse_response_streams_and_releases_after_consumption():
 
 @pytest.mark.asyncio
 async def test_director_release_when_stream_context_creation_fails():
-    from muse.cli_impl.gateway import _forward_with_release
+    from muse.cli_impl.gateway import _forward
 
     request = MagicMock()
     request.body = AsyncMock(return_value=b"")
@@ -138,12 +137,11 @@ async def test_director_release_when_stream_context_creation_fails():
         return_value=mock_client,
     ):
         with pytest.raises(ValueError, match="invalid worker URL"):
-            await _forward_with_release(
+            await _forward(
                 request,
                 "invalid://worker",
                 1.0,
-                director=director,
-                model_id="broken-model",
+                release=lambda: director.release("broken-model"),
             )
 
     director.release.assert_called_once_with("broken-model")

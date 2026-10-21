@@ -1213,11 +1213,10 @@ async def _route_via_director(
     slot_released = False
 
     def _release_slot() -> None:
-        # Exactly-once slot release: the flag guards against the forward leg's
-        # multiple release sites (buffered finally, stream-relay finally,
-        # early-failure except) all calling this. release_slot is itself
+        # Exactly-once slot release, shared by the acquire-failure branches
+        # below and `_release` (the forward leg). release_slot is itself
         # threadsafe (schedules on the gate's captured loop when off-loop) and
-        # over-release-safe, so this is belt-and-suspenders. Release only
+        # over-release-safe, so the flag is belt-and-suspenders. Release only
         # when acquire_slot actually took a slot (#332): re-deriving the cap
         # here would desync if server.default_max_concurrency changed live.
         nonlocal slot_released
@@ -1275,18 +1274,36 @@ async def _route_via_director(
         raise
     queued_ms = (gate_wait_seconds + capacity_wait_seconds) * 1000.0
 
-    # 4. Forward. The release calls (director.release + the gate slot release)
-    # are wired into the response shape: for buffered responses, fire in a
-    # finally clause once the body is read; for SSE streams, fire from inside
-    # the relay generator's finally clause when the upstream iteration ends (or
-    # raises). Both paths converge in `_forward_with_release`.
+    # 4. Forward. `_release` returns the director refcount and the gate slot;
+    # `_forward` runs it exactly once from its cleanup: before a buffered
+    # response returns, when a streamed response ends, or on any failure
+    # (cancellation included) before a response exists.
+    released = False
+
+    def _release() -> None:
+        # Each step is guarded separately so a raising director.release can
+        # never strand the gate slot (or vice versa).
+        nonlocal released
+        if released:
+            return
+        released = True
+        try:
+            state.director.release(model_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "director.release(%r) raised", model_id, exc_info=True,
+            )
+        try:
+            _release_slot()
+        except Exception:  # noqa: BLE001
+            logger.warning("gate release failed", exc_info=True)
+
     target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
     t0 = time.monotonic()
     try:
-        response = await _forward_with_release(
+        response = await _forward(
             request, target_url, timeout,
-            director=state.director, model_id=model_id,
-            extra_release=_release_slot,
+            release=_release,
             cancel_on_disconnect=request.url.path.rstrip("/") in cancellable_paths,
         )
     except ClientDisconnected:
@@ -1558,91 +1575,95 @@ async def _acquire_coalesced(state, model_id, manifest) -> int:
     return await _acquire_off_loop(state, model_id, manifest)
 
 
-async def _forward_with_release(
+async def _forward(
     request: Request,
     target_url: str,
     timeout: float,
     *,
-    director: Any,
-    model_id: str,
-    extra_release: "Callable[[], None] | None" = None,
+    release: "Callable[[], None] | None" = None,
     cancel_on_disconnect: bool = False,
 ) -> Response:
-    """Forward + release variant: same shape as `_forward`, but wires the
-    director.release call into the response lifecycle.
+    """Forward a request to target_url and relay the worker's response.
+
+    SSE responses relay immediately. Other bodies are prefetched up to a fixed
+    memory ceiling: small bodies return as a buffered Response, larger ones
+    continue through a StreamingResponse after the bounded prefix. The httpx
+    client and stream stay open for the life of a streamed response, so
+    chunks dispatch as the worker produces them.
+
+    `release` (the director refcount + concurrency-gate slot, from
+    `_route_via_director`; None for federation and the static-routes path)
+    runs exactly once, from one idempotent cleanup that also exits the
+    upstream stream and closes the client, in that order. Release goes first
+    and is synchronous, so neither a failing close step nor a second
+    cancellation landing during an await can skip it, and its own exception
+    is logged rather than propagated. Cleanup runs:
+
+      - before a buffered response is returned;
+      - when a streamed response ends: full iteration, iteration failure,
+        early iterator close, or a downstream send failure before the first
+        chunk (the outer `_OwnedStreamingResponse` lifecycle). Releasing at
+        stream close, not first chunk, keeps the model non-evictable until
+        the response is actually finished;
+      - on any failure (BaseException, so cancellation included) while
+        reading the request body, opening the worker stream, or prefetching
+        the response, after which the original exception is re-raised.
+        Connect/timeout errors therefore reach the caller unchanged, before
+        any response has started, which federation's failover relies on.
 
     `cancel_on_disconnect` (paths a modality lists in
     CANCEL_ON_DISCONNECT_PATHS): if the client disconnects while the worker
     is still producing its response headers, close the worker connection,
-    release as on any open failure, and raise ClientDisconnected.
-
-    `extra_release`, when given, is invoked immediately after each
-    director.release site (spec 2026-07-08: the concurrency-gate slot
-    release). It is called at every point director.release fires -- buffered
-    finally, stream-relay finally, body-read except, stream-open except -- so
-    the gate slot is returned on exactly the paths the director refcount is,
-    and never stranded. Its own exceptions are logged and swallowed so a gate
-    hiccup can never break the refcount release or the response.
-
-    Small non-stream response: release runs after bounded raw prefetch and
-    before the Response is returned. Large non-stream responses transition
-    to the same relay lifecycle as SSE after a bounded in-memory prefix.
-
-    Streaming response: release runs from one idempotent callback owned by
-    both the relay generator and the outer ASGI response lifecycle. It runs
-    after full iteration, iteration failure, or a downstream send failure
-    before iteration starts. This matches the spec's "release on stream-close"
-    requirement: a release on first-chunk dispatch would decrement refcount
-    before the request actually finished, opening a window where the model
-    could be evicted mid-response.
-
-    Both paths also call director.release on the early-failure branches
-    (request-body read, stream-open raise, response-prefetch raise), so refcount
-    is never stranded.
+    release, and raise ClientDisconnected.
     """
-    def _fire_extra_release() -> None:
-        # Guarded gate-slot release, paired with each director.release site.
-        if extra_release is None:
-            return
-        try:
-            extra_release()
-        except Exception:  # noqa: BLE001
-            logger.warning("gate release failed", exc_info=True)
+    client: httpx.AsyncClient | None = None
+    stream_ctx: Any = None
+    stream_entered = False
+    cleaned_up = False
 
-    # The body read happens AFTER the caller's director.acquire() bumped
-    # the refcount. A ClientDisconnect (client vanished mid-body) here --
-    # reachable for a body-bearing GET, whose body is unread during model
-    # extraction -- would otherwise skip release and strand the refcount,
-    # wedging eviction. Release the slot first, then re-raise.
+    async def cleanup() -> None:
+        nonlocal cleaned_up
+        if cleaned_up:
+            return
+        cleaned_up = True
+        if release is not None:
+            try:
+                release()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "release callback raised during forward cleanup",
+                    exc_info=True,
+                )
+        if stream_entered:
+            try:
+                await stream_ctx.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "stream_ctx.__aexit__ raised during forward cleanup",
+                    exc_info=True,
+                )
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "AsyncClient.aclose() raised during forward cleanup",
+                    exc_info=True,
+                )
+
     try:
+        # The body read comes after the caller took its refcount. For a
+        # body-bearing GET it is the first read and can fail on a client
+        # disconnect, so it sits inside the cleanup guard too.
         body = await request.body()
-    except BaseException:
-        # BaseException, not just Exception: a CancelledError here (client
-        # disconnect / request cancellation mid body-read) is a BaseException,
-        # so `except Exception` would skip the release and strand the refcount
-        # -- pinning the model non-evictable. We re-raise, so cancellation
-        # still propagates.
-        try:
-            director.release(model_id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "director.release(%r) raised during body-read cleanup",
-                model_id, exc_info=True,
-            )
-        _fire_extra_release()
-        raise
-    client = None
-    stream_ctx = None
-    try:
-        fwd_headers = _proxy_headers(
-            request.headers,
-            exclude=frozenset({"host", "content-length"}),
-        )
         client = httpx.AsyncClient(timeout=timeout)
         stream_ctx = client.stream(
             method=request.method,
             url=target_url,
-            headers=fwd_headers,
+            headers=_proxy_headers(
+                request.headers,
+                exclude=frozenset({"host", "content-length"}),
+            ),
             content=body,
             params=dict(request.query_params),
         )
@@ -1650,344 +1671,43 @@ async def _forward_with_release(
         response = await (
             unless_disconnected(request, opening) if cancel_on_disconnect else opening
         )
-    except BaseException:
-        # BaseException, not just Exception: a CancelledError here (the client
-        # disconnected while we were opening the worker connection) must
-        # release the refcount too, or the hot model is pinned non-evictable
-        # forever. We re-raise below, so cancellation still propagates.
-        # __aenter__ raised: release the refcount FIRST, then aclose
-        # the AsyncClient. Order matters for cascading failure: if we
-        # awaited aclose() first and IT raised, control would exit via
-        # the new exception and director.release(model_id) would never
-        # run. Refcount leaks, eviction wedges. By releasing the
-        # director slot first we guarantee the refcount returns to
-        # baseline regardless of what aclose() does. The aclose() call
-        # below is wrapped so any failure there is logged but does not
-        # mask the original stream-open exception we re-raise.
-        # Regression watchdog: tests/cli_impl/test_gateway.py
-        # ::TestAsyncClientLifecycle::test_stream_open_failure_aclose_client
-        # (aclose runs); tests/cli_impl/test_gateway_lazy.py
-        # ::TestAcquireRelease::test_release_runs_even_when_aclose_raises_during_stream_open_failure
-        # (release runs even when aclose explodes).
-        try:
-            director.release(model_id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "director.release(%r) raised during stream-open cleanup",
-                model_id, exc_info=True,
-            )
-        _fire_extra_release()
-        if client is not None:
-            try:
-                await client.aclose()
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "AsyncClient.aclose() raised during stream-open cleanup",
-                    exc_info=True,
-                )
-        raise
+        stream_entered = True
 
-    content_type = str(response.headers.get("content-type", "") or "")
-    is_stream = "text/event-stream" in content_type.lower()
-
-    resp_headers = _proxy_headers(
-        response.headers,
-        exclude=frozenset({"content-length"}),
-    )
-
-    stream_cleanup_started = False
-
-    async def _cleanup_owned_stream() -> None:
-        """Release director/gate/HTTP ownership exactly once."""
-        nonlocal stream_cleanup_started
-        if stream_cleanup_started:
-            return
-        stream_cleanup_started = True
-        try:
-            director.release(model_id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "director.release(%r) raised at stream-close",
-                model_id, exc_info=True,
-            )
-        _fire_extra_release()
-        try:
-            await stream_ctx.__aexit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "stream_ctx.__aexit__ raised at stream-close",
-                exc_info=True,
-            )
-        try:
-            await client.aclose()
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "AsyncClient.aclose() raised at stream-close",
-                exc_info=True,
-            )
-
-    if is_stream:
-        async def relay():
-            # The relay generator owns the release call: it fires when
-            # the upstream iteration completes (full body sent) OR when
-            # it raises (worker died, client disconnected). Either way,
-            # the model's refcount drops back to baseline at end-of-life.
-            #
-            # Order: release FIRST, then close the stream and client.
-            # If aexit / aclose raised before release, the refcount would
-            # leak. Putting release at the top of the finally chain
-            # decouples it from cascading failures in the cleanup path.
-            try:
-                async for chunk in response.aiter_raw():
-                    yield chunk
-            finally:
-                await _cleanup_owned_stream()
-
-        return _install_response_headers(
-            _OwnedStreamingResponse(
-                relay(),
-                cleanup=_cleanup_owned_stream,
-                status_code=response.status_code,
-                media_type=content_type,
-            ),
-            resp_headers,
+        content_type = str(response.headers.get("content-type", "") or "")
+        resp_headers = _proxy_headers(
+            response.headers,
+            exclude=frozenset({"content-length"}),
         )
+        if "text/event-stream" in content_type.lower():
+            content, prefix, iterator = None, [], response.aiter_raw()
+        else:
+            content, prefix, iterator = await _prefetch_worker_response(response)
 
-    # Preserve the buffered path for small bodies, but never let a worker
-    # response grow gateway memory without bound.  Once the bounded prefix
-    # crosses the cap, ownership of the open iterator/stream/client moves to
-    # the relay generator and release fires when downstream consumption ends.
-    try:
-        content, prefix, iterator = await _prefetch_worker_response(response)
-    except BaseException:
-        try:
-            director.release(model_id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "director.release(%r) raised during response-prefetch cleanup",
-                model_id, exc_info=True,
+        if content is not None:
+            await cleanup()
+            return _install_response_headers(
+                Response(content=content, status_code=response.status_code),
+                resp_headers,
             )
-        _fire_extra_release()
-        try:
-            await stream_ctx.__aexit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "stream_ctx.__aexit__ raised during response-prefetch cleanup",
-                exc_info=True,
-            )
-        try:
-            await client.aclose()
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "AsyncClient.aclose() raised during response-prefetch cleanup",
-                exc_info=True,
-            )
-        raise
 
-    if content is None:
-        async def relay_large_response():
+        async def relay():
             try:
                 for chunk in prefix:
                     yield chunk
                 async for chunk in iterator:
                     yield chunk
             finally:
-                await _cleanup_owned_stream()
-
-        return _install_response_headers(
-            _OwnedStreamingResponse(
-                relay_large_response(),
-                cleanup=_cleanup_owned_stream,
-                status_code=response.status_code,
-                media_type=content_type,
-            ),
-            resp_headers,
-        )
-
-    # Small buffered response: release before fallible HTTP cleanup so a
-    # cleanup error can never strand the director refcount.
-    try:
-        director.release(model_id)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "director.release(%r) raised during buffered-response cleanup",
-            model_id, exc_info=True,
-        )
-    _fire_extra_release()
-    try:
-        await stream_ctx.__aexit__(None, None, None)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "stream_ctx.__aexit__ raised during buffered-response cleanup",
-            exc_info=True,
-        )
-    try:
-        await client.aclose()
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "AsyncClient.aclose() raised during buffered-response cleanup",
-            exc_info=True,
-        )
-
-    return _install_response_headers(
-        Response(
-            content=content,
-            status_code=response.status_code,
-        ),
-        resp_headers,
-    )
-
-
-async def _forward(request: Request, target_url: str, timeout: float) -> Response:
-    """Forward a request to target_url.
-
-    Relays SSE immediately. Other response bodies are prefetched only up to a
-    fixed memory ceiling: small bodies preserve the buffered Response shape,
-    while larger bodies continue through StreamingResponse.
-
-    The httpx client and stream context are held open for the duration of
-    a streaming response so chunks dispatch as they arrive from the worker
-    (not after full synthesis completes). Same producer-consumer shape as
-    the audio/speech router's internal streaming.
-    """
-    body = await request.body()
-    fwd_headers = _proxy_headers(
-        request.headers,
-        exclude=frozenset({"host", "content-length"}),
-    )
-
-    client = httpx.AsyncClient(timeout=timeout)
-    stream_ctx = None
-    try:
-        stream_ctx = client.stream(
-            method=request.method,
-            url=target_url,
-            headers=fwd_headers,
-            content=body,
-            params=dict(request.query_params),
-        )
-        response = await stream_ctx.__aenter__()
-    except BaseException:
-        # __aenter__ raised: stream_ctx is not entered, so __aexit__
-        # is not appropriate. Close the client to release the
-        # underlying connection pool slot without masking the original.
-        try:
-            await client.aclose()
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "AsyncClient.aclose() raised during direct stream-open cleanup",
-                exc_info=True,
-            )
-        raise
-
-    content_type = str(response.headers.get("content-type", "") or "")
-    is_stream = "text/event-stream" in content_type.lower()
-
-    resp_headers = _proxy_headers(
-        response.headers,
-        exclude=frozenset({"content-length"}),
-    )
-
-    stream_cleanup_started = False
-
-    async def _cleanup_direct_stream() -> None:
-        nonlocal stream_cleanup_started
-        if stream_cleanup_started:
-            return
-        stream_cleanup_started = True
-        try:
-            await stream_ctx.__aexit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "stream_ctx.__aexit__ raised during direct stream cleanup",
-                exc_info=True,
-            )
-        try:
-            await client.aclose()
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "AsyncClient.aclose() raised during direct stream cleanup",
-                exc_info=True,
-            )
-
-    if is_stream:
-        async def relay():
-            try:
-                async for chunk in response.aiter_raw():
-                    yield chunk
-            finally:
-                await _cleanup_direct_stream()
+                await cleanup()
 
         return _install_response_headers(
             _OwnedStreamingResponse(
                 relay(),
-                cleanup=_cleanup_direct_stream,
+                cleanup=cleanup,
                 status_code=response.status_code,
                 media_type=content_type,
             ),
             resp_headers,
         )
-
-    # Buffer only a bounded prefix.  Large binary/non-SSE responses relay
-    # without forcing the gateway to hold the complete body in RAM.
-    try:
-        content, prefix, iterator = await _prefetch_worker_response(response)
     except BaseException:
-        try:
-            await stream_ctx.__aexit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "stream_ctx.__aexit__ raised during direct prefetch cleanup",
-                exc_info=True,
-            )
-        try:
-            await client.aclose()
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "AsyncClient.aclose() raised during direct prefetch cleanup",
-                exc_info=True,
-            )
+        await cleanup()
         raise
-
-    if content is None:
-        async def relay_large_response():
-            try:
-                for chunk in prefix:
-                    yield chunk
-                async for chunk in iterator:
-                    yield chunk
-            finally:
-                await _cleanup_direct_stream()
-
-        return _install_response_headers(
-            _OwnedStreamingResponse(
-                relay_large_response(),
-                cleanup=_cleanup_direct_stream,
-                status_code=response.status_code,
-                media_type=content_type,
-            ),
-            resp_headers,
-        )
-
-    try:
-        await stream_ctx.__aexit__(None, None, None)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "stream_ctx.__aexit__ raised during direct buffered cleanup",
-            exc_info=True,
-        )
-    try:
-        await client.aclose()
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "AsyncClient.aclose() raised during direct buffered cleanup",
-            exc_info=True,
-        )
-
-    return _install_response_headers(
-        Response(
-            content=content,
-            status_code=response.status_code,
-        ),
-        resp_headers,
-    )

@@ -206,7 +206,7 @@ async def test_native_manifest_preparation_is_shared_off_loop_and_shielded(cance
          _patch_get_manifest(manifest), \
          patch("muse.cli_impl.gateway.revalidate_servability", side_effect=slow_preparation if blocked_phase == "revalidate" else None, return_value=None), \
          patch("muse.cli_impl.gateway.backfill_manifest_memory", side_effect=slow_preparation if blocked_phase == "backfill" else lambda value, *args, **kwargs: value), \
-         patch("muse.cli_impl.gateway._forward_with_release", new=AsyncMock(return_value=JSONResponse({"ok": True}))):
+         patch("muse.cli_impl.gateway._forward", new=AsyncMock(return_value=JSONResponse({"ok": True}))):
         tasks = [asyncio.create_task(_route_via_director(
             MagicMock(), "v1/chat/completions", "fake-model", state, 1.0,
         )) for _ in range(3)]
@@ -267,7 +267,7 @@ async def test_native_resident_survives_changed_unsupported_preferences():
     with patch("muse.cli_impl.gateway._read_catalog", return_value={"fake-model": {"device_override": "cuda"}}), \
          _patch_get_manifest(manifest), \
          patch("muse.cli_impl.gateway.backfill_manifest_memory", side_effect=changed_preferences), \
-         patch("muse.cli_impl.gateway._forward_with_release", new=AsyncMock(return_value=JSONResponse({"ok": True}))):
+         patch("muse.cli_impl.gateway._forward", new=AsyncMock(return_value=JSONResponse({"ok": True}))):
         response = await _route_via_director(
             MagicMock(), "v1/chat/completions", "fake-model", state, 1.0,
         )
@@ -314,7 +314,7 @@ async def test_cold_native_admission_does_not_stall_unrelated_gateway_request(mo
         watchdog.start()
         try:
             with _patch_get_manifest(), patch(
-                "muse.cli_impl.gateway._forward_with_release",
+                "muse.cli_impl.gateway._forward",
                 new=AsyncMock(return_value=JSONResponse({"ok": True})),
             ):
                 response = await _route_via_director(
@@ -448,7 +448,7 @@ class TestAcquireRelease:
         raises during cleanup. release MUST still fire so the refcount
         does not leak.
 
-        Without the fix in `_forward_with_release`, a `aclose()` that
+        Without the fix in `_forward`, a `aclose()` that
         raises would propagate before `director.release(...)` runs,
         stranding the refcount forever and (eventually) wedging the
         director's refcount-based eviction.
@@ -490,14 +490,14 @@ class TestAcquireRelease:
 
     def test_release_runs_when_request_body_read_raises(self):
         """L16: director.acquire() bumps the refcount, then
-        _forward_with_release reads the request body. A ClientDisconnect
+        _forward reads the request body. A ClientDisconnect
         (client vanished mid-body) during that read happens AFTER acquire
         and BEFORE the stream-open try/except, so without the fix it skips
         director.release and strands the refcount, wedging eviction.
 
         A body-bearing GET is the reachable path: GET routes extract the
         model from the query string, so the body is unread until
-        _forward_with_release -- the read there is the first one and CAN
+        _forward -- the read there is the first one and CAN
         disconnect (a POST's body is already read + cached during model
         extraction, so its later read never hits the network). The read
         must release the slot on failure.
@@ -1599,7 +1599,7 @@ class TestAcquireOffEventLoop:
             return MagicMock()
 
         with _patch_get_manifest(), \
-             patch("muse.cli_impl.gateway._forward_with_release", new=fake_forward):
+             patch("muse.cli_impl.gateway._forward", new=fake_forward):
             task = asyncio.create_task(
                 _route_via_director(
                     MagicMock(), "v1/audio/speech", "fake-model", state, 1.0,
@@ -1650,7 +1650,7 @@ class TestAcquireOffEventLoop:
         BaseException, so an `except Exception` cleanup would leak it and pin
         the model non-evictable.
         """
-        from muse.cli_impl.gateway import _forward_with_release
+        from muse.cli_impl.gateway import _forward
 
         director = MagicMock()
         req = MagicMock()
@@ -1667,23 +1667,23 @@ class TestAcquireOffEventLoop:
             mc.stream = MagicMock(return_value=ctx)
             mock_cls.return_value = mc
             with pytest.raises(asyncio.CancelledError):
-                await _forward_with_release(
+                await _forward(
                     req, "http://127.0.0.1:9099/x", 1.0,
-                    director=director, model_id="m",
+                    release=lambda: director.release("m"),
                 )
         director.release.assert_called_once_with("m")
 
     async def test_forward_release_fires_on_cancellation_during_body_read(self):
         """A CancelledError during the request body read must release too."""
-        from muse.cli_impl.gateway import _forward_with_release
+        from muse.cli_impl.gateway import _forward
 
         director = MagicMock()
         req = MagicMock()
         req.body = AsyncMock(side_effect=asyncio.CancelledError())
         with pytest.raises(asyncio.CancelledError):
-            await _forward_with_release(
+            await _forward(
                 req, "http://127.0.0.1:9099/x", 1.0,
-                director=director, model_id="m",
+                release=lambda: director.release("m"),
             )
         director.release.assert_called_once_with("m")
 

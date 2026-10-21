@@ -20,7 +20,7 @@ from muse.admin.operations import (
 )
 from muse.cli_impl.gateway import (
     ShutdownCancellationMiddleware,
-    _forward_with_release,
+    _forward,
     _install_response_headers,
     _proxy_headers,
     _route_via_director,
@@ -487,11 +487,9 @@ async def test_stream_send_failure_before_iteration_releases_all_ownership():
     director = MagicMock()
     extra_release = MagicMock()
     with patch("muse.cli_impl.gateway.httpx.AsyncClient", return_value=client):
-        response = await _forward_with_release(
+        response = await _forward(
             _request(), "http://worker.test/v1/audio/speech", 1.0,
-            director=director,
-            model_id="model",
-            extra_release=extra_release,
+            release=lambda: (director.release("model"), extra_release()),
         )
 
     async def receive() -> dict:
@@ -518,11 +516,9 @@ async def test_active_stream_shutdown_cleans_up_without_cancelled_error():
     director = MagicMock()
     extra_release = MagicMock()
     with patch("muse.cli_impl.gateway.httpx.AsyncClient", return_value=client):
-        response = await _forward_with_release(
+        response = await _forward(
             _request(), "http://worker.test/v1/audio/speech", 1.0,
-            director=director,
-            model_id="model",
-            extra_release=extra_release,
+            release=lambda: (director.release("model"), extra_release()),
         )
 
     stop_event = threading.Event()
