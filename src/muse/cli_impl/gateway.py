@@ -606,6 +606,8 @@ def build_gateway(
             ShutdownCancellationMiddleware,
             stop_event=stop_event,
         )
+    # Modality packages cannot change at runtime, so read this seam once.
+    app.state.disconnect_cancellable_paths = disconnect_cancellable_paths()
     app.state.aggregation_timeout = (
         aggregation_timeout if aggregation_timeout is not None
         else config.get("server.aggregation_timeout_seconds")
@@ -869,6 +871,7 @@ def build_gateway(
         if s is not None and getattr(s, "director", None) is not None:
             return await _route_via_director(
                 request, full_path, model_id, s, app.state.timeout,
+                cancellable_paths=app.state.disconnect_cancellable_paths,
             )
 
         # Legacy static-routes path: look up the worker URL in a frozen
@@ -1065,8 +1068,13 @@ async def _route_via_director(
     model_id: str,
     state: Any,
     timeout: float,
+    *,
+    cancellable_paths: frozenset[str] = frozenset(),
 ) -> Response:
     """Director-driven request routing for v0.40.0 lazy load.
+
+    `cancellable_paths` is the CANCEL_ON_DISCONNECT_PATHS set, computed once
+    by build_gateway.
 
     Order of operations:
 
@@ -1290,7 +1298,7 @@ async def _route_via_director(
             request, target_url, timeout,
             director=state.director, model_id=model_id,
             extra_release=_release_slot,
-            cancel_on_disconnect=request.url.path in disconnect_cancellable_paths(),
+            cancel_on_disconnect=request.url.path.rstrip("/") in cancellable_paths,
         )
     except ClientDisconnected:
         # Nobody receives this response; it is recorded as a 499 below.

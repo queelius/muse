@@ -266,6 +266,33 @@ def test_only_systemone_cancels_its_worker_call_on_disconnect():
     assert disconnect_cancellable_paths() == frozenset({"/v1/systemone"})
 
 
+@pytest.mark.parametrize("path,expected", [
+    ("/v1/systemone", True), ("/v1/systemone/", True), ("/v1/other", False),
+])
+async def test_route_watches_disconnect_only_for_declared_paths(path, expected):
+    from muse.cli_impl.gateway import _route_via_director, build_gateway
+
+    state = _state()
+    paths = build_gateway(state=state).state.disconnect_cancellable_paths
+    assert paths == frozenset({"/v1/systemone"})
+    req = MagicMock()
+    req.method = "POST"
+    req.url.path = path
+    seen = {}
+
+    async def fake_forward(*args, **kwargs):
+        seen.update(kwargs)
+        return MagicMock()
+
+    with patch("muse.cli_impl.gateway.get_manifest", return_value=_manifest()), \
+         patch("muse.cli_impl.gateway._read_catalog", return_value={DECISION: {"enabled": True}}), \
+         patch("muse.cli_impl.gateway._forward_with_release", new=fake_forward):
+        await _route_via_director(
+            req, "v1/systemone", DECISION, state, 1.0, cancellable_paths=paths,
+        )
+    assert seen["cancel_on_disconnect"] is expected
+
+
 def _disconnecting_request(body: bytes, gone: asyncio.Event):
     from starlette.requests import Request
 
