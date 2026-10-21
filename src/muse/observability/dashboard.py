@@ -66,8 +66,10 @@ def _node_id(state) -> str:
 async def _stream_model_logs(hub, model_id: str, request: Request):
     """Yield past + live log lines for one model as SSE-shaped dicts.
 
-    First drains `hub.snapshot(model_id)` (the buffered history), then
-    subscribes and polls for new lines until the client disconnects.
+    `hub.subscribe_with_snapshot` subscribes and snapshots the buffered
+    history under one lock, so no line falls between the history and the
+    live queue (nor appears in both). The history is drained first, then
+    the queue is polled for new lines until the client disconnects.
     Polling (rather than a blocking `queue.Queue.get`) keeps this on the
     event loop with no extra thread; the `asyncio.sleep` between drains
     is the only per-iteration cost. `hub.unsubscribe` runs in a `finally`
@@ -99,12 +101,7 @@ async def _stream_model_logs(hub, model_id: str, request: Request):
 
 
 def _loaded_entry_dict(model_id: str, entry, queue_depth: int | None = None) -> dict:
-    """Defensively project a LoadEntry-like object into the wire shape.
-
-    Only fields verified on muse.cli_impl.load_director.LoadEntry are
-    read directly (memory_gb, last_touched_at); everything else (namely
-    "pool", which is not a LoadEntry attribute) falls back to None via
-    getattr rather than assuming a name that might not exist.
+    """Project a LoadEntry into the wire shape.
 
     `queue_depth` (spec 2026-07-08 Task 4) is passed in by the caller
     (already resolved from the gateway's ConcurrencyGate, or 0 when no
@@ -113,9 +110,9 @@ def _loaded_entry_dict(model_id: str, entry, queue_depth: int | None = None) -> 
     """
     return {
         "model_id": model_id,
-        "pool": getattr(entry, "pool", None),
-        "gb": getattr(entry, "memory_gb", None),
-        "last_used": getattr(entry, "last_touched_at", None),
+        "pool": entry.pool,
+        "gb": entry.memory_gb,
+        "last_used": entry.last_touched_at,
         "queue_depth": queue_depth,
     }
 

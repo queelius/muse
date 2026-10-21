@@ -20,7 +20,7 @@ def test_snapshot_and_byte_bound():
 
 def test_pubsub_delivers_new_lines():
     hub = LogHub()
-    q = hub.subscribe("m")
+    _, q = hub.subscribe_with_snapshot("m")
     hub.append("m", "hello")
     assert q.get_nowait() == "hello"
     hub.unsubscribe("m", q)
@@ -69,7 +69,7 @@ def test_eviction_counts_utf8_bytes_not_chars():
 
 def test_oversized_line_is_capped_before_subscriber_fanout():
     hub = LogHub(buffer_bytes=32)
-    q = hub.subscribe("m")
+    _, q = hub.subscribe_with_snapshot("m")
 
     hub.append("m", "x" * 10_000)
 
@@ -83,12 +83,12 @@ def test_oversized_line_is_capped_before_subscriber_fanout():
 def test_subscriber_queue_is_bounded_and_does_not_block_or_raise():
     """A stalled-but-connected subscriber must not grow memory unboundedly.
 
-    Regression: subscribe() previously returned an unbounded queue.Queue(),
+    Regression: subscription previously returned an unbounded queue.Queue(),
     so append()'s `except queue.Full: pass` guard was dead code -- a slow
     SSE client that never drains its queue accumulated every line forever.
     """
     hub = LogHub(buffer_bytes=10_000_000)
-    q = hub.subscribe("m")
+    _, q = hub.subscribe_with_snapshot("m")
 
     for i in range(SUBSCRIBER_QUEUE_MAXSIZE + 50):
         hub.append("m", f"line{i}")  # must never raise / block
@@ -98,12 +98,12 @@ def test_subscriber_queue_is_bounded_and_does_not_block_or_raise():
 
 def test_fresh_subscriber_after_a_stalled_one_still_receives_new_lines():
     hub = LogHub(buffer_bytes=10_000_000)
-    stalled = hub.subscribe("m")
+    _, stalled = hub.subscribe_with_snapshot("m")
 
     for i in range(SUBSCRIBER_QUEUE_MAXSIZE + 50):
         hub.append("m", f"line{i}")
 
-    fresh = hub.subscribe("m")
+    _, fresh = hub.subscribe_with_snapshot("m")
     hub.append("m", "fresh-line")
     assert fresh.get_nowait() == "fresh-line"
     # The stalled subscriber's queue is still capped, not raising/blocking.
@@ -112,7 +112,7 @@ def test_fresh_subscriber_after_a_stalled_one_still_receives_new_lines():
 
 def test_unsubscribe_removes_empty_model_subscription_bucket():
     hub = LogHub()
-    q = hub.subscribe("transient-model")
+    _, q = hub.subscribe_with_snapshot("transient-model")
 
     hub.unsubscribe("transient-model", q)
 

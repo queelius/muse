@@ -2,7 +2,7 @@
 
 Stdlib-only. Does not import torch, fastapi, or any other observability
 module. One lock guards all mutation (buffers, byte counts, subscriber
-sets) so snapshot/subscribe/unsubscribe/drop are all safe against a
+sets) so snapshot/subscribe_with_snapshot/unsubscribe/drop are all safe against a
 concurrent append from another thread.
 """
 
@@ -13,7 +13,7 @@ import queue
 import threading
 
 # Bounds a stalled subscriber's queue to this many buffered lines. A
-# healthy consumer (the SSE tail polls hub.subscribe() every 250ms, see
+# healthy consumer (the SSE tail polls its queue every 250ms, see
 # dashboard.py) drains far faster than workers emit, so this only bites
 # a disconnected-but-not-yet-unsubscribed or genuinely slow client, and
 # caps its memory growth instead of letting it accumulate for the life
@@ -42,7 +42,8 @@ class LogHub:
       running byte count exceeds buffer_bytes) then publish it to every
       subscriber for that model_id.
     - snapshot(model_id): a point-in-time copy of the current buffer.
-    - subscribe(model_id)/unsubscribe(model_id, q): live-tail registration.
+    - subscribe_with_snapshot(model_id)/unsubscribe(model_id, q): live-tail
+      registration, atomically paired with the buffered history.
     - drop(model_id): remove a model's buffer and all its subscribers.
     """
 
@@ -88,12 +89,6 @@ class LogHub:
         with self._lock:
             buf = self._buffers.get(model_id)
             return list(buf) if buf is not None else []
-
-    def subscribe(self, model_id: str) -> queue.Queue:
-        q: queue.Queue = queue.Queue(maxsize=SUBSCRIBER_QUEUE_MAXSIZE)
-        with self._lock:
-            self._subscribers.setdefault(model_id, set()).add(q)
-        return q
 
     def subscribe_with_snapshot(
         self, model_id: str,
