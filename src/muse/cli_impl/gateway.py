@@ -1568,53 +1568,46 @@ async def _acquire_coalesced(state, model_id, manifest) -> int:
         def _settle(acq_fut: "asyncio.Future") -> None:
             # Runs on the loop thread when the load settles. Compare-and-remove
             # (only this Future's owner deletes its entry, so a re-elected
-            # loader's gate is never clobbered). NEVER set_exception -- a pure
-            # ("ok"|"fail", info) signal avoids "exception never retrieved"
-            # noise when there are zero waiters.
+            # loader's gate is never clobbered). The loader's exception (None
+            # on success) is the gate's RESULT, never set_exception, so zero
+            # waiters means no "exception never retrieved" noise. A cancelled
+            # load counts as an unmapped failure.
             if gates.get(model_id) is gate:
                 del gates[model_id]
             if gate.done():
                 return
             if acq_fut.cancelled():
-                gate.set_result(("fail", None))
-            elif acq_fut.exception() is not None:
-                exc = acq_fut.exception()
-                # v0.57.3 (review finding): carry `retryable` through the
-                # tuple. Without it a waiter rebuilds an OperationError
-                # whose retryable defaults to False and fast-fails a
-                # transient capacity 503 the loader itself parks on --
-                # defeating the capacity-wait for same-model cold bursts.
-                info = (
-                    (exc.status, exc.code, exc.message,
-                     getattr(exc, "retryable", False))
-                    if isinstance(exc, OperationError) else None
-                )
-                gate.set_result(("fail", info))
+                gate.set_result(asyncio.CancelledError())
             else:
-                gate.set_result(("ok", None))
+                gate.set_result(acq_fut.exception())
 
         return await _acquire_off_loop(state, model_id, manifest, on_settle=_settle)
 
     # WAITER: await the shared gate WITHOUT a thread. shield so cancelling THIS
     # waiter cannot cancel the shared gate and poison the whole group.
     await asyncio.shield(gate)
-    status, info = gate.result()
-    if status == "fail":
+    failure = gate.result()
+    if failure is not None:
         # Propagate the loader's failure; do NOT re-acquire. A retry herd would
-        # re-park N-1 threads -- the exact #319 pathology. A mapped failure
-        # carries the loader's own (status, code, message); a rare UNMAPPED one
-        # (director.acquire raised a non-OperationError, e.g. a pynvml hiccup in
-        # _decide) becomes a generic 503 so waiters still fail-fast without
-        # re-dispatching a thundering herd of cold acquires.
-        if info is not None:
-            s, code, msg, retryable = info
-            raise OperationError(code, msg, status=s, retryable=retryable)
+        # re-park N-1 threads -- the exact #319 pathology. A mapped failure is
+        # rebuilt per waiter (concurrent waiters never share one exception
+        # object) with the loader's status, code, message and `retryable`, so
+        # a transient capacity 503 still capacity-waits instead of failing
+        # fast. A rare UNMAPPED one (director.acquire raised a
+        # non-OperationError, e.g. a pynvml hiccup in _decide) becomes a
+        # generic 503 so waiters still fail-fast without re-dispatching a
+        # thundering herd of cold acquires.
+        if isinstance(failure, OperationError):
+            raise OperationError(
+                failure.code, failure.message,
+                status=failure.status, retryable=failure.retryable,
+            )
         raise OperationError(
             "model_load_failed",
             f"load of {model_id!r} failed",
             status=503,
         )
-    # "ok": take our OWN refcount via a full acquire. This re-decides
+    # Success: take our OWN refcount via a full acquire. This re-decides
     # hot-or-cold -- the model may have been evicted between the loader's
     # commit and now; the director's own singleton collapse handles a genuine
     # reload. The hot case is a sub-ms refcount bump.
