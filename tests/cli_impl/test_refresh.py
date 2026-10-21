@@ -907,7 +907,7 @@ def test_cuda_wheel_setting_splits_the_extras_step(tmp_catalog, tmp_path, monkey
         "pip_extras": ("llama-cpp-python>=0.2.90",),
     }
     with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
-         patch("muse.core.venv._is_cuda_llama_build", return_value=False), \
+         patch("muse.core.pip_install._is_cuda_llama_build", return_value=False), \
          patch("muse.cli_impl.refresh.run_owned_command") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = refresh_one("x")

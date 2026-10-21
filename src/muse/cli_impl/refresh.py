@@ -42,10 +42,10 @@ from muse.core.catalog import (
     is_enabled,
 )
 from muse.core.venv_dedupe import dedupe_after_install
+from muse.core.owned_command import run_owned_command
+from muse.core.pip_install import pip_install_commands
 from muse.core.venv import (
     install_python_sources,
-    pip_install_commands,
-    run_owned_command,
     venv_python,
     venv_transaction,
 )
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 # 30 minutes: long enough for a slow PyPI mirror to complete a full
 # torch+diffusers install, short enough that a hung mirror is detected
 # before the operator gives up. Matches the pip timeout `muse pull` uses
-# (muse.core.venv._PIP_TIMEOUT).
+# (muse.core.pip_install._PIP_TIMEOUT).
 _PIP_TIMEOUT = 1800
 
 

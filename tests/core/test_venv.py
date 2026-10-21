@@ -15,17 +15,18 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import muse.core.owned_command as owned_command_module
+import muse.core.pip_install as pip_install_module
 import muse.core.venv as venv_module
 from muse.core.venv import (
     create_venv,
     install_python_sources,
     install_output_mode,
-    install_into_venv,
     run_owned_command,
     venv_transaction,
     venv_python,
     find_free_port,
 )
+from muse.core.pip_install import install_into_venv
 
 
 _TRELLIS_REVISION = "442aa1e1afb9014e80681d3bf604e8d728a86ee7"
@@ -683,7 +684,7 @@ class TestInstallIntoVenv:
         args = popen.call_args.args[0]
         assert "-q" not in args
         assert popen.call_args.kwargs == {"start_new_session": True}
-        process.wait.assert_called_once_with(timeout=venv_module._PIP_TIMEOUT)
+        process.wait.assert_called_once_with(timeout=pip_install_module._PIP_TIMEOUT)
 
     def test_success_never_signals_reusable_group_identifier(self, tmp_path):
         (tmp_path / "bin").mkdir()
@@ -704,7 +705,7 @@ class TestInstallIntoVenv:
         (tmp_path / "bin" / "python").touch()
         process = _mock_process(returncode=1)
         process.wait.side_effect = [
-            subprocess.TimeoutExpired(cmd="pip", timeout=venv_module._PIP_TIMEOUT),
+            subprocess.TimeoutExpired(cmd="pip", timeout=pip_install_module._PIP_TIMEOUT),
             1,
         ]
         signals, killpg, alive = _group_signal_that_exits_on(signal.SIGKILL)
@@ -745,7 +746,7 @@ class TestInstallIntoVenv:
         process.poll.side_effect = lambda: None if alive["value"] else 1
         process.terminate.side_effect = lambda: alive.update(value=False)
         process.wait.side_effect = [
-            subprocess.TimeoutExpired(cmd="pip", timeout=venv_module._PIP_TIMEOUT),
+            subprocess.TimeoutExpired(cmd="pip", timeout=pip_install_module._PIP_TIMEOUT),
             1,
         ]
         with patch("muse.core.venv.os.name", "posix"), \
@@ -790,7 +791,7 @@ class TestInstallIntoVenv:
         process.poll.side_effect = lambda: None if alive["value"] else 1
         process.terminate.side_effect = lambda: alive.update(value=False)
         process.wait.side_effect = [
-            subprocess.TimeoutExpired(cmd="pip", timeout=venv_module._PIP_TIMEOUT),
+            subprocess.TimeoutExpired(cmd="pip", timeout=pip_install_module._PIP_TIMEOUT),
             1,
         ]
         create_group = 0x200

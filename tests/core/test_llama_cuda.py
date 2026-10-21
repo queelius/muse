@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from muse.core import llama_cuda
-from muse.core.venv import pip_install_commands
+from muse.core.pip_install import pip_install_commands
 
 CU130, VERIFIED, RUNTIMES = llama_cuda.WHEELS["cu130"]
 
@@ -59,7 +59,7 @@ def test_unknown_wheel_is_refused():
 
 def _commands(monkeypatch, packages, *, cuda_build, upgrade=False):
     monkeypatch.setenv("MUSE_LLAMA_CPP_WHEEL", "cu130")
-    with patch("muse.core.venv._is_cuda_llama_build", return_value=cuda_build):
+    with patch("muse.core.pip_install._is_cuda_llama_build", return_value=cuda_build):
         return list(pip_install_commands("/v/bin/python", packages, upgrade=upgrade))
 
 
@@ -76,12 +76,12 @@ def test_commands_replace_a_cpu_build_without_touching_deps(monkeypatch):
 
 
 def test_install_checks_the_build_only_after_the_install_steps_ran(monkeypatch, tmp_path):
-    from muse.core import venv as venv_module
+    from muse.core import pip_install as pip_install_module
 
     monkeypatch.setenv("MUSE_LLAMA_CPP_WHEEL", "cu130")
     events: list[str] = []
     monkeypatch.setattr(
-        venv_module, "run_owned_command",
+        pip_install_module, "run_owned_command",
         lambda cmd, **kwargs: events.append(
             "reinstall" if "--force-reinstall" in cmd else "install"
         ),
@@ -91,8 +91,8 @@ def test_install_checks_the_build_only_after_the_install_steps_ran(monkeypatch, 
         events.append("check")
         return False
 
-    monkeypatch.setattr(venv_module, "_is_cuda_llama_build", is_cuda_build)
-    venv_module.install_into_venv(tmp_path, ["llama-cpp-python==0.3.33"])
+    monkeypatch.setattr(pip_install_module, "_is_cuda_llama_build", is_cuda_build)
+    pip_install_module.install_into_venv(tmp_path, ["llama-cpp-python==0.3.33"])
     assert events == ["install", "install", "check", "reinstall"]
 
 
