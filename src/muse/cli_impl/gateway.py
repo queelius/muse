@@ -52,7 +52,7 @@ from muse.core.discovery import (
     strict_request_parsers,
 )
 from muse.core.disconnect import ClientDisconnected, unless_disconnected
-from muse.core.errors import error_type_for_status
+from muse.core.errors import error_response
 from muse.core.server import _format_loaded_at, build_model_entry
 
 # Bare name (not `from muse.observability import recorder`) so tests can
@@ -188,7 +188,7 @@ class RequestBodyLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
     async def _reject(self, scope: dict, receive: Any, send: Any) -> None:
-        response = _openai_error(
+        response = error_response(
             413,
             "request_too_large",
             f"request body exceeds the configured {self.limit} byte limit",
@@ -235,11 +235,10 @@ class ShutdownCancellationMiddleware:
                 raise
             if response_started:
                 return
-            response = _openai_error(
+            response = error_response(
                 503,
                 "server_shutting_down",
                 "request cancelled because the server is shutting down",
-                error_type="server_error",
             )
             try:
                 await response(scope, receive, send)
@@ -490,26 +489,11 @@ async def extract_model_from_request(request: Any) -> Any:
 
 
 def _openai_error(
-    status: int,
-    code: str,
-    message: str,
-    *,
-    error_type: str = "invalid_request_error",
+    status: int, code: str, message: str, *, error_type: str | None = None,
 ) -> JSONResponse:
-    """OpenAI-compatible error envelope.
-
-    `error_type` defaults to `invalid_request_error` (the OpenAI shape for
-    400 / 404). 5xx paths (lazy-load 503 "model_unservable" and
-    "model_too_large_for_device", or any director-raised OperationError
-    with status >= 500) pass `server_error` so SDK clients that branch on
-    type can distinguish "this request is malformed" from "this server is
-    full." This matches the chat_completion router's `server_error` choice
-    for backend-stream failures (`muse.modalities.chat_completion.routes`).
-    """
-    return JSONResponse(
-        status_code=status,
-        content={"error": {"code": code, "message": message, "type": error_type}},
-    )
+    """Compatibility alias for federation.py; `error_type` is derived from
+    `status` by `error_response` (every caller passes the matching type)."""
+    return error_response(status, code, message)
 
 
 def _resolve_default_model(modality: str) -> str | None:
@@ -821,7 +805,7 @@ def build_gateway(
                 request, limit=app.state.max_request_body_bytes,
             )
         except RequestBodyTooLarge as exc:
-            return _openai_error(
+            return error_response(
                 413,
                 "request_too_large",
                 f"request body exceeds the configured {exc.limit} byte limit",
@@ -843,7 +827,7 @@ def build_gateway(
         else:
             model_id = await extract_model_from_request(request)
         if model_id is not None and not _valid_model_id(model_id):
-            return _openai_error(
+            return error_response(
                 400,
                 "invalid_model",
                 "`model` must be a non-empty string of at most "
@@ -857,18 +841,17 @@ def build_gateway(
             # path with no model keeps today's 400 model_required exactly.
             tag = model_optional_paths().get(request.url.path)
             if tag is None:
-                return _openai_error(
+                return error_response(
                     400, "model_required",
                     "request is missing a `model` field (required for gateway routing)",
                 )
             default_id = _resolve_default_model(tag)
             if default_id is None:
-                return _openai_error(
+                return error_response(
                     503, "no_default_model",
                     f"no enabled model of modality {tag!r} is available to "
                     f"serve {request.url.path!r}; pull and enable one, or "
                     f"pass an explicit `model` field",
-                    error_type="server_error",
                 )
             logger.debug(
                 "gateway: resolved default model %r (modality %r) for %r",
@@ -894,7 +877,7 @@ def build_gateway(
         cur = app.state.routes_now()
         route = cur.get(model_id)
         if route is None:
-            return _openai_error(
+            return error_response(
                 404, "model_not_found",
                 f"model {model_id!r} is not registered with any worker; "
                 f"known: {sorted(cur)}",
@@ -904,16 +887,14 @@ def build_gateway(
         try:
             return await _forward(request, target_url, app.state.timeout)
         except httpx.TimeoutException:
-            return _openai_error(
+            return error_response(
                 504, "worker_timeout",
                 f"worker for model {model_id!r} timed out",
-                error_type="server_error",
             )
         except httpx.TransportError:
-            return _openai_error(
+            return error_response(
                 502, "worker_unavailable",
                 f"worker for model {model_id!r} is unavailable",
-                error_type="server_error",
             )
 
     return app
@@ -1119,17 +1100,16 @@ async def _route_via_director(
     try:
         catalog_entry = _read_catalog().get(model_id)
     except CatalogError as exc:
-        return _openai_error(
+        return error_response(
             503,
             "catalog_unavailable",
             f"model catalog is temporarily unavailable: {exc}",
-            error_type="server_error",
         )
     if (
         isinstance(catalog_entry, dict)
         and not bool(catalog_entry.get("enabled", True))
     ):
-        return _openai_error(
+        return error_response(
             409,
             "model_disabled",
             f"model {model_id!r} is disabled; enable it before requesting it",
@@ -1165,7 +1145,7 @@ async def _route_via_director(
             state, model_id, catalog_entry, check_servability=needs_servability_check,
         )
     except KeyError:
-        return _openai_error(
+        return error_response(
             404, "model_not_found",
             f"model {model_id!r} is not in the catalog",
         )
@@ -1174,20 +1154,18 @@ async def _route_via_director(
             "manifest preparation for %r failed: catalog is unavailable: %s",
             model_id, exc,
         )
-        return _openai_error(
+        return error_response(
             503,
             "catalog_unavailable",
             f"model catalog is temporarily unavailable: {exc}",
-            error_type="server_error",
         )
     except RuntimeError as exc:
         unservable_reason = str(exc)
     if unservable_reason is not None:
-        return _openai_error(
+        return error_response(
             503,
             "model_unservable",
             f"model {model_id!r} cannot be served: {unservable_reason}",
-            error_type="server_error",
         )
 
     # 3. Queueing (spec 2026-07-08). ONE deadline covers the concurrency-gate
@@ -1223,17 +1201,15 @@ async def _route_via_director(
     except QueueTimeout:
         # Report the ACTUAL elapsed wait, not the configured budget: an
         # early fast-fail would otherwise claim "waited 300s" (v0.57.3).
-        return _openai_error(
+        return error_response(
             503, "queue_timeout",
             f"waited {time.monotonic() - queue_t0:.0f}s for a slot on "
             f"model {model_id!r} (queue depth {gate.depth(model_id)})",
-            error_type="server_error",
         )
     except QueueFull as exc:
-        return _openai_error(
+        return error_response(
             503, "queue_full",
             f"queue for model {model_id!r} is full (depth {exc.depth})",
-            error_type="server_error",
         )
     gate_wait_seconds = time.monotonic() - gate_wait_t0
 
@@ -1266,17 +1242,15 @@ async def _route_via_director(
         )
     except QueueTimeout:
         _release_slot()
-        return _openai_error(
+        return error_response(
             503, "queue_timeout",
             f"waited {time.monotonic() - queue_t0:.0f}s for capacity for "
             f"model {model_id!r} (queue depth {gate.depth(model_id)})",
-            error_type="server_error",
         )
     except OperationError as exc:
         _release_slot()
-        return _openai_error(
+        return error_response(
             exc.status, exc.code, exc.message,
-            error_type=error_type_for_status(exc.status),
         )
     except Exception:  # noqa: BLE001
         # A non-OperationError out of director.acquire (e.g. a pynvml
@@ -1291,10 +1265,9 @@ async def _route_via_director(
             "director.acquire(%r) raised an unexpected error",
             model_id, exc_info=True,
         )
-        return _openai_error(
+        return error_response(
             503, "model_load_failed",
             f"load of {model_id!r} failed",
-            error_type="server_error",
         )
     except BaseException:
         # Includes cancellation: the off-loop callback releases any refcount
@@ -1321,18 +1294,16 @@ async def _route_via_director(
         )
     except ClientDisconnected:
         # Nobody receives this response; it is recorded as a 499 below.
-        response = _openai_error(499, "client_disconnected", "the client disconnected")
+        response = error_response(499, "client_disconnected", "the client disconnected")
     except httpx.TimeoutException:
-        return _openai_error(
+        return error_response(
             504, "worker_timeout",
             f"worker for model {model_id!r} timed out",
-            error_type="server_error",
         )
     except httpx.TransportError:
-        return _openai_error(
+        return error_response(
             502, "worker_unavailable",
             f"worker for model {model_id!r} is unavailable",
-            error_type="server_error",
         )
     latency_ms = (time.monotonic() - t0) * 1000.0
     stream = isinstance(response, StreamingResponse)
@@ -1386,9 +1357,8 @@ def _strict_model(target: str, body: bytes) -> tuple[Response | None, Any]:
         parser = _load_strict_parser(target)
     except Exception:  # noqa: BLE001
         logger.error("strict request parser %s is unavailable", target, exc_info=True)
-        return _openai_error(
+        return error_response(
             500, "internal_error", "request parser unavailable; see server logs",
-            error_type="server_error",
         ), None
     try:
         parsed = parser(body)
@@ -1399,11 +1369,10 @@ def _strict_model(target: str, body: bytes) -> tuple[Response | None, Any]:
         )
         if isinstance(status, int) and 400 <= status < 500 and isinstance(code, str) \
                 and isinstance(message, str):
-            return _openai_error(status, code, message), None
+            return error_response(status, code, message), None
         logger.error("strict request parser %s failed", target, exc_info=True)
-        return _openai_error(
+        return error_response(
             500, "internal_error", "request parsing failed; see server logs",
-            error_type="server_error",
         ), None
     return None, getattr(parsed, "model", None)
 
