@@ -16,10 +16,10 @@ import pytest
 
 import muse.core.owned_command as owned_command_module
 import muse.core.pip_install as pip_install_module
+import muse.core.python_sources as python_sources_module
 import muse.core.venv as venv_module
 from muse.core.venv import (
     create_venv,
-    install_python_sources,
     install_output_mode,
     run_owned_command,
     venv_transaction,
@@ -27,6 +27,7 @@ from muse.core.venv import (
     find_free_port,
 )
 from muse.core.pip_install import install_into_venv
+from muse.core.python_sources import install_python_sources
 
 
 _TRELLIS_REVISION = "442aa1e1afb9014e80681d3bf604e8d728a86ee7"
@@ -153,7 +154,7 @@ class TestPythonSources:
         monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'url.evil.insteadOf=https://'")
 
         with patch(
-            "muse.core.venv._run_owned", side_effect=_mock_source_git(commands),
+            "muse.core.python_sources._run_owned", side_effect=_mock_source_git(commands),
         ):
             installed = install_python_sources(venv_path, [_trellis_source_spec()])
 
@@ -175,14 +176,14 @@ class TestPythonSources:
             "trellis/representations/mesh/flexicubes",
         ) in git_args
         assert all(call[2]["capture_output"] is True for call in commands)
-        assert all(call[2]["timeout"] <= venv_module._SOURCE_INSTALL_TIMEOUT for call in commands)
+        assert all(call[2]["timeout"] <= python_sources_module._SOURCE_INSTALL_TIMEOUT for call in commands)
         assert all("GIT_DIR" not in call[2]["env"] for call in commands)
         assert all("GIT_CONFIG_PARAMETERS" not in call[2]["env"] for call in commands)
         assert all(call[2]["env"]["GIT_CONFIG_GLOBAL"] == os.devnull for call in commands)
         assert all(call[2]["env"]["GIT_CONFIG_NOSYSTEM"] == "1" for call in commands)
         assert all(call[2]["env"]["GIT_TERMINAL_PROMPT"] == "0" for call in commands)
-        assert "core.fsmonitor=false" in venv_module._GIT_SAFE_CONFIG
-        assert "core.untrackedCache=false" in venv_module._GIT_SAFE_CONFIG
+        assert "core.fsmonitor=false" in python_sources_module._GIT_SAFE_CONFIG
+        assert "core.untrackedCache=false" in python_sources_module._GIT_SAFE_CONFIG
         assert any(
             args == ("status", "--porcelain=v1", "--untracked-files=all")
             and checkout.name == "flexicubes"
@@ -207,7 +208,7 @@ class TestPythonSources:
         invalid = _trellis_source_spec()
         invalid["revision"] = "main"
 
-        with pytest.raises(ValueError), patch("muse.core.venv._run_owned") as run:
+        with pytest.raises(ValueError), patch("muse.core.python_sources._run_owned") as run:
             install_python_sources(venv_path, [invalid])
 
         assert not stale.exists()
@@ -241,7 +242,7 @@ class TestPythonSources:
         invalid = _trellis_source_spec()
         mutate(invalid)
 
-        with patch("muse.core.venv._run_owned") as run:
+        with patch("muse.core.python_sources._run_owned") as run:
             with pytest.raises(ValueError):
                 install_python_sources(venv_path, [valid, invalid])
 
@@ -263,7 +264,7 @@ class TestPythonSources:
                 )
             return fake_git(command, **kwargs)
 
-        with patch("muse.core.venv._run_owned", side_effect=fail_fetch):
+        with patch("muse.core.python_sources._run_owned", side_effect=fail_fetch):
             with pytest.raises(subprocess.CalledProcessError):
                 install_python_sources(venv_path, [_trellis_source_spec()])
 
@@ -282,7 +283,7 @@ class TestPythonSources:
         fake_git = _mock_source_git(commands)
         spec = _trellis_source_spec()
 
-        with patch("muse.core.venv._run_owned", side_effect=fake_git):
+        with patch("muse.core.python_sources._run_owned", side_effect=fake_git):
             checkout, = install_python_sources(venv_path, [spec])
 
         pth = (
@@ -292,7 +293,7 @@ class TestPythonSources:
         assert pth.is_file()
         (checkout / "untracked.py").write_text("malicious = True", encoding="utf-8")
 
-        with patch("muse.core.venv._run_owned", side_effect=fake_git):
+        with patch("muse.core.python_sources._run_owned", side_effect=fake_git):
             with pytest.raises(RuntimeError, match="local changes"):
                 install_python_sources(venv_path, [spec])
 
@@ -304,7 +305,7 @@ class TestPythonSources:
         first = _trellis_source_spec()
         second = _trellis_source_spec()
         second["name"] = "trellis-second"
-        real_write = venv_module._write_source_pth
+        real_write = python_sources_module._write_source_pth
 
         def fail_second_write(path, checkout, spec):
             if spec.name == "trellis-second":
@@ -312,9 +313,9 @@ class TestPythonSources:
             return real_write(path, checkout, spec)
 
         with patch(
-            "muse.core.venv._run_owned", side_effect=_mock_source_git(commands),
+            "muse.core.python_sources._run_owned", side_effect=_mock_source_git(commands),
         ), patch(
-            "muse.core.venv._write_source_pth", side_effect=fail_second_write,
+            "muse.core.python_sources._write_source_pth", side_effect=fail_second_write,
         ):
             with pytest.raises(OSError, match="activation failure"):
                 install_python_sources(venv_path, [first, second])
@@ -342,7 +343,7 @@ class TestPythonSources:
                 raise subprocess.CalledProcessError(1, command)
             return fake_git(command, **kwargs)
 
-        with patch("muse.core.venv._run_owned", side_effect=substitute_at_fetch), \
+        with patch("muse.core.python_sources._run_owned", side_effect=substitute_at_fetch), \
              patch("muse.core.venv.shutil.rmtree") as rmtree:
             with pytest.raises(subprocess.CalledProcessError):
                 install_python_sources(venv_path, [_trellis_source_spec()])

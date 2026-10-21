@@ -44,11 +44,8 @@ from muse.core.catalog import (
 from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.owned_command import run_owned_command
 from muse.core.pip_install import pip_install_commands
-from muse.core.venv import (
-    install_python_sources,
-    venv_python,
-    venv_transaction,
-)
+from muse.core.python_sources import install_python_sources
+from muse.core.venv import venv_python, venv_transaction
 
 logger = logging.getLogger(__name__)
 

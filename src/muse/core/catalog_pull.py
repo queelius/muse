@@ -46,13 +46,13 @@ from muse.core.catalog_store import (
 from muse.core.curated import find_curated, find_curated_by_uri
 from muse.core.hf_seed import drop_unused_seeds, seed_repo
 from muse.core.pip_install import install_into_venv
+from muse.core.python_sources import install_python_sources
 from muse.core.resolvers import COMMIT_RE
 from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.venv import (
     _is_verbose,
     create_venv,
     ensure_venv,
-    install_python_sources,
     venv_python,
     venv_transaction,
 )
