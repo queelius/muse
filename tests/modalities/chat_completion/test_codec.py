@@ -76,3 +76,32 @@ def test_result_to_openai_dict_shape():
     assert d["choices"][0]["message"]["content"] == "world"
     assert d["choices"][0]["finish_reason"] == "stop"
     assert d["usage"]["total_tokens"] == 4
+
+
+def _fp_result():
+    from muse.modalities.chat_completion.protocol import ChatChoice, ChatResult
+    return ChatResult(
+        id="c", model_id="q", created=1,
+        choices=[ChatChoice(index=0, message={"role": "assistant", "content": "x"}, finish_reason="stop")],
+        usage={},
+    )
+
+
+def test_chat_dict_has_fingerprint():
+    from muse.modalities.chat_completion.codec import result_to_openai_dict
+    d = result_to_openai_dict(_fp_result(), system_fingerprint="q@0123456789ab")
+    assert d["system_fingerprint"] == "q@0123456789ab"
+
+
+def test_chat_dict_omits_fingerprint_when_unknown():
+    from muse.modalities.chat_completion.codec import result_to_openai_dict
+    assert "system_fingerprint" not in result_to_openai_dict(_fp_result())
+
+
+def test_chunk_dict_and_sse_fingerprint():
+    import json
+    from muse.modalities.chat_completion.codec import chunk_to_openai_dict, chunk_to_sse_data
+    from muse.modalities.chat_completion.protocol import ChatChunk
+    ch = ChatChunk(id="c", model_id="q", created=1, choice_index=0, delta={}, finish_reason=None)
+    assert "system_fingerprint" not in chunk_to_openai_dict(ch)
+    assert json.loads(chunk_to_sse_data(ch, system_fingerprint="q@x"))["system_fingerprint"] == "q@x"

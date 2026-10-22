@@ -317,6 +317,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         decoded_images = _decoded_message_images(messages)
 
+        # One catalog read per request, off the event loop.
+        from muse.core.provenance import lookup_revision, system_fingerprint
+        fingerprint = system_fingerprint(
+            await asyncio.to_thread(lookup_revision, effective_id)
+        )
+
         kwargs = req.backend_kwargs()
 
         # If the request asks for tool calling, warn when the loaded
@@ -366,7 +372,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             finally:
                 if not abandoned:
                     close_decoded_images(decoded_images)
-            return result_to_openai_dict(result)
+            return result_to_openai_dict(result, system_fingerprint=fingerprint)
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_DEPTH)
         loop = asyncio.get_running_loop()
@@ -446,7 +452,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                         yield {"event": "error", "data": json.dumps(err_payload)}
                         yield {"data": DONE_SENTINEL}
                         return
-                    yield {"data": chunk_to_sse_data(item)}
+                    yield {"data": chunk_to_sse_data(item, system_fingerprint=fingerprint)}
             finally:
                 # EventSourceResponse closes this generator on disconnect.
                 # Wake a producer blocked on the bounded queue; the backend

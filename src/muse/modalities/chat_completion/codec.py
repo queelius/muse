@@ -11,9 +11,11 @@ DONE_SENTINEL = "[DONE]"
 Clients stop reading at this marker. OpenAI uses the exact same string."""
 
 
-def chunk_to_openai_dict(chunk: ChatChunk) -> dict:
+def chunk_to_openai_dict(
+    chunk: ChatChunk, *, system_fingerprint: str | None = None,
+) -> dict:
     """Map a ChatChunk to the OpenAI ChatCompletionChunk wire dict."""
-    return {
+    out = {
         "id": chunk.id,
         "object": "chat.completion.chunk",
         "created": chunk.created,
@@ -24,20 +26,30 @@ def chunk_to_openai_dict(chunk: ChatChunk) -> dict:
             "finish_reason": chunk.finish_reason,
         }],
     }
+    if system_fingerprint:
+        out["system_fingerprint"] = system_fingerprint
+    return out
 
 
-def chunk_to_sse_data(chunk: ChatChunk) -> str:
+def chunk_to_sse_data(
+    chunk: ChatChunk, *, system_fingerprint: str | None = None,
+) -> str:
     """JSON-encode a chunk ready for an SSE `data:` line.
 
     Returns only the JSON body; the transport layer (EventSourceResponse
     in routes.py) handles the `data:` field and event separator.
     """
-    return json.dumps(chunk_to_openai_dict(chunk), separators=(",", ":"))
+    return json.dumps(
+        chunk_to_openai_dict(chunk, system_fingerprint=system_fingerprint),
+        separators=(",", ":"),
+    )
 
 
-def result_to_openai_dict(result: ChatResult) -> dict:
+def result_to_openai_dict(
+    result: ChatResult, *, system_fingerprint: str | None = None,
+) -> dict:
     """Map a ChatResult to the OpenAI ChatCompletion wire dict."""
-    return {
+    out = {
         "id": result.id,
         "object": "chat.completion",
         "created": result.created,
@@ -49,3 +61,6 @@ def result_to_openai_dict(result: ChatResult) -> dict:
         } for c in result.choices],
         "usage": result.usage,
     }
+    if system_fingerprint:
+        out["system_fingerprint"] = system_fingerprint
+    return out

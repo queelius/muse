@@ -53,7 +53,7 @@ from muse.core.discovery import (
 )
 from muse.core.disconnect import ClientDisconnected, unless_disconnected
 from muse.core.errors import error_response
-from muse.core.provenance import lookup_revision
+from muse.core.provenance import lookup_revision, revision_headers
 from muse.core.server import _format_loaded_at, build_model_entry
 
 # Bare name (not `from muse.observability import recorder`) so tests can
@@ -1306,9 +1306,13 @@ async def _route_via_director(
     target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
     t0 = time.monotonic()
     try:
+        rev_headers = revision_headers(
+            await asyncio.to_thread(lookup_revision, model_id)
+        )
         response = await _forward(
             request, target_url, timeout,
             release=_release,
+            extra_headers=rev_headers,
             cancel_on_disconnect=request.url.path.rstrip("/") in cancellable_paths,
         )
     except ClientDisconnected:
@@ -1587,6 +1591,7 @@ async def _forward(
     *,
     release: "Callable[[], None] | None" = None,
     cancel_on_disconnect: bool = False,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
 ) -> Response:
     """Forward a request to target_url and relay the worker's response.
 
@@ -1683,6 +1688,12 @@ async def _forward(
             response.headers,
             exclude=frozenset({"content-length"}),
         )
+        if extra_headers:
+            # Gateway-owned values replace same-named worker headers.
+            own = {k.lower() for k, _v in extra_headers}
+            resp_headers = [
+                (k, v) for k, v in resp_headers if k.lower() not in own
+            ] + list(extra_headers)
         if "text/event-stream" in content_type.lower():
             content, prefix, iterator = None, [], response.aiter_raw()
         else:

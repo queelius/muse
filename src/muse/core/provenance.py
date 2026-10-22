@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -120,6 +121,7 @@ def system_fingerprint(rev: ModelRevision) -> str | None:
 
 _cache: dict[str, ModelRevision] = {}
 _cache_mtime: int | None = None
+_cache_lock = threading.Lock()
 
 
 def lookup_revision(model_id: str) -> ModelRevision:
@@ -131,10 +133,11 @@ def lookup_revision(model_id: str) -> ModelRevision:
             mtime = catalog_store._catalog_path().stat().st_mtime_ns
         except OSError:
             mtime = None
-        if mtime != _cache_mtime or mtime is None:
-            _cache = {}
-            _cache_mtime = mtime
-        hit = _cache.get(model_id)
+        with _cache_lock:
+            if mtime != _cache_mtime or mtime is None:
+                _cache = {}
+                _cache_mtime = mtime
+            hit = _cache.get(model_id)
         if hit is not None:
             return hit
         catalog = catalog_store._read_catalog()
@@ -148,7 +151,10 @@ def lookup_revision(model_id: str) -> ModelRevision:
             stored = entry.get("manifest")
             manifest = stored if isinstance(stored, Mapping) else {}
         rev = model_revision(model_id, entry, manifest, catalog)
-        _cache[model_id] = rev
+        with _cache_lock:
+            # Only store if the catalog has not changed since we sampled it.
+            if mtime is not None and mtime == _cache_mtime:
+                _cache[model_id] = rev
         return rev
     except Exception:  # noqa: BLE001
         return ModelRevision(model_id, None, (), None)

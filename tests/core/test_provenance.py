@@ -85,3 +85,37 @@ def test_lookup_reads_catalog(tmp_path, monkeypatch):
     import os
     os.utime(cat, ns=(10**18, 10**18))
     assert lookup_revision("x").revision == "b" * 40
+
+
+def test_lookup_revision_cache_never_stores_result_for_old_mtime(monkeypatch, tmp_path):
+    """A result computed against an old mtime must not land in the new cache."""
+    import threading
+    from muse.core import provenance, catalog_store
+
+    path = tmp_path / "catalog.json"
+    path.write_text("{}")
+    monkeypatch.setattr(catalog_store, "_catalog_path", lambda: path)
+    provenance._cache.clear()
+    provenance._cache_mtime = None
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_read():
+        entered.set()
+        release.wait(5)
+        return {"m": {"manifest": {}}}
+
+    monkeypatch.setattr(catalog_store, "_read_catalog", slow_read)
+    t = threading.Thread(target=provenance.lookup_revision, args=("m",))
+    t.start()
+    assert entered.wait(5)
+    # catalog changes while the slow lookup is in flight
+    import os
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+    monkeypatch.setattr(catalog_store, "_read_catalog", lambda: {})
+    provenance.lookup_revision("other")  # observes the new mtime, resets cache
+    release.set()
+    t.join(5)
+    assert "m" not in provenance._cache
