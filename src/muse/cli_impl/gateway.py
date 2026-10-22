@@ -825,7 +825,13 @@ def build_gateway(
     if config.get("telemetry.enabled") and state is not None:
         app.include_router(build_dashboard_router(state))
 
-    @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+    from muse.cli_impl.agent_routes import install_agent_routes
+    install_agent_routes(app, capabilities=capabilities_document)
+
+    @app.api_route(
+        "/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        include_in_schema=False,
+    )
     async def proxy(request: Request, full_path: str):
         # The aggregated endpoints (/v1/models, /health) are explicit routes
         # registered BEFORE this catch-all, so they win via FastAPI's
