@@ -133,9 +133,103 @@ def test_missing_model_rejected_before_http(fake_http, media_env):
     _list(srv)
     result = _call(srv, "muse_speak", {"input": "hi"})
     assert result.isError is True and "model" in result.content[0].text
-    result = _call(srv, "muse_speak", {"model": "not-served", "input": "hi"})
-    assert result.isError is True
     assert not [r for r in fake_http.requests if r.url.path == "/v1/audio/speech"]
+
+
+def test_model_added_after_list_tools_can_be_called(fake_http, media_env, caps_doc):
+    client = fake_http(lambda r: httpx.Response(
+        200, content=_wav(), headers={"content-type": "audio/wav"}), caps=caps_doc)
+    srv = MCPServer(client=client, filter_kind="inference")
+    _list(srv)  # the SDK caches these schemas and validates calls against them
+    for m in caps_doc["modalities"]:
+        if m["modality"] == "audio/speech":
+            m["models"].append("new-tts")
+    result = _call(srv, "muse_speak", {"model": "new-tts", "input": "hi"})
+    assert result.isError is False, result.content[0].text
+    sent = [r for r in fake_http.requests if r.url.path == "/v1/audio/speech"]
+    assert json.loads(sent[-1].content)["model"] == "new-tts"
+
+
+def _flaky_client(caps_doc, openapi_doc, up):
+    def route(request):
+        if not up[0]:
+            raise httpx.ConnectError("connection refused", request=request)
+        if request.url.path == "/v1/capabilities":
+            return httpx.Response(200, json=caps_doc)
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=openapi_doc)
+        return httpx.Response(404, json={"error": {"code": "nope"}})
+
+    return MuseClient(server_url="http://muse.test",
+                      transport=httpx.MockTransport(route))
+
+
+def test_tool_list_changed_is_advertised_and_sent(caps_doc, openapi_doc, media_env,
+                                                  monkeypatch):
+    import anyio
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    monkeypatch.setattr(server_mod, "_FAILED_CACHE_SECONDS", 0.0)
+    monkeypatch.setattr(server_mod, "CACHE_SECONDS", 0.0)
+    up = [False]
+    srv = MCPServer(client=_flaky_client(caps_doc, openapi_doc, up),
+                    filter_kind="inference")
+    seen = []
+
+    async def on_message(msg):
+        if isinstance(msg, types.ServerNotification):
+            seen.append(type(msg.root).__name__)
+
+    async def scenario():
+        async with create_connected_server_and_client_session(
+            srv._server, message_handler=on_message,
+        ) as client:
+            init = client.get_server_capabilities()
+            assert init.tools.listChanged is True
+            first = {t.name for t in (await client.list_tools()).tools}
+            assert first == {"muse_describe"}
+            await client.call_tool("muse_describe", {})  # still down: no change
+            await anyio.sleep(0.05)
+            assert "ToolListChangedNotification" not in seen
+            up[0] = True  # server comes up
+            await client.call_tool("muse_describe", {})
+            with anyio.fail_after(5):
+                while "ToolListChangedNotification" not in seen:
+                    await anyio.sleep(0.01)
+            names = {t.name for t in (await client.list_tools()).tools}
+            assert "muse_speak" in names
+            # Re-listed: an unchanged set sends nothing more.
+            seen.clear()
+            await client.call_tool("muse_describe", {"modality": "audio/speech"})
+            await anyio.sleep(0.05)
+            assert "ToolListChangedNotification" not in seen
+
+    anyio.run(scenario)
+
+
+def test_background_watch_notifies_known_sessions(fake_http, media_env, caps_doc,
+                                                  monkeypatch):
+    monkeypatch.setattr(server_mod, "CACHE_SECONDS", 0.0)
+    srv = MCPServer(client=fake_http(caps=caps_doc), filter_kind="inference")
+
+    class FakeSession:
+        def __init__(self):
+            self.sent = 0
+
+        async def send_tool_list_changed(self):
+            self.sent += 1
+
+    sess = FakeSession()
+    srv._sessions[sess] = srv._signature(srv.tools)
+    asyncio.run(srv._notify_changed())
+    assert sess.sent == 0  # unchanged
+    for m in caps_doc["modalities"]:
+        if m["modality"] == "audio/speech":
+            m["models"].append("new-tts")
+    asyncio.run(srv._notify_changed())
+    assert sess.sent == 1
+    asyncio.run(srv._notify_changed())
+    assert sess.sent == 1  # told once per change
 
 
 def test_http_error_reports_muse_error_body(fake_http, media_env):

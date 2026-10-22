@@ -12,7 +12,9 @@ Input changes against the route's own schema:
     list field (``input[]``) becomes ``<name>_paths`` / ``<name>_urls``.
     "Exactly one of" is checked at call time, not with a top-level
     ``oneOf``, because the Claude API rejects top-level oneOf/anyOf/allOf;
-  - ``model`` is an enum of the models serving the route's modality;
+  - ``model`` is a string whose description lists the models serving the
+    route's modality (not an ``enum``: clients validate against a cached
+    schema, which would reject a model enabled mid-session);
   - ``stream`` is removed and always sent as false (MCP results are whole);
   - optional ``out_path``, and ``preview`` on image-producing routes.
 
@@ -215,9 +217,14 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
         required = [r for r in required if r != "stream"]
         fixed["stream"] = False
     ids = list(mod.get("models") or [])
-    model_prop = {"type": "string", "description": "Model id; see the list above."}
+    # Ids go in the description, never an `enum`: MCP SDKs validate calls
+    # against the client's cached schema, so an enum would reject a model
+    # enabled mid-session. The server is the authority on unknown ids.
+    model_prop = {"type": "string", "description": (
+        "Model id. Serving now: " + ", ".join(ids) + " (see the list above; "
+        "a model enabled later works too)." if ids else
+        "Model id; no enabled model serves this route right now.")}
     if ids:
-        model_prop["enum"] = ids
         required.append("model")
     else:
         required = [r for r in required if r != "model"]

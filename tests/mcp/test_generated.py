@@ -92,9 +92,13 @@ def test_list_file_field_becomes_paths_and_urls(caps_doc, openapi_doc):
     assert "input" not in props
 
 
-def test_model_enum_lists_serving_models(caps_doc, openapi_doc):
+def test_model_ids_are_described_not_enumerated(caps_doc, openapi_doc):
+    # No enum: the SDK validates against the client's cached schema, so an
+    # enum would reject a model enabled mid-session.
     schema = _gen(caps_doc, openapi_doc, "muse_speak").tool.inputSchema
-    assert schema["properties"]["model"]["enum"] == ["kokoro-82m", "soprano-80m"]
+    prop = schema["properties"]["model"]
+    assert "enum" not in prop
+    assert "kokoro-82m" in prop["description"] and "soprano-80m" in prop["description"]
     assert "model" in schema["required"]
 
 

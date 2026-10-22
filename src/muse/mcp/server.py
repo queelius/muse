@@ -7,6 +7,13 @@ the server's own ``/v1/capabilities`` + ``/openapi.json``
 server is unreachable only ``muse_describe`` (which reports the error) and
 the admin tools are listed, never stale generated tools.
 
+The server advertises ``tools.listChanged``. A session that has listed
+tools is sent ``notifications/tools/list_changed`` once whenever the
+generated set changes (a model or modality added or removed, or the muse
+server going down -> up): checked after every tool call and resource read
+in that session, and every ``CACHE_SECONDS`` by a background watcher in
+stdio mode.
+
 Resources: ``muse://capabilities`` and ``muse://models/{id}`` (JSON).
 
 Importing this module lazily probes the ``mcp`` Python package; without it
@@ -16,11 +23,13 @@ the symbols still exist and construction raises a RuntimeError pointing at
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
 import time
 import urllib.parse
+import weakref
 from typing import Any
 
 import httpx
@@ -39,8 +48,24 @@ MODEL_URI_PREFIX = "muse://models/"
 
 try:
     import mcp.types as _mcp_types  # noqa: F401
-    from mcp.server.lowlevel import Server as _LowServer  # noqa: F401
+    from mcp.server.lowlevel import NotificationOptions
+    from mcp.server.lowlevel import Server as _SDKServer
     from mcp.server.lowlevel.helper_types import ReadResourceContents
+
+    class _LowServer(_SDKServer):
+        """Advertise ``tools.listChanged`` by default.
+
+        The stdio path, the HTTP session manager and the SDK's in-memory
+        test transport all call ``create_initialization_options()`` with no
+        arguments, so the default is where the capability must live.
+        """
+
+        def create_initialization_options(self, notification_options=None,
+                                          experimental_capabilities=None):
+            return super().create_initialization_options(
+                notification_options or NotificationOptions(tools_changed=True),
+                experimental_capabilities,
+            )
 
     from muse.mcp.generated import (
         DESCRIBE,
@@ -115,6 +140,9 @@ class MCPServer:
         self._fetch_error: str | None = None
         self._caps: dict = {}
         self._generated: dict = {}
+        # Session -> signature of the tool list it last saw (weak: a closed
+        # session drops out). Touched on the event loop only.
+        self._sessions: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._server = _LowServer("muse")
         self._wire_handlers()
 
@@ -150,6 +178,55 @@ class MCPServer:
         out.extend(e.tool for e in self._admin)
         return out
 
+    # ---- tools/list_changed ----
+
+    @staticmethod
+    def _signature(tools: list[Any]) -> str:
+        dumped = [t.model_dump(mode="json", exclude_none=True) for t in tools]
+        return hashlib.sha256(
+            json.dumps(dumped, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _current_session(self) -> Any | None:
+        try:
+            return self._server.request_context.session
+        except LookupError:  # called outside a request (direct handler use)
+            return None
+
+    async def _notify_changed(self, session: Any | None = None) -> None:
+        """Send ``tools/list_changed`` to ``session`` (else every session that
+        has listed tools) when its last-seen list differs from the current
+        one. Refreshes the discovery cache (TTL-bound) off the loop first."""
+        if not self._inference:
+            return  # the admin-only set is fixed
+        targets = [session] if session is not None else list(self._sessions)
+        targets = [t for t in targets if t in self._sessions]
+        if not targets:
+            return
+        sig = self._signature(await asyncio.to_thread(lambda: self.tools))
+        for sess in targets:
+            if self._sessions.get(sess) == sig:
+                continue
+            self._sessions[sess] = sig  # once per change; re-listing confirms it
+            try:
+                await sess.send_tool_list_changed()
+            except Exception as e:  # noqa: BLE001 - a closed session is not fatal
+                log.debug("tools/list_changed not delivered: %s", e)
+
+    async def _after_request(self) -> None:
+        try:
+            await self._notify_changed(self._current_session())
+        except Exception as e:  # noqa: BLE001 - never fail the request for this
+            log.debug("tools/list_changed check failed: %s", e)
+
+    async def _watch_tools(self, interval: float | None = None) -> None:
+        """Background push for long-lived (stdio) sessions."""
+        while True:
+            await asyncio.sleep(CACHE_SECONDS if interval is None else interval)
+            try:
+                await self._notify_changed()
+            except Exception as e:  # noqa: BLE001
+                log.debug("tools/list_changed watch failed: %s", e)
+
     # ---- SDK wiring ----
 
     def _wire_handlers(self) -> None:
@@ -158,7 +235,11 @@ class MCPServer:
 
         @srv.list_tools()
         async def _list_tools():
-            return await asyncio.to_thread(lambda: self.tools)
+            tools = await asyncio.to_thread(lambda: self.tools)
+            session = self._current_session()
+            if session is not None:
+                self._sessions[session] = self._signature(tools)
+            return tools
 
         @srv.call_tool()
         async def _call_tool(name: str, arguments: dict | None):
@@ -166,6 +247,7 @@ class MCPServer:
             # generation); inline they would stall every concurrent call and
             # SSE frame in HTTP mode.
             blocks = await asyncio.to_thread(self.call_handler, name, arguments)
+            await self._after_request()
             return _to_result(blocks)
 
         @srv.list_resources()
@@ -180,6 +262,7 @@ class MCPServer:
                     uri=MODEL_URI_PREFIX + urllib.parse.quote(mid, safe=""),
                     name=mid, mimeType="application/json",
                     description=m.get("summary") or m.get("modality")))
+            await self._after_request()
             return out
 
         @srv.list_resource_templates()
@@ -200,6 +283,7 @@ class MCPServer:
                     lambda: self.client.capabilities(model=mid))
             else:
                 raise ValueError(f"unknown resource {text!r}")
+            await self._after_request()
             return [ReadResourceContents(content=json.dumps(doc),
                                          mime_type="application/json")]
 
@@ -244,7 +328,13 @@ class MCPServer:
 
         async with stdio_server() as (read, write):
             init_opts = self._server.create_initialization_options()
-            await self._server.run(read, write, init_opts)
+            watcher = (asyncio.ensure_future(self._watch_tools())
+                       if self._inference else None)
+            try:
+                await self._server.run(read, write, init_opts)
+            finally:
+                if watcher is not None:
+                    watcher.cancel()
 
     def build_http_app(self, *, admin_token: str | None = None) -> Any:
         """Build (but don't run) the Starlette app for HTTP+SSE mode.
