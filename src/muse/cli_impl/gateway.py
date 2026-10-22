@@ -30,6 +30,7 @@ import functools
 import importlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -43,11 +44,22 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 # manifests or a catalog snapshot without touching state on disk.
 # `_read_catalog` backs the /v1/models listing of enabled-but-unloaded
 # models; it is mtime-cached so per-request reads are cheap.
+from muse import __version__
 from muse.core import config
+from muse.core.capabilities import (
+    ModelFacts,
+    ModelState,
+    UnknownFilter,
+    build_document,
+    model_facts,
+    node_name,
+    server_block,
+)
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, is_enabled, known_models
 from muse.core.discovery import (
     concurrency_ceilings,
     disconnect_cancellable_paths,
+    modality_discovery,
     model_optional_paths,
     strict_request_parsers,
 )
@@ -759,6 +771,33 @@ def build_gateway(
             "models": sorted(models),
         }
 
+    async def capabilities_document(
+        request: Request, *, modality: str | None = None, model: str | None = None,
+    ) -> dict:
+        """The capabilities document for this request's base URL.
+
+        Gathered off the event loop: the catalog read, servability checks
+        and telemetry query are blocking. Never loads or acquires a model.
+        Raises UnknownFilter for an unknown `modality` / `model`.
+        """
+        return await asyncio.to_thread(
+            _capabilities_document,
+            app.state.routes_state, app.state.routes_now,
+            str(request.base_url).rstrip("/"), modality, model,
+        )
+
+    # Task 9's /llms.txt renders from the same awaitable.
+    app.state.capabilities_document = capabilities_document
+
+    @app.get("/v1/capabilities")
+    async def capabilities(
+        request: Request, modality: str | None = None, model: str | None = None,
+    ):
+        try:
+            return await capabilities_document(request, modality=modality, model=model)
+        except UnknownFilter as exc:
+            return error_response(404, "not_found", str(exc))
+
     # Admin routes mounted BEFORE the catch-all so /v1/admin/* paths
     # win the dispatch even though the proxy below would also match
     # them. Auth is enforced on every admin route via the Depends in
@@ -942,6 +981,191 @@ def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
         entry["last_loaded_at"] = _format_loaded_at({"loaded_at": mono})
 
 
+def _safe_stored_manifest(entry: Any) -> dict:
+    """The descriptive strings of a catalog entry's stored manifest.
+
+    Fallback when `get_manifest` rejects invalid legacy/operator metadata:
+    keep only safe descriptive strings, never unvalidated capabilities.
+    """
+    stored = entry.get("manifest") if isinstance(entry, dict) else None
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        key: stored[key]
+        for key in ("modality", "description", "license", "hf_repo")
+        if isinstance(stored.get(key), str)
+    }
+
+
+# Static ModelFacts per model id, valid for one catalog file version.
+_capabilities_cache: dict[str, ModelFacts] = {}
+_capabilities_cache_key: tuple | None = None
+_capabilities_cache_lock = threading.Lock()
+
+
+def _reset_capabilities_cache() -> None:
+    global _capabilities_cache, _capabilities_cache_key
+    with _capabilities_cache_lock:
+        _capabilities_cache = {}
+        _capabilities_cache_key = None
+
+
+def _catalog_file_key() -> tuple | None:
+    from muse.core import catalog_store
+    try:
+        path = catalog_store._catalog_path()
+        st = path.stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
+def _capability_facts(model_id: str, entry: Any, device: str) -> ModelFacts:
+    """Static facts for one model. Best-effort: bad metadata degrades."""
+    entry = entry if isinstance(entry, dict) else {}
+    try:
+        manifest = get_manifest(model_id)
+    except Exception as e:  # noqa: BLE001
+        if not isinstance(e, (CatalogError, KeyError)):
+            logger.warning("/v1/capabilities: manifest for %s failed: %s", model_id, e)
+        manifest = _safe_stored_manifest(entry)
+    if not isinstance(manifest, dict):
+        manifest = {}
+    caps = manifest.get("capabilities")
+    memory_gb = caps.get("memory_gb") if isinstance(caps, dict) else None
+    try:
+        # The director's own sizing ladder (declared, probe, weights on
+        # disk). Placement is not resolved: it can touch the GPU and does
+        # not change the size.
+        sized = backfill_manifest_memory(
+            manifest, model_id, supervisor_device=device, resolve_placement=False,
+        )
+        memory_gb = (sized.get("capabilities") or {}).get("memory_gb", memory_gb)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/capabilities: sizing %s failed: %s", model_id, e)
+    stored = entry.get("manifest")
+    fallback_modality = (
+        stored.get("modality") if isinstance(stored, dict) else None
+    ) or entry.get("modality")
+    return model_facts(
+        model_id, manifest,
+        revision=lookup_revision(model_id),
+        memory_gb=memory_gb,
+        modality=fallback_modality if isinstance(fallback_modality, str) else None,
+    )
+
+
+def _resident_ids(state: Any, routes_now: Callable[[], dict]) -> set[str]:
+    """Model ids resident now: director-loaded plus running workers."""
+    out: set[str] = set()
+    try:
+        out.update(routes_now())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/capabilities: route snapshot failed: %s", e)
+    director = getattr(state, "director", None)
+    loaded = getattr(director, "loaded", None)
+    if isinstance(loaded, dict):
+        lock = getattr(director, "lock", None)
+        try:
+            if lock is not None:
+                with lock:
+                    out.update(loaded)
+            else:
+                out.update(loaded)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("/v1/capabilities: director snapshot failed: %s", e)
+    return out
+
+
+def _capabilities_document(
+    state: Any,
+    routes_now: Callable[[], dict],
+    base_url: str,
+    modality: str | None,
+    model: str | None,
+) -> dict:
+    """Gather facts and live state, then build the document (blocking).
+
+    Lists enabled catalog models plus resident ones (mirroring /v1/models).
+    Static facts are cached per catalog file version; live state is read
+    fresh. Never acquires from the director or loads a model.
+    """
+    global _capabilities_cache, _capabilities_cache_key
+    key = _catalog_file_key()
+    try:
+        catalog = _read_catalog()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/capabilities: catalog read failed: %s", e)
+        catalog = {}
+    if not isinstance(catalog, dict):
+        catalog = {}
+    resident = _resident_ids(state, routes_now)
+    ids = [
+        mid for mid, entry in catalog.items()
+        if mid in resident or (isinstance(entry, dict) and entry.get("enabled", True))
+    ]
+    ids += sorted(resident - set(ids))
+
+    with _capabilities_cache_lock:
+        if key is None or key != _capabilities_cache_key:
+            _capabilities_cache = {}
+            _capabilities_cache_key = key
+        cached = dict(_capabilities_cache)
+    device = getattr(state, "device", "auto") if state is not None else "auto"
+    fresh = {
+        mid: _capability_facts(mid, catalog.get(mid), device)
+        for mid in ids if mid not in cached
+    }
+    if fresh and key is not None:
+        with _capabilities_cache_lock:
+            if _capabilities_cache_key == key:
+                _capabilities_cache.update(fresh)
+
+    cold: dict = {}
+    store = getattr(state, "telemetry_store", None)
+    if store is not None:
+        try:
+            cold = store.last_cold_load_seconds()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("/v1/capabilities: cold-load query failed: %s", e)
+    gate = getattr(state, "concurrency_gate", None)
+    depths: dict | None = None
+    if gate is not None:
+        try:
+            depths = gate.depths()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("/v1/capabilities: queue depths failed: %s", e)
+        if not isinstance(depths, dict):
+            depths = None  # unknown is never rendered as 0
+
+    pairs: list[tuple[ModelFacts, ModelState]] = []
+    for mid in ids:
+        is_loaded = mid in resident
+        reason = None
+        if not is_loaded and state is not None:
+            try:
+                reason = revalidate_servability(state, mid)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("/v1/capabilities: servability of %s failed: %s", mid, e)
+                reason = getattr(state, "unservable_reasons", {}).get(mid)
+        seconds = cold.get(mid) if isinstance(cold, dict) else None
+        pairs.append((cached.get(mid) or fresh[mid], ModelState(
+            loaded=is_loaded,
+            last_cold_load_seconds=float(seconds) if isinstance(seconds, (int, float)) else None,
+            queue_depth=None if depths is None else int(depths.get(mid, 0)),
+            unservable_reason=reason,
+        )))
+    return build_document(
+        server=server_block(
+            version=__version__, node=node_name(state), base_url=base_url,
+        ),
+        discovery=modality_discovery(),
+        models=pairs,
+        modality=modality,
+        model=model,
+    )
+
+
 def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
     """Build /v1/models entries for enabled-but-unloaded catalog models.
 
@@ -969,16 +1193,8 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
             manifest = get_manifest(model_id)
         except (CatalogError, KeyError):
             # Invalid legacy/operator metadata must not break the whole
-            # listing. Keep only safe descriptive strings; in particular,
-            # never splat unvalidated capabilities into build_model_entry.
-            stored = entry.get("manifest")
-            manifest = {}
-            if isinstance(stored, dict):
-                manifest = {
-                    key: stored[key]
-                    for key in ("modality", "description", "license", "hf_repo")
-                    if isinstance(stored.get(key), str)
-                }
+            # listing; never splat unvalidated capabilities.
+            manifest = _safe_stored_manifest(entry)
         modality = manifest.get("modality") or entry.get("modality", "")
         if not isinstance(modality, str):
             modality = ""

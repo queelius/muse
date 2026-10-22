@@ -20,7 +20,13 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from muse import __version__
+from muse.core.capabilities import (
+    UnknownFilter, build_document, model_facts, node_name, server_block,
+)
+from muse.core.discovery import modality_discovery
 from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.provenance import lookup_revision
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -121,6 +127,37 @@ def create_app(
             for info in registry.list_all()
         ]
         return {"object": "list", "data": data}
+
+    @app.get("/v1/capabilities")
+    def capabilities(
+        request: Request, modality: str | None = None, model: str | None = None,
+    ):
+        # Sync handler: FastAPI runs it in its threadpool, off the event
+        # loop (lookup_revision reads the catalog). A worker reports only
+        # its registry's models, all resident, so live state is None.
+        pairs = []
+        for info in registry.list_all():
+            manifest = info.manifest or {}
+            caps = manifest.get("capabilities") or {}
+            pairs.append((model_facts(
+                info.model_id, manifest,
+                revision=lookup_revision(info.model_id),
+                memory_gb=caps.get("memory_gb") if isinstance(caps, dict) else None,
+                modality=info.modality,
+            ), None))
+        discovery = {
+            tag: d for tag, d in modality_discovery().items() if tag in routers
+        }
+        try:
+            return build_document(
+                server=server_block(
+                    version=__version__, node=node_name(None),
+                    base_url=str(request.base_url).rstrip("/"),
+                ),
+                discovery=discovery, models=pairs, modality=modality, model=model,
+            )
+        except UnknownFilter as exc:
+            return error_response(404, "not_found", str(exc))
 
     for name, router in routers.items():
         logger.info("mounting modality router %s", name)
