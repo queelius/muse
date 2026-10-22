@@ -138,6 +138,7 @@ def build_model_entry(
     loaded: bool,
     last_loaded_at: str | None,
     unservable_reason: str | None,
+    revision: str | None = None,
 ) -> dict:
     """Shape one /v1/models entry from a manifest + lazy-load state.
 
@@ -174,6 +175,8 @@ def build_model_entry(
     entry["loaded"] = loaded
     entry["last_loaded_at"] = last_loaded_at
     entry["unservable_reason"] = unservable_reason
+    # Written last so a manifest capability named "revision" cannot win.
+    entry["revision"] = revision
     return entry
 
 

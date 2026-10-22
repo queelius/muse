@@ -53,6 +53,7 @@ from muse.core.discovery import (
 )
 from muse.core.disconnect import ClientDisconnected, unless_disconnected
 from muse.core.errors import error_response
+from muse.core.provenance import lookup_revision
 from muse.core.server import _format_loaded_at, build_model_entry
 
 # Bare name (not `from muse.observability import recorder`) so tests can
@@ -905,6 +906,9 @@ def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
     entries untouched. Entries that already carry a non-null
     last_loaded_at are never overwritten.
     """
+    for entry in aggregated:
+        if entry.get("revision") is None and isinstance(entry.get("id"), str):
+            entry["revision"] = lookup_revision(entry["id"]).revision
     director = getattr(state, "director", None)
     if director is None:
         return
@@ -982,6 +986,7 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
             model_id, modality, manifest,
             loaded=False, last_loaded_at=None,
             unservable_reason=reason,
+            revision=lookup_revision(model_id).revision,
         ))
     return out
 

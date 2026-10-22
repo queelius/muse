@@ -381,3 +381,13 @@ def test_build_model_entry_owned_by_defaults_to_muse_without_hf_repo():
     )
     assert e["owned_by"] == "muse"
     assert e["created"] == 0
+
+
+def test_build_model_entry_revision_cannot_be_clobbered():
+    from muse.core.server import build_model_entry
+    e = build_model_entry("m", "audio/speech", {"capabilities": {"revision": "evil"}},
+                          loaded=False, last_loaded_at=None, unservable_reason=None, revision="a" * 40)
+    assert e["revision"] == "a" * 40
+    e = build_model_entry("m", "audio/speech", {"capabilities": {"revision": "evil"}},
+                          loaded=False, last_loaded_at=None, unservable_reason=None)
+    assert e["revision"] is None
