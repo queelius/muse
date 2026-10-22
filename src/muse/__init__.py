@@ -62,9 +62,9 @@ v0.30.0 bundles three operational improvements:
     deps.
 
 v0.29.0 adds `muse mcp`: an MCP (Model Context Protocol) server that
-exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 29
+exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as
 structured tools. 11 admin tools wrap `/v1/admin/*` (gated by
-`MUSE_ADMIN_TOKEN`); 18 inference tools wrap the generation routes.
+`MUSE_ADMIN_TOKEN`); the inference tools are generated from the server.
 Stdio mode is the default; HTTP+SSE mode is available for remote /
 web embedders. Filter mode lets ops pin to admin-only or
 inference-only. See CLAUDE.md "Using muse from Claude Desktop".

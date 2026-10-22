@@ -461,7 +461,7 @@ for diagnosis. A null reason is not a dependency or inference smoke test.
 | `muse doctor resources [--repair]` | inspect Muse's owned-resource registry; optionally clean verified stale/orphan records after an unclean exit |
 | `muse doctor storage [--json]` | report Muse-owned storage, shared caches, broken references, and reclaimable space without changing files |
 | `muse storage prune [--dry-run] [--include-unreferenced]` | reclaim old partial/staging data; optionally include unregistered retained model files |
-| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (32 tools) |
+| `muse mcp [--http]` | run an MCP server bridging muse to LLM clients |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.
 
@@ -621,7 +621,7 @@ muse serve
 
 ## MCP server (since v0.29.0)
 
-`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as 32 structured tools: 11 admin tools (gated by `MUSE_ADMIN_TOKEN`) plus 21 inference tools. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
+`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as structured tools: `muse_describe`, inference tools generated from the server's own OpenAPI and capabilities document, and 11 admin tools (gated by `MUSE_ADMIN_TOKEN`). Install with `claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp`. See `docs/AGENT_DISCOVERY.md`. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
 
 ```bash
 muse mcp                                  # stdio mode
@@ -652,13 +652,7 @@ Tools split into two groups:
 
 **Admin (11):** `muse_list_models`, `muse_get_model_info`, `muse_search_models`, `muse_pull_model`, `muse_remove_model`, `muse_enable_model`, `muse_disable_model`, `muse_probe_model`, `muse_get_memory_status`, `muse_get_workers`, `muse_get_jobs`. Long-running ops (pull, probe, enable) return a `job_id` and the LLM polls `muse_get_jobs` to track progress.
 
-**Inference (20):** `muse_chat`, `muse_summarize`, `muse_rerank`, `muse_classify`, `muse_embed_text`, `muse_translate`, `muse_generate_image`, `muse_edit_image`, `muse_vary_image`, `muse_upscale_image`, `muse_segment_image`, `muse_vectorize_image`, `muse_generate_animation`, `muse_embed_image`, `muse_speak`, `muse_transcribe`, `muse_generate_music`, `muse_generate_sfx`, `muse_embed_audio`, `muse_generate_video`.
-
-Inference tools require an explicit catalog `model` id, matching the gateway's
-routing contract. `muse_translate` can omit it when connected directly to
-`muse serve`, which selects an enabled translation model.
-
-Binary inputs accept `<name>_b64` (base64), `<name>_url` (data: or http URL), or `<name>_path` (local file). Image and audio outputs return as MCP `ImageContent` / `AudioContent` blocks plus a JSON summary.
+**Inference:** generated from the server at start, one per route (for example `muse_chat`, `muse_speak`, `muse_transcribe`, `muse_generate_image`, `muse_align`, `muse_moderate`). Media outputs are written to files (`out_path`, else `mcp.output_dir`) and returned as path, sha256, model and revision; path inputs are limited to the working directory, `mcp.output_dir` and `fetch.mcp_allowed_path_prefixes`; `*_url` inputs are fetched by the server.
 
 ## Federation
 

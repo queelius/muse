@@ -1,4 +1,4 @@
-"""Hardened URL fetch primitive shared by image routes and the MCP binary-IO resolver.
+"""Hardened URL fetch primitive shared by the image routes.
 
 Public API:
     validate_public_host(url)     -- raises ValueError for private/loopback/etc. IPs.

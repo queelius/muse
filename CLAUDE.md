@@ -1371,59 +1371,86 @@ Client usage is unchanged OpenAI-compat, just pointed at the
 coordinator: `OpenAI(base_url="http://coordinator:8100/v1",
 api_key="not-used")`.
 
-## MCP server (Using muse from Claude Desktop)
+## Agent discovery
 
-`muse mcp` runs an MCP (Model Context Protocol) server that exposes
-muse's capabilities to LLM clients (Claude Desktop, Cursor, etc.) as
-32 structured tools: 11 admin tools (wrap `/v1/admin/*`) and 21
-inference tools (one per generation route).
+A muse server describes itself from only its URL (full guide: `docs/AGENT_DISCOVERY.md`,
+design: `docs/superpowers/specs/2026-10-21-agent-discovery-design.md`). Public,
+read-only, never triggers a model load, computed off the event loop:
 
-The package layout:
+- `GET /` and `/.well-known/muse.json`: pointer document (the gateway no
+  longer proxies `GET /`).
+- `GET /v1/capabilities[?modality=|?model=]`: server info, modalities (summary,
+  use_for/not_for, routes, examples, MCP tool names), enabled models (revision,
+  components, notes: summary/strengths/limits/quality_tier, capability flags,
+  live state). Built by `muse.core.capabilities` from per-modality `DISCOVERY`
+  declarations (AST-read) and model notes.
+- `GET /openapi.json` is the complete OpenAPI for every inference route;
+  `GET /llms.txt` is rendered from the capabilities document.
+- Every inference response carries `X-Muse-Model`, `X-Muse-Model-Revision`
+  (40-hex HF commit, omitted if unknown) and `X-Muse-Model-Artifacts`
+  (multi-component digest); chat sets `system_fingerprint` to
+  `<id>@<revision[:12]>`. `/v1/models` gains `revision`. See
+  `muse.core.provenance`.
+- Federation: the coordinator serves the merged `/v1/capabilities`, `/`,
+  `/llms.txt` and the first reachable node's `/openapi.json`; its `/docs` and
+  `/redoc` are disabled.
+
+## MCP server (Using muse from Claude Desktop / Claude Code)
+
+`muse mcp` is a thin local HTTP client of a muse server. Install only the
+light extra (`mcp = httpx, mcp>=1.19,<2, pillow`; the `server` extra pins the
+same `mcp`):
+
+    claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp
+
+It lists `muse_describe` (the server's capabilities document), the inference
+tools generated at start from the server's `/openapi.json` and
+`/v1/capabilities` (35 today; `muse.mcp.generated`), and the 11 unchanged admin
+tools (`muse.mcp.tools.admin`, wrapping `/v1/admin/*`, gated by
+`MUSE_ADMIN_TOKEN`). If the server is unreachable at start, only
+`muse_describe` and the admin tools are listed, never stale generated tools.
+Tool counts are deliberately not documented elsewhere; they follow the server.
 
 ```
 src/muse/mcp/
   server.py     MCPServer wrapping mcp.server.lowlevel.Server
-  client.py     MuseClient aggregating httpx calls + AdminClient delegation
-  binary_io.py  tri-modal binary input resolution (b64 / url / path) + output packers
-  tools/
-    admin.py             11 admin tools
-    inference_text.py    chat / summarize / rerank / classify / embed_text / translate
-    inference_image.py   generate / edit / vary / upscale / segment / animation / embed_image
-    inference_audio.py   speak / transcribe / music / sfx / embed_audio
-    inference_video.py   video generation
-    inference_decision.py  muse_decide (/v1/systemone)
-src/muse/cli_impl/mcp_server.py  CLI entry (boots stdio or HTTP+SSE transport)
+  client.py     MuseClient (httpx + AdminClient delegation)
+  generated.py  tools generated from the discovery document; request building and result rendering
+  files.py      local file inputs (allowed prefixes) and hardened content-named outputs
+  tools/admin.py   the 11 admin tools
+src/muse/cli_impl/mcp_server.py  CLI entry (stdio or HTTP+SSE transport)
 ```
 
-Two transport modes:
-- **Stdio (default).** For desktop apps that spawn the MCP server as a
-  child process. `muse mcp` reads JSON-RPC framing from stdin and
-  writes to stdout.
-- **HTTP+SSE.** `muse mcp --http --port 8088` runs a Starlette app
-  with an `/mcp` mount via `StreamableHTTPSessionManager`. Useful
-  for remote / web embedders.
+Transports: stdio (default) and `muse mcp --http --port 8088` (Starlette,
+`/mcp` mount via `StreamableHTTPSessionManager`). `--filter all|admin|inference`
+pins the surface. `--admin-token` / `$MUSE_ADMIN_TOKEN` is the admin bearer.
+Long-running ops (pull, probe, enable) return a `job_id`; poll `muse_get_jobs`.
 
-Filter mode pins the tool surface:
-- `--filter all` (default): 32 tools.
-- `--filter admin`: 11 tools, only useful with `MUSE_ADMIN_TOKEN`.
-- `--filter inference`: 21 tools, no admin-token needed.
+I/O conventions:
+- Media outputs are written to files and returned as path, sha256, model and
+  revision. `out_path` names the file, else a content-named file lands in
+  `mcp.output_dir` (env `MUSE_MCP_OUTPUT_DIR`, default `./muse-output`).
+  `preview: true` on image tools adds one inline 512 px PNG. `X-Alignment` is
+  surfaced as `response.alignment`.
+- Path inputs (`<name>_path`) are allowed under the MCP process cwd and
+  `mcp.output_dir`; `fetch.mcp_allowed_path_prefixes` adds more. (An empty
+  setting used to disable path inputs; it now means cwd plus output dir.)
+- JSON `*_url` inputs pass through to the server's SSRF-guarded fetch.
 
-Auth: `--admin-token` (or `$MUSE_ADMIN_TOKEN`) is forwarded as the
-bearer token for admin tool calls. Inference tools don't need a token.
+Behaviour changes from the old hand-written tools: `muse_classify` maps to
+`/v1/text/classifications` and `/v1/moderations` is now `muse_moderate`;
+`muse_decide` is validated server-side (strict parser); `*_url` inputs are
+fetched by the server, not the MCP process; base64 inputs are gone (use a path
+or URL).
 
-Long-running ops (pull, probe, enable) return a `job_id` and a
-`poll_with` hint. The LLM polls `muse_get_jobs` to track progress.
-
-Claude Desktop config example
-(`~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+Claude Desktop config:
 
 ```json
 {
   "mcpServers": {
     "muse": {
-      "command": "muse",
-      "args": ["mcp"],
+      "command": "uvx",
+      "args": ["--from", "museq[mcp]", "muse", "mcp"],
       "env": {
         "MUSE_SERVER": "http://localhost:8000",
         "MUSE_ADMIN_TOKEN": "your-admin-token-here"
@@ -1432,35 +1459,6 @@ on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
   }
 }
 ```
-
-Inference-only setup (no admin tools, no token needed):
-
-```json
-{
-  "mcpServers": {
-    "muse-inference": {
-      "command": "muse",
-      "args": ["mcp", "--filter", "inference"],
-      "env": {"MUSE_SERVER": "http://localhost:8000"}
-    }
-  }
-}
-```
-
-After saving the config, restart Claude Desktop. Tools appear in the
-"Search and tools" menu. Test with prompts like:
-- "Generate an image of a sunset over a mountain lake."
-- "List all enabled models in muse."
-- "Transcribe this audio file: /path/to/audio.wav"
-
-Binary I/O conventions:
-- Inputs accept three mutually-exclusive fields per slot:
-  `<name>_b64` (base64), `<name>_url` (data: or http URL), or
-  `<name>_path` (local filesystem). Tool descriptions tell the LLM
-  which form is appropriate.
-- Outputs return MCP `ImageContent` (image bytes) or `AudioContent`
-  (audio bytes) plus a `TextContent` summary. Video bytes return
-  inside the JSON envelope (no SDK VideoContent type yet).
 
 ## Development commands
 
@@ -1526,8 +1524,8 @@ muse models refresh --all --json               # machine-readable output
 muse serve --device cuda
 muse mcp                                       # MCP server for LLM clients (stdio mode)
 muse mcp --http --port 8088                    # MCP server in HTTP+SSE mode
-muse mcp --filter admin                        # only the 11 admin tools
-muse mcp --filter inference                    # only the 21 inference tools
+muse mcp --filter admin                        # only the admin tools
+muse mcp --filter inference                    # only muse_describe + generated tools
 
 # Python clients (HTTP)
 python - <<'PY'
