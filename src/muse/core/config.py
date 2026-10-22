@@ -293,10 +293,14 @@ SETTINGS: list[Setting] = [
     Setting("fetch.mcp_allowed_path_prefixes", "MUSE_MCP_ALLOWED_PATH_PREFIXES",
             "str", "", "fetch",
             "Colon-separated dir prefixes MCP path inputs and out_path may use. "
-            "Empty means the MCP process's working directory plus mcp.output_dir."),
+            "Empty means the MCP process's working directory (unless it is /) plus "
+            "mcp.output_dir; a set value replaces both. mcp.output_dir is always "
+            "writable."),
     # --- mcp ---
     Setting("mcp.output_dir", "MUSE_MCP_OUTPUT_DIR", "str", "./muse-output", "mcp",
-            "Directory muse mcp writes media outputs to when a tool call gives no out_path."),
+            "Directory muse mcp writes media outputs to when a tool call gives no "
+            "out_path. Relative to the MCP process cwd, or to the home directory "
+            "when the cwd is / (as Claude Desktop launches it)."),
     # --- limits (per-modality request caps) ---
     Setting("limits.image_input_max_bytes", "MUSE_IMAGE_INPUT_MAX_BYTES",
             "opt_int", 10 * _MB, "limits", "Max bytes per image upload / data URL.",

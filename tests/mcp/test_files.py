@@ -149,3 +149,55 @@ def test_fifo_refused_without_hanging(tmp_path, monkeypatch):
     os.mkfifo(tmp_path / "pipe")
     with pytest.raises(ValueError, match="regular file"):
         read_input("pipe", field="file", max_bytes=10)
+
+
+# ---- cwd `/` (Claude Desktop launches stdio servers there) ----
+
+def test_cwd_root_drops_implicit_cwd_prefix(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir("/")
+    assert allowed_prefixes() == [str((home / "muse-output").resolve())]
+    with pytest.raises(ValueError, match="not within an allowed prefix"):
+        read_input("/etc/hostname", field="image", max_bytes=10_000)
+
+
+def test_cwd_root_default_output_goes_under_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir("/")
+    wf = write_output(b"\x89PNG\r\n\x1a\nxx", "image/png", out_path=None)
+    assert Path(wf.path).parent == (home / "muse-output").resolve()
+    assert Path(wf.path).read_bytes().startswith(b"\x89PNG")
+
+
+def test_cwd_root_explicit_output_dir_kept(tmp_path, monkeypatch):
+    monkeypatch.chdir("/")
+    monkeypatch.setenv("MUSE_MCP_OUTPUT_DIR", str(tmp_path / "out"))
+    assert allowed_prefixes() == [str((tmp_path / "out").resolve())]
+    wf = write_output(b"x", "image/png", out_path=None)
+    assert Path(wf.path).parent == (tmp_path / "out").resolve()
+
+
+# ---- configured prefixes replace the read defaults; output dir stays writable ----
+
+def test_configured_prefixes_still_write_default_output(tmp_path, monkeypatch):
+    work, other = tmp_path / "work", tmp_path / "other"
+    work.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", str(other))
+    # Replaces the defaults for reads: the cwd is no longer readable.
+    (work / "a.png").write_bytes(b"abc")
+    with pytest.raises(ValueError, match="not within an allowed prefix"):
+        read_input("a.png", field="image", max_bytes=100)
+    # ...but mcp.output_dir is always writable.
+    wf = write_output(b"x", "image/png", out_path=None)
+    assert Path(wf.path).parent == (work / "muse-output").resolve()
+    named = write_output(b"y", "image/png", out_path="muse-output/named.png")
+    assert Path(named.path).read_bytes() == b"y"
+    # Paths outside both the list and the output dir are still refused.
+    with pytest.raises(ValueError, match="not within an allowed prefix"):
+        write_output(b"z", "image/png", out_path=str(tmp_path / "x.png"))

@@ -35,21 +35,39 @@ def _real(path: str) -> str:
     return os.path.realpath(os.path.expanduser(path))
 
 
+def _cwd_is_root() -> bool:
+    return _real(os.getcwd()) == os.sep
+
+
 def allowed_prefixes() -> list[str]:
-    """Realpath'd prefixes path inputs/outputs must lie within.
+    """Realpath'd prefixes path inputs (and ``out_path``) must lie within.
 
     An empty ``fetch.mcp_allowed_path_prefixes`` means the process working
-    directory plus ``mcp.output_dir``.
+    directory plus ``mcp.output_dir``; a set value replaces both. A cwd of
+    ``/`` (how Claude Desktop launches stdio servers) is never an implicit
+    prefix, since it would allow every path: only ``mcp.output_dir`` remains.
     """
     raw = (config.get("fetch.mcp_allowed_path_prefixes") or "").strip()
     items = [p for p in raw.split(os.pathsep) if p.strip()]
     if not items:
-        items = [os.getcwd(), _output_dir()]
+        items = ([] if _cwd_is_root() else [os.getcwd()]) + [_output_dir()]
     return [_real(p) for p in items]
 
 
+def write_prefixes() -> list[str]:
+    """``allowed_prefixes()`` plus ``mcp.output_dir``, which is always writable."""
+    out = allowed_prefixes()
+    own = _real(_output_dir())
+    return out if own in out else [*out, own]
+
+
 def _output_dir() -> str:
-    return str(config.get("mcp.output_dir") or "./muse-output")
+    """``mcp.output_dir``; a relative value resolves against the cwd, or
+    against the home directory when the cwd is ``/`` (never ``/muse-output``)."""
+    path = os.path.expanduser(str(config.get("mcp.output_dir") or "./muse-output"))
+    if not os.path.isabs(path) and _cwd_is_root():
+        path = os.path.join(os.path.expanduser("~"), path)
+    return path
 
 
 def _check_within(path: str, *, label: str,
@@ -132,9 +150,9 @@ class WrittenFile:
 def write_output(data: bytes, mime: str, *, out_path: str | None) -> WrittenFile:
     """Write ``data`` atomically; default name is ``<sha256[:16]><ext>``."""
     digest = hashlib.sha256(data).hexdigest()
-    # Snapshot the prefixes once: the default prefix includes the (relative)
+    # Snapshot the prefixes once: they include the (possibly relative)
     # output dir, which must not be re-resolved after a symlink swap.
-    prefixes = allowed_prefixes()
+    prefixes = write_prefixes()
     if out_path:
         target = _check_within(out_path, label="out_path", prefixes=prefixes)
     else:
