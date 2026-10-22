@@ -24,6 +24,17 @@ MANIFEST = {
         "Apache 2.0. Strong cross-domain generalization; CPU-friendly "
         "default for the image/cv depth primitive."
     ),
+    "summary": "Relative depth maps from a single image",
+    "strengths": [
+        "Generalizes well across indoor, outdoor and stylized scenes",
+        "CPU-friendly, 25M params",
+        "16-bit PNG or float32 output; Apache 2.0",
+    ],
+    "limits": [
+        "Relative inverse depth, not meters (zoedepth-nyu-kitti gives metric depth)",
+        "Less detail than the base and large variants",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     "pip_extras": [
         # torchvision: transformers>=5 builds the DPT/DepthAnything image

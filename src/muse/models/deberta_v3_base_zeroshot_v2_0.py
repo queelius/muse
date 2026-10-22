@@ -24,6 +24,18 @@ MANIFEST = {
         "label as an NLI hypothesis against the input. Strong "
         "performance on novel-label classification."
     ),
+    "summary": "Classify English text into labels chosen at request time (zero-shot NLI)",
+    "strengths": [
+        "No training: pass candidate_labels per request",
+        "CPU-friendly, 184M params",
+        "MIT",
+    ],
+    "limits": [
+        "English only (mdeberta-v3-base-mnli-xnli covers other languages)",
+        "One NLI pass per label: slower with many labels",
+        "Less accurate than a classifier fine-tuned on a fixed label set",
+    ],
+    "quality_tier": "good",
     "license": "MIT",
     "pip_extras": ["torch>=2.1.0", "transformers>=4.40.0"],
     "system_packages": [],

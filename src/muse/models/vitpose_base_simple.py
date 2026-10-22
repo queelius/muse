@@ -23,6 +23,17 @@ MANIFEST = {
         "Apache 2.0. v1 takes one full-image bbox per call; "
         "multi-person pose needs a person detector upstream."
     ),
+    "summary": "Human body keypoints (COCO 17-point pose) for one person per image",
+    "strengths": [
+        "COCO 17 keypoints with scores",
+        "~85M params, CPU-runnable",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "One full-image box per call: multi-person images need a person detector first",
+        "Human bodies only; no hand or detailed face landmarks",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     "pip_extras": [
         "torch>=2.1.0", "torchvision>=0.16.0",

@@ -24,6 +24,18 @@ MANIFEST = {
         "Returns positive/neutral/negative with softmax probabilities. "
         "CPU-friendly; common baseline for sentiment analysis."
     ),
+    "summary": "Positive/neutral/negative sentiment for short English text",
+    "strengths": [
+        "3 labels with softmax probabilities",
+        "Trained on tweets: handles informal text, slang and emoji",
+        "CPU-friendly, 125M params, MIT",
+    ],
+    "limits": [
+        "English only (twitter-xlm-roberta-base-sentiment covers 8 languages)",
+        "Tweet domain: less reliable on long or formal text",
+        "Three fixed labels; no emotions or aspects",
+    ],
+    "quality_tier": "good",
     "license": "MIT",
     "pip_extras": ["torch>=2.1.0", "transformers>=4.40.0"],
     "system_packages": [],

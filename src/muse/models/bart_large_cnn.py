@@ -24,6 +24,18 @@ MANIFEST = {
     "description": (
         "BART large CNN: news summarization, ~400MB, CPU-friendly, Apache 2.0"
     ),
+    "summary": "Abstractive summaries of news-style articles and other prose",
+    "strengths": [
+        "short/medium/long length presets",
+        "CPU-friendly, ~1.5 GB",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "Input past 1024 tokens is truncated (flagged in the response metadata)",
+        "News-trained: weak on dialog (use bart-cnn-samsum); the bullets format is metadata only",
+        "Abstractive: can state facts not in the source; check names and numbers",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

@@ -36,6 +36,18 @@ MANIFEST = {
         "defaults to sequential CPU offload to fit 8-12GB GPUs (slower; "
         "set server.video_cpu_offload model|off on a bigger card for speed)"
     ),
+    "summary": "Text-to-video clips of a few seconds at 832x480",
+    "strengths": [
+        "Clips up to 10 s at 832x480; MP4 or WebM output",
+        "Fits 8-12 GB GPUs through sequential CPU offload",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "Slow: sequential offload trades speed for VRAM (many minutes per clip)",
+        "480p only and text-to-video only, so no character consistency from a reference image",
+        "Needs a CUDA GPU",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

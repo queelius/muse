@@ -14,6 +14,11 @@ Two entry shapes:
     bundled script's model_id; metadata is read from that script's
     MANIFEST at display time.
 
+Optional agent-facing notes on resolver entries: `summary` (one line),
+`strengths` / `limits` (short lists), `quality_tier` (best|good|draft).
+Validated here; a bad value drops the entry with a warning naming its id.
+See `muse.core.model_notes`.
+
 Optional `capabilities:` mapping on either shape: runtime-specific
 overrides (e.g. `trust_remote_code: true`, `chat_format: "..."`,
 `context_length`) that merge into the resolver-synthesized manifest at
@@ -38,6 +43,7 @@ from typing import Any
 
 import yaml
 
+from muse.core.model_notes import NOTE_FIELDS, validate_note_fields
 from muse.core.resolvers import COMMIT_RE
 
 
@@ -63,6 +69,12 @@ class CuratedEntry:
     # repository named by a Transformers auto_map (for example Nomic BERT).
     revision: str | None = None
     code_revision: str | None = None
+    # Agent-facing notes (see muse.core.model_notes). URI entries only:
+    # bundled aliases take theirs from the script MANIFEST.
+    summary: str | None = None
+    strengths: tuple[str, ...] = ()
+    limits: tuple[str, ...] = ()
+    quality_tier: str | None = None
 
 
 _CURATED_CACHE: list[CuratedEntry] | None = None
@@ -158,6 +170,12 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
             f"entry {d['id']!r}: 'code_revision' requires "
             "capabilities.trust_remote_code: true"
         )
+    if bundled and any(name in d for name in NOTE_FIELDS):
+        raise ValueError(
+            f"entry {d['id']!r}: bundled entries take summary/strengths/"
+            "limits/quality_tier from the script MANIFEST"
+        )
+    notes = validate_note_fields(d, d["id"])
     return CuratedEntry(
         id=d["id"],
         bundled=bundled,
@@ -169,6 +187,10 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
         capabilities=dict(caps),
         revision=revision,
         code_revision=code_revision,
+        summary=notes.summary,
+        strengths=notes.strengths,
+        limits=notes.limits,
+        quality_tier=notes.quality_tier,
     )
 
 

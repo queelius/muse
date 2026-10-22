@@ -26,6 +26,18 @@ MANIFEST = {
         "ACE-Step v1 3.5B: text-to-music + full songs (genre/style "
         "prompt + optional structured lyrics), 48kHz stereo. Apache 2.0."
     ),
+    "summary": "Full songs with sung vocals from a style prompt plus optional structured lyrics, or instrumentals",
+    "strengths": [
+        "Sung vocals from [verse]/[chorus] lyric tags; empty lyrics give an instrumental",
+        "Long clips up to 240 s of 48 kHz stereo",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "Needs a CUDA GPU (~8 GB); /v1/audio/music only, /v1/audio/sfx rejects it",
+        "Sung words can be unclear; not for narration or speech",
+        "Output varies a lot by seed; expect to regenerate for a usable take",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

@@ -21,6 +21,18 @@ MANIFEST = {
         "SmolVLM-256M-Instruct: tiny CPU-runnable VLM, ~500MB. "
         "Image captioning, basic VQA, multi-image."
     ),
+    "summary": "Tiny vision-language model for basic image captions and simple visual questions",
+    "strengths": [
+        "CPU-runnable, ~1 GB",
+        "Accepts several images per message",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "256M params: shallow reasoning and frequent detail errors; check its captions",
+        "Weak at reading small text in images",
+        "No tool calling",
+    ],
+    "quality_tier": "draft",
     "license": "apache-2.0",
     "pip_extras": [
         "torch>=2.1.0",

@@ -73,6 +73,17 @@ MANIFEST = {
         "NVIDIA NV-Embed-v2: 4096 dims, 32K context, SotA MTEB "
         "(LICENSE: CC-BY-NC-4.0, non-commercial only)"
     ),
+    "summary": "High-quality text embeddings for retrieval and semantic search over long documents",
+    "strengths": [
+        "4096 dims, 32K-token context",
+        "Top of the MTEB leaderboard when released",
+    ],
+    "limits": [
+        "CC-BY-NC-4.0: non-commercial use only",
+        "Heavy: ~16 GB, needs a large GPU",
+        "4096-dim vectors are costly to store; runs remote code",
+    ],
+    "quality_tier": "best",
     "license": "CC-BY-NC-4.0",
     "pip_extras": (
         "torch>=2.1.0",

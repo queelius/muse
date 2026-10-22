@@ -24,6 +24,17 @@ MANIFEST = {
         "AST AudioSet: 527 classes (speech, music, animals, vehicles, "
         "alarms, household, etc.), multi-label, BSD-3-Clause."
     ),
+    "summary": "Tag audio clips with AudioSet sound-event labels (speech, music, instruments, animals, alarms, ...)",
+    "strengths": [
+        "527-class multi-label scores, so overlapping sounds can all score high",
+        "CPU-friendly, ~0.7 GB",
+        "BSD-3-Clause",
+    ],
+    "limits": [
+        "AudioSet labels only; no emotion or spoken-language ID (see the curated audio/classification models)",
+        "One set of labels per clip; no timestamps",
+    ],
+    "quality_tier": "good",
     "license": "BSD-3-Clause",
     "pip_extras": [
         "torch>=2.1.0", "transformers>=4.40.0",

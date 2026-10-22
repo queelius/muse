@@ -21,6 +21,17 @@ MANIFEST = {
         "TrOCR base printed: 334M, English printed text, MIT. "
         "CPU-friendly default OCR for line-level extraction."
     ),
+    "summary": "Read one line of printed English text from a cropped image",
+    "strengths": [
+        "Good on clean, cropped printed English lines",
+        "CPU-friendly, ~0.7 GB",
+        "MIT",
+    ],
+    "limits": [
+        "One text line per image: crop full pages or paragraphs into lines first",
+        "Printed English only; no handwriting (trocr-large-handwritten) or math (texteller)",
+    ],
+    "quality_tier": "draft",
     "license": "MIT",
     "pip_extras": [
         "torch>=2.1.0", "torchvision>=0.16.0",

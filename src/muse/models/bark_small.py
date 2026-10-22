@@ -48,6 +48,18 @@ MANIFEST = {
     "hf_repo": "suno/bark-small",
     "revision": "1dbd7a128513b8ae4a4e2130fed57b7ac9da5bcd",
     "description": "Multilingual TTS with voice cloning, 24kHz",
+    "summary": "Expressive multilingual TTS with preset speakers and non-speech sounds",
+    "strengths": [
+        "130 preset voices across many languages",
+        "Text markers such as [laughter] render non-speech sounds",
+        "Custom voices from Bark .npz history prompts; MIT",
+    ],
+    "limits": [
+        "Slow and unpredictable: may drift, add sounds or skip words; regenerate often",
+        "No streaming (one chunk) and no word timings",
+        "No cloning from a raw audio sample; custom voices need precomputed .npz prompts",
+    ],
+    "quality_tier": "draft",
     "license": "MIT",
     # transformers pulls torch + numpy transitively, but declaring them
     # explicitly keeps the contract self-contained for fresh-venv

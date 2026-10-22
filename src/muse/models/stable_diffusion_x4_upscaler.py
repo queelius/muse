@@ -21,6 +21,16 @@ MANIFEST = {
     "description": (
         "SD x4 upscaler: 4x super-resolution via latent diffusion, Apache 2.0"
     ),
+    "summary": "4x upscale of an image with a prompt-guided diffusion upscaler",
+    "strengths": [
+        "Adds plausible detail at 4x; an optional prompt steers it",
+    ],
+    "limits": [
+        "Fixed 4x only; input capped at 1024 px per side by default",
+        "Slow and needs a CUDA GPU (~6 GB); invents texture rather than restoring it exactly",
+        "Upstream license is CreativeML OpenRAIL++ (use restrictions), not Apache 2.0",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

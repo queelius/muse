@@ -26,6 +26,18 @@ MANIFEST = {
     "hf_repo": "ekwek/Soprano-1.1-80M",
     "revision": "27b5a5f5f541a1db3a51d6fd1b0fc7147b92cd01",
     "description": "Qwen3 LLM backbone + Vocos decoder, 32kHz, 80M params",
+    "summary": "Very fast English TTS with paragraph-level timings",
+    "strengths": [
+        "Very fast on CPU or GPU, 32 kHz",
+        "align: true returns paragraph start/end times in an X-Alignment header",
+        "Apache 2.0, ~0.5 GB",
+    ],
+    "limits": [
+        "English only, one voice, no voice cloning",
+        "Paragraph timings only; no word timings",
+        "Small training set: may mispronounce uncommon words and numbers (spell them out)",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     # Soprano delegates to muse.modalities.audio_speech.tts.Narro which
     # imports torch + numpy unconditionally; declared explicitly for

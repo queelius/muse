@@ -39,6 +39,18 @@ MANIFEST = {
     "hf_repo": "Supertone/supertonic-3",
     "revision": "3cadd1ee6394adea1bd021217a0e650ede09a323",
     "description": "Supertonic 3: lightweight on-device TTS, 31 languages, ONNX (CPU)",
+    "summary": "On-device multilingual TTS on CPU, 31 languages",
+    "strengths": [
+        "31 languages",
+        "10 preset voice styles (F1-F5, M1-M5), 44.1 kHz",
+        "CPU-only ONNX, ~0.5 GB, no GPU needed",
+    ],
+    "limits": [
+        "No word timings at synthesis and no voice cloning",
+        "Fixed voice styles; little expressive control",
+        "OpenRAIL license carries use-based restrictions",
+    ],
+    "quality_tier": "draft",
     "license": "OpenRAIL",
     "pip_extras": (
         "supertonic",

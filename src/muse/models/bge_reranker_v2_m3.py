@@ -23,6 +23,17 @@ MANIFEST = {
         "BAAI bge-reranker-v2-m3: multilingual cross-encoder reranker, "
         "8192-token context, ~568MB"
     ),
+    "summary": "Rerank retrieved passages by relevance to a query, in many languages",
+    "strengths": [
+        "Multilingual cross-encoder",
+        "Long pairs, up to 8192 tokens",
+        "Apache 2.0, ~1.2 GB",
+    ],
+    "limits": [
+        "Scores each query-passage pair separately: cost grows with candidate count, so rerank a shortlist",
+        "Scores rank passages for one query; they are not calibrated probabilities",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

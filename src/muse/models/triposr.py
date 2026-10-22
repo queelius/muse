@@ -33,6 +33,18 @@ MANIFEST = {
         "should be foreground-isolated (transparent or white "
         "background works best). GLB output."
     ),
+    "summary": "Fast single-image to 3D mesh (GLB) of one isolated object",
+    "strengths": [
+        "Fast feed-forward reconstruction, ~1.5 GB",
+        "GLB output",
+        "MIT",
+    ],
+    "limits": [
+        "Needs a foreground-isolated object (plain or transparent background)",
+        "Geometry only by default: no texture, vertex colors off",
+        "Hidden sides are guessed; coarse detail",
+    ],
+    "quality_tier": "draft",
     "license": "MIT",
     "pip_extras": [
         "torch>=2.1.0",

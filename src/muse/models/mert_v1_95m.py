@@ -32,6 +32,18 @@ MANIFEST = {
         "MERT v1 95M: music understanding, 768-dim audio embeddings, "
         "CC-BY-NC-4.0 (non-commercial)"
     ),
+    "summary": "Music-understanding embeddings for similarity search, tagging and clustering of music clips",
+    "strengths": [
+        "768-dim music representations, mean-pooled over time",
+        "Trained on music: reflects timbre, pitch and rhythm",
+        "Small, ~0.5 GB, runs on CPU",
+    ],
+    "limits": [
+        "CC-BY-NC-4.0: non-commercial use only",
+        "No text tower, so no text-to-audio search (use clap-htsat-fused)",
+        "Clips longer than 60 s are truncated",
+    ],
+    "quality_tier": "good",
     "license": "CC-BY-NC-4.0",
     "pip_extras": (
         # The pinned repo has only a pickle pytorch_model.bin checkpoint.

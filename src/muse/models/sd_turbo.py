@@ -22,6 +22,17 @@ MANIFEST = {
     "hf_repo": "stabilityai/sd-turbo",
     "revision": "b261bac6fd2cf515557d5d0707481eafa0485ec2",
     "description": "Stable Diffusion Turbo: 1-step distilled, 512x512",
+    "summary": "Very fast 512x512 draft images, img2img and inpainting from a text prompt",
+    "strengths": [
+        "One-step generation; img2img, inpainting and variations",
+        "Small, ~4 GB VRAM",
+    ],
+    "limits": [
+        "Trained at 512x512: 16:9 or larger sizes degrade composition",
+        "Weak at legible text, hands and multi-object scenes; no reference-image character consistency",
+        "Stability AI Community License: research artifact, commercial use limited (see stability.ai/license)",
+    ],
+    "quality_tier": "draft",
     "license": "SAI Community License",
     "pip_extras": (
         # torch: hard runtime dep. Pulled transitively by accelerate,

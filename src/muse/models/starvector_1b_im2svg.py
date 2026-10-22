@@ -19,6 +19,18 @@ MANIFEST = {
         "StarVector-1B im2svg: raster icons, logos, and diagrams to "
         "editable static SVG; Apache 2.0; 5.14GB checkpoint, fp16 load"
     ),
+    "summary": "Convert icons, logos and diagrams into editable static SVG (for example for Manim)",
+    "strengths": [
+        "Writes SVG code with shapes and paths you can edit",
+        "Output limited to a safe static SVG subset (no scripts, rasters or remote references)",
+        "Apache 2.0; fits a 12 GB GPU in fp16",
+    ],
+    "limits": [
+        "Not for photos or detailed illustrations",
+        "1B model: complex inputs can lose shapes or colors; check the render",
+        "Long SVGs take many tokens and are slow",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     "pip_extras": [
         "torch>=2.1.0",

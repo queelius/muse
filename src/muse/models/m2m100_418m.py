@@ -24,6 +24,17 @@ MANIFEST = {
         "M2M-100 418M: many-to-many translation across 100 languages, "
         "~2GB, MIT. Backs the LibreTranslate-compatible /v1/translate route."
     ),
+    "summary": "Translate text between any pair of 100 languages (default for LibreTranslate clients)",
+    "strengths": [
+        "Any-to-any across 100 languages in one model",
+        "Runs on CPU, ~2.5 GB",
+        "MIT",
+    ],
+    "limits": [
+        "Smallest M2M-100: lower quality than NLLB-200 or a per-pair OPUS-MT model",
+        "No source-language auto-detection; pass source explicitly",
+    ],
+    "quality_tier": "draft",
     "license": "MIT",
     "pip_extras": [
         "transformers",

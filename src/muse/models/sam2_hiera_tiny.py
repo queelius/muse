@@ -69,6 +69,17 @@ MANIFEST = {
     "description": (
         "SAM-2 Hiera tiny: ~40MB promptable segmentation, Apache 2.0"
     ),
+    "summary": "Object masks from points or boxes, or automatic masks for the whole image",
+    "strengths": [
+        "Point, box and automatic modes",
+        "Tiny and fast, ~0.8 GB, CPU-friendly",
+        "PNG or COCO RLE masks; Apache 2.0",
+    ],
+    "limits": [
+        "No text prompts: cannot segment an object by name",
+        "Coarser masks than sam2-hiera-base-plus or the large models",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

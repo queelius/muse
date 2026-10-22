@@ -49,6 +49,18 @@ MANIFEST = {
     "hf_repo": "hexgrad/Kokoro-82M",
     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
     "description": "Lightweight TTS, 54 voices, 24kHz",
+    "summary": "Fast narration TTS with preset voices",
+    "strengths": [
+        "CPU-friendly 82M model, 24 kHz output, sentence-level streaming",
+        "53 preset voices in 9 language/accent groups (US and UK English, Spanish, French, Hindi, Italian, Japanese, Portuguese, Mandarin)",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "No word timings at synthesis; run audio/alignment on the output for captions",
+        "No voice cloning; preset voices only",
+        "Little control over emphasis or emotion beyond speed",
+    ],
+    "quality_tier": "good",
     "license": "Apache 2.0",
     # kokoro pulls torch + numpy transitively; declared explicitly so
     # the manifest stays self-describing for fresh-venv installs (#110).

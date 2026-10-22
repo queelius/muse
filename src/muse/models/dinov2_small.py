@@ -24,6 +24,17 @@ MANIFEST = {
     "description": (
         "DINOv2 small: 88MB, 384-dim self-supervised image features, Apache 2.0"
     ),
+    "summary": "Image-to-vector features for near-duplicate detection, clustering and visual similarity",
+    "strengths": [
+        "384 dims, CPU-friendly, 88 MB",
+        "Self-supervised features capture visual structure without captions",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "Image only: no text tower, so no text-to-image search (use siglip2-base)",
+        "Smallest of the family; dinov2-base and dinov2-large give finer features",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

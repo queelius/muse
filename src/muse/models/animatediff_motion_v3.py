@@ -48,6 +48,18 @@ MANIFEST = {
     "hf_repo": _ADAPTER_REPO,
     "revision": _ADAPTER_REVISION,
     "description": "AnimateDiff motion v3 + SD 1.5 base, 16 frames @ 8fps, 512x512",
+    "summary": "Short looping text-to-animation clips (16 frames at 8 fps) on an SD 1.5 photoreal base",
+    "strengths": [
+        "Loops by default; animated WebP, GIF or MP4 output",
+        "8-24 frames per clip",
+        "Apache 2.0 motion adapter",
+    ],
+    "limits": [
+        "SD 1.5-era quality at 512x512; weak at text and fine detail",
+        "About 2 s per clip; not for narrative video (use video/generation)",
+        "Needs a CUDA GPU (~10 GB); the epiCRealism base is CreativeML OpenRAIL-M",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     "pip_extras": (
         "torch>=2.1.0",

@@ -21,6 +21,18 @@ MANIFEST = {
         "Apache 2.0. CPU-friendly default for the image/cv "
         "detection primitive."
     ),
+    "summary": "Detect and box the 80 COCO object classes in an image",
+    "strengths": [
+        "COCO 80 classes with scores and boxes",
+        "CPU-friendly, ~41M params",
+        "Apache 2.0",
+    ],
+    "limits": [
+        "COCO classes only; no open-vocabulary or text prompts",
+        "Older and less accurate than RT-DETR (rtdetr-v2-r50vd)",
+        "Weak on small objects",
+    ],
+    "quality_tier": "draft",
     "license": "Apache 2.0",
     "pip_extras": [
         "torch>=2.1.0", "transformers>=4.46.0", "Pillow",

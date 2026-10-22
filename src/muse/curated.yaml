@@ -8,6 +8,12 @@
 #   - For URI entries: also set `modality`, `size_gb`, `description`.
 #     For bundled entries: leave the rest empty; metadata comes from
 #     the script's MANIFEST.
+#   - Agent-facing notes (URI entries; bundled scripts carry theirs in
+#     MANIFEST): `summary` (one line: what it is for), `strengths` and
+#     `limits` (1-3 short items each; a non-commercial license always goes
+#     in `limits`), `quality_tier` (best | good | draft, judged absolutely
+#     within the modality across bundled + curated models; pick the lower
+#     tier when unsure). See muse.core.model_notes.
 #   - Optional `capabilities:` mapping (URI entries only): runtime-specific
 #     overrides (e.g. `trust_remote_code: true`, `chat_format`,
 #     `context_length`) that merge into the resolver-synthesized manifest
@@ -35,6 +41,16 @@
   modality: chat/completion
   size_gb: 2.5
   description: "Qwen3.5 4B (Q4_K_M): small but capable, runs on 4GB+ GPU or CPU"
+  summary: "General local chat and drafting model that fits a 4 GB GPU or CPU"
+  strengths:
+    - "Capable for its size; ~2.5 GB at Q4_K_M"
+    - "Runs on CPU or a small GPU"
+    - "Apache 2.0"
+  limits:
+    - "Often ignores tool results in multi-step tool loops (llama-cpp formatting); prefer 9B+ for tools"
+    - "Text only in muse: the GGUF runtime takes no image input"
+    - "Small model: verify facts"
+  quality_tier: good
   capabilities:
     memory_gb: 3.5
 
@@ -43,6 +59,16 @@
   modality: chat/completion
   size_gb: 2.0
   description: "Llama 3.2 3B Instruct (Q4_K_M): small, fast, broadly compatible"
+  summary: "Small, fast general chat model with tool-call support"
+  strengths:
+    - "Fast on CPU, ~2.5 GB"
+    - "llama-3 chat format with tool calling"
+    - "8 officially supported languages"
+  limits:
+    - "Weaker reasoning than the Qwen3 4B-class models"
+    - "Llama 3.2 Community License (acceptable-use policy)"
+    - "Small model: verify facts"
+  quality_tier: draft
   capabilities:
     memory_gb: 2.5
 
@@ -53,6 +79,15 @@
   modality: chat/completion
   size_gb: 0.5
   description: "Qwen3 0.6B (Q4_K_M): tiny, CPU-friendly, hybrid thinking, Apache 2.0"
+  summary: "Tiny CPU chat model for simple rewriting, extraction and routing"
+  strengths:
+    - "Runs on any CPU, ~2 GB at 8K context"
+    - "Hybrid thinking and non-thinking modes"
+    - "Apache 2.0"
+  limits:
+    - "0.6B: unreliable on facts and multi-step reasoning"
+    - "Thinking mode spends tokens before answering"
+  quality_tier: draft
   capabilities:
     # Measured 1.66 GB on CUDA at the default 8192-token context (2026-10-19).
     memory_gb: 2.0
@@ -62,6 +97,15 @@
   modality: chat/completion
   size_gb: 2.5
   description: "Qwen3 4B (Q4_K_M): strong small model, hybrid thinking, runs on 4GB+ GPU or CPU"
+  summary: "Strong small chat model with optional step-by-step thinking"
+  strengths:
+    - "Good reasoning for its size; hybrid thinking"
+    - "Runs on a 4 GB GPU or CPU"
+    - "Apache 2.0"
+  limits:
+    - "Small Qwen models often ignore tool results in tool loops"
+    - "Thinking mode is slower; verify facts"
+  quality_tier: good
   capabilities:
     memory_gb: 3.5
 
@@ -70,6 +114,15 @@
   modality: chat/completion
   size_gb: 5.0
   description: "Qwen3 8B (Q4_K_M): high quality, hybrid thinking, 8GB+ GPU"
+  summary: "Largest curated local text chat model, for writing and reasoning"
+  strengths:
+    - "More knowledge and steadier long answers than the 4B options"
+    - "Hybrid thinking"
+    - "Apache 2.0"
+  limits:
+    - "Needs an 8 GB+ GPU for usable speed"
+    - "Tool loops less reliable than with 9B+ models"
+  quality_tier: good
   capabilities:
     memory_gb: 6.5
 
@@ -80,6 +133,15 @@
 
 - id: smolvlm-instruct
   description: SmolVLM-Instruct (2.2B). Strong VLM at small size, matches LLaVA-1.5-7B quality.
+  summary: "Small vision-language model for image captions and visual questions on CPU"
+  strengths:
+    - "2.2B params; CPU-runnable at ~5 GB"
+    - "Multi-image input"
+    - "Apache 2.0"
+  limits:
+    - "Slow on CPU; weaker OCR and detail than Qwen2-VL / Qwen2.5-VL"
+    - "No tool calling"
+  quality_tier: draft
   uri: hf://HuggingFaceTB/SmolVLM-Instruct
   modality: chat/completion
   capabilities:
@@ -91,6 +153,16 @@
 
 - id: qwen2-vl-2b-instruct
   description: Qwen2-VL-2B-Instruct. SOTA quality at 2B params; multi-image, dynamic resolution.
+  summary: "Compact vision-language model for captions, OCR and chart reading"
+  strengths:
+    - "Dynamic resolution keeps small text readable"
+    - "Multi-image input"
+    - "Apache 2.0"
+  limits:
+    - "Runs on CPU by default (~5 GB): slow"
+    - "2B: shallower reasoning than the 7B VLMs"
+    - "No tool calling"
+  quality_tier: good
   uri: hf://Qwen/Qwen2-VL-2B-Instruct
   modality: chat/completion
   capabilities:
@@ -102,6 +174,15 @@
 
 - id: llava-1.5-7b
   description: LLaVA-1.5-7B (proven, well-known). Single-image only.
+  summary: "Classic 7B vision-language model for single-image description"
+  strengths:
+    - "Well-known, widely tested behavior"
+    - "Single-image visual question answering"
+  limits:
+    - "Single image only; low input resolution, weak at text in images"
+    - "Older than Qwen2-VL and needs a ~14 GB GPU"
+    - "Llama 2 license"
+  quality_tier: draft
   uri: hf://llava-hf/llava-1.5-7b-hf
   modality: chat/completion
   capabilities:
@@ -113,6 +194,16 @@
 
 - id: qwen2-vl-7b-instruct
   description: Qwen2-VL-7B-Instruct (flagship). Strong multi-image and OCR; needs 16GB+ VRAM.
+  summary: "Vision-language model for multi-image reasoning, OCR and documents"
+  strengths:
+    - "Strong OCR and multi-image understanding"
+    - "Dynamic input resolution"
+    - "Apache 2.0"
+  limits:
+    - "Needs a 16 GB+ GPU"
+    - "Superseded by qwen2.5-vl-7b-instruct"
+    - "No tool calling"
+  quality_tier: good
   uri: hf://Qwen/Qwen2-VL-7B-Instruct
   modality: chat/completion
   capabilities:
@@ -124,6 +215,15 @@
 
 - id: qwen2.5-vl-7b-instruct
   description: Qwen2.5-VL-7B-Instruct. Upgrade over Qwen2-VL-7B; better OCR, document and video understanding, agentic grounding. 16GB+ VRAM.
+  summary: "Strongest curated vision-language model, for documents, charts, screenshots and visual grounding"
+  strengths:
+    - "Better OCR and document parsing than Qwen2-VL-7B"
+    - "Multi-image input; can locate objects in an image"
+    - "Apache 2.0"
+  limits:
+    - "Needs ~18 GB of VRAM"
+    - "No tool calling"
+  quality_tier: good
   uri: hf://Qwen/Qwen2.5-VL-7B-Instruct
   modality: chat/completion
   capabilities:
@@ -140,6 +240,15 @@
   modality: embedding/text
   size_gb: 0.1
   description: "MiniLM 384 dims, 22MB: CPU-friendly default embedder"
+  summary: "Fast small English sentence embeddings for semantic search and dedup"
+  strengths:
+    - "384 dims, 22M params, very fast on CPU"
+    - "Widely used baseline"
+    - "Apache 2.0"
+  limits:
+    - "English; input past 256 word pieces is truncated"
+    - "Lower retrieval quality than Qwen3-Embedding or BGE-M3"
+  quality_tier: draft
   capabilities:
     device: cpu
     memory_gb: 0.1
@@ -149,6 +258,15 @@
   modality: embedding/text
   size_gb: 0.6
   description: "Qwen3-Embedding 0.6B: 1024 dims (matryoshka), 32K context, Apache 2.0"
+  summary: "Multilingual text embeddings for retrieval over long inputs"
+  strengths:
+    - "1024 dims with matryoshka truncation"
+    - "32K context, multilingual"
+    - "Apache 2.0"
+  limits:
+    - "Larger and slower than MiniLM on CPU"
+    - "Queries work best with an instruction prefix"
+  quality_tier: good
   capabilities:
     memory_gb: 1.5
 
@@ -159,6 +277,15 @@
   modality: embedding/text
   size_gb: 2.3
   description: "BGE-M3: 568M, 1024 dims, multilingual (100+ langs), 8192 ctx, MIT"
+  summary: "Multilingual retrieval embeddings for 100+ languages and long documents"
+  strengths:
+    - "100+ languages, 8192-token inputs"
+    - "1024 dims"
+    - "MIT"
+  limits:
+    - "muse returns the dense vector only (no sparse or multi-vector output)"
+    - "~2.5 GB; slower than small embedders"
+  quality_tier: good
   capabilities:
     memory_gb: 2.5
 
@@ -172,6 +299,15 @@
   modality: embedding/text
   size_gb: 0.55
   description: "Nomic Embed v1.5: 137M, 768 dims (matryoshka), 8192 ctx, Apache 2.0"
+  summary: "English text embeddings for long-document retrieval with adjustable dimension"
+  strengths:
+    - "768 dims, matryoshka down to smaller sizes"
+    - "8192-token context"
+    - "Apache 2.0"
+  limits:
+    - "Expects task prefixes in the input text ('search_query: ', 'search_document: ')"
+    - "Runs remote code (pinned revision)"
+  quality_tier: good
   capabilities:
     trust_remote_code: true
     memory_gb: 1.0
@@ -197,6 +333,16 @@
   modality: image/generation
   size_gb: 7.0
   description: "SDXL Turbo: 1-step distilled SDXL, 512x512, fast"
+  summary: "Fast 512x512 draft images, with better prompt following than sd-turbo"
+  strengths:
+    - "1-4 step generation; img2img and inpainting"
+    - "Better prompt understanding than sd-turbo"
+    - "Base model for the pixel-art-xl LoRA"
+  limits:
+    - "Trained at 512x512: 16:9 and large sizes degrade"
+    - "Weak at legible text; no reference-image character consistency"
+    - "Stability AI license: check commercial terms at stability.ai/license"
+  quality_tier: draft
   capabilities:
     memory_gb: 8.0
 
@@ -205,6 +351,16 @@
   modality: image/generation
   size_gb: 24.0
   description: "FLUX.1 Schnell: 4-step distilled, 1024x1024, Apache 2.0"
+  summary: "Final-quality stills: strong composition, some legible text, flexible aspect ratios"
+  strengths:
+    - "Strong prompt following and composition; can render short text"
+    - "4-step distilled; works at non-square sizes such as 16:9"
+    - "Apache 2.0"
+  limits:
+    - "Very heavy: ~24 GB, needs a large GPU"
+    - "Distilled: guidance scale has no effect"
+    - "No reference-image character consistency (img2img only)"
+  quality_tier: good
   capabilities:
     memory_gb: 24.0
 
@@ -213,6 +369,15 @@
   modality: image/generation
   size_gb: 0.05
   description: "Pixel-art LoRA for SDXL (trigger phrase: 'pixel art'); pre-paired with sdxl-turbo (pull sdxl-turbo first) for fast 4-step generation"
+  summary: "Pixel-art style stills from a LoRA on sdxl-turbo"
+  strengths:
+    - "Pixel-art look with the 'pixel art' trigger phrase"
+    - "50 MB adapter; 4-step generation; per-request lora_scale"
+  limits:
+    - "Requires sdxl-turbo pulled first"
+    - "Pixel-art style only, with sdxl-turbo's text and composition limits"
+    - "CreativeML OpenRAIL-M license (use restrictions)"
+  quality_tier: draft
   capabilities:
     lora_adapter: true
     base_model: sdxl-turbo
@@ -229,6 +394,14 @@
   modality: audio/transcription
   size_gb: 0.08
   description: "Whisper tiny (39M, ~75MB): CPU-friendly smoke test, multilingual"
+  summary: "Smoke-test speech-to-text on CPU"
+  strengths:
+    - "~75 MB, very fast on CPU"
+    - "Multilingual; word timestamps available"
+  limits:
+    - "High error rate, especially on names and technical terms"
+    - "Not reliable for pronunciation checks"
+  quality_tier: draft
   capabilities:
     device: cpu
     memory_gb: 0.1
@@ -238,6 +411,15 @@
   modality: audio/transcription
   size_gb: 0.15
   description: "Whisper base (74M, ~142MB): balanced CPU default"
+  summary: "Quick CPU transcription for rough drafts"
+  strengths:
+    - "~142 MB, fast on CPU"
+    - "Multilingual; word timestamps available"
+    - "MIT"
+  limits:
+    - "Noticeably more errors than large-v3, especially on names and jargon"
+    - "Not reliable for pronunciation checks"
+  quality_tier: draft
   capabilities:
     device: cpu
     memory_gb: 0.2
@@ -247,6 +429,16 @@
   modality: audio/transcription
   size_gb: 3.0
   description: "Whisper large-v3 (1550M, ~2.9GB): SotA quality, 8GB+ GPU"
+  summary: "Highest-accuracy transcription, and speech translation to English"
+  strengths:
+    - "Most accurate curated Whisper; about 99 languages"
+    - "Word timestamps; translation to English via /v1/audio/translations"
+    - "MIT"
+  limits:
+    - "Slow on CPU; wants a GPU"
+    - "Can hallucinate text on silence or music (use vad_filter)"
+    - "Its language prior can write the intended word for a mispronounced one, so it under-reports pronunciation errors"
+  quality_tier: best
   capabilities:
     memory_gb: 3.0
 
@@ -257,6 +449,16 @@
   modality: audio/transcription
   size_gb: 1.6
   description: "Whisper large-v3-turbo (809M, ~1.6GB): near-large-v3 quality, ~4x faster decode, MIT"
+  summary: "Near-large-v3 transcription accuracy at several times the speed"
+  strengths:
+    - "Pruned decoder: much faster than large-v3"
+    - "Word timestamps"
+    - "MIT"
+  limits:
+    - "Not trained for translation: use whisper-large-v3 for /v1/audio/translations"
+    - "Can hallucinate text on silence or music (use vad_filter)"
+    - "Its language prior can mask mispronunciations"
+  quality_tier: best
   capabilities:
     memory_gb: 2.0
 
@@ -267,6 +469,14 @@
   modality: text/classification
   size_gb: 0.14
   description: "9-category text moderation (S/H/V/HR/SH/S3/H2/V2/OK), CPU-friendly"
+  summary: "Flag English text in 9 moderation categories (sexual, hate, violence, harassment, self-harm, ...)"
+  strengths:
+    - "OpenAI-moderation-style categories via /v1/moderations"
+    - "CPU-friendly, ~0.5 GB"
+  limits:
+    - "English only; small training set, so expect misses and false flags"
+    - "OpenRAIL license (use restrictions)"
+  quality_tier: draft
   capabilities:
     supports_classification: true
     supports_zero_shot: false
@@ -287,6 +497,14 @@
   modality: text/classification
   size_gb: 0.6
   description: "Twitter XLM-RoBERTa sentiment: 125M, 8 langs, 3-label, MIT"
+  summary: "Positive/neutral/negative sentiment for short social text in 8 languages"
+  strengths:
+    - "Fine-tuned on Arabic, English, French, German, Hindi, Italian, Spanish and Portuguese"
+    - "CPU-friendly, ~0.6 GB"
+  limits:
+    - "Tweet domain: less reliable on formal text"
+    - "Three fixed labels only"
+  quality_tier: draft
   capabilities:
     supports_classification: true
     supports_zero_shot: false
@@ -298,6 +516,15 @@
   modality: text/classification
   size_gb: 1.1
   description: "mDeBERTa v3 zero-shot NLI: 276M, 100 langs, MIT"
+  summary: "Zero-shot classification with your own labels in about 100 languages"
+  strengths:
+    - "Labels chosen per request"
+    - "Multilingual (about 100 languages)"
+    - "MIT"
+  limits:
+    - "Less accurate on English than deberta-v3-base-zeroshot-v2.0"
+    - "One NLI pass per label: slower with many labels"
+  quality_tier: draft
   capabilities:
     supports_classification: false
     supports_zero_shot: true
@@ -315,6 +542,14 @@
   modality: audio/classification
   size_gb: 1.2
   description: "wav2vec2 emotion (English): 8 classes, ~1.2GB, Apache 2.0"
+  summary: "8-class emotion labels for short English speech clips"
+  strengths:
+    - "8 emotions: angry, calm, disgust, fearful, happy, neutral, sad, surprised"
+    - "Apache 2.0"
+  limits:
+    - "Trained on acted RAVDESS recordings: unreliable on natural or narrated speech"
+    - "English only; ~1.5 GB"
+  quality_tier: draft
   capabilities:
     memory_gb: 1.5
 
@@ -324,6 +559,14 @@
   modality: audio/classification
   size_gb: 0.36
   description: "HuBERT SUPERB emotion: 4 classes, ~360MB, Apache 2.0"
+  summary: "4-class speech emotion (neutral, happy, angry, sad)"
+  strengths:
+    - "Small, ~0.7 GB"
+    - "Apache 2.0"
+  limits:
+    - "Only 4 classes; trained on acted IEMOCAP dialog"
+    - "English speech only"
+  quality_tier: draft
   capabilities:
     memory_gb: 0.7
 
@@ -333,6 +576,15 @@
   modality: audio/classification
   size_gb: 0.34
   description: "AST speech-commands v2: 35 commands, ~340MB, BSD-3-Clause"
+  summary: "Recognize 35 single spoken command words (yes, no, up, down, ...)"
+  strengths:
+    - "35 Speech Commands v2 words"
+    - "Small, ~0.7 GB"
+    - "BSD-3-Clause"
+  limits:
+    - "Isolated one-second command words only; not transcription"
+    - "English command vocabulary only"
+  quality_tier: good
   capabilities:
     memory_gb: 0.7
 
@@ -342,6 +594,14 @@
   modality: audio/classification
   size_gb: 0.7
   description: "MMS Language ID: 126 spoken languages, ~700MB, CC-BY-NC-4.0"
+  summary: "Identify which of 126 languages is spoken in a clip"
+  strengths:
+    - "126 languages"
+    - "~1 GB"
+  limits:
+    - "CC-BY-NC-4.0: non-commercial use only"
+    - "Language only; no dialect or accent detail"
+  quality_tier: good
   capabilities:
     memory_gb: 1.0
 
@@ -354,6 +614,16 @@
   modality: audio/quality
   size_gb: 0.39
   description: "UTMOS naturalness MOS: single-ended 1-5 speech-quality score, ~394MB, MIT"
+  summary: "Score speech naturalness (1-5 MOS) to catch bad TTS takes"
+  strengths:
+    - "Single-ended: no reference recording needed"
+    - "Per-segment scores plus the worst segment for review"
+    - "MIT"
+  limits:
+    - "Speech only; trained on English TTS listening tests, less reliable on other languages"
+    - "Predicts naturalness, not pronunciation or content correctness"
+    - "Compare takes against each other rather than trusting absolute thresholds"
+  quality_tier: good
   capabilities:
     memory_gb: 1.0
 
@@ -366,6 +636,15 @@
   modality: audio/quality
   size_gb: 0.39
   description: "Meta Audiobox Aesthetics: four 1-10 quality axes for speech, music, and sound, ~396MB, CC-BY-4.0"
+  summary: "Rate the production quality of speech, music or sound on four 1-10 axes"
+  strengths:
+    - "Production quality, production complexity, content enjoyment and content usefulness"
+    - "Works on speech, music and sound effects"
+    - "Per-segment scores plus the worst segment for review"
+  limits:
+    - "Aesthetic judgment, not intelligibility or correctness"
+    - "CC-BY-4.0: attribution required"
+  quality_tier: good
   capabilities:
     memory_gb: 1.5
 
@@ -378,6 +657,16 @@
   modality: audio/alignment
   size_gb: 1.84
   description: "Qwen3 ForcedAligner 0.6B: reference-text word timestamps for 11 languages, Apache 2.0"
+  summary: "Word-level start/end times for a known transcript (captions, highlight sync)"
+  strengths:
+    - "Word timestamps from the reference text, with no ASR errors"
+    - "11 languages"
+    - "Apache 2.0"
+  limits:
+    - "Needs the exact transcript; it does not detect what was said or flag wrong words"
+    - "Up to 300 s of audio and 2048 words per request; split longer narration"
+    - "Confidence values are uncalibrated"
+  quality_tier: good
   capabilities:
     memory_gb: 4.0
     sample_rate: 16000
@@ -412,6 +701,14 @@
   modality: text/rerank
   size_gb: 0.1
   description: "MS MARCO MiniLM-L6: 22M params, English-only, 512 ctx, CPU-friendly classic baseline"
+  summary: "Tiny fast English reranker for search results"
+  strengths:
+    - "22M params, fast on CPU"
+    - "Apache 2.0"
+  limits:
+    - "English only; 512-token pairs"
+    - "Lower quality than bge-reranker-v2-m3 or mxbai-rerank-large-v1"
+  quality_tier: draft
   capabilities:
     device: cpu
     memory_gb: 0.2
@@ -424,6 +721,14 @@
   modality: text/rerank
   size_gb: 0.6
   description: "BGE Reranker base: 278M, multilingual (100+ langs), 512 ctx, MIT"
+  summary: "Mid-size reranker for English and Chinese passages"
+  strengths:
+    - "278M params, ~1.4 GB"
+    - "MIT"
+  limits:
+    - "Model card lists English and Chinese only, despite the multilingual base"
+    - "512-token pairs; older than bge-reranker-v2-m3"
+  quality_tier: draft
   capabilities:
     memory_gb: 1.4
     max_length: 512
@@ -436,6 +741,14 @@
   modality: text/rerank
   size_gb: 1.7
   description: "Mixedbread mxbai-rerank-large: 435M, English-only, top BEIR scores, Apache 2.0"
+  summary: "High-quality English reranker"
+  strengths:
+    - "Strong English relevance ranking"
+    - "Apache 2.0"
+  limits:
+    - "English only; 512-token pairs"
+    - "435M params: slower than base-size rerankers"
+  quality_tier: good
   capabilities:
     memory_gb: 2.0
     max_length: 512
@@ -448,6 +761,14 @@
   modality: text/rerank
   size_gb: 0.6
   description: "Jina Reranker v2 base: 278M, 100+ langs, 1024 ctx, faster than BGE v2-m3"
+  summary: "Fast multilingual reranker with 1024-token pairs"
+  strengths:
+    - "100+ languages, 1024-token pairs"
+    - "278M params, faster than bge-reranker-v2-m3"
+  limits:
+    - "CC-BY-NC-4.0 on its model card: non-commercial use only"
+    - "Runs remote code (pinned revision)"
+  quality_tier: good
   capabilities:
     trust_remote_code: true
     memory_gb: 1.5
@@ -467,6 +788,15 @@
   modality: image/ocr
   size_gb: 0.5
   description: "Nougat base: 250M, academic papers (math/LaTeX), CC-BY-NC-4.0 (non-commercial)"
+  summary: "Convert academic paper page images to Markdown with LaTeX math"
+  strengths:
+    - "Full pages, including equations and tables"
+    - "~1 GB"
+  limits:
+    - "CC-BY-NC-4.0: non-commercial use only"
+    - "Trained on arXiv-style papers; weak on other layouts"
+    - "Can repeat or invent text on unusual pages"
+  quality_tier: good
   capabilities:
     memory_gb: 1.0
     max_new_tokens: 4096
@@ -478,6 +808,14 @@
   modality: image/ocr
   size_gb: 0.8
   description: "TexTeller: 400M, math-formula -> LaTeX, MIT"
+  summary: "Turn an image of a math formula into LaTeX"
+  strengths:
+    - "Formula image to LaTeX"
+    - "MIT"
+  limits:
+    - "Formulas only; not prose or full pages"
+    - "Grayscale 448x448 preprocessing: crop tightly to the formula"
+  quality_tier: good
   capabilities:
     memory_gb: 1.4
     max_new_tokens: 1024
@@ -492,6 +830,14 @@
   modality: image/ocr
   size_gb: 1.1
   description: "TrOCR large handwritten: 558M, handwritten English text, MIT"
+  summary: "Read one line of handwritten English text"
+  strengths:
+    - "Handwriting recognition"
+    - "MIT"
+  limits:
+    - "One text line per image; crop lines first"
+    - "English only; ~1.5 GB"
+  quality_tier: good
   capabilities:
     memory_gb: 1.5
     max_new_tokens: 256
@@ -516,6 +862,14 @@
   modality: image/cv
   size_gb: 0.4
   description: "Depth-Anything V2 Base: 97M, relative depth, Apache 2.0"
+  summary: "Relative depth maps with more detail than the small default"
+  strengths:
+    - "More detail than depth-anything-v2-small"
+    - "~1 GB"
+  limits:
+    - "CC-BY-NC-4.0 on its model card (not Apache 2.0): non-commercial use only"
+    - "Relative depth, not meters"
+  quality_tier: good
   capabilities:
     supports_depth: true
     metric_depth: false
@@ -528,6 +882,14 @@
   modality: image/cv
   size_gb: 0.35
   description: "ZoeDepth NYU+KITTI: ~340MB, METRIC depth (meters), MIT"
+  summary: "Metric depth in meters from a single image"
+  strengths:
+    - "Absolute depth in meters"
+    - "MIT"
+  limits:
+    - "Tuned on indoor (NYU) and driving (KITTI) scenes; less reliable elsewhere"
+    - "Older architecture than Depth-Anything V2"
+  quality_tier: good
   capabilities:
     supports_depth: true
     metric_depth: true
@@ -539,6 +901,14 @@
   modality: image/cv
   size_gb: 0.35
   description: "DPT Large: ~340MB, relative depth, classic, MIT"
+  summary: "Classic relative-depth baseline"
+  strengths:
+    - "Robust on outdoor scenes"
+    - "Apache 2.0 on its model card"
+  limits:
+    - "Relative depth only; superseded by Depth-Anything V2"
+    - "Larger and slower than depth-anything-v2-small"
+  quality_tier: draft
   capabilities:
     supports_depth: true
     metric_depth: false
@@ -551,6 +921,15 @@
   modality: image/cv
   size_gb: 0.17
   description: "RT-DETR ResNet-50: ~167MB, faster than DETR, Apache 2.0"
+  summary: "Real-time COCO object detection, more accurate than DETR"
+  strengths:
+    - "80 COCO classes"
+    - "Fast; ~0.6 GB"
+    - "Apache 2.0"
+  limits:
+    - "COCO classes only; no open-vocabulary prompts"
+    - "Superseded by rtdetr-v2-r50vd"
+  quality_tier: good
   capabilities:
     supports_detection: true
     memory_gb: 0.6
@@ -562,6 +941,13 @@
   modality: image/cv
   size_gb: 0.17
   description: "RT-DETR v2 ResNet-50: ~170MB, improved real-time detection, Apache 2.0"
+  summary: "Most accurate curated COCO object detector at real-time speed"
+  strengths:
+    - "Improved accuracy over RT-DETR v1 at similar speed"
+    - "Apache 2.0"
+  limits:
+    - "COCO classes only; no text prompts"
+  quality_tier: good
   capabilities:
     supports_detection: true
     memory_gb: 0.6
@@ -572,6 +958,14 @@
   modality: image/cv
   size_gb: 0.12
   description: "YOLOS small: 31M, ViT-based object detection, tiny footprint, Apache 2.0"
+  summary: "Tiny ViT detector for coarse COCO object boxes"
+  strengths:
+    - "Smallest detector, ~0.5 GB"
+    - "Apache 2.0"
+  limits:
+    - "Lower accuracy than DETR and RT-DETR"
+    - "COCO classes only"
+  quality_tier: draft
   capabilities:
     supports_detection: true
     memory_gb: 0.5
@@ -583,6 +977,13 @@
   modality: image/cv
   size_gb: 1.3
   description: "Depth-Anything V2 Large: 335M, best relative depth, CC-BY-NC-4.0 (non-commercial)"
+  summary: "Highest-quality relative depth maps"
+  strengths:
+    - "Finest detail of the curated depth models"
+  limits:
+    - "CC-BY-NC-4.0: non-commercial use only"
+    - "Relative depth, not meters"
+  quality_tier: best
   capabilities:
     supports_depth: true
     metric_depth: false
@@ -598,6 +999,13 @@
   modality: image/animation
   size_gb: 5.0
   description: "AnimateLCM: distilled AnimateDiff, 4 steps, ~3-5x faster than v3"
+  summary: "Faster AnimateDiff-style looping clips in 4 steps"
+  strengths:
+    - "4-step sampling, several times faster than animatediff-motion-v3"
+  limits:
+    - "Distilled: less detail and motion variety than animatediff-motion-v3"
+    - "SD 1.5-era quality; ~9 GB GPU"
+  quality_tier: draft
   capabilities:
     memory_gb: 9.0
 
@@ -621,6 +1029,14 @@
   modality: text/summarization
   size_gb: 0.4
   description: "BART CNN samsum: dialog summarization (meetings, chats), ~400MB"
+  summary: "Summarize dialogs such as chats and meeting transcripts"
+  strengths:
+    - "Dialog-tuned on SAMSum"
+    - "CPU, ~1.5 GB, MIT"
+  limits:
+    - "Trained on short chat dialogs; input past 1024 tokens is truncated"
+    - "Abstractive: may misattribute who said what"
+  quality_tier: draft
   capabilities:
     supports_dialog_summarization: true
     device: cpu
@@ -633,6 +1049,14 @@
   modality: text/summarization
   size_gb: 1.2
   description: "DistilBART CNN 12-6: 306M, ~2x faster than bart-large-cnn, news/article summaries, Apache 2.0"
+  summary: "Faster news-style summaries on CPU"
+  strengths:
+    - "Faster than bart-large-cnn at close quality"
+    - "Apache 2.0"
+  limits:
+    - "Somewhat lower quality than bart-large-cnn"
+    - "News-trained; input past 1024 tokens is truncated"
+  quality_tier: draft
   capabilities:
     device: cpu
     memory_gb: 1.5
@@ -651,6 +1075,14 @@
   modality: text/translation
   size_gb: 2.5
   description: "NLLB-200 distilled 600M: 200 languages via FLORES-200, ~2.5GB, CC-BY-NC-4.0 (non-commercial)"
+  summary: "Translate between 200 languages, including low-resource ones"
+  strengths:
+    - "200 languages"
+    - "Better than m2m100-418m on most language pairs"
+  limits:
+    - "CC-BY-NC-4.0: non-commercial use only"
+    - "Trained on inputs up to 512 tokens; longer inputs may lose quality"
+  quality_tier: good
   capabilities:
     device: auto
     memory_gb: 3.0
@@ -666,6 +1098,13 @@
   modality: text/translation
   size_gb: 0.3
   description: "Helsinki-NLP OPUS-MT en->es: fixed-pair English-to-Spanish, ~300MB, Apache 2.0"
+  summary: "English to Spanish translation"
+  strengths:
+    - "Dedicated en->es model; small (~0.6 GB) and fast"
+    - "Apache 2.0"
+  limits:
+    - "English to Spanish only; any other pair returns 400"
+  quality_tier: good
   capabilities:
     device: auto
     memory_gb: 0.6
@@ -677,6 +1116,13 @@
   modality: text/translation
   size_gb: 0.3
   description: "Helsinki-NLP OPUS-MT en->de: fixed-pair English-to-German, ~300MB, Apache 2.0"
+  summary: "English to German translation"
+  strengths:
+    - "Dedicated en->de model; small (~0.6 GB) and fast"
+  limits:
+    - "English to German only; any other pair returns 400"
+    - "CC-BY-4.0 on its model card: attribution required"
+  quality_tier: good
   capabilities:
     device: auto
     memory_gb: 0.6
@@ -696,6 +1142,16 @@
   modality: decision/evaluation
   size_gb: 0.81
   description: "Decision-0.8B Q8_0 (Eval Engine, Apache 2.0): option-letter logits on Qwen3.5-0.8B; uncalibrated probabilities, English, 2,048-token questions"
+  summary: "Typed Choice/Score/Noul decisions as probabilities over your options"
+  strengths:
+    - "Full probability distribution over the options, not prose"
+    - "Small Q8 GGUF, ~0.8 GB"
+    - "Apache 2.0"
+  limits:
+    - "Probabilities are uncalibrated; English only"
+    - "Questions limited to 2,048 tokens"
+    - "Not a safety gate"
+  quality_tier: draft
 
 - id: decima-base
   uri: hf://amyrmahdy/decima-base
@@ -703,6 +1159,16 @@
   modality: decision/evaluation
   size_gb: 0.37
   description: "Decima-base INT8 ONNX (Apache 2.0; see its training-data licensing note): temperature-calibrated late-interaction scorer, CPU, multilingual"
+  summary: "Typed Choice/Score/Noul decisions on CPU with temperature-calibrated probabilities"
+  strengths:
+    - "One publisher-fitted temperature calibrates its probabilities"
+    - "CPU-only INT8 ONNX, ~0.4 GB"
+    - "Multilingual"
+  limits:
+    - "State plus question limited to 512 tokens; each option to 64"
+    - "Calibration not validated for arbitrary tasks"
+    - "Read the publisher's training-data licensing note before commercial use"
+  quality_tier: draft
 
 # ---------- audio/embedding (CLAP / MERT / wav2vec family) ----------
 
@@ -714,6 +1180,15 @@
   modality: audio/embedding
   size_gb: 0.8
   description: "CLAP HTSAT fused: 800MB, 512-dim audio embeddings, supports text too, BSD-3"
+  summary: "Audio embeddings aligned with text, for text-to-sound search and tagging"
+  strengths:
+    - "Shared audio-text space: search sounds with a text query"
+    - "512 dims, 48 kHz input"
+    - "Apache 2.0 on its model card"
+  limits:
+    - "Coarse semantic match; not for fine music similarity (use mert-v1-95m)"
+    - "Trained on English captions"
+  quality_tier: good
   capabilities:
     supports_text_embeddings_too: true
     dimensions: 512
@@ -730,6 +1205,14 @@
   modality: image/embedding
   size_gb: 0.4
   description: "SigLIP2 base: 370MB, supports text embeddings too, Apache 2.0"
+  summary: "Image and text embeddings in one space, for text-to-image search"
+  strengths:
+    - "Text and image towers"
+    - "768 dims"
+    - "Apache 2.0"
+  limits:
+    - "Low input resolution (256 px): small details are lost"
+  quality_tier: good
   capabilities:
     supports_text_embeddings_too: true
     dimensions: 768
@@ -741,6 +1224,14 @@
   modality: image/embedding
   size_gb: 0.6
   description: "CLIP ViT-B/32: 600MB, classic cross-modal, MIT"
+  summary: "Classic CLIP image and text embeddings"
+  strengths:
+    - "Widely supported 512-dim space"
+    - "MIT"
+  limits:
+    - "Older and less accurate than SigLIP2"
+    - "224 px input with 32 px patches: coarse detail"
+  quality_tier: draft
   capabilities:
     supports_text_embeddings_too: true
     dimensions: 512
@@ -754,6 +1245,13 @@
   modality: image/embedding
   size_gb: 0.35
   description: "DINOv2 base: 86M, 768-dim self-supervised image features, Apache 2.0"
+  summary: "Image-to-vector features for similarity and dedup, finer than dinov2-small"
+  strengths:
+    - "768 dims, self-supervised"
+    - "Apache 2.0"
+  limits:
+    - "Image only: no text search"
+  quality_tier: good
   capabilities:
     dimensions: 768
     image_size: 224
@@ -764,6 +1262,14 @@
   modality: image/embedding
   size_gb: 1.2
   description: "DINOv2 large: 304M, 1024-dim image features, best in the family, Apache 2.0"
+  summary: "Finest DINOv2 image features for similarity, dedup and clustering"
+  strengths:
+    - "1024 dims; best of the family"
+    - "Apache 2.0"
+  limits:
+    - "Image only: no text search"
+    - "Larger and slower than base"
+  quality_tier: best
   capabilities:
     dimensions: 1024
     image_size: 224
@@ -789,6 +1295,13 @@
   modality: image/segmentation
   size_gb: 0.15
   description: "SAM-2 Hiera base-plus: balanced quality, 150MB, Apache 2.0"
+  summary: "Object masks from points or boxes, balanced speed and quality"
+  strengths:
+    - "Point, box and automatic modes"
+    - "Apache 2.0"
+  limits:
+    - "No text prompts"
+  quality_tier: good
   capabilities:
     max_masks: 64
     memory_gb: 1.5
@@ -802,6 +1315,14 @@
   modality: image/segmentation
   size_gb: 0.25
   description: "SAM-2 Hiera large: best quality, 225MB, Apache 2.0"
+  summary: "High-quality object masks from points or boxes"
+  strengths:
+    - "Most accurate original SAM-2 size"
+    - "Apache 2.0"
+  limits:
+    - "No text prompts"
+    - "Superseded by sam2.1-hiera-large"
+  quality_tier: good
   capabilities:
     max_masks: 64
     memory_gb: 2.5
@@ -818,6 +1339,14 @@
   modality: image/segmentation
   size_gb: 0.25
   description: "SAM 2.1 Hiera large: refined SAM-2 weights, best quality, 225MB, Apache 2.0"
+  summary: "Highest-quality object masks from points, boxes or automatic mode"
+  strengths:
+    - "Refined SAM 2.1 weights at the large size"
+    - "Apache 2.0"
+  limits:
+    - "No text prompts"
+    - "Slower than the tiny and base-plus models"
+  quality_tier: best
   capabilities:
     max_masks: 64
     memory_gb: 2.5
@@ -842,6 +1371,14 @@
   modality: video/generation
   size_gb: 6.0
   description: "CogVideoX 2B: ~6GB at fp16, 6s videos at 720x480, fits 12GB, Apache 2.0"
+  summary: "Text-to-video clips of about 6 s at 720x480"
+  strengths:
+    - "Fits 12 GB GPUs"
+    - "Apache 2.0"
+  limits:
+    - "8 fps output; dated motion quality"
+    - "Text-to-video only; English prompts"
+  quality_tier: draft
   capabilities:
     memory_gb: 9.0
     default_size: [720, 480]
@@ -856,6 +1393,14 @@
   modality: video/generation
   size_gb: 13.0
   description: "LTX-Video: ~13GB, fast generation at 30fps, requires 16GB+ GPU"
+  summary: "Fast high-resolution text-to-video at 30 fps (experimental in muse)"
+  strengths:
+    - "Designed for fast generation at 1216x704, 30 fps"
+  limits:
+    - "No dedicated muse runtime: served through the Wan runtime fallback, untested"
+    - "Needs a 16 GB+ GPU"
+    - "Custom LTX license: check the model card"
+  quality_tier: draft
   capabilities:
     memory_gb: 16.0
     default_size: [1216, 704]
@@ -888,6 +1433,14 @@
   modality: 3d/generation
   size_gb: 1.5
   description: "TRELLIS image-to-3D: ~1.5GB at fp16, MIT, custom SDK runtime"
+  summary: "Image to 3D mesh with better geometry than TripoSR"
+  strengths:
+    - "Large structured-latent model: strong shapes from one image"
+    - "MIT"
+  limits:
+    - "Geometry-only GLB in muse (no texture baking)"
+    - "Needs a CUDA GPU (~6 GB); image input only"
+  quality_tier: good
   capabilities:
     memory_gb: 6.0
     device: cuda
@@ -901,6 +1454,13 @@
   modality: 3d/generation
   size_gb: 3.0
   description: "Wonder3D: multi-view diffusion-based image-to-3D, ~3GB, CC-BY-NC-4.0 (non-commercial) (deferred indefinitely; multi-view + NeuS reconstruction does not fit muse's runtime model)"
+  summary: "Multi-view diffusion image-to-3D (not usable in muse yet)"
+  strengths:
+    - "Multi-view consistent generation upstream"
+  limits:
+    - "No Wonder3D runtime in muse: pulls fall back to the TripoSR runtime and are not expected to work"
+    - "License unclear: muse lists CC-BY-NC-4.0 (non-commercial), the Hub card says AGPL-3.0"
+  quality_tier: draft
   capabilities:
     memory_gb: 8.0
     device: cuda
@@ -914,6 +1474,15 @@
   modality: 3d/generation
   size_gb: 5.0
   description: "Hunyuan3D-2 by Tencent: dual-direction (image and text), ~5GB at fp16, custom SDK runtime. text_to_3d additionally downloads Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled (~2GB) on first call."
+  summary: "Image-to-3D and text-to-3D meshes from one model"
+  strengths:
+    - "Both directions; text goes through a text-to-image stage first"
+    - "Strong shape quality"
+  limits:
+    - "Tencent Hunyuan Community License: not licensed in the EU, UK or South Korea; check the terms"
+    - "Shape only in muse (no texture stage); ~10 GB GPU"
+    - "Text-to-3D downloads an extra ~2 GB model on first call"
+  quality_tier: good
   capabilities:
     memory_gb: 10.0
     device: cuda
@@ -928,6 +1497,14 @@
   modality: 3d/generation
   size_gb: 0.6
   description: "Shap-E: OpenAI's text-to-3D (mesh + radiance field), ~600MB, MIT"
+  summary: "Quick, low-detail text-to-3D prototypes"
+  strengths:
+    - "Small (~2 GB) and fast"
+    - "MIT"
+  limits:
+    - "Low-detail shapes; surpassed by newer models"
+    - "Text-to-3D only"
+  quality_tier: draft
   capabilities:
     memory_gb: 2.0
     device: cuda
