@@ -32,6 +32,34 @@ from muse.modalities.audio_embedding.routes import build_router
 
 MODALITY = "audio/embedding"
 
+DISCOVERY = {
+    "summary": (
+        "Audio embeddings. Turns audio clips into vectors for similarity "
+        "search, clustering and retrieval over music or sound libraries."
+    ),
+    "use_for": [
+        "finding similar-sounding clips in a library",
+        "clustering or indexing audio by content",
+    ],
+    "not_for": [
+        "labeling sounds in words (use audio/classification)",
+        "text embeddings (use embedding/text)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/audio/embeddings",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_embed_audio",
+            "file_fields": ["file"],
+            "media_fields": [],
+            "example": {"model": "<model>"},
+        },
+    ],
+}
+
 
 def _make_probe_audio() -> bytes:
     """Generate a 1-second 24kHz mono sine wave WAV.
@@ -66,6 +94,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "AudioEmbeddingResult",

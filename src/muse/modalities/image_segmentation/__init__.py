@@ -26,6 +26,35 @@ from muse.modalities.image_segmentation.routes import build_router
 
 MODALITY = "image/segmentation"
 
+DISCOVERY = {
+    "summary": (
+        "Promptable segmentation. Returns masks for regions of an image, "
+        "found automatically or from points, boxes or (for some models) a "
+        "text prompt."
+    ),
+    "use_for": [
+        "cutting out a subject or object from an image",
+        "isolating regions for editing or compositing",
+    ],
+    "not_for": [
+        "bounding boxes and class labels (use image/cv detect)",
+        "depth or pose (use image/cv)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/segment",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_segment_image",
+            "file_fields": ["image"],
+            "media_fields": ["masks[].mask"],
+            "example": {"model": "<model>", "mode": "auto"},
+        },
+    ],
+}
+
 
 def _make_probe_image():
     """Generate a small synthetic test image for `muse models probe`.
@@ -45,6 +74,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "ImageSegmentationClient",

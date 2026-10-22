@@ -32,6 +32,43 @@ from muse.modalities.model_3d_generation.routes import build_router
 
 MODALITY = "3d/generation"
 
+DISCOVERY = {
+    "summary": (
+        "3D asset generation. Creates a GLB mesh from a prompt or a single "
+        "image, returned base64 encoded. Which input a model accepts depends "
+        "on the model."
+    ),
+    "use_for": [
+        "a 3D model of an object from a text description",
+        "a 3D mesh reconstructed from one image",
+    ],
+    "not_for": ["scenes or animation (use video/generation)", "2D images (use image/generation)"],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/3d/generations",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_generate_3d",
+            "file_fields": [],
+            "media_fields": ["data[].b64_json"],
+            "example": {"model": "<model>", "prompt": "a small wooden chair"},
+        },
+        {
+            "method": "POST",
+            "path": "/v1/3d/from-image",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_generate_3d_from_image",
+            "file_fields": ["image"],
+            "media_fields": ["data[].b64_json"],
+            "example": {"model": "<model>"},
+        },
+    ],
+}
+
 
 def _probe_call(model):
     """Probe-default body: a tiny synthetic 256x256 RGB image, written
@@ -69,6 +106,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "Generation3DBackend",

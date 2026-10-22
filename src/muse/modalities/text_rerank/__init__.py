@@ -26,6 +26,39 @@ from muse.modalities.text_rerank.routes import build_router
 
 MODALITY = "text/rerank"
 
+DISCOVERY = {
+    "summary": (
+        "Reranking. Scores a list of documents against a query so the best "
+        "matches come first."
+    ),
+    "use_for": [
+        "ordering retrieved passages by relevance to a question",
+        "second-stage ranking after vector search",
+    ],
+    "not_for": [
+        "generating vectors (use embedding/text)",
+        "answering questions (use chat/completion)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/rerank",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "cohere:rerank",
+            "mcp_tool": "muse_rerank",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {
+                "model": "<model>",
+                "query": "what is muse",
+                "documents": ["a media server", "a fruit"],
+                "top_n": 2,
+            },
+        },
+    ],
+}
+
 
 # Per-modality probe defaults read by `muse models probe`.
 PROBE_DEFAULTS = {
@@ -45,6 +78,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "RerankResult",

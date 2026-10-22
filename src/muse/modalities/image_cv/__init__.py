@@ -46,6 +46,54 @@ from muse.modalities.image_cv.routes import build_router
 
 MODALITY = "image/cv"
 
+DISCOVERY = {
+    "summary": (
+        "Image analysis primitives. Estimates a depth map, human pose "
+        "keypoints or detects objects in an image. Which routes a model "
+        "serves depends on the model."
+    ),
+    "use_for": [
+        "a depth map for parallax or 3D effects",
+        "locating people, poses and objects in a frame",
+    ],
+    "not_for": ["segmentation masks (use image/segmentation)", "reading text (use image/ocr)"],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/depth",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_estimate_depth",
+            "file_fields": ["image"],
+            "media_fields": ["depth_map"],
+            "example": {"model": "<model>", "response_format": "png16"},
+        },
+        {
+            "method": "POST",
+            "path": "/v1/images/keypoints",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_detect_keypoints",
+            "file_fields": ["image"],
+            "media_fields": [],
+            "example": {"model": "<model>"},
+        },
+        {
+            "method": "POST",
+            "path": "/v1/images/detect",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_detect_objects",
+            "file_fields": ["image"],
+            "media_fields": [],
+            "example": {"model": "<model>", "threshold": 0.5},
+        },
+    ],
+}
+
 
 def _probe_call(model):
     """Probe-default body: small white image, dispatch by capability.
@@ -78,6 +126,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     # Protocols

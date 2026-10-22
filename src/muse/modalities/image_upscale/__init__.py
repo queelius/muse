@@ -21,6 +21,31 @@ from muse.modalities.image_upscale.routes import build_router
 
 MODALITY = "image/upscale"
 
+DISCOVERY = {
+    "summary": (
+        "Super-resolution. Enlarges an image, adding plausible detail, as "
+        "base64 PNG."
+    ),
+    "use_for": ["making a low-resolution image larger and sharper"],
+    "not_for": [
+        "generating new images (use image/generation)",
+        "turning a raster into scalable vectors (use image/vectorization)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/upscale",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_upscale_image",
+            "file_fields": ["image"],
+            "media_fields": ["data[].b64_json"],
+            "example": {"model": "<model>", "scale": 4},
+        },
+    ],
+}
+
 
 def _make_probe_image():
     """Generate a small synthetic test image for `muse models probe`.
@@ -40,6 +65,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "ImageUpscaleClient",

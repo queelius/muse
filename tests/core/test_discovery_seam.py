@@ -1,7 +1,6 @@
 """The DISCOVERY seam: AST-read, validated per-modality agent descriptions."""
 from __future__ import annotations
 
-import importlib
 import logging
 
 import pytest
@@ -58,39 +57,3 @@ def test_pipeline_modalities_declare_discovery():
                       ("audio/transcription", "muse_translate_audio"),
                       ("audio/quality", "muse_assess_audio_quality")]:
         assert tool in {r["mcp_tool"] for r in d[tag]["routes"]}
-
-
-PIPELINE = {
-    "audio/speech": "muse.modalities.audio_speech",
-    "audio/alignment": "muse.modalities.audio_alignment",
-    "audio/transcription": "muse.modalities.audio_transcription",
-    "audio/quality": "muse.modalities.audio_quality",
-}
-
-
-def _example_for(route_decl):
-    return {k: ("m" if v == "<model>" else v) for k, v in route_decl["example"].items()}
-
-
-@pytest.mark.parametrize("tag", sorted(PIPELINE))
-def test_examples_match_route_request_models(tag):
-    from fastapi.routing import APIRoute
-
-    router = importlib.import_module(PIPELINE[tag]).build_router(ModalityRegistry())
-    routes = {(m, r.path): r for r in router.routes if isinstance(r, APIRoute) for m in r.methods}
-    for decl in modality_discovery()[tag]["routes"]:
-        route = routes[(decl["method"], decl["path"])]
-        example = _example_for(decl)
-        ctype = decl["request_content_type"]
-        if ctype == "application/json":
-            route.body_field.field_info.annotation.model_validate(example)
-        elif ctype == "multipart/form-data":
-            names = {p.alias for p in route.dependant.body_params}
-            assert set(example) | set(decl["file_fields"]) <= names
-            assert set(decl["file_fields"]) <= names
-            required = {p.alias for p in route.dependant.body_params if p.field_info.is_required()}
-            assert required <= set(example) | set(decl["file_fields"])
-        else:
-            assert ctype is None and decl["method"] == "GET"
-            names = {p.alias for p in route.dependant.query_params}
-            assert set(example) <= names

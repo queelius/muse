@@ -32,6 +32,31 @@ from muse.modalities.image_embedding.routes import build_router
 
 MODALITY = "image/embedding"
 
+DISCOVERY = {
+    "summary": (
+        "Image embeddings. Turns images into vectors for visual similarity "
+        "search and clustering."
+    ),
+    "use_for": ["finding visually similar images", "indexing an image library"],
+    "not_for": [
+        "describing images in words (use chat/completion with a vision model)",
+        "text vectors (use embedding/text)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/embeddings",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_embed_image",
+            "file_fields": ["input[]"],
+            "media_fields": [],
+            "example": {"model": "<model>", "input": ["data:image/png;base64,<base64>"]},
+        },
+    ],
+}
+
 
 def _make_probe_image():
     """Build a 224x224 mid-gray PIL image used by `muse models probe`.
@@ -52,6 +77,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "ImageEmbeddingResult",

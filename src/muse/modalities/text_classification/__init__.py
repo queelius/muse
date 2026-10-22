@@ -35,6 +35,45 @@ from muse.modalities.text_classification.routes import build_router
 
 MODALITY = "text/classification"
 
+DISCOVERY = {
+    "summary": (
+        "Text classification. Moderation, sentiment and zero-shot labelling "
+        "of text with scored labels."
+    ),
+    "use_for": [
+        "moderating text for policy categories",
+        "labelling text with sentiment or your own candidate labels",
+    ],
+    "not_for": [
+        "typed decisions with explicit criteria (use decision/evaluation)",
+        "audio classification (use audio/classification)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/moderations",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "openai:moderations",
+            "mcp_tool": "muse_moderate",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>", "input": "some text to check"},
+        },
+        {
+            "method": "POST",
+            "path": "/v1/text/classifications",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_classify",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>", "input": "I love this", "top_k": 3},
+        },
+    ],
+}
+
 
 # Per-modality probe defaults read by `muse models probe`. The probe
 # uses the classify() method which both runtimes share. Zero-shot-only
@@ -54,6 +93,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "ClassificationResult",

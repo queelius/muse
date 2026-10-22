@@ -27,6 +27,29 @@ from muse.modalities.text_summarization.routes import build_router
 
 MODALITY = "text/summarization"
 
+DISCOVERY = {
+    "summary": "Summarization. Condenses text to a short, medium or long summary.",
+    "use_for": ["shortening an article, transcript or dialog", "producing a digest of long text"],
+    "not_for": ["open-ended writing (use chat/completion)", "translation (use text/translation)"],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/summarize",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "cohere:summarize",
+            "mcp_tool": "muse_summarize",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {
+                "model": "<model>",
+                "text": "A long passage to condense.",
+                "length": "short",
+            },
+        },
+    ],
+}
+
 
 # Per-modality probe defaults read by `muse models probe`.
 PROBE_DEFAULTS = {
@@ -45,6 +68,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "SummarizationResult",

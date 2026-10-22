@@ -24,6 +24,34 @@ from muse.modalities.image_ocr.routes import build_router
 
 MODALITY = "image/ocr"
 
+DISCOVERY = {
+    "summary": (
+        "Optical character recognition. Reads printed or handwritten text, or "
+        "math, from an image."
+    ),
+    "use_for": [
+        "extracting text from a screenshot, scan or photo of a document",
+        "transcribing handwriting or formulas",
+    ],
+    "not_for": [
+        "describing an image (use chat/completion with a vision model)",
+        "vector output (use image/vectorization)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/ocr",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_ocr",
+            "file_fields": ["image"],
+            "media_fields": [],
+            "example": {"model": "<model>"},
+        },
+    ],
+}
+
 
 def _probe_call(model):
     """Probe-default body: small white image, capped tokens.
@@ -45,6 +73,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "OcrModel",

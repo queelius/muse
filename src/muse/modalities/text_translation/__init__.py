@@ -36,6 +36,57 @@ from muse.modalities.text_translation.routes import build_router as _build_route
 
 MODALITY = "text/translation"
 
+DISCOVERY = {
+    "summary": (
+        "Machine translation. Translates text between languages, "
+        "LibreTranslate compatible; the languages route lists what a model "
+        "supports."
+    ),
+    "use_for": [
+        "translating subtitles, captions or documents",
+        "listing the language pairs a model supports",
+    ],
+    "not_for": [
+        "rewriting or summarizing text",
+        "speech to English text (use audio/transcription translations)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/translate",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "libretranslate",
+            "mcp_tool": "muse_translate",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>", "q": "Hello", "source": "en", "target": "es"},
+        },
+        {
+            "method": "POST",
+            "path": "/translate",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "libretranslate",
+            "mcp_tool": "muse_translate_libre",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>", "q": "Hello", "source": "en", "target": "es"},
+        },
+        {
+            "method": "GET",
+            "path": "/languages",
+            "request_content_type": None,
+            "response_content_type": "application/json",
+            "compat": "libretranslate",
+            "mcp_tool": "muse_list_languages",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>"},
+        },
+    ],
+}
+
 
 # Paths on which the gateway may resolve a default model when the
 # request omits `model` (LibreTranslate clients never send one).
@@ -63,6 +114,7 @@ def build_router(registry) -> APIRouter:
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "MODEL_OPTIONAL_PATHS",
     "PROBE_DEFAULTS",
     "build_router",

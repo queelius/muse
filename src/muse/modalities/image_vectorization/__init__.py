@@ -21,6 +21,31 @@ from muse.modalities.image_vectorization.routes import build_router
 MODALITY = "image/vectorization"
 MODEL_OPTIONAL_PATHS = ("/v1/images/vectorize",)
 
+DISCOVERY = {
+    "summary": (
+        "Raster to SVG. Converts an icon, logo, flat illustration or diagram "
+        "into static SVG markup. Not suited to photographs."
+    ),
+    "use_for": [
+        "turning a logo or icon bitmap into editable SVG",
+        "vector diagrams for downstream tools",
+    ],
+    "not_for": ["photographs", "enlarging a raster (use image/upscale)"],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/vectorize",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_vectorize_image",
+            "file_fields": ["image"],
+            "media_fields": [],
+            "example": {"model": "<model>", "response_format": "json"},
+        },
+    ],
+}
+
 
 def _probe_call(model):
     from PIL import Image, ImageDraw
@@ -45,6 +70,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "MODEL_OPTIONAL_PATHS",
     "PROBE_DEFAULTS",
     "build_router",

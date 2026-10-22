@@ -40,10 +40,14 @@ from muse.modalities.image_generation.image_input import (
 from muse.modalities.model_3d_generation.codec import encode_3d_response
 
 
-try:
-    from PIL import Image as _PIL_Image
-except Exception:  # noqa: BLE001
-    _PIL_Image = None  # type: ignore[assignment]
+def _pillow_available() -> bool:
+    """Pillow is imported lazily so the router builds under muse[server]
+    alone (the worker venv carries Pillow via the model's pip_extras)."""
+    try:
+        import PIL  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 MODALITY = "3d/generation"
@@ -195,7 +199,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # before entering the worker thread. All runtimes (TripoSR,
         # TRELLIS, Hunyuan3D) accept PIL.Image.Image; the unified contract
         # avoids runtime-specific path vs. PIL dispatching.
-        if _PIL_Image is None:
+        if not _pillow_available():
             return error_response(
                 500, "internal_error",
                 "Pillow is not installed in this worker; cannot decode "

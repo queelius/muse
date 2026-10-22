@@ -30,6 +30,38 @@ from muse.modalities.audio_classification.routes import build_router
 
 MODALITY = "audio/classification"
 
+DISCOVERY = {
+    "summary": (
+        "Audio classification. Scores an audio clip against a label set and "
+        "returns the top labels with scores: sound events, emotion, language "
+        "or speech commands, depending on the model."
+    ),
+    "use_for": [
+        (
+            "identifying what sounds occur in a clip (speech, music, dog bark, "
+            "siren)"
+        ),
+        "detecting emotion or spoken language in a recording",
+    ],
+    "not_for": [
+        "transcribing words (use audio/transcription)",
+        "judging production quality (use audio/quality)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/audio/classifications",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_classify_audio",
+            "file_fields": ["file"],
+            "media_fields": [],
+            "example": {"model": "<model>", "top_k": 5},
+        },
+    ],
+}
+
 
 def _probe_call(model):
     """Classify 1 second of 16kHz silence (temp WAV always removed)."""
@@ -45,6 +77,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "AudioClassificationResult",

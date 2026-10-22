@@ -18,6 +18,62 @@ from muse.modalities.image_generation.routes import build_router
 
 MODALITY = "image/generation"
 
+DISCOVERY = {
+    "summary": (
+        "Still image generation. Creates images from a prompt, edits regions "
+        "with a mask, or makes variations of an image, returned as base64 "
+        "PNG."
+    ),
+    "use_for": [
+        "illustrations, concept art and backgrounds from a prompt",
+        "inpainting a masked region of an image",
+        "alternate takes on an existing image",
+    ],
+    "not_for": [
+        "animation or video (use image/animation or video/generation)",
+        "enlarging an image faithfully (use image/upscale)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/images/generations",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "openai:images.generations",
+            "mcp_tool": "muse_generate_image",
+            "file_fields": ["image"],
+            "media_fields": ["data[].b64_json"],
+            "example": {
+                "model": "<model>",
+                "prompt": "a red fox in snow, watercolor",
+                "size": "512x512",
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/v1/images/edits",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": "openai:images.edits",
+            "mcp_tool": "muse_edit_image",
+            "file_fields": ["image", "mask"],
+            "media_fields": ["data[].b64_json"],
+            "example": {"model": "<model>", "prompt": "replace the sky with a sunset"},
+        },
+        {
+            "method": "POST",
+            "path": "/v1/images/variations",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": "openai:images.variations",
+            "mcp_tool": "muse_vary_image",
+            "file_fields": ["image"],
+            "media_fields": ["data[].b64_json"],
+            "example": {"model": "<model>"},
+        },
+    ],
+}
+
 # Per-modality probe defaults read by `muse models probe`. Defaults to
 # the model's own default size + steps; backends honor capabilities.
 PROBE_DEFAULTS = {
@@ -27,6 +83,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "GenerationsClient",

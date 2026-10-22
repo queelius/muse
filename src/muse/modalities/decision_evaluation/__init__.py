@@ -37,6 +37,48 @@ from muse.modalities.decision_evaluation.routes import build_router as _build_ro
 
 MODALITY = "decision/evaluation"
 
+DISCOVERY = {
+    "summary": (
+        "Typed decisions. Answers Choice, Score and Noul questions about a "
+        "state with complete probability distributions instead of generated "
+        "text. Text only; the model must be named."
+    ),
+    "use_for": [
+        (
+            "classifying or rating a piece of text against explicit criteria with "
+            "calibrated probabilities"
+        ),
+        "routing or triage where the score distribution matters",
+    ],
+    "not_for": ["free-form generation (use chat/completion)", "images or audio inputs"],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/systemone",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "typesafe:systemone",
+            "mcp_tool": "muse_decide",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {
+                "model": "<model>",
+                "state": "Customer message: I was charged twice this month.",
+                "questions": {
+                    "team": {
+                        "type": "choice",
+                        "instructions": "Which team should handle this?",
+                        "criteria": {
+                            "billing": "Charges and refunds",
+                            "technical": "Software faults",
+                        },
+                    },
+                },
+            },
+        },
+    ],
+}
+
 # Literals: read by muse.core.discovery via AST, without importing.
 CONCURRENCY_CEILING = {"max_concurrency": 1, "max_queue_depth": 32}
 STRICT_REQUEST_PARSERS = {
@@ -58,6 +100,7 @@ def build_router(registry) -> APIRouter:
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "CONCURRENCY_CEILING",
     "STRICT_REQUEST_PARSERS",
     "CANCEL_ON_DISCONNECT_PATHS",
