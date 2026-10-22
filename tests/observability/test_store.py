@@ -113,3 +113,20 @@ def test_close_is_idempotent_and_later_operations_fail_clearly(tmp_path):
         store.summary_counts()
     with pytest.raises(RuntimeError, match="telemetry store is closed"):
         store.insert_many([event_to_row("request", 1.0, model_id="m")])
+
+
+def test_last_cold_load_seconds_per_model(store):
+    store.insert_many([
+        event_to_row("model_load", 100.0, model_id="a", cold_load_seconds=12.0),
+        event_to_row("model_load", 200.0, model_id="a", cold_load_seconds=None),
+        event_to_row("model_load", 150.0, model_id="b", cold_load_seconds=7.5),
+        event_to_row("model_load", 90.0, model_id="b", cold_load_seconds=99.0),
+    ])
+    assert store.last_cold_load_seconds() == {"a": 12.0, "b": 7.5}
+
+
+def test_last_cold_load_seconds_on_closed_store_raises(tmp_path):
+    store = TelemetryStore(tmp_path / "t.db")
+    store.close()
+    with pytest.raises(RuntimeError, match="telemetry store is closed"):
+        store.last_cold_load_seconds()

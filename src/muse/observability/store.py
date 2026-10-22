@@ -82,6 +82,22 @@ _SERIES_SQL = {
 }
 
 
+_LAST_COLD_LOAD_SQL = """
+    SELECT model_id, cold_load_seconds FROM (
+        SELECT
+            model_id,
+            cold_load_seconds,
+            ROW_NUMBER() OVER (
+                PARTITION BY model_id ORDER BY ts DESC
+            ) AS rn
+        FROM events
+        WHERE type = 'model_load'
+          AND model_id IS NOT NULL
+          AND cold_load_seconds IS NOT NULL
+    )
+    WHERE rn = 1
+"""
+
 class TelemetryStore:
     """SQLite-backed telemetry event store.
 
@@ -171,6 +187,17 @@ class TelemetryStore:
             self._require_open_locked()
             (total,) = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()
         return {"total": total}
+
+    def last_cold_load_seconds(self) -> dict[str, float]:
+        """Newest non-null ``cold_load_seconds`` of each model's ``model_load``.
+
+        Models whose only loads lack a measured cold-load time are omitted.
+        A closed store raises RuntimeError, like the other read methods.
+        """
+        with self._lock:
+            self._require_open_locked()
+            rows = self._conn.execute(_LAST_COLD_LOAD_SQL).fetchall()
+        return {model_id: seconds for model_id, seconds in rows}
 
     def close(self) -> None:
         with self._lock:
