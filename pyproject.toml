@@ -67,10 +67,12 @@ Issues = "https://github.com/queelius/muse/issues"
 # missing). Without this entry, per-model venvs that install
 # muse[server] would crash when discover_modalities mounts the
 # audio_transcription router.
-server = ["fastapi", "uvicorn", "sse-starlette>=3.0.0,<3.1.0", "httpx", "python-multipart", "psutil>=5.9", "nvidia-ml-py>=12.0", "mcp>=1.8.0,<2"]
+server = ["fastapi", "uvicorn", "sse-starlette>=3.0.0,<3.1.0", "httpx", "python-multipart", "psutil>=5.9", "nvidia-ml-py>=12.0", "mcp>=1.19,<2"]
 # Light install for the local `muse mcp` program (an HTTP client of a muse
-# server): no fastapi, no ML deps. `uvx --from "museq[mcp]" muse mcp`.
-mcp = ["httpx", "mcp>=1.8.0,<2"]
+# server): no fastapi, no ML deps; Pillow for image previews and sizes.
+# `uvx --from "museq[mcp]" muse mcp`. mcp>=1.19: older SDKs mishandle a
+# returned CallToolResult with structuredContent.
+mcp = ["httpx", "mcp>=1.19,<2", "pillow"]
 
 # Audio modality (TTS)
 audio = [

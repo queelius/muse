@@ -269,7 +269,7 @@ class MCPServer:
             )
         except ImportError as exc:
             raise RuntimeError(
-                "MCP HTTP transport requires mcp>=1.8.0,<2; reinstall "
+                "MCP HTTP transport requires mcp>=1.19,<2; reinstall "
                 "the mcp extra with: pip install 'museq[mcp]'"
             ) from exc
         from starlette.applications import Starlette
@@ -373,7 +373,7 @@ def _to_result(blocks: list[dict]) -> Any:
         elif kind == "image":
             content.append(t.ImageContent(type="image", data=b.get("data", ""),
                                           mimeType=b.get("mimeType", "image/png")))
-        elif kind == "resource_link" and hasattr(t, "ResourceLink"):
+        elif kind == "resource_link":
             content.append(t.ResourceLink(
                 type="resource_link", uri=b["uri"], name=b.get("name", b["uri"]),
                 mimeType=b.get("mimeType"), size=b.get("size")))

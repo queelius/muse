@@ -350,3 +350,78 @@ def test_routes_with_no_serving_model_take_free_model(caps_doc, openapi_doc):
     schema = _gen(caps_doc, openapi_doc, "muse_assess_audio_quality").tool.inputSchema
     assert "enum" not in schema["properties"]["model"]
     assert "model" not in schema["required"]
+
+
+# ---- review fixes ----
+
+def _form_fields(body: bytes) -> list[tuple[str, str]]:
+    """(name, value) for each non-file part of a multipart body."""
+    import re
+
+    return [(m.group(1).decode(), m.group(2).decode())
+            for m in re.finditer(rb'name="([^"]+)"\r\n\r\n(.*?)\r\n--', body, re.S)]
+
+
+def test_property_names_are_mcp_safe(caps_doc, openapi_doc):
+    import re
+
+    for g in generate_tools(caps_doc, openapi_doc):
+        for name in g.tool.inputSchema["properties"]:
+            assert re.match(r"^[A-Za-z0-9_.-]{1,64}$", name), (g.name, name)
+
+
+def test_multipart_list_is_sent_as_repeated_fields(caps_doc, openapi_doc, fake_http,
+                                                   media_env):
+    (media_env / "a.wav").write_bytes(_wav())
+    seen = {}
+
+    def handler(request):
+        seen["fields"] = _form_fields(request.read())
+        return httpx.Response(200, json={"text": "hi"})
+
+    gen = _gen(caps_doc, openapi_doc, "muse_transcribe")
+    assert gen.tool.inputSchema["properties"]["timestamp_granularities"]["type"] == "array"
+    call_generated(fake_http(handler), gen, {
+        "model": "whisper-base", "file_path": "a.wav", "response_format": "verbose_json",
+        "timestamp_granularities": ["word", "segment"]})
+    assert [v for k, v in seen["fields"] if k == "timestamp_granularities[]"] == [
+        "word", "segment"]
+
+
+def test_alignment_header_lands_in_response(caps_doc, openapi_doc, fake_http, media_env):
+    alignment = [{"word": "hi", "start": 0.0, "end": 0.4}]
+    client = fake_http(lambda r: httpx.Response(200, content=_wav(), headers={
+        "content-type": "audio/wav", "x-alignment": json.dumps(alignment)}))
+    blocks = call_generated(client, _gen(caps_doc, openapi_doc, "muse_speak"),
+                            {"model": "kokoro-82m", "input": "hi", "align": True})
+    data = _structured(blocks)
+    jsonschema.validate(data, OUTPUT_SCHEMA)
+    assert data["response"] == {"alignment": alignment}
+    assert len(data["files"]) == 1
+    assert '"alignment"' in blocks[0]["text"]
+
+
+def test_preview_unavailable_is_reported(caps_doc, openapi_doc, fake_http, media_env,
+                                         monkeypatch):
+    from muse.mcp import generated
+
+    monkeypatch.setattr(generated.files, "preview_png", lambda data: None)
+    monkeypatch.setattr(generated, "_has_pillow", lambda: False)
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\0" * 16).decode()
+    client = fake_http(lambda r: httpx.Response(200, json={"data": [{"b64_json": png}]}))
+    blocks = call_generated(client, _gen(caps_doc, openapi_doc, "muse_generate_image"),
+                            {"model": "sd-turbo", "prompt": "x", "preview": True})
+    assert not any(b["type"] == "image" for b in blocks)
+    assert "preview unavailable: Pillow not installed" in blocks[0]["text"]
+
+
+def test_out_path_names_the_spill_on_json_only_routes(caps_doc, openapi_doc, fake_http,
+                                                      media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_embed_text")
+    assert "too large" in gen.tool.inputSchema["properties"]["out_path"]["description"]
+    body = {"data": [{"embedding": [0.123456789] * 3000}]}
+    client = fake_http(lambda r: httpx.Response(200, json=body))
+    blocks = call_generated(client, gen, {"model": "all-minilm-l6-v2", "input": ["a"],
+                                          "out_path": "emb.json"})
+    assert _structured(blocks)["files"][0]["path"] == str(media_env / "emb.json")
+    assert json.load(open(media_env / "emb.json")) == body

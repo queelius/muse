@@ -38,6 +38,7 @@ import copy
 import json
 import os
 import pathlib
+import re
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -50,6 +51,10 @@ DESCRIBE = "muse_describe"
 LARGE_JSON_CHARS = 20_000
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 _REF = "#/components/schemas/"
+# Response headers that carry data (not provenance) -> key in ``response``.
+DATA_HEADERS = {"x-alignment": "alignment"}
+# Property names MCP clients accept (the Claude API enforces this pattern).
+_PROP_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MAX_DEPTH = 64  # JSON nesting; bounds a cyclic $ref
 
 _FILE_SCHEMA = {
@@ -83,6 +88,7 @@ class GeneratedTool:
     required_files: tuple[str, ...] = ()
     fixed: dict = field(default_factory=dict)   # body values always sent
     image_output: bool = False
+    aliases: dict = field(default_factory=dict)  # schema name -> wire name
 
 
 # ---- schema generation ----
@@ -185,6 +191,14 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     props = {k: {kk: vv for kk, vv in (v if isinstance(v, dict) else {}).items()
                  if kk != "title"} for k, v in (base.get("properties") or {}).items()}
     required = [r for r in base.get("required") or [] if r in props]
+    aliases = {}
+    for wire in [k for k in props if not _PROP_NAME.match(k)]:
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", wire).strip("_")[:64] or "field"
+        if name in props:
+            continue
+        props[name] = props.pop(wire)
+        aliases[name] = wire
+        required = [name if r == wire else r for r in required]
     required_files: list[str] = []
     for f in route.get("file_fields") or []:
         many = f.endswith("[]")
@@ -208,8 +222,12 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     else:
         required = [r for r in required if r != "model"]
     props["model"] = model_prop
-    props["out_path"] = {"type": "string", "description": "File for the media "
-                         "output (later outputs get -1, -2... suffixes)."}
+    has_media = bool(route.get("media_fields")) or not (
+        route.get("response_content_type") or "").endswith("json")
+    props["out_path"] = {"type": "string", "description": (
+        "File for the media output (later outputs get -1, -2... suffixes)."
+        if has_media else "File for the JSON result when it is too large to "
+        "return inline (over 20,000 characters).")}
     image_output = _is_image_output(mod["modality"], route)
     if image_output:
         props["preview"] = {"type": "boolean", "default": False, "description":
@@ -222,7 +240,7 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
                       inputSchema=schema, outputSchema=OUTPUT_SCHEMA)
     return GeneratedTool(name=route["mcp_tool"], tool=tool, route=copy.deepcopy(route),
                          modality=mod["modality"], required_files=tuple(required_files),
-                         fixed=fixed, image_output=image_output)
+                         fixed=fixed, image_output=image_output, aliases=aliases)
 
 
 def generate_tools(capabilities: dict, openapi: dict) -> list[GeneratedTool]:
@@ -328,7 +346,10 @@ def _read(path: str, name: str) -> tuple[bytes, str]:
     return data, mime
 
 
-def _form(value: Any) -> str:
+def _form(value: Any) -> str | list[str]:
+    """A multipart form value; a list becomes repeated fields."""
+    if isinstance(value, list):
+        return [v if isinstance(v, str) else json.dumps(v) for v in value]
     return value if isinstance(value, str) else json.dumps(value)
 
 
@@ -341,7 +362,7 @@ def call_generated(client: Any, gen: GeneratedTool, args: dict) -> list[dict]:
     method = route["method"].upper()
     multipart = route.get("request_content_type") == "multipart/form-data"
     parts = _take_files(gen, args, multipart)
-    body = {k: v for k, v in args.items() if v is not None}
+    body = {gen.aliases.get(k, k): v for k, v in args.items() if v is not None}
     if method == "GET":
         resp = client.call(route, params=body)
     elif multipart:
@@ -457,7 +478,9 @@ def _maybe_spill(body: Any, writer: _Writer) -> Any:
     text = json.dumps(body, ensure_ascii=False)
     if len(text) <= LARGE_JSON_CHARS:
         return body
-    wf = files.write_output(text.encode("utf-8"), "application/json", out_path=None)
+    # out_path names the spill only when no media took it.
+    target = writer.out_path if not writer.written else None
+    wf = files.write_output(text.encode("utf-8"), "application/json", out_path=target)
     writer.written.append((wf, b""))
     return {"written_to": wf.path, "chars": len(text), "outline": _outline(body)}
 
@@ -491,8 +514,17 @@ def _blocks(structured: dict, writer: _Writer, *, preview: bool) -> list[dict]:
         if png:
             blocks.append({"type": "image", "mimeType": "image/png",
                            "data": base64.b64encode(png).decode("ascii")})
+        elif image:
+            blocks[0]["text"] += "\npreview unavailable: " + (
+                "not a raster image" if _has_pillow() else "Pillow not installed")
     blocks.append({"type": "structured", "data": structured})
     return blocks
+
+
+def _has_pillow() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("PIL") is not None
 
 
 def _render(resp: Any, gen: GeneratedTool, *, out_path: str | None,
@@ -507,6 +539,13 @@ def _render(resp: Any, gen: GeneratedTool, *, out_path: str | None,
     else:
         writer.write(resp.content, ctype or _sniff(resp.content))
         response = None
+    for header, key in DATA_HEADERS.items():
+        if header in resp.headers:
+            try:
+                value = json.loads(resp.headers[header])
+            except ValueError:
+                value = resp.headers[header]
+            response = {**(response if isinstance(response, dict) else {}), key: value}
     structured = {
         "model": resp.headers.get("x-muse-model") or model,
         "revision": resp.headers.get("x-muse-model-revision"),
