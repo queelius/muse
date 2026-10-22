@@ -79,3 +79,65 @@ async def test_without_extra_headers_node_headers_pass_through():
     h = _hdrs(await _run("buffered", None))
     assert h[b"x-muse-model-revision"] == [b"worker-value"]
     assert h[b"x-muse-model"] == [b"worker-model"]
+
+
+# --- through-gateway wiring -------------------------------------------------
+import asyncio
+import threading
+
+from fastapi.testclient import TestClient
+
+from muse.cli_impl import gateway
+from muse.cli_impl.gateway import build_gateway
+from tests.cli_impl.test_gateway_lazy import (
+    _isolate_catalog,  # noqa: F401  (autouse fixture)
+    _make_state_with_director,
+    _patch_get_manifest,
+    _wire_async_client_json,
+)
+
+
+def test_gateway_route_stamps_revision_headers(monkeypatch):
+    monkeypatch.setattr(
+        gateway, "lookup_revision",
+        lambda m: ModelRevision(m, REV, (), None),
+    )
+    state = _make_state_with_director(acquire_port=9001)
+    client = TestClient(build_gateway(state=state))
+    with _patch_get_manifest(), \
+         patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
+        _wire_async_client_json(mock_cls)
+        r = client.post(
+            "/v1/audio/speech", json={"input": "hi", "model": "fake-model"},
+        )
+    assert r.status_code == 200
+    assert r.headers["x-muse-model"] == "fake-model"
+    assert r.headers["x-muse-model-revision"] == REV
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_revision_lookup_holds_no_refcount_or_slot(monkeypatch):
+    started = threading.Event()
+    gate_ev = threading.Event()
+
+    def slow_lookup(m):
+        started.set()
+        gate_ev.wait(2)
+        return ModelRevision(m, REV, (), None)
+
+    monkeypatch.setattr(gateway, "lookup_revision", slow_lookup)
+    state = _make_state_with_director()
+    with _patch_get_manifest():
+        task = asyncio.create_task(
+            gateway._route_via_director(
+                MagicMock(), "v1/audio/speech", "fake-model", state, 1.0,
+            )
+        )
+        await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate_ev.set()
+    # Nothing was acquired before the lookup, so nothing can leak.
+    state.director.acquire.assert_not_called()
+    state.director.release.assert_not_called()

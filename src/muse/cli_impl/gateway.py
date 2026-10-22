@@ -1181,6 +1181,12 @@ async def _route_via_director(
     # queue delay with load time. gate_wait_seconds and
     # capacity_wait_seconds are each measured tightly around their own
     # await below, not via a single wall-clock span across this whole block.
+    # Resolve the revision BEFORE taking a gate slot or director refcount: a
+    # cancel during this await must not leak either (nothing is held yet).
+    rev_headers = revision_headers(
+        await asyncio.to_thread(lookup_revision, model_id)
+    )
+
     queued_ms = 0.0
     queue_budget = config.get("server.queue_timeout_seconds") or 0.0
     queue_t0 = time.monotonic()
@@ -1306,9 +1312,6 @@ async def _route_via_director(
     target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
     t0 = time.monotonic()
     try:
-        rev_headers = revision_headers(
-            await asyncio.to_thread(lookup_revision, model_id)
-        )
         response = await _forward(
             request, target_url, timeout,
             release=_release,
