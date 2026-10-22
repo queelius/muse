@@ -118,3 +118,34 @@ def test_wav_duration():
         w.writeframes(struct.pack("<h", 0) * 4000)
     assert media_facts(buf.getvalue(), "audio/wav")["duration_seconds"] == 0.5
     assert media_facts(b"junk", "audio/wav") == {}
+
+
+def test_parent_swapped_to_symlink_before_replace_refused(tmp_path, monkeypatch):
+    import tempfile as _tf
+    from muse.mcp import files
+    work = tmp_path / "work"
+    outside = tmp_path / "outside"
+    work.mkdir()
+    outside.mkdir()
+    monkeypatch.chdir(work)
+    real_mkstemp = _tf.mkstemp
+
+    def swapping(*a, **kw):
+        res = real_mkstemp(*a, **kw)
+        parent = work / "muse-output"
+        parent.rename(work / "moved")
+        parent.symlink_to(outside)
+        return res
+
+    monkeypatch.setattr(files.tempfile, "mkstemp", swapping)
+    with pytest.raises(ValueError, match="not within an allowed prefix"):
+        write_output(b"payload", "image/png", out_path=None)
+    assert list(outside.iterdir()) == []
+
+
+def test_fifo_refused_without_hanging(tmp_path, monkeypatch):
+    import os
+    monkeypatch.chdir(tmp_path)
+    os.mkfifo(tmp_path / "pipe")
+    with pytest.raises(ValueError, match="regular file"):
+        read_input("pipe", field="file", max_bytes=10)

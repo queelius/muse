@@ -52,9 +52,10 @@ def _output_dir() -> str:
     return str(config.get("mcp.output_dir") or "./muse-output")
 
 
-def _check_within(path: str, *, label: str) -> str:
+def _check_within(path: str, *, label: str,
+                  prefixes: list[str] | None = None) -> str:
     real = _real(path)
-    for prefix in allowed_prefixes():
+    for prefix in (prefixes if prefixes is not None else allowed_prefixes()):
         if real == prefix or real.startswith(prefix.rstrip(os.sep) + os.sep):
             return real
     raise ValueError(
@@ -101,7 +102,10 @@ def _open_regular_nofollow(path: str) -> int:
                           dir_fd=cur)
             os.close(cur)
             cur = nxt
-        fd = os.open(parts[-1], os.O_RDONLY | nofollow | cloexec, dir_fd=cur)
+        # O_NONBLOCK so a FIFO cannot hang the open before the fstat check.
+        fd = os.open(parts[-1],
+                     os.O_RDONLY | nofollow | cloexec | os.O_NONBLOCK,
+                     dir_fd=cur)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise OSError("path does not name a regular file")
@@ -128,22 +132,36 @@ class WrittenFile:
 def write_output(data: bytes, mime: str, *, out_path: str | None) -> WrittenFile:
     """Write ``data`` atomically; default name is ``<sha256[:16]><ext>``."""
     digest = hashlib.sha256(data).hexdigest()
+    # Snapshot the prefixes once: the default prefix includes the (relative)
+    # output dir, which must not be re-resolved after a symlink swap.
+    prefixes = allowed_prefixes()
     if out_path:
-        target = _check_within(out_path, label="out_path")
+        target = _check_within(out_path, label="out_path", prefixes=prefixes)
     else:
         base = mime.split(";")[0].strip().lower()
         ext = _EXT_FALLBACK.get(base) or mimetypes.guess_extension(base) or ""
         target = os.path.join(_real(_output_dir()), digest[:16] + ext)
-        _check_within(target, label="output path")
+        _check_within(target, label="output path", prefixes=prefixes)
     parent = os.path.dirname(target)
     os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".muse-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            os.fchmod(f.fileno(), 0o644)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp, 0o644)
+        # Re-check immediately before the replace: an ancestor swapped for a
+        # symlink since the first check would otherwise redirect the write.
+        # A small race remains between this check and os.replace; that is
+        # acceptable because this is a guardrail for an agent acting as the
+        # same local user, not a privilege boundary.
+        real_parent = os.path.realpath(parent)
+        _check_within(real_parent, label="output directory", prefixes=prefixes)
+        if os.path.dirname(os.path.realpath(tmp)) != real_parent:
+            raise ValueError(
+                f"output directory {parent!r} is not within an allowed prefix "
+                "(changed during write)")
         os.replace(tmp, target)
     except BaseException:
         try:
