@@ -75,27 +75,41 @@ tool result (below).
    claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp
    ```
 
-2. Call `muse_describe`: returns the capabilities document (optionally
-   narrowed by `modality` or `model`) for the live server.
+2. Call `muse_describe`: returns the capabilities document for the live
+   server. Narrowed by `modality` or `model`, it comes back inline. Unfiltered
+   and over 20,000 characters (a full server), the full document is written
+   to a file and the result is an inline index: per modality its summary,
+   tool names and model ids; per model its id, modality, license,
+   quality_tier, summary and loaded state.
 3. Call `muse_speak` with `model`, `input` and `out_path`. The result is
    `{path, sha256, model, revision}` for the written file. Pass
    `preview: true` on image tools to also get one inline 512 px PNG.
 
-`muse mcp` is a thin local HTTP client. At start it reads `/openapi.json` and
-`/v1/capabilities` and generates one tool per inference route (35 on a full
-server), so tools track the server: a new route or model appears without a
-client release. It lists `muse_describe`, the generated tools, and the 11
-admin tools. If the server is unreachable at start, only `muse_describe` and
-the admin tools are listed (never stale generated tools). Behaviour:
+`muse mcp` is a thin local HTTP client. It reads `/openapi.json` and
+`/v1/capabilities` (cached 30 s) and generates one tool per inference route,
+so tools track the server: a new route or model appears without a client
+release. It lists `muse_describe`, the generated tools, and the 11 admin
+tools. If the server is unreachable, only `muse_describe` and the admin tools
+are listed (never stale generated tools). The server advertises
+`tools.listChanged` and notifies a session once when the tool set changes
+(including the server coming up after the client connected), so clients
+re-list. A `model` argument is a string whose description lists the serving
+models, not an enum, so a model enabled mid-session is accepted. Behaviour:
 
 - Media outputs are written to files and returned as path, sha256, model and
   revision, never inline bytes. `out_path` names the file; otherwise a
   content-named file goes in `mcp.output_dir` (`MUSE_MCP_OUTPUT_DIR`,
-  default `./muse-output`).
-- File inputs take a local `<name>_path` (under the current directory or
-  `mcp.output_dir`, plus any `fetch.mcp_allowed_path_prefixes`). JSON `*_url`
-  inputs are passed to the server, whose SSRF guard fetches them. Base64
-  inputs are not supported.
+  default `./muse-output`, relative to the MCP process cwd; when the cwd is
+  `/`, as Claude Desktop launches it, `~/muse-output`). SVG from
+  `muse_vectorize_image` is written as an `.svg` file too.
+- File inputs take a local `<name>_path`. With
+  `fetch.mcp_allowed_path_prefixes` (`MUSE_MCP_ALLOWED_PATH_PREFIXES`) empty,
+  paths under the current directory or `mcp.output_dir` are allowed; a cwd of
+  `/` is never allowed implicitly. A set value replaces that default with its
+  colon-separated directories, and `mcp.output_dir` stays writable either
+  way. Multipart `*_url` inputs are fetched by the MCP process through muse's
+  SSRF guard; JSON `*_url` inputs are passed to the server, whose SSRF guard
+  fetches them. Base64 inputs are not supported.
 - `X-Alignment` from `audio/speech align=true` is surfaced as
   `response.alignment`.
 - Tool descriptions come from the capabilities document, so they carry the

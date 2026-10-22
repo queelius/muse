@@ -637,10 +637,11 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
 {
   "mcpServers": {
     "muse": {
-      "command": "muse",
-      "args": ["mcp"],
+      "command": "uvx",
+      "args": ["--from", "museq[mcp]", "muse", "mcp"],
       "env": {
         "MUSE_SERVER": "http://localhost:8000",
+        "MUSE_MCP_OUTPUT_DIR": "/Users/you/muse-output",
         "MUSE_ADMIN_TOKEN": "your-admin-token-here"
       }
     }
@@ -648,11 +649,18 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
 }
 ```
 
+Claude Desktop starts stdio servers with cwd `/`, so set
+`MUSE_MCP_OUTPUT_DIR` to an absolute directory (without it, outputs go to
+`~/muse-output`). With cwd `/` no path input is readable except files under
+the output dir; to pass local files, set `MUSE_MCP_ALLOWED_PATH_PREFIXES` to
+a colon-separated list of directories (it replaces the cwd + output-dir
+default; the output dir stays writable).
+
 Tools split into two groups:
 
 **Admin (11):** `muse_list_models`, `muse_get_model_info`, `muse_search_models`, `muse_pull_model`, `muse_remove_model`, `muse_enable_model`, `muse_disable_model`, `muse_probe_model`, `muse_get_memory_status`, `muse_get_workers`, `muse_get_jobs`. Long-running ops (pull, probe, enable) return a `job_id` and the LLM polls `muse_get_jobs` to track progress.
 
-**Inference:** generated from the server at start, one per route (for example `muse_chat`, `muse_speak`, `muse_transcribe`, `muse_generate_image`, `muse_align`, `muse_moderate`). Media outputs are written to files (`out_path`, else `mcp.output_dir`) and returned as path, sha256, model and revision; path inputs are limited to the working directory, `mcp.output_dir` and `fetch.mcp_allowed_path_prefixes`; `*_url` inputs are fetched by the server.
+**Inference:** generated from the server at start, one per route (for example `muse_chat`, `muse_speak`, `muse_transcribe`, `muse_generate_image`, `muse_align`, `muse_moderate`). Media outputs are written to files (`out_path`, else `mcp.output_dir`) and returned as path, sha256, model and revision. Path inputs are limited to the working directory (never `/`) and `mcp.output_dir`, or, when `fetch.mcp_allowed_path_prefixes` is set, to its directories instead (the output dir stays writable). Multipart `*_url` inputs are fetched by the MCP process through the SSRF guard; JSON `*_url` inputs are fetched by the server. An unfiltered `muse_describe` on a full server writes the document to a file and returns an index; with `modality` or `model` it returns the document inline.
 
 ## Federation
 

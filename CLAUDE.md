@@ -1404,12 +1404,19 @@ same `mcp`):
     claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp
 
 It lists `muse_describe` (the server's capabilities document), the inference
-tools generated at start from the server's `/openapi.json` and
-`/v1/capabilities` (35 today; `muse.mcp.generated`), and the 11 unchanged admin
-tools (`muse.mcp.tools.admin`, wrapping `/v1/admin/*`, gated by
-`MUSE_ADMIN_TOKEN`). If the server is unreachable at start, only
-`muse_describe` and the admin tools are listed, never stale generated tools.
-Tool counts are deliberately not documented elsewhere; they follow the server.
+tools generated from the server's `/openapi.json` and `/v1/capabilities`
+(`muse.mcp.generated`; cached 30 s), and the 11 unchanged admin tools
+(`muse.mcp.tools.admin`, wrapping `/v1/admin/*`, gated by `MUSE_ADMIN_TOKEN`).
+If the server is unreachable, only `muse_describe` and the admin tools are
+listed, never stale generated tools. Tool counts are deliberately not
+documented; they follow the server. The server advertises `tools.listChanged`
+and sends `notifications/tools/list_changed` once per change (a model or
+route added or removed, or the server coming up) to a session that has listed
+tools: checked after each tool call / resource read, and every 30 s by a
+stdio background watcher. HTTP mode is stateless, so it gets no push.
+`model` is a plain string whose description lists the serving models, never
+an `enum` (clients validate against their cached schema, so an enum would
+reject a model enabled mid-session).
 
 ```
 src/muse/mcp/
@@ -1432,16 +1439,28 @@ I/O conventions:
   `mcp.output_dir` (env `MUSE_MCP_OUTPUT_DIR`, default `./muse-output`).
   `preview: true` on image tools adds one inline 512 px PNG. `X-Alignment` is
   surfaced as `response.alignment`.
-- Path inputs (`<name>_path`) are allowed under the MCP process cwd and
-  `mcp.output_dir`; `fetch.mcp_allowed_path_prefixes` adds more. (An empty
-  setting used to disable path inputs; it now means cwd plus output dir.)
-- JSON `*_url` inputs pass through to the server's SSRF-guarded fetch.
+- A DISCOVERY route may declare `text_media_fields` (`{json path: mime}`)
+  for plain-text media; vectorize's `svg` is written as a UTF-8 `.svg` file.
+- Path inputs (`<name>_path`) and `out_path` are allowed under the MCP
+  process cwd and `mcp.output_dir` when `fetch.mcp_allowed_path_prefixes` is
+  empty. A set value REPLACES both (colon-separated); `mcp.output_dir` is
+  always writable regardless. A cwd of `/` (Claude Desktop) is never an
+  implicit prefix, and a relative `mcp.output_dir` then resolves under the
+  home directory (`~/muse-output`), not `/muse-output`. (An empty setting
+  used to disable path inputs; it now means cwd plus output dir.)
+- `*_url` inputs on multipart routes are fetched by the MCP process (through
+  `muse.core.net_fetch`'s SSRF guard) and uploaded; `*_url` inputs on JSON
+  routes pass through to the server's SSRF-guarded fetch.
+- An unfiltered `muse_describe` past 20,000 chars writes the full document
+  to a file and returns an inline index (per modality: summary, tools,
+  model ids; per model: id, modality, license, quality_tier, summary,
+  loaded). With `modality` or `model` it returns the document inline.
 
 Behaviour changes from the old hand-written tools: `muse_classify` maps to
 `/v1/text/classifications` and `/v1/moderations` is now `muse_moderate`;
-`muse_decide` is validated server-side (strict parser); `*_url` inputs are
-fetched by the server, not the MCP process; base64 inputs are gone (use a path
-or URL).
+`muse_decide` is validated server-side (strict parser); JSON-route `*_url`
+inputs are fetched by the server, multipart ones by the MCP process (above);
+base64 inputs are gone (use a path or URL).
 
 Claude Desktop config:
 
@@ -1453,12 +1472,20 @@ Claude Desktop config:
       "args": ["--from", "museq[mcp]", "muse", "mcp"],
       "env": {
         "MUSE_SERVER": "http://localhost:8000",
+        "MUSE_MCP_OUTPUT_DIR": "/Users/you/muse-output",
         "MUSE_ADMIN_TOKEN": "your-admin-token-here"
       }
     }
   }
 }
 ```
+
+Claude Desktop starts stdio servers with cwd `/`, so set
+`MUSE_MCP_OUTPUT_DIR` to an absolute directory (without it, outputs go to
+`~/muse-output`). With cwd `/` no path input is readable except files under
+the output dir; to pass local files, set `MUSE_MCP_ALLOWED_PATH_PREFIXES` to
+a colon-separated list of directories (it replaces the cwd + output-dir
+default; the output dir stays writable).
 
 ## Development commands
 
