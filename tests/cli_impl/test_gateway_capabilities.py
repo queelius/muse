@@ -304,3 +304,19 @@ def test_static_routes_mode_serves_document(manifest_calls):
     assert by_id["fake-tts"]["loaded"] is True
     assert by_id["fake-asr"]["loaded"] is False
     assert by_id["fake-asr"]["unservable_reason"] is None
+
+
+def test_catalog_file_key_is_replacement_sensitive(tmp_path, monkeypatch):
+    from muse.cli_impl import gateway
+    from muse.core import catalog_store
+
+    path = tmp_path / "catalog.json"
+    path.write_text("{}")
+    os.utime(path, ns=(10**18, 10**18))
+    monkeypatch.setattr(catalog_store, "_catalog_path", lambda: path)
+    before = gateway._catalog_file_key()
+    tmp = tmp_path / "next.json"
+    tmp.write_text("{}")
+    os.utime(tmp, ns=(10**18, 10**18))
+    os.replace(tmp, path)  # same size, same mtime, new inode
+    assert gateway._catalog_file_key() != before

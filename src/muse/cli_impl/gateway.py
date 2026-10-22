@@ -1020,10 +1020,9 @@ def _catalog_file_key() -> tuple | None:
     from muse.core import catalog_store
     try:
         path = catalog_store._catalog_path()
-        st = path.stat()
+        return catalog_store._catalog_file_key(path, path.lstat())
     except OSError:
         return None
-    return (str(path), st.st_mtime_ns, st.st_size)
 
 
 def _capability_facts(model_id: str, entry: Any, device: str) -> ModelFacts:

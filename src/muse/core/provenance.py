@@ -120,23 +120,24 @@ def system_fingerprint(rev: ModelRevision) -> str | None:
 
 
 _cache: dict[str, ModelRevision] = {}
-_cache_mtime: int | None = None
+_cache_key: tuple | None = None  # catalog_store._catalog_file_key
 _cache_lock = threading.Lock()
 
 
 def lookup_revision(model_id: str) -> ModelRevision:
     """Resolve a model's revision from the catalog. Never raises."""
-    global _cache, _cache_mtime
+    global _cache, _cache_key
     try:
         from muse.core import catalog_store
         try:
-            mtime = catalog_store._catalog_path().stat().st_mtime_ns
+            path = catalog_store._catalog_path()
+            key = catalog_store._catalog_file_key(path, path.lstat())
         except OSError:
-            mtime = None
+            key = None
         with _cache_lock:
-            if mtime != _cache_mtime or mtime is None:
+            if key != _cache_key or key is None:
                 _cache = {}
-                _cache_mtime = mtime
+                _cache_key = key
             hit = _cache.get(model_id)
         if hit is not None:
             return hit
@@ -153,7 +154,7 @@ def lookup_revision(model_id: str) -> ModelRevision:
         rev = model_revision(model_id, entry, manifest, catalog)
         with _cache_lock:
             # Only store if the catalog has not changed since we sampled it.
-            if mtime is not None and mtime == _cache_mtime:
+            if key is not None and key == _cache_key:
                 _cache[model_id] = rev
         return rev
     except Exception:  # noqa: BLE001

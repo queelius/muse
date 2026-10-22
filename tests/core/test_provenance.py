@@ -96,7 +96,7 @@ def test_lookup_revision_cache_never_stores_result_for_old_mtime(monkeypatch, tm
     path.write_text("{}")
     monkeypatch.setattr(catalog_store, "_catalog_path", lambda: path)
     provenance._cache.clear()
-    provenance._cache_mtime = None
+    provenance._cache_key = None
 
     entered = threading.Event()
     release = threading.Event()
@@ -119,3 +119,25 @@ def test_lookup_revision_cache_never_stores_result_for_old_mtime(monkeypatch, tm
     release.set()
     t.join(5)
     assert "m" not in provenance._cache
+
+
+def test_lookup_revision_sees_same_size_same_mtime_replacement(tmp_path, monkeypatch):
+    """An atomic replace that keeps size and mtime still invalidates the cache."""
+    import os
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    cat = tmp_path / "catalog.json"
+
+    def doc(rev):
+        return json.dumps({"x": {"revision": rev * 40, "hf_repo": "o/x",
+                                 "manifest": {"model_id": "x", "modality": "audio/speech",
+                                              "hf_repo": "o/x"}}})
+
+    cat.write_text(doc("a"))
+    os.utime(cat, ns=(10**18, 10**18))
+    assert lookup_revision("x").revision == "a" * 40
+    tmp = tmp_path / "catalog.json.new"
+    tmp.write_text(doc("b"))
+    os.utime(tmp, ns=(10**18, 10**18))
+    os.replace(tmp, cat)  # same size, same mtime, new inode
+    assert lookup_revision("x").revision == "b" * 40
