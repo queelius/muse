@@ -38,7 +38,8 @@ def test_manifest_has_required_fields():
     assert m["modality"] == "audio/generation"
     assert m["hf_repo"] == "stabilityai/stable-audio-open-1.0"
     assert "pip_extras" in m
-    assert m["license"] == "Apache 2.0"
+    assert m["license"] == "Stability AI Community License"
+    assert "Apache" not in m["description"]
 
 
 def test_manifest_pip_extras_declares_torch_diffusers_transformers():

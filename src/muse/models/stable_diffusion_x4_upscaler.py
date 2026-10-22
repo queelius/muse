@@ -19,7 +19,8 @@ MANIFEST = {
     "hf_repo": "stabilityai/stable-diffusion-x4-upscaler",
     "revision": "572c99286543a273bfd17fac263db5a77be12c4c",
     "description": (
-        "SD x4 upscaler: 4x super-resolution via latent diffusion, Apache 2.0"
+        "SD x4 upscaler: 4x super-resolution via latent diffusion, "
+        "CreativeML OpenRAIL++-M"
     ),
     "summary": "4x upscale of an image with a prompt-guided diffusion upscaler",
     "strengths": [
@@ -28,10 +29,10 @@ MANIFEST = {
     "limits": [
         "Fixed 4x only; input capped at 1024 px per side by default",
         "Slow and needs a CUDA GPU (~6 GB); invents texture rather than restoring it exactly",
-        "Upstream license is CreativeML OpenRAIL++ (use restrictions), not Apache 2.0",
+        "CreativeML OpenRAIL++-M license (use restrictions)",
     ],
     "quality_tier": "draft",
-    "license": "Apache 2.0",
+    "license": "CreativeML OpenRAIL++-M",
     "pip_extras": (
         "torch>=2.1.0",
         "diffusers>=0.27.0",

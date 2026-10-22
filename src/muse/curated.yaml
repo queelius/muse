@@ -714,19 +714,19 @@
     memory_gb: 0.2
     max_length: 512
 
-# Lighter multilingual alternative to the bundled BGE v2-m3 (568M).
-# 278M params, 100+ languages, 512 ctx. Same lineage, lower memory.
+# Lighter English + Chinese alternative to the bundled BGE v2-m3 (568M).
+# 278M params, 512 ctx. Same lineage, lower memory.
 - id: bge-reranker-base
   uri: hf://BAAI/bge-reranker-base
   modality: text/rerank
   size_gb: 0.6
-  description: "BGE Reranker base: 278M, multilingual (100+ langs), 512 ctx, MIT"
+  description: "BGE Reranker base: 278M, English and Chinese, 512 ctx, MIT"
   summary: "Mid-size reranker for English and Chinese passages"
   strengths:
     - "278M params, ~1.4 GB"
     - "MIT"
   limits:
-    - "Model card lists English and Chinese only, despite the multilingual base"
+    - "English and Chinese only (use bge-reranker-v2-m3 for other languages)"
     - "512-token pairs; older than bge-reranker-v2-m3"
   quality_tier: draft
   capabilities:
@@ -754,13 +754,13 @@
     max_length: 512
 
 # Multilingual with a longer context window than BGE-base. 278M
-# params, 1024 ctx, 100+ languages. Apache 2.0.
+# params, 1024 ctx, 100+ languages. CC-BY-NC-4.0 (non-commercial).
 - id: jina-reranker-v2-base-multilingual
   uri: hf://jinaai/jina-reranker-v2-base-multilingual
   revision: 9cfeff2df7d40d1b78e75e5e9cebec92a99813c9
   modality: text/rerank
   size_gb: 0.6
-  description: "Jina Reranker v2 base: 278M, 100+ langs, 1024 ctx, faster than BGE v2-m3"
+  description: "Jina Reranker v2 base: 278M, 100+ langs, 1024 ctx, faster than BGE v2-m3, CC-BY-NC-4.0 (non-commercial)"
   summary: "Fast multilingual reranker with 1024-token pairs"
   strengths:
     - "100+ languages, 1024-token pairs"
@@ -856,18 +856,18 @@
   bundled: true
 
 # Larger Depth-Anything for better quality. Same architecture as
-# the bundled small; ~390MB, Apache 2.0.
+# the bundled small; ~390MB, CC-BY-NC-4.0 (non-commercial).
 - id: depth-anything-v2-base
   uri: hf://depth-anything/Depth-Anything-V2-Base-hf
   modality: image/cv
   size_gb: 0.4
-  description: "Depth-Anything V2 Base: 97M, relative depth, Apache 2.0"
+  description: "Depth-Anything V2 Base: 97M, relative depth, CC-BY-NC-4.0 (non-commercial)"
   summary: "Relative depth maps with more detail than the small default"
   strengths:
     - "More detail than depth-anything-v2-small"
     - "~1 GB"
   limits:
-    - "CC-BY-NC-4.0 on its model card (not Apache 2.0): non-commercial use only"
+    - "CC-BY-NC-4.0 on its model card: non-commercial use only"
     - "Relative depth, not meters"
   quality_tier: good
   capabilities:

@@ -23,7 +23,7 @@ MANIFEST = {
     "revision": "f21265c1e2710b3bd2386596943f0007f55f802e",
     "description": (
         "Stable Audio Open 1.0: 47s music + SFX, 44.1kHz stereo, "
-        "Apache 2.0"
+        "Stability AI Community License"
     ),
     "summary": "Sound effects, ambiences and short music beds from a text prompt",
     "strengths": [
@@ -33,10 +33,10 @@ MANIFEST = {
     "limits": [
         "No realistic vocals and weaker at music than at SFX (ace-step-v1-3.5b makes songs)",
         "Needs a CUDA GPU (~6 GB); English prompts work best",
-        "Upstream weights use the Stability AI Community License, not Apache 2.0; commercial use is limited",
+        "Stability AI Community License: commercial use is limited; check the terms",
     ],
     "quality_tier": "good",
-    "license": "Apache 2.0",
+    "license": "Stability AI Community License",
     "pip_extras": (
         "torch>=2.1.0",
         "diffusers>=0.27.0",

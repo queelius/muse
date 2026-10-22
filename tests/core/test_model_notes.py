@@ -188,3 +188,44 @@ def test_kokoro_limits_mention_word_timings_and_cloning():
     text = " ".join(n.limits).lower()
     assert "word timing" in text
     assert "cloning" in text
+
+
+_LICENSE_WORDS = ("Apache 2.0", "Apache-2.0", "MIT", "CC-BY-NC-4.0", "OpenRAIL",
+                  "Community License")
+
+
+def _note_rows():
+    """(id, description, license, limits) for every bundled + curated model."""
+    rows = []
+    for mid in known_models():
+        try:
+            m = get_manifest(mid)
+        except Exception:  # noqa: BLE001 - bundled scripts only
+            continue
+        rows.append((mid, m.get("description") or "", m.get("license") or "",
+                     list(m.get("limits") or [])))
+    for e in load_curated():
+        if not e.bundled:
+            rows.append((e.id, e.description or "", "", list(e.limits or ())))
+    return rows
+
+
+def test_license_metadata_does_not_contradict_itself():
+    bad = []
+    for mid, desc, lic, limits in _note_rows():
+        text = " ".join(limits)
+        if "not Apache" in text:
+            bad.append(f"{mid}: a limit says 'not Apache' (fix the license field)")
+        if "CC-BY-NC" in text and ("CC-BY-NC" not in desc or "Apache" in desc):
+            bad.append(f"{mid}: non-commercial limit but description says {desc!r}")
+        if lic:
+            named = [w for w in _LICENSE_WORDS if w in desc]
+            if named and not any(w in lic for w in named):
+                bad.append(f"{mid}: description names {named} but license is {lic!r}")
+    assert not bad, "\n".join(bad)
+
+
+def test_bge_reranker_base_is_not_called_multilingual():
+    entry = next(e for e in load_curated() if e.id == "bge-reranker-base")
+    assert "multilingual" not in entry.description.lower()
+    assert "100+" not in entry.description
