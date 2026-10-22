@@ -41,6 +41,7 @@ DISCOVERY = {
             "mcp_tool": "muse_vectorize_image",
             "file_fields": ["image"],
             "media_fields": [],
+            "text_media_fields": {"svg": "image/svg+xml"},
             "example": {"model": "<model>", "response_format": "json"},
         },
     ],

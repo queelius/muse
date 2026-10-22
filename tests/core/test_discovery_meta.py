@@ -89,3 +89,13 @@ def test_examples_match_route_request_models(tag):
             assert ctype is None and decl["method"] == "GET"
             names = {p.alias for p in route.dependant.query_params}
             assert set(example) <= names
+
+
+def test_text_media_fields_only_on_json_routes_and_svg_declared():
+    for d in DECL.values():
+        for r in d["routes"]:
+            if "text_media_fields" in r:
+                assert r["response_content_type"] == "application/json", r["path"]
+                assert not set(r["text_media_fields"]) & set(r["media_fields"])
+    [vec] = DECL["image/vectorization"]["routes"]
+    assert vec["text_media_fields"] == {"svg": "image/svg+xml"}

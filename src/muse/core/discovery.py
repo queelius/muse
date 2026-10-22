@@ -279,10 +279,22 @@ def _str_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
+def _valid_text_media(value: Any) -> bool:
+    """Optional ``text_media_fields``: {JSON path: MIME type} of plain-text
+    media (e.g. SVG markup) that clients write to files as UTF-8."""
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and k and isinstance(v, str) and "/" in v
+        for k, v in value.items()
+    )
+
+
 def _valid_discovery_route(route: Any) -> bool:
     if not isinstance(route, dict):
         return False
-    if set(route) != set(_DISCOVERY_ROUTE_KEYS) | {"request_content_type", "compat"}:
+    required = set(_DISCOVERY_ROUTE_KEYS) | {"request_content_type", "compat"}
+    if set(route) - {"text_media_fields"} != required:
+        return False
+    if "text_media_fields" in route and not _valid_text_media(route["text_media_fields"]):
         return False
     if not all(isinstance(route[k], t) for k, t in _DISCOVERY_ROUTE_KEYS.items()):
         return False

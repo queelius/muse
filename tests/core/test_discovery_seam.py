@@ -34,6 +34,20 @@ def test_get_route_may_have_no_request_content_type(tmp_path):
     assert "audio/x" in modality_discovery([tmp_path])
 
 
+def test_route_may_declare_text_media_fields(tmp_path):
+    route = ROUTE[:-1] + ', "text_media_fields": {"svg": "image/svg+xml"}}'
+    _pkg(tmp_path, f'DISCOVERY = {{"summary": "s", "use_for": [], "not_for": [], "routes": [{route}]}}\n')
+    got = modality_discovery([tmp_path])["audio/x"]["routes"][0]
+    assert got["text_media_fields"] == {"svg": "image/svg+xml"}
+
+
+@pytest.mark.parametrize("bad", ['["svg"]', '{"svg": 1}', '{"svg": "svg"}', '{1: "image/svg+xml"}'])
+def test_malformed_text_media_fields_skipped(tmp_path, bad):
+    route = ROUTE[:-1] + f', "text_media_fields": {bad}}}'
+    _pkg(tmp_path, f'DISCOVERY = {{"summary": "s", "use_for": [], "not_for": [], "routes": [{route}]}}\n')
+    assert "audio/x" not in modality_discovery([tmp_path])
+
+
 @pytest.mark.parametrize("body", [
     'DISCOVERY = {"summary": "s", "use_for": [], "not_for": []}\n',
     f'DISCOVERY = {{"summary": 1, "use_for": [], "not_for": [], "routes": [{ROUTE}]}}\n',

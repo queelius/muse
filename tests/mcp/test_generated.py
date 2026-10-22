@@ -429,3 +429,25 @@ def test_out_path_names_the_spill_on_json_only_routes(caps_doc, openapi_doc, fak
                                           "out_path": "emb.json"})
     assert _structured(blocks)["files"][0]["path"] == str(media_env / "emb.json")
     assert json.load(open(media_env / "emb.json")) == body
+
+
+SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>'
+
+
+def test_vectorize_svg_text_written_to_file(caps_doc, openapi_doc, fake_http, media_env):
+    png = _png()
+    (media_env / "logo.png").write_bytes(png)
+    client = fake_http(lambda r: httpx.Response(200, json={
+        "id": "v1", "object": "image.vectorization", "model": "m", "mime_type": "image/svg+xml",
+        "svg": SVG, "width": 8, "height": 8, "view_box": "0 0 8 8",
+    }))
+    gen = _gen(caps_doc, openapi_doc, "muse_vectorize_image")
+    assert "written to local files" in gen.tool.description
+    blocks = call_generated(client, gen, {"model": "m", "image_path": "logo.png"})
+    data = _structured(blocks)
+    [f] = data["files"]
+    assert f["mime"] == "image/svg+xml" and f["path"].endswith(".svg")
+    assert data["response"]["svg"] == f["path"]
+    assert open(f["path"], encoding="utf-8").read() == SVG
+    assert data["response"]["view_box"] == "0 0 8 8"
+    assert SVG not in json.dumps(blocks)

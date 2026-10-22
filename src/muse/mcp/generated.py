@@ -20,8 +20,9 @@ Input changes against the route's own schema:
 
 Outputs never come back inline: binary bodies and every base64 (or data:
 URL) string at a DISCOVERY ``media_fields`` path, or in a sibling ``url``,
-are written to local files (``files.py``); other values, such as RLE mask
-dicts, are left alone. A result is a short text block, a ``resource_link``
+are written to local files (``files.py``), as is each plain-text string at a
+``text_media_fields`` path (e.g. SVG markup, written as UTF-8 with the
+declared MIME type); other values, such as RLE mask dicts, are left alone. A result is a short text block, a ``resource_link``
 per file, an optional PNG preview, and ``structuredContent`` (``OUTPUT_SCHEMA``):
 ``model`` / ``revision`` / ``artifacts`` from the ``X-Muse-Model*`` response
 headers, ``files`` (path, sha256, mime, bytes, duration or size), and
@@ -162,6 +163,11 @@ def _file_props(name: str, many: bool, required: bool) -> dict:
     }
 
 
+def _has_media(route: dict) -> bool:
+    return bool(route.get("media_fields") or route.get("text_media_fields")) or not (
+        route.get("response_content_type") or "").endswith("json")
+
+
 def _is_image_output(modality: str, route: dict) -> bool:
     if (route.get("response_content_type") or "").startswith("image/"):
         return True
@@ -181,8 +187,7 @@ def _description(mod: dict, route: dict, models: list[dict], from_openapi: bool)
     if not from_openapi:
         lines.append("The server publishes no request schema for this route; the "
                      "fields come from its example and extra fields pass through.")
-    if route.get("media_fields") or not (
-            route.get("response_content_type") or "").endswith("json"):
+    if _has_media(route):
         lines.append("Media outputs are written to local files (out_path, else "
                      "MUSE_MCP_OUTPUT_DIR); the result links them.")
     return "\n".join(lines)
@@ -229,8 +234,7 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     else:
         required = [r for r in required if r != "model"]
     props["model"] = model_prop
-    has_media = bool(route.get("media_fields")) or not (
-        route.get("response_content_type") or "").endswith("json")
+    has_media = _has_media(route)
     props["out_path"] = {"type": "string", "description": (
         "File for the media output (later outputs get -1, -2... suffixes)."
         if has_media else "File for the JSON result when it is too large to "
@@ -433,33 +437,32 @@ class _Writer:
         return self.write(data, mime).path if data else value
 
 
-def _replace_leaf(node: dict, key: str, writer: _Writer) -> None:
-    if isinstance(node.get(key), str) and node[key]:
-        node[key] = writer.media(node[key])
-    url = node.get("url")
-    if key != "url" and isinstance(url, str) and url.startswith("data:"):
-        node["url"] = writer.media(url)
-
-
-def _walk(node: Any, parts: list[str], writer: _Writer) -> None:
-    """Replace string media values at a ``a.b[].c`` path; others untouched."""
+def _walk(node: Any, parts: list[str], convert, *, sibling_url: bool = True) -> None:
+    """Replace string values at a ``a.b[].c`` path with ``convert(value)``;
+    others untouched. ``sibling_url`` also converts a data: URL in the
+    leaf's sibling ``url`` (base64 media envelopes)."""
     if not parts or not isinstance(node, dict):
         return
     head, rest = parts[0], parts[1:]
     many = head.endswith("[]")
     key = head[:-2] if many else head
     if not many and not rest:
-        return _replace_leaf(node, key, writer)
+        if isinstance(node.get(key), str) and node[key]:
+            node[key] = convert(node[key])
+        url = node.get("url")
+        if sibling_url and key != "url" and isinstance(url, str) and url.startswith("data:"):
+            node["url"] = convert(url)
+        return
     if not many:
-        return _walk(node.get(key), rest, writer)
+        return _walk(node.get(key), rest, convert, sibling_url=sibling_url)
     items = node.get(key)
     if not isinstance(items, list):
         return
     for i, item in enumerate(items):
         if rest:
-            _walk(item, rest, writer)
+            _walk(item, rest, convert, sibling_url=sibling_url)
         elif isinstance(item, str) and item:
-            items[i] = writer.media(item)
+            items[i] = convert(item)
 
 
 def _outline(value: Any, depth: int = 0) -> Any:
@@ -541,7 +544,11 @@ def _render(resp: Any, gen: GeneratedTool, *, out_path: str | None,
     if ctype == "application/json" or ctype.endswith("+json"):
         body = resp.json()
         for path in gen.route.get("media_fields") or []:
-            _walk(body, path.split("."), writer)
+            _walk(body, path.split("."), writer.media)
+        for path, mime in (gen.route.get("text_media_fields") or {}).items():
+            _walk(body, path.split("."),
+                  lambda text, mime=mime: writer.write(text.encode("utf-8"), mime).path,
+                  sibling_url=False)
         response = _maybe_spill(body, writer)
     else:
         writer.write(resp.content, ctype or _sniff(resp.content))
