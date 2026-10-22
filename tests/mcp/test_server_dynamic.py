@@ -255,13 +255,17 @@ def test_describe_returns_document_with_filters(fake_http, media_env):
 
 
 def test_describe_large_document_is_written_to_file(fake_http, media_env, caps_doc):
-    caps_doc["models"] = caps_doc["models"] * 3
+    # The fixture is one model per modality (~25) and already over 20,000
+    # chars, so it spills as a real full server does.
+    assert len(json.dumps(caps_doc)) > 20_000
     srv = MCPServer(client=fake_http(caps=caps_doc), filter_kind="inference")
     result = _call(srv, "muse_describe", {})
     out = result.structuredContent
     assert json.load(open(out["written_to"]))["object"] == "muse.capabilities"
     assert len(result.content[0].text) < 20_000
     assert out["models"][0]["id"]
+    assert set(out["models"][0]) == {"id", "modality", "license", "quality_tier",
+                                     "summary", "loaded"}
 
 
 def test_resources_list_and_read(fake_http, media_env):
