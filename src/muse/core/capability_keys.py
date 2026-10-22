@@ -34,7 +34,7 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "option_cache_size", "idle_timeout_seconds", "max_concurrency",
     "lora_scale", "image_processor_overrides", "window_seconds", "num_beams",
     "temperature", "probabilities", "calibration", "confidence",
-    "adapter_model_subdir", "base_model_revision", "base_model_subdir", "dtype",
+    "revision", "adapter_model_subdir", "base_model_revision", "base_model_subdir", "dtype",
 })
 
 

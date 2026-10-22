@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 from muse.core.capability_keys import classify, public_capabilities
-from muse.core.catalog_models import known_models
+from muse.core.catalog_models import get_manifest, known_models
 from muse.core.curated import load_curated
 
 
@@ -61,8 +61,9 @@ def _resolver_keys() -> set[str]:
 
 def test_every_known_capability_key_is_classified():
     keys = set()
-    for entry in known_models().values():
-        keys |= set(entry.extra.get("capabilities") or {})
+    for model_id, entry in known_models().items():
+        if entry.bundled:
+            keys |= set(get_manifest(model_id).get("capabilities") or {})
     for c in load_curated():
         keys |= set(c.capabilities)
     keys |= _resolver_keys()
