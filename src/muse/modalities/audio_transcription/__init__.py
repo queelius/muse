@@ -23,6 +23,48 @@ from muse.modalities.audio_transcription.client import TranscriptionClient
 
 MODALITY = "audio/transcription"
 
+DISCOVERY = {
+    "summary": (
+        "Speech recognition. Turns spoken audio into text, with optional "
+        "segment and word timestamps and subtitle formats (srt, vtt). The "
+        "translations route renders non-English speech as English text."
+    ),
+    "use_for": [
+        "transcribing recorded speech or a narration track",
+        "producing subtitles (srt, vtt) from audio",
+        "translating foreign-language speech into English text",
+    ],
+    "not_for": [
+        "timing a transcript you already trust (use audio/alignment; it is more exact)",
+        "classifying sounds or emotion (use audio/classification)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/audio/transcriptions",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": "openai:audio.transcriptions",
+            "mcp_tool": "muse_transcribe",
+            "file_fields": ["file"],
+            "media_fields": [],
+            "example": {"model": "<model>", "response_format": "json"},
+        },
+        {
+            "method": "POST",
+            "path": "/v1/audio/translations",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": "openai:audio.translations",
+            "mcp_tool": "muse_translate_audio",
+            "file_fields": ["file"],
+            "media_fields": [],
+            "example": {"model": "<model>", "response_format": "json"},
+        },
+    ],
+}
+
+
 
 def _probe_call(model):
     """Transcribe 5s of 16kHz silence: the activation working set is what
@@ -40,6 +82,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
     "Word",

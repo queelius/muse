@@ -269,6 +269,67 @@ def concurrency_ceilings(dirs: list[Path] | None = None) -> dict[str, dict[str, 
     return out
 
 
+_DISCOVERY_ROUTE_KEYS = {
+    "method": str, "path": str, "response_content_type": str, "mcp_tool": str,
+    "file_fields": list, "media_fields": list, "example": dict,
+}
+
+
+def _str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
+def _valid_discovery_route(route: Any) -> bool:
+    if not isinstance(route, dict):
+        return False
+    if set(route) != set(_DISCOVERY_ROUTE_KEYS) | {"request_content_type", "compat"}:
+        return False
+    if not all(isinstance(route[k], t) for k, t in _DISCOVERY_ROUTE_KEYS.items()):
+        return False
+    if route["method"] not in ("GET", "POST"):
+        return False
+    # A GET has no body, so its content type is None and `example` holds
+    # query parameters; a POST declares what it accepts.
+    if route["request_content_type"] is None:
+        if route["method"] != "GET":
+            return False
+    elif route["request_content_type"] not in (
+        "application/json", "multipart/form-data",
+    ):
+        return False
+    if route["compat"] is not None and not isinstance(route["compat"], str):
+        return False
+    return _str_list(route["file_fields"]) and _str_list(route["media_fields"])
+
+
+def _valid_discovery(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"summary", "use_for", "not_for", "routes"}
+        and isinstance(value["summary"], str)
+        and _str_list(value["use_for"])
+        and _str_list(value["not_for"])
+        and isinstance(value["routes"], list)
+        and bool(value["routes"])
+        and all(_valid_discovery_route(r) for r in value["routes"])
+    )
+
+
+def modality_discovery(dirs: list[Path] | None = None) -> dict[str, dict]:
+    """{modality tag: DISCOVERY dict} for every modality package that exports
+    a well-formed DISCOVERY literal (what the capabilities document, OpenAPI
+    descriptions and generated MCP tools are built from). Malformed
+    declarations are logged and skipped.
+    """
+    out: dict[str, dict] = {}
+    for tag, value in _declarations("DISCOVERY", dirs):
+        if _valid_discovery(value):
+            out[tag] = value
+        else:
+            logger.warning("ignoring malformed DISCOVERY for %s", tag)
+    return out
+
+
 def strict_request_parsers(dirs: list[Path] | None = None) -> dict[str, str]:
     """{request path: "module:callable"} for every modality package that
     exports STRICT_REQUEST_PARSERS.

@@ -21,6 +21,37 @@ from muse.modalities.audio_quality.routes import build_router
 MODALITY = "audio/quality"
 MODEL_OPTIONAL_PATHS = ("/v1/audio/quality",)
 
+DISCOVERY = {
+    "summary": (
+        "Single-ended audio quality assessment. Scores one audio file on "
+        "named scales (speech naturalness, or production quality axes) and "
+        "reports the weakest segment, so a bad stretch can be re-generated."
+    ),
+    "use_for": [
+        "checking a generated narration sounds natural before using it",
+        "picking the best of several generated takes",
+        "finding the worst segment of a long track to redo",
+    ],
+    "not_for": [
+        "comparing two clips head to head",
+        "transcribing or timing speech (use audio/transcription or audio/alignment)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/audio/quality",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_assess_audio_quality",
+            "file_fields": ["file"],
+            "media_fields": [],
+            "example": {"model": "<model>"},
+        },
+    ],
+}
+
+
 
 def _probe_call(model):
     """Assess a short 16kHz tone."""
@@ -36,6 +67,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "MODEL_OPTIONAL_PATHS",
     "PROBE_DEFAULTS",
     "build_router",

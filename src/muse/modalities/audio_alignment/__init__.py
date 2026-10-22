@@ -24,6 +24,37 @@ from muse.modalities.audio_alignment.routes import build_router
 MODALITY = "audio/alignment"
 MODEL_OPTIONAL_PATHS = ("/v1/audio/alignments",)
 
+DISCOVERY = {
+    "summary": (
+        "Forced alignment. Given an audio file and its trusted transcript, "
+        "returns start and end times for every word. It locates the words "
+        "you supply; it does not decide what was spoken."
+    ),
+    "use_for": [
+        "word timing for captions and subtitles from a known script",
+        "animation and cut cues keyed to when a word is spoken",
+        "syncing a generated narration to its source text",
+    ],
+    "not_for": [
+        "speech recognition when no transcript exists (use audio/transcription)",
+        "judging audio quality (use audio/quality)",
+    ],
+    "routes": [
+        {
+            "method": "POST",
+            "path": "/v1/audio/alignments",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_align",
+            "file_fields": ["file"],
+            "media_fields": [],
+            "example": {"model": "<model>", "text": "Hello from muse.", "language": "English"},
+        },
+    ],
+}
+
+
 
 def _probe_call(model):
     """Align one word against a short tone."""
@@ -39,6 +70,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "DISCOVERY",
     "MODEL_OPTIONAL_PATHS",
     "PROBE_DEFAULTS",
     "build_router",
