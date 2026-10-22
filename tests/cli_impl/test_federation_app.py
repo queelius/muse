@@ -267,3 +267,87 @@ def test_nonconnect_transport_failure_maps_502_without_failover(monkeypatch):
 
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "node_forward_failed"
+
+
+# ---- discovery -----------------------------------------------------------
+
+def _node_doc(mid):
+    return {
+        "object": "muse.capabilities", "server": {},
+        "modalities": [{"modality": "audio/speech", "summary": "tts", "routes": [], "models": [mid]}],
+        "models": [{"id": mid, "modality": "audio/speech", "revision": "1" * 40,
+                    "loaded": True, "queue_depth": 0}],
+    }
+
+
+@pytest.fixture
+def coordinator_client(monkeypatch):
+    class Reg:
+        def snapshot(self):
+            return [
+                NodeState(NodeSpec("http://a:8000", "a", token="secret"), True, {}, 0, 0.0),
+                NodeState(NodeSpec("http://b:8000", "b"), True, {}, 0, 0.0),
+                NodeState(NodeSpec("http://c:8000", "c"), True, {}, 0, 0.0),
+                NodeState(NodeSpec("http://d:8000", "d"), False, {}, 0, 0.0),
+            ]
+
+    seen = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            seen.append((url, kw))
+            if url.startswith("http://a:"):
+                if url.endswith("/openapi.json"):
+                    return httpx.Response(200, json={"openapi": "3.1.0", "paths": {"/v1/x": {}}, "info": {}})
+                return httpx.Response(200, json=_node_doc("m"))
+            if url.startswith("http://b:"):
+                return httpx.Response(200, content=b"not json")
+            raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(fed.httpx, "AsyncClient", FakeClient)
+    c = TestClient(fed.build_coordinator(Reg(), timeout=5))
+    c.seen = seen
+    return c
+
+
+def test_bad_node_degrades_not_fails(coordinator_client):
+    r = coordinator_client.get("/v1/capabilities")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body["unreachable_nodes"]) == {"b", "c", "d"}
+    assert body["models"][0]["nodes"][0]["name"] == "a"
+    assert body["server"]["mcp"]["env"]["MUSE_SERVER"] == "http://testserver"
+    assert [n["name"] for n in body["server"]["nodes"]] == ["a", "b", "c", "d"]
+    assert "secret" not in r.text
+    assert all("Authorization" not in (kw.get("headers") or {}) for _, kw in coordinator_client.seen)
+
+
+def test_llms_txt_and_pointers(coordinator_client):
+    r = coordinator_client.get("/llms.txt")
+    assert r.status_code == 200 and "audio/speech" in r.text
+    assert coordinator_client.get("/").json()["capabilities"] == "/v1/capabilities"
+    assert coordinator_client.get("/.well-known/muse.json").status_code == 200
+
+
+def test_openapi_is_first_node_plus_own_paths(coordinator_client):
+    r = coordinator_client.get("/openapi.json")
+    assert r.status_code == 200
+    paths = r.json()["paths"]
+    assert "/v1/x" in paths and "/v1/federation/nodes" in paths and "/v1/capabilities" in paths
+
+
+def test_openapi_without_reachable_node_still_serves(monkeypatch):
+    class Reg:
+        def snapshot(self):
+            return []
+    r = TestClient(fed.build_coordinator(Reg(), timeout=5)).get("/openapi.json")
+    assert r.status_code == 200 and "/v1/capabilities" in r.json()["paths"]

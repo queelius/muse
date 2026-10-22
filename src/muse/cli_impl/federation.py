@@ -49,6 +49,7 @@ in `muse.cli`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import time
@@ -58,7 +59,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from muse.cli_impl.gateway import (
     RequestBodyLimitMiddleware,
@@ -69,6 +70,7 @@ from muse.cli_impl.gateway import (
 from muse.core import config
 from muse.core.errors import error_response
 from muse.cli_impl.serve_util import run_uvicorn
+from muse.federation.capabilities import merge_capabilities
 from muse.federation.nodes import load_nodes
 from muse.federation.registry import NodeRegistry
 from muse.federation.router import select_node
@@ -143,7 +145,10 @@ def build_coordinator(
         finally:
             await registry.aclose()
 
-    app = FastAPI(title="Muse Federation Coordinator", lifespan=_lifespan)
+    app = FastAPI(
+        title="Muse Federation Coordinator", lifespan=_lifespan,
+        openapi_url=None,  # served below: first node's schema + our paths
+    )
     app.add_middleware(
         RequestBodyLimitMiddleware,
         limit=int(config.get("server.max_request_body_mb")) * 1024 * 1024,
@@ -213,7 +218,92 @@ def build_coordinator(
         ]
         return {"nodes": nodes}
 
-    @app.api_route("/{full_path:path}", methods=["GET", "POST"])
+    # ---- agent discovery ------------------------------------------------
+    # Coordinator-specific routes rather than agent_routes.install_agent_routes:
+    # that helper replaces app.openapi with the LOCAL modality merge, which
+    # is wrong here (the schema comes from a node). Node tokens are never
+    # sent: discovery documents are public on a node.
+
+    async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict | None:
+        try:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return None
+            body = r.json()
+            return body if isinstance(body, dict) else None
+        except Exception:  # noqa: BLE001 - any failure == unreachable
+            return None
+
+    async def _fetch_nodes(path: str, states: list[NodeState]):
+        t = float(config.get("server.aggregation_timeout_seconds"))
+        async with httpx.AsyncClient(timeout=t) as client:
+            return await asyncio.gather(
+                *(_fetch_json(client, f"{s.spec.url}{path}") for s in states
+                  if s.reachable)
+            )
+
+    async def _merged_capabilities(request: Request) -> dict:
+        from muse import __version__
+        from muse.core.capabilities import server_block
+
+        states: list[NodeState] = registry.snapshot()
+        live = [s for s in states if s.reachable]
+        docs = await _fetch_nodes("/v1/capabilities", states)
+        by_name = {s.spec.name: d for s, d in zip(live, docs)}
+        node_docs = [(s.spec.name, by_name.get(s.spec.name)) for s in states]
+        base_url = str(request.base_url).rstrip("/")
+        server = server_block(
+            version=__version__, node="federation-coordinator", base_url=base_url,
+        )
+        server["nodes"] = [
+            {"name": s.spec.name, "url": s.spec.url} for s in states
+        ]
+        return merge_capabilities(node_docs, server=server)
+
+    @app.get("/v1/capabilities")
+    async def capabilities(request: Request):
+        return await _merged_capabilities(request)
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/.well-known/muse.json", include_in_schema=False)
+    async def pointer():
+        from muse.cli_impl.agent_routes import POINTER
+
+        return dict(POINTER)
+
+    @app.get("/llms.txt", include_in_schema=False)
+    async def llms_txt(request: Request):
+        from muse.core.capabilities import render_llms_txt
+
+        return PlainTextResponse(
+            render_llms_txt(await _merged_capabilities(request)),
+            media_type="text/markdown; charset=utf-8",
+        )
+
+    @app.get("/openapi.json", include_in_schema=False)
+    async def openapi_json():
+        from fastapi.openapi.utils import get_openapi
+
+        own = get_openapi(
+            title=app.title, version="1", routes=app.routes,
+        )
+        states = [s for s in registry.snapshot() if s.reachable]
+        base = None
+        for s, doc in zip(states, await _fetch_nodes("/openapi.json", states)):
+            if doc is not None:
+                base = doc
+                break
+        if base is None:
+            return own
+        base.setdefault("paths", {})
+        for path, item in own.get("paths", {}).items():
+            base["paths"][path] = item
+        schemas = base.setdefault("components", {}).setdefault("schemas", {})
+        for name, schema in own.get("components", {}).get("schemas", {}).items():
+            schemas.setdefault(name, schema)
+        return base
+
+    @app.api_route("/{full_path:path}", methods=["GET", "POST"], include_in_schema=False)
     async def proxy(request: Request, full_path: str) -> JSONResponse:
         model_id = await extract_model_from_request(request)
         if model_id is None:
