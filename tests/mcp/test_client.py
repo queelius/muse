@@ -1,7 +1,7 @@
 """Tests for muse.mcp.client.MuseClient.
 
-Each method is covered by a mocked httpx.Client patched at the call
-site; no network is touched.
+Probes use a mocked httpx.Client patched at the call site; the discovery
+and call surface uses an httpx.MockTransport. No network is touched.
 """
 from __future__ import annotations
 
@@ -40,15 +40,6 @@ def _ok_json(body: dict, status: int = 200, content_type: str = "application/jso
     return r
 
 
-def _ok_bytes(data: bytes, status: int = 200, content_type: str = "audio/wav"):
-    r = MagicMock()
-    r.status_code = status
-    r.content = data
-    r.headers = {"content-type": content_type}
-    r.raise_for_status = MagicMock()
-    return r
-
-
 class TestProbes:
     def test_health(self, client, mock_httpx_client):
         mock_httpx_client.get.return_value = _ok_json({"status": "ok"})
@@ -64,154 +55,66 @@ class TestProbes:
         assert out["data"][0]["id"] == "kokoro-82m"
 
 
-class TestTextRoutes:
-    def test_chat(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json(
-            {"choices": [{"message": {"content": "hi"}}]},
-        )
-        out = client.chat(model="qwen", messages=[{"role": "user", "content": "x"}])
-        assert out["choices"][0]["message"]["content"] == "hi"
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/chat/completions")
-        assert call.kwargs["json"]["model"] == "qwen"
+class TestDiscoveryAndCall:
+    """The generic surface the generated tools use, over a MockTransport."""
 
-    def test_summarize(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"summary": "tldr"})
-        out = client.summarize(text="long text", length="short")
-        assert out["summary"] == "tldr"
-        assert mock_httpx_client.post.call_args.args[0].endswith("/v1/summarize")
+    @staticmethod
+    def _client(handler):
+        import httpx
 
-    def test_rerank(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json(
-            {"results": [{"index": 0, "relevance_score": 0.9}]},
-        )
-        out = client.rerank(query="q", documents=["a", "b"])
-        assert out["results"][0]["index"] == 0
+        seen = []
 
-    def test_classify(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"results": [{"flagged": False}]})
-        out = client.classify(input="hello")
-        assert out["results"][0]["flagged"] is False
+        def route(request):
+            seen.append(request)
+            return handler(request)
 
-    def test_embed_text(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json(
-            {"data": [{"embedding": [0.1, 0.2]}]},
-        )
-        out = client.embed_text(input=["x"])
-        assert out["data"][0]["embedding"] == [0.1, 0.2]
+        c = MuseClient(server_url="http://muse.test/",
+                       transport=httpx.MockTransport(route))
+        return c, seen
 
-    def test_post_drops_none_values(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"x": 1})
-        client.chat(model="m", messages=[{"role": "user", "content": "x"}], temperature=None)
-        call = mock_httpx_client.post.call_args
-        assert "temperature" not in call.kwargs["json"]
+    def test_capabilities_passes_filters(self):
+        import httpx
 
+        c, seen = self._client(lambda r: httpx.Response(200, json={"object": "x"}))
+        assert c.capabilities(modality="audio/speech") == {"object": "x"}
+        assert seen[-1].url.path == "/v1/capabilities"
+        assert dict(seen[-1].url.params) == {"modality": "audio/speech"}
+        c.capabilities()
+        assert dict(seen[-1].url.params) == {}
 
-class TestImageRoutes:
-    def test_generate_image_defaults_b64(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json(
-            {"data": [{"b64_json": "AAAA"}]},
-        )
-        out = client.generate_image(prompt="cat")
-        assert out["data"][0]["b64_json"] == "AAAA"
-        call = mock_httpx_client.post.call_args
-        assert call.kwargs["json"]["response_format"] == "b64_json"
+    def test_openapi(self):
+        import httpx
 
-    def test_edit_image_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"data": [{"b64_json": "X"}]})
-        out = client.edit_image(image=b"img", mask=b"msk", prompt="paint blue")
-        assert out["data"][0]["b64_json"] == "X"
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/edits")
-        files = call.kwargs["files"]
-        assert "image" in files and "mask" in files
+        c, seen = self._client(lambda r: httpx.Response(200, json={"openapi": "3.1.0"}))
+        assert c.openapi()["openapi"] == "3.1.0"
+        assert seen[-1].url.path == "/openapi.json"
 
-    def test_vary_image_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"data": [{"b64_json": "Y"}]})
-        out = client.vary_image(image=b"img")
-        assert out["data"][0]["b64_json"] == "Y"
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/variations")
+    def test_call_json_body(self):
+        import httpx
 
-    def test_upscale_image_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"data": [{"b64_json": "Z"}]})
-        client.upscale_image(image=b"img", scale=4)
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/upscale")
-        assert call.kwargs["data"]["scale"] == "4"
+        c, seen = self._client(lambda r: httpx.Response(200, content=b"RIFF"))
+        r = c.call({"method": "POST", "path": "/v1/audio/speech"},
+                   json={"model": "m", "input": "hi"})
+        assert r.content == b"RIFF"
+        assert seen[-1].method == "POST"
+        assert seen[-1].headers["content-type"] == "application/json"
 
-    def test_segment_image_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"masks": []})
-        client.segment_image(image=b"img", mode="auto")
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/segment")
+    def test_call_multipart_and_get(self):
+        import httpx
 
-    def test_vectorize_image_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({
-            "mime_type": "image/svg+xml", "svg": "<svg/>",
-        })
-        out = client.vectorize_image(
-            image=b"img", model="starvector", seed=7,
-        )
-        assert out["mime_type"] == "image/svg+xml"
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/vectorize")
-        assert call.kwargs["data"]["model"] == "starvector"
-        assert call.kwargs["data"]["seed"] == "7"
-        assert call.kwargs["data"]["response_format"] == "json"
+        c, seen = self._client(lambda r: httpx.Response(200, json={}))
+        c.call({"method": "POST", "path": "/v1/audio/alignments"},
+               data={"text": "hi"}, files={"file": ("a.wav", b"RIFF", "audio/wav")})
+        assert seen[-1].headers["content-type"].startswith("multipart/form-data")
+        c.call({"method": "GET", "path": "/languages"}, params={"model": "m"})
+        assert seen[-1].method == "GET" and seen[-1].url.params["model"] == "m"
 
-    def test_generate_animation(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"data": [{"b64": "..."}]})
-        client.generate_animation(prompt="bouncing ball")
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/animations")
+    def test_call_raises_on_error_status(self):
+        import httpx
 
-    def test_generate_video(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"data": [{"b64": "..."}]})
-        client.generate_video(prompt="a sunset over the ocean")
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/video/generations")
-
-    def test_embed_image(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json(
-            {"data": [{"embedding": [0.1, 0.2]}]},
-        )
-        client.embed_image(input=["data:image/png;base64,AAAA"])
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/images/embeddings")
-
-
-class TestAudioRoutes:
-    def test_speak_returns_bytes(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_bytes(b"WAVE")
-        out = client.speak(input="hello", model="kokoro-82m")
-        assert out == b"WAVE"
-
-    def test_generate_music_returns_bytes(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_bytes(b"WAVE")
-        out = client.generate_music(prompt="ambient pad")
-        assert out == b"WAVE"
-
-    def test_generate_sfx_returns_bytes(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_bytes(b"WAVE")
-        out = client.generate_sfx(prompt="thunder")
-        assert out == b"WAVE"
-
-    def test_transcribe_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json({"text": "hello world"})
-        out = client.transcribe(audio=b"riff", model="whisper-tiny", language="en")
-        assert out["text"] == "hello world"
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/audio/transcriptions")
-        assert "file" in call.kwargs["files"]
-
-    def test_embed_audio_multipart(self, client, mock_httpx_client):
-        mock_httpx_client.post.return_value = _ok_json(
-            {"data": [{"embedding": [0.1]}]},
-        )
-        client.embed_audio(audio=b"riff", model="mert-v1")
-        call = mock_httpx_client.post.call_args
-        assert call.args[0].endswith("/v1/audio/embeddings")
+        c, _ = self._client(lambda r: httpx.Response(500, json={}))
+        with pytest.raises(httpx.HTTPStatusError):
+            c.call({"method": "POST", "path": "/v1/embeddings"}, json={})
 
 
 class TestServerUrlResolution:

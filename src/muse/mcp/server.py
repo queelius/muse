@@ -1,19 +1,26 @@
-"""MCPServer: wrap mcp.server.lowlevel.Server with muse-specific tools.
+"""MCPServer: wrap mcp.server.lowlevel.Server with muse's tools.
 
-Importing this module lazily probes the ``mcp`` Python package. If it's
-not installed, the symbols still exist at module level (so the rest of
-muse can ``from muse.mcp import MCPServer`` without importing the SDK
-unless instantiated). Construction or ``build_tools`` calls then raise
-a clear RuntimeError pointing at ``pip install museq[server]``.
+The tool list is dynamic: ``muse_describe``, one tool generated per route of
+the server's own ``/v1/capabilities`` + ``/openapi.json``
+(``muse.mcp.generated``), and the fixed admin tools, selected by
+``filter_kind``. The discovery documents are cached for 30 s. While the
+server is unreachable only ``muse_describe`` (which reports the error) and
+the admin tools are listed, never stale generated tools.
 
-Stdio mode (default) is for desktop LLM apps that spawn the MCP server
-as a child process. HTTP+SSE mode is for remote / web embedders.
+Resources: ``muse://capabilities`` and ``muse://models/{id}`` (JSON).
+
+Importing this module lazily probes the ``mcp`` Python package; without it
+the symbols still exist and construction raises a RuntimeError pointing at
+``pip install 'museq[mcp]'``.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import threading
+import time
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -24,10 +31,24 @@ from muse.mcp.client import MuseClient
 log = logging.getLogger("muse.mcp")
 
 _MAX_ERROR_CHARS = 300
+CACHE_SECONDS = 30.0
+_FAILED_CACHE_SECONDS = 5.0
+_FILTERS = ("all", "admin", "inference")
+CAPABILITIES_URI = "muse://capabilities"
+MODEL_URI_PREFIX = "muse://models/"
 
 try:
     import mcp.types as _mcp_types  # noqa: F401
     from mcp.server.lowlevel import Server as _LowServer  # noqa: F401
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+
+    from muse.mcp.generated import (
+        DESCRIBE,
+        call_describe,
+        call_generated,
+        describe_tool,
+        generate_tools,
+    )
     _MCP_AVAILABLE = True
 except ImportError:  # pragma: no cover  (covered indirectly via skip)
     _MCP_AVAILABLE = False
@@ -39,34 +60,8 @@ def _require_mcp() -> None:
     if not _MCP_AVAILABLE:
         raise RuntimeError(
             "the `mcp` Python package is required for muse mcp; "
-            "install via: pip install 'museq[server]'"
+            "install via: pip install 'museq[mcp]'"
         )
-
-
-def _entries(filter_kind: str) -> list[Any]:
-    """The ``ToolEntry`` rows exposed under ``filter_kind``."""
-    _require_mcp()
-    from muse.mcp.tools import ADMIN_TOOLS, INFERENCE_TOOLS
-
-    if filter_kind not in ("all", "admin", "inference"):
-        raise ValueError(
-            f"unknown filter_kind {filter_kind!r}; expected "
-            f"'all' | 'admin' | 'inference'"
-        )
-    out: list[Any] = []
-    if filter_kind in ("admin", "all"):
-        out.extend(ADMIN_TOOLS)
-    if filter_kind in ("inference", "all"):
-        out.extend(INFERENCE_TOOLS)
-    return out
-
-
-def build_tools(filter_kind: str = "all") -> list[Any]:
-    """Build the list of registered MCP Tool objects.
-
-    ``filter_kind``: ``'admin'`` | ``'inference'`` | ``'all'`` (default).
-    """
-    return [entry.tool for entry in _entries(filter_kind)]
 
 
 def _upstream_error(response: httpx.Response) -> str:
@@ -85,13 +80,15 @@ def _upstream_error(response: httpx.Response) -> str:
     return text
 
 
-class MCPServer:
-    """Wrap the mcp SDK Server with muse-specific list_tools / call_tool.
+def _error_block(payload: dict) -> dict:
+    return {"type": "text", "text": json.dumps(payload, indent=2), "error": True}
 
-    The server stays stateless; each ``call_tool`` invocation builds a
-    fresh HTTP request via the injected ``MuseClient``. Filter mode
-    pre-selects which tools are exposed at boot; the server never sees
-    tools outside the selected subset.
+
+class MCPServer:
+    """The mcp SDK Server with muse's dynamic tools and resources.
+
+    Tool handlers are synchronous (blocking httpx); the SDK callbacks run
+    them off the event loop.
     """
 
     def __init__(
@@ -101,79 +98,145 @@ class MCPServer:
         filter_kind: str = "all",
     ) -> None:
         _require_mcp()
+        if filter_kind not in _FILTERS:
+            raise ValueError(
+                f"unknown filter_kind {filter_kind!r}; expected "
+                f"'all' | 'admin' | 'inference'"
+            )
+        from muse.mcp.tools import ADMIN_TOOLS
+
         self.client = client
         self.filter_kind = filter_kind
+        self._admin = list(ADMIN_TOOLS) if filter_kind in ("admin", "all") else []
+        self._admin_handlers = {e.tool.name: e.handler for e in self._admin}
+        self._inference = filter_kind in ("inference", "all")
+        self._lock = threading.Lock()
+        self._fetched_at: float | None = None
+        self._fetch_error: str | None = None
+        self._caps: dict = {}
+        self._generated: dict = {}
         self._server = _LowServer("muse")
-        entries = _entries(filter_kind)
-        self._tools = [entry.tool for entry in entries]
-        self._handlers = {entry.tool.name: entry.handler for entry in entries}
         self._wire_handlers()
 
-    def _wire_handlers(self) -> None:
-        srv = self._server
-        tools_snapshot = list(self._tools)
+    # ---- discovery cache ----
 
-        @srv.list_tools()
-        async def _list_tools():
-            return tools_snapshot
-
-        @srv.call_tool()
-        async def _call_tool(name: str, arguments: dict | None):
-            # Handlers are synchronous and make blocking httpx calls
-            # (up to 600s for generation). In HTTP+SSE mode there is a
-            # single event loop; running the handler inline would stall
-            # every concurrent tool call and SSE frame for the duration
-            # of one slow generation. Dispatch off-loop so the loop
-            # stays responsive. MuseClient is stateless per call, so
-            # this is thread-safe.
-            blocks = await asyncio.to_thread(self.call_handler, name, arguments)
-            return _to_content(blocks)
+    def _refresh(self) -> None:
+        """Refetch the discovery documents when the cache is stale."""
+        with self._lock:
+            ttl = _FAILED_CACHE_SECONDS if self._fetch_error else CACHE_SECONDS
+            now = time.monotonic()
+            if self._fetched_at is not None and now - self._fetched_at < ttl:
+                return
+            try:
+                caps = self.client.capabilities()
+                gens = generate_tools(caps, self.client.openapi())
+                self._caps = caps
+                self._generated = {g.name: g for g in gens
+                                   if g.name not in self._admin_handlers}
+                self._fetch_error = None
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not read muse discovery documents: %s", e)
+                self._caps, self._generated = {}, {}
+                self._fetch_error = str(e)
+            self._fetched_at = time.monotonic()
 
     @property
     def tools(self) -> list[Any]:
-        return list(self._tools)
+        out: list[Any] = []
+        if self._inference:
+            self._refresh()
+            out.append(describe_tool())
+            out.extend(g.tool for g in self._generated.values())
+        out.extend(e.tool for e in self._admin)
+        return out
 
-    @property
-    def handlers(self) -> dict[str, Any]:
-        return dict(self._handlers)
+    # ---- SDK wiring ----
+
+    def _wire_handlers(self) -> None:
+        srv = self._server
+        types = _mcp_types
+
+        @srv.list_tools()
+        async def _list_tools():
+            return await asyncio.to_thread(lambda: self.tools)
+
+        @srv.call_tool()
+        async def _call_tool(name: str, arguments: dict | None):
+            # Off-loop: handlers make blocking httpx calls (up to 600 s for
+            # generation); inline they would stall every concurrent call and
+            # SSE frame in HTTP mode.
+            blocks = await asyncio.to_thread(self.call_handler, name, arguments)
+            return _to_result(blocks)
+
+        @srv.list_resources()
+        async def _list_resources():
+            await asyncio.to_thread(self._refresh)
+            out = [types.Resource(uri=CAPABILITIES_URI, name="capabilities",
+                                  mimeType="application/json",
+                                  description="The muse capabilities document.")]
+            for m in self._caps.get("models") or []:
+                mid = str(m.get("id"))
+                out.append(types.Resource(
+                    uri=MODEL_URI_PREFIX + urllib.parse.quote(mid, safe=""),
+                    name=mid, mimeType="application/json",
+                    description=m.get("summary") or m.get("modality")))
+            return out
+
+        @srv.list_resource_templates()
+        async def _list_templates():
+            return [types.ResourceTemplate(
+                uriTemplate=MODEL_URI_PREFIX + "{id}", name="model",
+                mimeType="application/json",
+                description="The capabilities document for one model id.")]
+
+        @srv.read_resource()
+        async def _read_resource(uri):
+            text = str(uri)
+            if text == CAPABILITIES_URI:
+                doc = await asyncio.to_thread(self.client.capabilities)
+            elif text.startswith(MODEL_URI_PREFIX):
+                mid = urllib.parse.unquote(text[len(MODEL_URI_PREFIX):])
+                doc = await asyncio.to_thread(
+                    lambda: self.client.capabilities(model=mid))
+            else:
+                raise ValueError(f"unknown resource {text!r}")
+            return [ReadResourceContents(content=json.dumps(doc),
+                                         mime_type="application/json")]
 
     def call_handler(self, name: str, args: dict | None = None) -> list[dict]:
-        """Invoke the registered handler for ``name``; the one place tool
-        failures become error blocks.
+        """Run tool ``name``; the one place tool failures become error blocks.
 
-        An ``AdminClientError`` becomes an ``admin_api_error`` block; an
-        HTTP error status from muse reports the status plus muse's error
-        code and message; anything else reports ``str(exc)``. Returns plain
-        content-block dicts (pre-conversion to SDK types), so tests drive
-        tools through here without the async transport.
+        An ``AdminClientError`` becomes an ``admin_api_error`` block; an HTTP
+        error status from muse reports the status plus muse's error code and
+        message; anything else reports ``str(exc)``. Error blocks carry
+        ``"error": True``. Returns plain content-block dicts, so tests drive
+        tools here without the async transport.
         """
-        handler = self._handlers.get(name)
-        if handler is None:
-            return [{
-                "type": "text",
-                "text": json.dumps({"error": f"unknown tool {name!r}"}),
-            }]
+        args = args or {}
         try:
-            return handler(self.client, args or {})
+            if name in self._admin_handlers:
+                return self._admin_handlers[name](self.client, args)
+            if self._inference and name == DESCRIBE:
+                return call_describe(self.client, args)
+            gen = self._generated.get(name) if self._inference else None
+            if gen is None and self._inference:
+                self._refresh()
+                gen = self._generated.get(name)
+            if gen is None:
+                return [_error_block({"error": f"unknown tool {name!r}"})]
+            return call_generated(self.client, gen, args)
         except AdminClientError as e:
-            return [{"type": "text", "text": json.dumps({
-                "error": {
-                    "code": e.code,
-                    "message": e.message,
-                    "status": e.status,
-                    "type": "admin_api_error",
-                },
-            }, indent=2)}]
+            return [_error_block({"error": {
+                "code": e.code, "message": e.message,
+                "status": e.status, "type": "admin_api_error",
+            }})]
         except Exception as e:  # noqa: BLE001
             log.exception("tool %s failed", name)
             message = (
                 _upstream_error(e.response)
                 if isinstance(e, httpx.HTTPStatusError) else str(e)
             )
-            return [{
-                "type": "text",
-                "text": json.dumps({"error": message, "tool": name}),
-            }]
+            return [_error_block({"error": message, "tool": name})]
 
     async def run_stdio(self) -> None:
         """Drive the MCP server over stdio (default for desktop apps)."""
@@ -207,7 +270,7 @@ class MCPServer:
         except ImportError as exc:
             raise RuntimeError(
                 "MCP HTTP transport requires mcp>=1.8.0,<2; reinstall "
-                "the server extra with: pip install 'museq[server]'"
+                "the mcp extra with: pip install 'museq[mcp]'"
             ) from exc
         from starlette.applications import Starlette
         from starlette.responses import Response
@@ -288,34 +351,33 @@ class MCPServer:
         await uvicorn.Server(config).serve()
 
 
-def _to_content(blocks: list[dict]) -> list[Any]:
-    """Convert plain-dict content blocks to mcp types instances.
+def _to_result(blocks: list[dict]) -> Any:
+    """Plain-dict blocks to an ``mcp.types.CallToolResult``.
 
-    Test code can compare against the dict shapes; runtime code returns
-    SDK types via this shim. Keeps the rest of the codebase free of
-    per-call SDK imports.
+    The pseudo-block ``{"type": "structured", "data": ...}`` becomes
+    ``structuredContent``; a block marked ``"error": True`` sets ``isError``.
+    Returning the result object bypasses the SDK's output validation, so an
+    error result needs no structured content.
     """
-    out: list[Any] = []
+    t = _mcp_types
+    content: list[Any] = []
+    structured = None
+    is_error = False
     for b in blocks:
         kind = b.get("type")
-        if kind == "text":
-            out.append(_mcp_types.TextContent(
-                type="text", text=b.get("text", ""),
-            ))
+        is_error = is_error or bool(b.get("error"))
+        if kind == "structured":
+            structured = b.get("data")
+        elif kind == "text":
+            content.append(t.TextContent(type="text", text=b.get("text", "")))
         elif kind == "image":
-            out.append(_mcp_types.ImageContent(
-                type="image",
-                data=b.get("data", ""),
-                mimeType=b.get("mimeType", "image/png"),
-            ))
-        elif kind == "audio":
-            out.append(_mcp_types.AudioContent(
-                type="audio",
-                data=b.get("data", ""),
-                mimeType=b.get("mimeType", "audio/wav"),
-            ))
+            content.append(t.ImageContent(type="image", data=b.get("data", ""),
+                                          mimeType=b.get("mimeType", "image/png")))
+        elif kind == "resource_link" and hasattr(t, "ResourceLink"):
+            content.append(t.ResourceLink(
+                type="resource_link", uri=b["uri"], name=b.get("name", b["uri"]),
+                mimeType=b.get("mimeType"), size=b.get("size")))
         else:
-            out.append(_mcp_types.TextContent(
-                type="text", text=json.dumps(b),
-            ))
-    return out
+            content.append(t.TextContent(type="text", text=json.dumps(b)))
+    return t.CallToolResult(content=content, structuredContent=structured,
+                            isError=is_error)

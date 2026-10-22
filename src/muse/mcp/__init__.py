@@ -1,12 +1,12 @@
-"""muse mcp: MCP server bridging muse capabilities to LLM clients.
+"""muse mcp: MCP server bridging a muse server to LLM clients.
 
-`muse mcp` exposes muse's admin and inference surfaces as tools over the
-Model Context Protocol. Stdio mode is the default (for desktop apps); HTTP+SSE
-mode is available for remote / web embedders.
+`muse mcp` exposes tools generated from the server's own discovery
+documents (`/v1/capabilities`, `/openapi.json`), `muse_describe`, and the
+fixed admin tools over the Model Context Protocol. Stdio mode is the
+default; HTTP+SSE mode is available for remote / web embedders.
 
-See docs/superpowers/specs/2026-04-28-muse-mcp-design.md for the full
-spec; CLAUDE.md "Using muse from Claude Desktop" for the config example.
+Install the light client with `pip install 'museq[mcp]'`.
 """
-from muse.mcp.server import MCPServer, build_tools
+from muse.mcp.server import MCPServer
 
-__all__ = ["MCPServer", "build_tools"]
+__all__ = ["MCPServer"]

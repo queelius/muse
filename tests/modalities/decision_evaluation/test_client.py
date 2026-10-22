@@ -1,14 +1,12 @@
-"""DecisionClient and MuseClient.decide: same body, same envelope."""
+"""DecisionClient: validated body, envelope returned verbatim."""
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 import requests
 
-from muse.mcp.client import MuseClient
 from muse.modalities.decision_evaluation.client import DecisionClient, encode_request
 from muse.modalities.decision_evaluation.protocol import DecisionInputError
 
@@ -77,38 +75,3 @@ def test_http_errors_raise_rather_than_return_answers(status):
                return_value=_requests_response(status, {"error": {"code": "x"}})):
         with pytest.raises(requests.HTTPError):
             DecisionClient("http://muse").decide(model="m", state="s", questions=QUESTIONS)
-
-
-def _mock_httpx(monkeypatch, respond):
-    original = httpx.Client
-    monkeypatch.setattr(
-        "muse.mcp.client.httpx.Client",
-        lambda **kw: original(transport=httpx.MockTransport(respond), **kw),
-    )
-
-
-def test_muse_client_sends_the_identical_body(monkeypatch):
-    seen = []
-
-    def respond(request):
-        seen.append(request)
-        return httpx.Response(200, json=ENVELOPE)
-
-    _mock_httpx(monkeypatch, respond)
-    out = MuseClient(server_url="http://gateway").decide(
-        model="decima-base", state={"msg": "café"}, questions=QUESTIONS,
-    )
-    assert out == ENVELOPE
-    (request,) = seen
-    assert request.url.path == "/v1/systemone"
-    assert request.content == encode_request(
-        model="decima-base", state={"msg": "café"}, questions=QUESTIONS,
-    )
-
-
-def test_muse_client_validates_before_http(monkeypatch):
-    seen = []
-    _mock_httpx(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json={}))
-    with pytest.raises(DecisionInputError):
-        MuseClient(server_url="http://gateway").decide(model="", state="s", questions=QUESTIONS)
-    assert seen == []

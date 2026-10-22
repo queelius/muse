@@ -1,18 +1,9 @@
-"""MuseClient: thin httpx wrapper aggregating muse's HTTP routes.
+"""MuseClient: the thin HTTP side of ``muse mcp``.
 
-Wraps /v1/chat/completions, /v1/audio/*, /v1/images/*, /v1/embeddings,
-/v1/rerank, /v1/summarize, /v1/moderations, /v1/translate,
-/v1/systemone, /health,
-/v1/models, plus delegates admin operations to ``AdminClient``.
-
-Each method returns either parsed JSON (for non-binary modalities) or
-raw bytes (for /v1/audio/speech, /v1/audio/music, /v1/audio/sfx).
-Image bytes come back as base64 strings inside the b64_json field of
-/v1/images/* JSON responses; the MCP layer unwraps once when packing
-into MCP ImageContent.
-
-This client is intentionally thin: the MCP server stays stateless and
-imports muse's per-modality client modules lazily on demand.
+Reads the server's discovery documents (``/v1/capabilities``,
+``/openapi.json``), makes one generic ``call(route, ...)`` per generated
+tool, and delegates admin operations to ``AdminClient``. Light by design:
+httpx and ``muse.core.config`` only.
 """
 from __future__ import annotations
 
@@ -23,13 +14,14 @@ import httpx
 from muse.admin.client import AdminClient
 from muse.core import config
 
+_DISCOVERY_TIMEOUT = 10.0
+
 
 class MuseClient:
-    """HTTP aggregator over muse's /v1/* surface.
+    """HTTP client of one muse server (a node or a federation coordinator).
 
-    Construct with the muse server URL; each method maps to one route.
-    Tests inject an instance with mocked httpx, or stub specific
-    methods with ``unittest.mock``.
+    ``transport`` is an optional ``httpx`` transport (tests pass an
+    ``httpx.MockTransport``); every request goes through it.
     """
 
     def __init__(
@@ -37,178 +29,68 @@ class MuseClient:
         server_url: str | None = None,
         admin_token: str | None = None,
         timeout: float = 600.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.server_url = (server_url or config.get("client.server_url")).rstrip("/")
         self.admin_token = admin_token or config.get("admin.token")
         self.timeout = timeout
+        self.transport = transport
         self.admin = AdminClient(
             base_url=self.server_url,
             token=self.admin_token,
             timeout=30.0,
         )
 
-    # Probes
+    def _get_json(self, path: str, params: dict | None = None) -> Any:
+        with httpx.Client(timeout=_DISCOVERY_TIMEOUT, transport=self.transport) as c:
+            r = c.get(f"{self.server_url}{path}", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    # Probes and discovery
 
     def health(self) -> dict:
-        with httpx.Client(timeout=10.0) as c:
-            r = c.get(f"{self.server_url}/health")
-        r.raise_for_status()
-        return r.json()
+        return self._get_json("/health")
 
     def list_models(self) -> dict:
-        with httpx.Client(timeout=10.0) as c:
-            r = c.get(f"{self.server_url}/v1/models")
-        r.raise_for_status()
-        return r.json()
+        return self._get_json("/v1/models")
 
-    # JSON in / JSON out
+    def capabilities(self, *, modality: str | None = None,
+                     model: str | None = None) -> dict:
+        params = {k: v for k, v in (("modality", modality), ("model", model)) if v}
+        return self._get_json("/v1/capabilities", params or None)
 
-    def _post(self, path: str, body: dict) -> httpx.Response:
-        """POST ``body`` (None values dropped) as JSON; raise on error status."""
-        cleaned = {k: v for k, v in body.items() if v is not None}
-        with httpx.Client(timeout=self.timeout) as c:
-            r = c.post(f"{self.server_url}{path}", json=cleaned)
+    def openapi(self) -> dict:
+        return self._get_json("/openapi.json")
+
+    # Inference
+
+    def call(
+        self,
+        route: dict,
+        *,
+        json: Any = None,
+        data: dict | None = None,
+        files: dict | None = None,
+        params: dict | None = None,
+    ) -> httpx.Response:
+        """One request to a DISCOVERY route; raises on an error status.
+
+        ``json`` sends a JSON body; ``data`` + ``files`` send multipart;
+        ``params`` are query parameters (GET routes).
+        """
+        kwargs: dict[str, Any] = {"params": params}
+        if json is not None:
+            kwargs["json"] = json
+        if files:
+            kwargs["files"] = files
+        if data:
+            kwargs["data"] = data
+        with httpx.Client(timeout=self.timeout, transport=self.transport) as c:
+            r = c.request(route["method"].upper(),
+                          f"{self.server_url}{route['path']}", **kwargs)
         r.raise_for_status()
         return r
-
-    def _post_json(self, path: str, body: dict) -> dict:
-        return self._post(path, body).json()
-
-    def _post_bytes(self, path: str, body: dict) -> bytes:
-        return self._post(path, body).content
-
-    def _post_multipart(self, path: str, *, files: dict, data: dict) -> Any:
-        """POST multipart/form-data with ``data`` as string form fields
-        (None values dropped); return JSON if the response is JSON, else
-        bytes."""
-        fields = {k: str(v) for k, v in data.items() if v is not None}
-        with httpx.Client(timeout=self.timeout) as c:
-            r = c.post(f"{self.server_url}{path}", files=files, data=fields)
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "").lower()
-        if ct.startswith("application/json"):
-            return r.json()
-        return r.content
-
-    # Text routes
-
-    def chat(self, **body: Any) -> dict:
-        return self._post_json("/v1/chat/completions", body)
-
-    def summarize(self, **body: Any) -> dict:
-        return self._post_json("/v1/summarize", body)
-
-    def rerank(self, **body: Any) -> dict:
-        return self._post_json("/v1/rerank", body)
-
-    def classify(self, **body: Any) -> dict:
-        return self._post_json("/v1/moderations", body)
-
-    def embed_text(self, **body: Any) -> dict:
-        return self._post_json("/v1/embeddings", body)
-
-    def translate(self, **body: Any) -> dict:
-        return self._post_json("/v1/translate", body)
-
-    def decide(self, *, model: str, state: Any, questions: dict) -> dict:
-        """POST /v1/systemone; the full envelope. The body is strictly
-        validated first (DecisionInputError before any HTTP) and sent as
-        exactly those bytes."""
-        from muse.modalities.decision_evaluation.client import encode_request
-
-        body = encode_request(model=model, state=state, questions=questions)
-        with httpx.Client(timeout=self.timeout) as c:
-            r = c.post(
-                f"{self.server_url}/v1/systemone",
-                content=body, headers={"content-type": "application/json"},
-            )
-        r.raise_for_status()
-        return r.json()
-
-    # Image routes
-
-    def embed_image(self, **body: Any) -> dict:
-        return self._post_json("/v1/images/embeddings", body)
-
-    def generate_image(self, **body: Any) -> dict:
-        body.setdefault("response_format", "b64_json")
-        return self._post_json("/v1/images/generations", body)
-
-    def edit_image(
-        self,
-        *,
-        image: bytes,
-        mask: bytes,
-        **body: Any,
-    ) -> dict:
-        files = {
-            "image": ("image.png", image, "image/png"),
-            "mask": ("mask.png", mask, "image/png"),
-        }
-        body.setdefault("response_format", "b64_json")
-        return self._post_multipart("/v1/images/edits", files=files, data=body)
-
-    def vary_image(self, *, image: bytes, **body: Any) -> dict:
-        files = {"image": ("image.png", image, "image/png")}
-        body.setdefault("response_format", "b64_json")
-        return self._post_multipart("/v1/images/variations", files=files, data=body)
-
-    def upscale_image(self, *, image: bytes, **body: Any) -> dict:
-        files = {"image": ("image.png", image, "image/png")}
-        body.setdefault("response_format", "b64_json")
-        return self._post_multipart("/v1/images/upscale", files=files, data=body)
-
-    def segment_image(self, *, image: bytes, **body: Any) -> dict:
-        files = {"image": ("image.png", image, "image/png")}
-        return self._post_multipart("/v1/images/segment", files=files, data=body)
-
-    def vectorize_image(self, *, image: bytes, **body: Any) -> dict:
-        files = {"image": ("image.png", image, "image/png")}
-        body.setdefault("response_format", "json")
-        return self._post_multipart(
-            "/v1/images/vectorize", files=files, data=body,
-        )
-
-    def generate_animation(self, **body: Any) -> dict:
-        return self._post_json("/v1/images/animations", body)
-
-    def generate_video(self, **body: Any) -> dict:
-        return self._post_json("/v1/video/generations", body)
-
-    # Audio routes
-
-    def generate_music(self, **body: Any) -> bytes:
-        return self._post_bytes("/v1/audio/music", body)
-
-    def generate_sfx(self, **body: Any) -> bytes:
-        return self._post_bytes("/v1/audio/sfx", body)
-
-    def speak(self, **body: Any) -> bytes:
-        return self._post_bytes("/v1/audio/speech", body)
-
-    def transcribe(
-        self,
-        *,
-        audio: bytes,
-        filename: str = "audio.wav",
-        **body: Any,
-    ) -> dict:
-        files = {"file": (filename, audio, "application/octet-stream")}
-        return self._post_multipart(
-            "/v1/audio/transcriptions", files=files, data=body,
-        )
-
-    def embed_audio(
-        self,
-        *,
-        audio: bytes,
-        filename: str = "audio.wav",
-        **body: Any,
-    ) -> dict:
-        files = {"file": (filename, audio, "application/octet-stream")}
-        return self._post_multipart(
-            "/v1/audio/embeddings", files=files, data=body,
-        )
 
     # Resolver search (admin-style discovery)
 

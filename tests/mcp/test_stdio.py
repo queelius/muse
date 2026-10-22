@@ -22,6 +22,8 @@ def server(monkeypatch):
     monkeypatch.delenv("MUSE_SERVER", raising=False)
     monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
     client = MuseClient(server_url="http://test")
+    # No discovery server: the listing is muse_describe + the admin tools.
+    client.capabilities = lambda **_: (_ for _ in ()).throw(ConnectionError("down"))
     return MCPServer(client=client, filter_kind="all")
 
 
@@ -44,7 +46,7 @@ class TestServerStdioBasics:
         assert types.ListToolsRequest in rh
         assert types.CallToolRequest in rh
 
-    def test_list_tools_handler_returns_32_tools(self, server):
+    def test_list_tools_handler_returns_describe_and_admin(self, server):
         # Assert the public handler result instead of an SDK-private cache
         # attribute, which is not part of the compatibility contract.
         import asyncio
@@ -57,7 +59,8 @@ class TestServerStdioBasics:
 
         result = asyncio.run(run_handler())
         out = result.root if hasattr(result, "root") else result
-        assert len(out.tools) == 32
+        names = [t.name for t in out.tools]
+        assert names[0] == "muse_describe" and len(names) == 12
 
     def test_call_tool_dispatches(self, server, monkeypatch):
         # Drive the call_tool handler with a fake list_models response.
