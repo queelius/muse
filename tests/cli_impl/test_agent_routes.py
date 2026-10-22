@@ -26,6 +26,35 @@ def test_speech_request_schema_present(gateway_client):
     assert op["description"] == modality_discovery()["audio/speech"]["summary"]
 
 
+def _refs(node):
+    if isinstance(node, dict):
+        if isinstance(node.get("$ref"), str):
+            yield node["$ref"]
+        for v in node.values():
+            yield from _refs(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _refs(v)
+
+
+def _pointer(doc, ref):
+    assert ref.startswith("#/"), ref
+    node = doc
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        assert isinstance(node, dict) and part in node, f"unresolved $ref {ref}"
+        node = node[part]
+    return node
+
+
+def test_every_ref_in_merged_openapi_resolves(gateway_client):
+    doc = gateway_client.get("/openapi.json").json()
+    refs = set(_refs(doc))
+    assert len(refs) > 20  # the modality request schemas are actually merged in
+    for ref in sorted(refs):
+        assert isinstance(_pointer(doc, ref), dict), ref
+
+
 def test_openapi_is_cached(gateway_client):
     gateway_client.get("/openapi.json")
     app = gateway_client.app
