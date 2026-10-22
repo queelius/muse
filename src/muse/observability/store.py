@@ -192,10 +192,12 @@ class TelemetryStore:
         """Newest non-null ``cold_load_seconds`` of each model's ``model_load``.
 
         Models whose only loads lack a measured cold-load time are omitted.
-        A closed store raises RuntimeError, like the other read methods.
+        A closed store returns {} rather than raising: this feeds a public
+        discovery endpoint that must not fail during shutdown.
         """
         with self._lock:
-            self._require_open_locked()
+            if self._closed:
+                return {}
             rows = self._conn.execute(_LAST_COLD_LOAD_SQL).fetchall()
         return {model_id: seconds for model_id, seconds in rows}
 

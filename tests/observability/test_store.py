@@ -125,8 +125,7 @@ def test_last_cold_load_seconds_per_model(store):
     assert store.last_cold_load_seconds() == {"a": 12.0, "b": 7.5}
 
 
-def test_last_cold_load_seconds_on_closed_store_raises(tmp_path):
+def test_last_cold_load_seconds_on_closed_store_returns_empty(tmp_path):
     store = TelemetryStore(tmp_path / "t.db")
     store.close()
-    with pytest.raises(RuntimeError, match="telemetry store is closed"):
-        store.last_cold_load_seconds()
+    assert store.last_cold_load_seconds() == {}
