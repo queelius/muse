@@ -176,21 +176,6 @@ def build_document(
         (_model_entry(f, s) for f, s in models), key=lambda e: e["id"],
     )
     tags = set(discovery) | {e["modality"] for e in entries if e["modality"]}
-
-    if modality is not None and modality not in tags:
-        raise UnknownFilter(f"unknown modality {modality!r}")
-    if model is not None:
-        match = [e for e in entries if e["id"] == model]
-        if not match:
-            raise UnknownFilter(f"unknown model {model!r}")
-        if modality is not None and match[0]["modality"] != modality:
-            raise UnknownFilter(f"model {model!r} does not serve modality {modality!r}")
-        entries = match
-        tags = {match[0]["modality"]}
-    if modality is not None:
-        entries = [e for e in entries if e["modality"] == modality]
-        tags = {modality}
-
     modalities = []
     for tag in sorted(tags):
         d = discovery.get(tag) or {}
@@ -202,12 +187,62 @@ def build_document(
             "routes": copy.deepcopy(d.get("routes", [])),
             "models": [e["id"] for e in entries if e["modality"] == tag],
         })
-    return {
+    doc = {
         "object": "muse.capabilities",
         "server": copy.deepcopy(server),
         "modalities": modalities,
         "models": entries,
     }
+    return filter_document(doc, modality=modality, model=model)
+
+
+def filter_document(
+    doc: dict, *, modality: str | None = None, model: str | None = None,
+) -> dict:
+    """Slice a built (or federation-merged) capabilities document. Pure.
+
+    Returns a new document; other top-level keys (server,
+    unreachable_nodes, ...) are kept. `modality` keeps that modality and
+    its models; `model` keeps that one model and its modality, with the
+    modality's `models` narrowed to it. An unknown value, or a model
+    outside the requested modality, raises UnknownFilter.
+    """
+    if modality is None and model is None:
+        return copy.deepcopy(doc)
+    entries = [e for e in doc.get("models") or [] if isinstance(e, dict)]
+    mods = {
+        m["modality"]: m for m in doc.get("modalities") or []
+        if isinstance(m, dict) and isinstance(m.get("modality"), str)
+    }
+    tags = set(mods) | {e.get("modality") for e in entries if e.get("modality")}
+
+    if modality is not None and modality not in tags:
+        raise UnknownFilter(f"unknown modality {modality!r}")
+    if model is not None:
+        match = [e for e in entries if e.get("id") == model]
+        if not match:
+            raise UnknownFilter(f"unknown model {model!r}")
+        if modality is not None and match[0].get("modality") != modality:
+            raise UnknownFilter(f"model {model!r} does not serve modality {modality!r}")
+        entries = match[:1]
+        keep = match[0].get("modality")
+    else:
+        entries = [e for e in entries if e.get("modality") == modality]
+        keep = modality
+
+    out = {k: copy.deepcopy(v) for k, v in doc.items() if k not in ("modalities", "models")}
+    base = mods.get(keep) or {
+        "modality": keep, "summary": None, "use_for": [], "not_for": [],
+        "routes": [], "models": [],
+    }
+    kept = copy.deepcopy(base)
+    if model is not None:
+        kept["models"] = [model]
+    out["modalities"] = [kept] if keep else []
+    out["models"] = copy.deepcopy(entries)
+    # Preserve the canonical key order (object, server, modalities, models, ...).
+    order = [k for k in doc if k in out] + [k for k in out if k not in doc]
+    return {k: out[k] for k in order}
 
 
 def render_llms_txt(doc: dict) -> str:

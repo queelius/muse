@@ -351,3 +351,26 @@ def test_openapi_without_reachable_node_still_serves(monkeypatch):
             return []
     r = TestClient(fed.build_coordinator(Reg(), timeout=5)).get("/openapi.json")
     assert r.status_code == 200 and "/v1/capabilities" in r.json()["paths"]
+
+
+def test_capabilities_filters_apply_to_merged_doc(coordinator_client):
+    r = coordinator_client.get("/v1/capabilities", params={"model": "m"})
+    assert r.status_code == 200
+    body = r.json()
+    assert [m["id"] for m in body["models"]] == ["m"]
+    assert [m["modality"] for m in body["modalities"]] == ["audio/speech"]
+    assert "unreachable_nodes" in body
+
+    r = coordinator_client.get("/v1/capabilities", params={"modality": "audio/speech"})
+    assert r.status_code == 200 and [m["id"] for m in r.json()["models"]] == ["m"]
+
+
+@pytest.mark.parametrize("params", [
+    {"modality": "video/nope"}, {"model": "nope"},
+    {"modality": "image/generation", "model": "m"},
+])
+def test_capabilities_unknown_filter_is_openai_404(coordinator_client, params):
+    r = coordinator_client.get("/v1/capabilities", params=params)
+    assert r.status_code == 404
+    err = r.json()["error"]
+    assert err["code"] == "not_found" and isinstance(err["message"], str)

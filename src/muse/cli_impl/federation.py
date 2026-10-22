@@ -261,8 +261,17 @@ def build_coordinator(
         return merge_capabilities(node_docs, server=server)
 
     @app.get("/v1/capabilities")
-    async def capabilities(request: Request):
-        return await _merged_capabilities(request)
+    async def capabilities(
+        request: Request, modality: str | None = None, model: str | None = None,
+    ):
+        # Same filter semantics as a node's gateway, applied to the merge.
+        from muse.core.capabilities import UnknownFilter, filter_document
+
+        doc = await _merged_capabilities(request)
+        try:
+            return filter_document(doc, modality=modality, model=model)
+        except UnknownFilter as exc:
+            return error_response(404, "not_found", str(exc))
 
     @app.get("/", include_in_schema=False)
     @app.get("/.well-known/muse.json", include_in_schema=False)

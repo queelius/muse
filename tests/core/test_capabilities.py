@@ -12,6 +12,7 @@ from muse.core.capabilities import (
     ModelState,
     UnknownFilter,
     build_document,
+    filter_document,
     model_facts,
     render_llms_txt,
     server_block,
@@ -141,6 +142,32 @@ def test_unknown_filters_raise():
     # A model that exists but not in the requested modality.
     with pytest.raises(UnknownFilter):
         _doc([(_facts(), _state())], modality="audio/transcription", model="kokoro-82m")
+
+
+def test_filter_document_is_pure_and_matches_build_filters():
+    whisper = _facts("whisper-base", "audio/transcription")
+    models = [(whisper, _state()), (_facts(), _state())]
+    full = _doc(models)
+    full["extra"] = ["kept"]
+    before = json.dumps(full, sort_keys=True)
+
+    by_mod = filter_document(full, modality="audio/speech")
+    assert [m["id"] for m in by_mod["models"]] == ["kokoro-82m"]
+    assert [m["modality"] for m in by_mod["modalities"]] == ["audio/speech"]
+    assert by_mod["extra"] == ["kept"] and by_mod["server"] == full["server"]
+
+    by_model = filter_document(full, model="whisper-base")
+    assert by_model["modalities"] == _doc(models, model="whisper-base")["modalities"]
+    assert [m["id"] for m in by_model["models"]] == ["whisper-base"]
+
+    assert filter_document(full) == full
+    assert json.dumps(full, sort_keys=True) == before  # input not mutated
+    with pytest.raises(UnknownFilter):
+        filter_document(full, modality="video/nope")
+    with pytest.raises(UnknownFilter):
+        filter_document(full, model="nope")
+    with pytest.raises(UnknownFilter):
+        filter_document(full, modality="audio/speech", model="whisper-base")
 
 
 def test_modality_without_models_is_listed_with_empty_ids():
