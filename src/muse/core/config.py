@@ -292,7 +292,11 @@ SETTINGS: list[Setting] = [
             "Allow image/URL fetches to non-public IPs (SSRF guard off)."),
     Setting("fetch.mcp_allowed_path_prefixes", "MUSE_MCP_ALLOWED_PATH_PREFIXES",
             "str", "", "fetch",
-            "Colon-separated dir prefixes MCP *_path inputs may read from."),
+            "Colon-separated dir prefixes MCP path inputs and out_path may use. "
+            "Empty means the MCP process's working directory plus mcp.output_dir."),
+    # --- mcp ---
+    Setting("mcp.output_dir", "MUSE_MCP_OUTPUT_DIR", "str", "./muse-output", "mcp",
+            "Directory muse mcp writes media outputs to when a tool call gives no out_path."),
     # --- limits (per-modality request caps) ---
     Setting("limits.image_input_max_bytes", "MUSE_IMAGE_INPUT_MAX_BYTES",
             "opt_int", 10 * _MB, "limits", "Max bytes per image upload / data URL.",

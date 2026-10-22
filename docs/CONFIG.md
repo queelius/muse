@@ -133,7 +133,13 @@ A snapshot of the defaults:
 | key | env | default |
 |---|---|---|
 | `fetch.allow_private` | `MUSE_ALLOW_PRIVATE_FETCH` | false (SSRF guard ON) |
-| `fetch.mcp_allowed_path_prefixes` | `MUSE_MCP_ALLOWED_PATH_PREFIXES` | "" |
+| `fetch.mcp_allowed_path_prefixes` | `MUSE_MCP_ALLOWED_PATH_PREFIXES` | "" (empty = MCP cwd + `mcp.output_dir`) |
+
+### mcp
+
+| Key | Env | Default |
+|---|---|---|
+| `mcp.output_dir` | `MUSE_MCP_OUTPUT_DIR` | `./muse-output` |
 
 ### limits (per-modality request caps)
 
