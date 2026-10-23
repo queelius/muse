@@ -915,3 +915,116 @@ def test_backend_error_in_generations_returns_openai_envelope():
     assert "detail" not in body
     assert body["error"]["code"] == "internal_error"
     assert "secret /internal/weights/path" not in r.text
+
+
+# ---------------- gpt-image style request options ----------------
+
+_SNAP_CAPS = {
+    "size_multiple": 16, "max_pixels": 4194304, "default_size": [1024, 1024],
+    "supports_negative_prompt": False, "supports_guidance": False,
+    "quality_presets": {
+        "low": {"steps": 4, "max_pixels": 1048576},
+        "medium": {"steps": 4}, "high": {"steps": 6},
+    },
+}
+
+
+@pytest.fixture
+def snap_client():
+    reg = ModalityRegistry()
+    model = RecordingImageModel(model_id="k")
+    reg.register(
+        "image/generation", model,
+        manifest={"model_id": "k", "modality": "image/generation",
+                  "capabilities": dict(_SNAP_CAPS)},
+    )
+    app = create_app(registry=reg, routers={"image/generation": build_router(reg)})
+    return TestClient(app), model
+
+
+def _post(c, **body):
+    return c.post("/v1/images/generations", json={"prompt": "p", "model": "k", **body})
+
+
+def test_omitted_size_uses_model_default_for_snapping_model(snap_client):
+    c, rec = snap_client
+    r = _post(c)
+    assert r.status_code == 200
+    assert (rec.calls[0]["width"], rec.calls[0]["height"]) == (1024, 1024)
+    assert r.json()["size"] == "1024x1024"
+
+
+def test_omitted_size_legacy_model_still_512(client_with_capable_model, capable_model):
+    r = client_with_capable_model.post(
+        "/v1/images/generations", json={"prompt": "p", "model": "fake-i2i-model"})
+    assert r.status_code == 200
+    assert (capable_model.calls[0]["width"], capable_model.calls[0]["height"]) == (512, 512)
+    assert capable_model.calls[0]["steps"] is None
+
+
+def test_low_quality_snaps_and_reports(snap_client):
+    c, rec = snap_client
+    r = _post(c, size="1536x1024", quality="low").json()
+    assert r["size"] == "1248x832" and r["quality"] == "low"
+    assert rec.calls[0]["steps"] == 4
+
+
+def test_high_quality_steps_and_explicit_steps_override(snap_client):
+    c, rec = snap_client
+    _post(c, quality="high")
+    assert rec.calls[-1]["steps"] == 6
+    _post(c, quality="high", steps=3)
+    assert rec.calls[-1]["steps"] == 3
+
+
+def test_webp_b64_and_url(snap_client):
+    import base64
+    import io
+    from PIL import Image
+    c, _ = snap_client
+    r = _post(c, output_format="webp", output_compression=50).json()
+    assert r["output_format"] == "webp"
+    img = Image.open(io.BytesIO(base64.b64decode(r["data"][0]["b64_json"])))
+    assert img.format == "WEBP"
+    r = _post(c, output_format="webp", response_format="url").json()
+    assert r["data"][0]["url"].startswith("data:image/webp;base64,")
+
+
+def test_transparent_background_400(snap_client):
+    c, _ = snap_client
+    r = _post(c, background="transparent")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "background_not_supported"
+
+
+def test_invalid_output_format_400(snap_client):
+    c, _ = snap_client
+    r = _post(c, output_format="gif")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
+
+
+def test_ignored_listed(snap_client):
+    c, _ = snap_client
+    r = _post(c, moderation="low", negative_prompt="blurry").json()
+    assert r["metadata"]["ignored"] == ["moderation", "negative_prompt"]
+
+
+def test_auto_quality_echo_medium(snap_client):
+    c, _ = snap_client
+    r = _post(c, quality="auto").json()
+    assert r["quality"] == "medium" and r["background"] == "auto"
+    assert r["output_format"] == "png"
+
+
+def test_legacy_response_still_has_data_and_created(client):
+    r = client.post("/v1/images/generations", json={"prompt": "p", "size": "64x64"}).json()
+    assert "created" in r and len(r["data"]) == 1
+    assert r["data"][0]["revised_prompt"] == "p"
+    assert r["size"] == "64x64" and r["quality"] == "auto"
+    assert r["metadata"] == {"ignored": []}
+
+
+def test_out_of_range_size_still_422(snap_client):
+    c, _ = snap_client
+    assert _post(c, size="4096x4096").status_code == 422

@@ -3,7 +3,9 @@
 Follows OpenAI's /v1/images/generations contract:
   - `prompt` (required, 1-4000 chars)
   - `n` number of images (1-10)
-  - `size` "WIDTHxHEIGHT" (64-2048 per side)
+  - `size` "WIDTHxHEIGHT" (64-2048 per side) or "auto"/omitted (model default)
+  - gpt-image fields: `quality`, `output_format`, `output_compression`,
+    `background` (opaque/auto only), `moderation` (accepted, ignored)
   - `response_format` "b64_json" (default) | "url" (data URL)
   - muse extensions: `model`, `seed`, `steps`, `guidance`, `negative_prompt`
   - img2img extensions (since v0.17.0): `image` (data URL or http(s) URL),
@@ -27,6 +29,16 @@ from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.codec import to_bytes, to_data_url
+from muse.modalities.image_generation.options import (
+    OptionError,
+    check_background,
+    check_output,
+    ignored_fields,
+    parse_size,
+    resolve_quality,
+    snap_size,
+    snaps,
+)
 from muse.modalities.image_generation.image_input import (
     close_decoded_images,
     decode_image_file,
@@ -43,7 +55,7 @@ class GenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     model: str | None = None
     n: int = Field(default=1, ge=1, le=10)
-    size: str = Field(default="512x512", pattern=r"^\d+x\d+$")
+    size: str | None = Field(default=None, pattern=r"^(\d+x\d+|auto)$")
     response_format: str = Field(default="b64_json", pattern="^(b64_json|url)$")
     negative_prompt: str | None = None
     steps: int | None = Field(default=None, ge=1, le=100)
@@ -52,14 +64,60 @@ class GenerationRequest(BaseModel):
     image: str | None = None
     strength: float | None = Field(default=None, ge=0.0, le=1.0)
     lora_scale: float | None = Field(default=None, ge=0.0, le=2.0)
+    quality: str | None = None
+    output_format: str | None = None
+    output_compression: int | None = None
+    background: str | None = None
+    moderation: str | None = None
 
     @field_validator("size")
     @classmethod
-    def _validate_size(cls, v: str) -> str:
+    def _validate_size(cls, v: str | None) -> str | None:
+        if v is None or v == "auto":
+            return v
         w, h = map(int, v.split("x"))
         if w < 64 or h < 64 or w > 2048 or h > 2048:
             raise ValueError(f"size {v} out of supported range (64-2048 per side)")
         return v
+
+
+def _build_response(
+    results: list,
+    *,
+    prompt: str | None,
+    response_format: str,
+    output_format: str,
+    compression: int | None,
+    quality: str,
+    background: str,
+    ignored: list[str],
+) -> dict:
+    """Shared envelope for generations/edits/variations.
+
+    A None `prompt` omits `revised_prompt`. `size` is what the first result
+    actually measured, not what was requested.
+    """
+    data = []
+    for r in results:
+        entry: dict = {}
+        if prompt is not None:
+            entry["revised_prompt"] = r.metadata.get("prompt", prompt)
+        if response_format == "url":
+            entry["url"] = to_data_url(r.image, fmt=output_format, compression=compression)
+        else:
+            entry["b64_json"] = base64.b64encode(
+                to_bytes(r.image, fmt=output_format, compression=compression),
+            ).decode()
+        data.append(entry)
+    return {
+        "created": int(time.time()),
+        "data": data,
+        "size": f"{results[0].width}x{results[0].height}",
+        "quality": quality,
+        "output_format": output_format,
+        "background": background,
+        "metadata": {"ignored": ignored},
+    }
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -105,14 +163,36 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"image decode failed: {e}",
                 )
 
-        width, height = map(int, req.size.split("x"))
+        caps = registry.capabilities(MODALITY, effective_id)
+        try:
+            width, height = parse_size(req.size, caps)
+            quality, preset = resolve_quality(req.quality, caps)
+            if snaps(caps):
+                width, height = snap_size(width, height, caps, preset)
+            output_format = check_output(req.output_format, req.output_compression)
+            background = check_background(req.background)
+        except OptionError as e:
+            close_decoded_images([init_image] if init_image is not None else [])
+            return error_response(400, e.code, e.message)
+        steps = req.steps if req.steps is not None else preset.get("steps")
+        ignored = ignored_fields(
+            {
+                "moderation": req.moderation,
+                "quality": req.quality,
+                "negative_prompt": req.negative_prompt,
+                "guidance": req.guidance,
+                "output_compression": req.output_compression,
+                "output_format": output_format,
+            },
+            caps,
+        )
 
         def _call_one(seed_offset: int):
             kwargs: dict = {
                 "width": width,
                 "height": height,
                 "negative_prompt": req.negative_prompt,
-                "steps": req.steps,
+                "steps": steps,
                 "guidance": req.guidance,
                 "init_image": init_image,
                 "strength": req.strength,
@@ -151,24 +231,22 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
             raise
 
-        data = []
         try:
-            for r in results:
-                entry = {"revised_prompt": r.metadata.get("prompt", req.prompt)}
-                if req.response_format == "url":
-                    entry["url"] = to_data_url(r.image, fmt="png")
-                else:
-                    entry["b64_json"] = base64.b64encode(
-                        to_bytes(r.image, fmt="png"),
-                    ).decode()
-                data.append(entry)
+            return _build_response(
+                results,
+                prompt=req.prompt,
+                response_format=req.response_format,
+                output_format=output_format,
+                compression=req.output_compression,
+                quality=quality,
+                background=background,
+                ignored=ignored,
+            )
         finally:
             close_decoded_images(
                 input_images
                 + [getattr(r, "image", None) for r in results]
             )
-
-        return {"created": int(time.time()), "data": data}
 
     # ---------------- /v1/images/edits (inpainting, multipart) ----------------
 
@@ -374,23 +452,21 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             raise
 
         # Variations envelope: no revised_prompt (no prompt).
-        data = []
         try:
-            for r in results:
-                entry: dict = {}
-                if response_format == "url":
-                    entry["url"] = to_data_url(r.image, fmt="png")
-                else:
-                    entry["b64_json"] = base64.b64encode(
-                        to_bytes(r.image, fmt="png"),
-                    ).decode()
-                data.append(entry)
+            return _build_response(
+                results,
+                prompt=None,
+                response_format=response_format,
+                output_format="png",
+                compression=None,
+                quality="auto",
+                background="auto",
+                ignored=[],
+            )
         finally:
             close_decoded_images(
                 [init_image]
                 + [getattr(r, "image", None) for r in results]
             )
-
-        return {"created": int(time.time()), "data": data}
 
     return router
