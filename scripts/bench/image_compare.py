@@ -249,9 +249,10 @@ def write_index(results: list[dict], out_dir) -> Path:
                              f"<div class='cap'>{r['seconds']}s</div></td>")
             else:
                 src = html.escape(r["path"], quote=True)
+                rev = f", rev {html.escape(r['revision'][:12])}" if r.get("revision") else ""
                 cells.append(f"<td><img src=\"{src}\" alt=\"{html.escape(case)}\">"
                              f"<div class='cap'>{r['seconds']}s, {html.escape(str(r['size']))}"
-                             "</div></td>")
+                             f"{rev}</div></td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     page = ("<!doctype html><html><head><meta charset='utf-8'><title>image compare</title>"
             f"<style>{_CSS}</style></head><body><table>{''.join(rows)}</table></body></html>")

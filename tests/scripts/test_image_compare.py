@@ -97,6 +97,7 @@ def test_index_html_lists_every_cell(tmp_path):
     assert 'src="flux/one.png"' in html_text
     assert "HTTP 500" in html_text and ">two<" in html_text
     assert "http://" not in html_text.replace("<!doctype", "")
+    assert "rev abc123" in html_text
 
 
 def test_revision_header_recorded(tmp_path):
