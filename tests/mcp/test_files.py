@@ -1,4 +1,5 @@
 import io
+import os
 import struct
 import wave
 from pathlib import Path
@@ -32,8 +33,32 @@ def test_empty_setting_means_cwd_and_output_dir(tmp_path, monkeypatch):
 
 
 def test_explicit_prefixes(tmp_path, monkeypatch):
-    monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", str(tmp_path))
-    assert allowed_prefixes() == [str(tmp_path.resolve())]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", str(tmp_path / "in"))
+    assert allowed_prefixes() == [str((tmp_path / "in").resolve()),
+                                  str((tmp_path / "muse-output").resolve())]
+
+
+def test_output_dir_readable_with_explicit_prefixes(tmp_path, monkeypatch):
+    """A generated file can be fed back into a tool (speak -> align)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", str(tmp_path / "in"))
+    wf = write_output(b"RIFFxxxx", "audio/wav", out_path=None)
+    data, _name, _mime = read_input(wf.path, field="file", max_bytes=100)
+    assert data == b"RIFFxxxx"
+
+
+def test_cwd_root_relative_prefix_resolves_under_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "takes").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir("/")
+    monkeypatch.setenv("MUSE_MCP_ALLOWED_PATH_PREFIXES", "takes")
+    got = allowed_prefixes()
+    assert os.sep not in got
+    assert got[0] == str((home / "takes").resolve())
+    with pytest.raises(ValueError, match="not within an allowed prefix"):
+        read_input("/etc/hostname", field="image", max_bytes=10_000)
 
 
 def test_symlink_escape_refused(tmp_path, monkeypatch):

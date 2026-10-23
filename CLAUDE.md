@@ -1443,10 +1443,11 @@ I/O conventions:
   for plain-text media; vectorize's `svg` is written as a UTF-8 `.svg` file.
 - Path inputs (`<name>_path`) and `out_path` are allowed under the MCP
   process cwd and `mcp.output_dir` when `fetch.mcp_allowed_path_prefixes` is
-  empty. A set value REPLACES both (colon-separated); `mcp.output_dir` is
-  always writable regardless. A cwd of `/` (Claude Desktop) is never an
-  implicit prefix, and a relative `mcp.output_dir` then resolves under the
-  home directory (`~/muse-output`), not `/muse-output`. (An empty setting
+  empty. A set value REPLACES the cwd (colon-separated); `mcp.output_dir` is
+  always allowed, for reads and writes, so a generated file can be passed to
+  another tool. A cwd of `/` (Claude Desktop) is never an implicit prefix,
+  and relative entries (a relative `mcp.output_dir`, or `.` in the setting)
+  then resolve under the home directory (`~/muse-output`), never `/`. (An empty setting
   used to disable path inputs; it now means cwd plus output dir.)
 - `*_url` inputs on multipart routes are fetched by the MCP process (through
   `muse.core.net_fetch`'s SSRF guard) and uploaded; `*_url` inputs on JSON
@@ -1484,8 +1485,8 @@ Claude Desktop starts stdio servers with cwd `/`, so set
 `MUSE_MCP_OUTPUT_DIR` to an absolute directory (without it, outputs go to
 `~/muse-output`). With cwd `/` no path input is readable except files under
 the output dir; to pass local files, set `MUSE_MCP_ALLOWED_PATH_PREFIXES` to
-a colon-separated list of directories (it replaces the cwd + output-dir
-default; the output dir stays writable).
+a colon-separated list of directories (it replaces the cwd default; the
+output dir is always readable and writable, so outputs can be fed back in).
 
 ## Development commands
 

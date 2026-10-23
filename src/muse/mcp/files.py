@@ -40,34 +40,36 @@ def _cwd_is_root() -> bool:
 
 
 def allowed_prefixes() -> list[str]:
-    """Realpath'd prefixes path inputs (and ``out_path``) must lie within.
+    """Realpath'd prefixes path inputs and ``out_path`` must lie within.
 
     An empty ``fetch.mcp_allowed_path_prefixes`` means the process working
-    directory plus ``mcp.output_dir``; a set value replaces both. A cwd of
-    ``/`` (how Claude Desktop launches stdio servers) is never an implicit
-    prefix, since it would allow every path: only ``mcp.output_dir`` remains.
+    directory; a set value replaces it. ``mcp.output_dir`` is always allowed,
+    so a generated file can be fed back into another tool. A cwd of ``/``
+    (how Claude Desktop launches stdio servers) is never an implicit prefix,
+    since it would allow every path, and relative entries then resolve
+    against the home directory.
     """
     raw = (config.get("fetch.mcp_allowed_path_prefixes") or "").strip()
-    items = [p for p in raw.split(os.pathsep) if p.strip()]
-    if not items:
-        items = ([] if _cwd_is_root() else [os.getcwd()]) + [_output_dir()]
-    return [_real(p) for p in items]
-
-
-def write_prefixes() -> list[str]:
-    """``allowed_prefixes()`` plus ``mcp.output_dir``, which is always writable."""
-    out = allowed_prefixes()
+    items = [_anchored(p) for p in raw.split(os.pathsep) if p.strip()]
+    if not items and not _cwd_is_root():
+        items = [os.getcwd()]
+    out = [_real(p) for p in items]
     own = _real(_output_dir())
     return out if own in out else [*out, own]
 
 
-def _output_dir() -> str:
-    """``mcp.output_dir``; a relative value resolves against the cwd, or
-    against the home directory when the cwd is ``/`` (never ``/muse-output``)."""
-    path = os.path.expanduser(str(config.get("mcp.output_dir") or "./muse-output"))
+def _anchored(path: str) -> str:
+    """``path`` with ``~`` expanded; a relative path resolves against the cwd,
+    or against the home directory when the cwd is ``/``."""
+    path = os.path.expanduser(path)
     if not os.path.isabs(path) and _cwd_is_root():
         path = os.path.join(os.path.expanduser("~"), path)
     return path
+
+
+def _output_dir() -> str:
+    """``mcp.output_dir`` (never ``/muse-output`` when the cwd is ``/``)."""
+    return _anchored(str(config.get("mcp.output_dir") or "./muse-output"))
 
 
 def _check_within(path: str, *, label: str,
@@ -152,7 +154,7 @@ def write_output(data: bytes, mime: str, *, out_path: str | None) -> WrittenFile
     digest = hashlib.sha256(data).hexdigest()
     # Snapshot the prefixes once: they include the (possibly relative)
     # output dir, which must not be re-resolved after a symlink swap.
-    prefixes = write_prefixes()
+    prefixes = allowed_prefixes()
     if out_path:
         target = _check_within(out_path, label="out_path", prefixes=prefixes)
     else:

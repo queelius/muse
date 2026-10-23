@@ -170,9 +170,13 @@ class MCPServer:
 
     @property
     def tools(self) -> list[Any]:
+        return self._tool_list(refresh=True)
+
+    def _tool_list(self, *, refresh: bool) -> list[Any]:
         out: list[Any] = []
         if self._inference:
-            self._refresh()
+            if refresh:
+                self._refresh()
             out.append(describe_tool())
             out.extend(g.tool for g in self._generated.values())
         out.extend(e.tool for e in self._admin)
@@ -192,17 +196,20 @@ class MCPServer:
         except LookupError:  # called outside a request (direct handler use)
             return None
 
-    async def _notify_changed(self, session: Any | None = None) -> None:
+    async def _notify_changed(self, session: Any | None = None, *,
+                              refresh: bool = True) -> None:
         """Send ``tools/list_changed`` to ``session`` (else every session that
         has listed tools) when its last-seen list differs from the current
-        one. Refreshes the discovery cache (TTL-bound) off the loop first."""
+        one. With ``refresh`` the discovery cache (TTL-bound) is refreshed off
+        the loop first; without it only the cached documents are compared."""
         if not self._inference:
             return  # the admin-only set is fixed
         targets = [session] if session is not None else list(self._sessions)
         targets = [t for t in targets if t in self._sessions]
         if not targets:
             return
-        sig = self._signature(await asyncio.to_thread(lambda: self.tools))
+        sig = self._signature(await asyncio.to_thread(
+            lambda: self._tool_list(refresh=refresh)))
         for sess in targets:
             if self._sessions.get(sess) == sig:
                 continue
@@ -213,8 +220,11 @@ class MCPServer:
                 log.debug("tools/list_changed not delivered: %s", e)
 
     async def _after_request(self) -> None:
+        # Compare against the cache only: a refresh here would add up to two
+        # discovery timeouts to every tool call when muse hangs. The tool call
+        # itself or the background watcher keeps the cache current.
         try:
-            await self._notify_changed(self._current_session())
+            await self._notify_changed(self._current_session(), refresh=False)
         except Exception as e:  # noqa: BLE001 - never fail the request for this
             log.debug("tools/list_changed check failed: %s", e)
 
@@ -301,6 +311,7 @@ class MCPServer:
             if name in self._admin_handlers:
                 return self._admin_handlers[name](self.client, args)
             if self._inference and name == DESCRIBE:
+                self._refresh()  # a discovery call also refreshes the tool cache
                 return call_describe(self.client, args)
             gen = self._generated.get(name) if self._inference else None
             if gen is None and self._inference:

@@ -653,8 +653,8 @@ Claude Desktop starts stdio servers with cwd `/`, so set
 `MUSE_MCP_OUTPUT_DIR` to an absolute directory (without it, outputs go to
 `~/muse-output`). With cwd `/` no path input is readable except files under
 the output dir; to pass local files, set `MUSE_MCP_ALLOWED_PATH_PREFIXES` to
-a colon-separated list of directories (it replaces the cwd + output-dir
-default; the output dir stays writable).
+a colon-separated list of directories (it replaces the cwd default; the
+output dir is always readable and writable, so outputs can be fed back in).
 
 Tools split into two groups:
 
@@ -719,7 +719,7 @@ See the "Federation" section of `CLAUDE.md` for the full design.
   - `nv_embed_v2.py` (embedding/text; MiniLM and Qwen3-Embedding are now resolver-pulled via the generic runtime, see `curated.yaml`)
   - `sd_turbo.py` (image/generation)
   - `bge_reranker_v2_m3.py` (text/rerank)
-  - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Apache 2.0)
+  - `stable_audio_open_1_0.py` (audio/generation; Stable Audio Open 1.0, Stability AI Community License)
   - `ace_step_v1_3_5b.py` (audio/generation; ACE-Step v1 3.5B full songs + lyrics, Apache 2.0, GPU-required)
   - `bart_large_cnn.py` (text/summarization; facebook/bart-large-cnn, Apache 2.0, ~400MB CPU-friendly)
   - `m2m100_418m.py` (text/translation; facebook/m2m100_418M, MIT, ~2GB, all-pairs across 100 languages)

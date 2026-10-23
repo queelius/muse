@@ -133,7 +133,7 @@ A snapshot of the defaults:
 | key | env | default |
 |---|---|---|
 | `fetch.allow_private` | `MUSE_ALLOW_PRIVATE_FETCH` | false (SSRF guard ON) |
-| `fetch.mcp_allowed_path_prefixes` | `MUSE_MCP_ALLOWED_PATH_PREFIXES` | "" (empty = MCP cwd, unless it is `/`, + `mcp.output_dir`; a set colon-separated list replaces both; `mcp.output_dir` is always writable) |
+| `fetch.mcp_allowed_path_prefixes` | `MUSE_MCP_ALLOWED_PATH_PREFIXES` | "" (empty = MCP cwd, unless it is `/`; a set colon-separated list replaces the cwd; `mcp.output_dir` is always readable and writable; relative entries resolve under `~` when the cwd is `/`) |
 
 ### mcp
 

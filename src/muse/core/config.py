@@ -294,8 +294,8 @@ SETTINGS: list[Setting] = [
             "str", "", "fetch",
             "Colon-separated dir prefixes MCP path inputs and out_path may use. "
             "Empty means the MCP process's working directory (unless it is /) plus "
-            "mcp.output_dir; a set value replaces both. mcp.output_dir is always "
-            "writable."),
+            "mcp.output_dir; a set value replaces the cwd. mcp.output_dir is always "
+            "allowed, for reads and writes."),
     # --- mcp ---
     Setting("mcp.output_dir", "MUSE_MCP_OUTPUT_DIR", "str", "./muse-output", "mcp",
             "Directory muse mcp writes media outputs to when a tool call gives no "

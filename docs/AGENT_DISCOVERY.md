@@ -105,9 +105,10 @@ models, not an enum, so a model enabled mid-session is accepted. Behaviour:
 - File inputs take a local `<name>_path`. With
   `fetch.mcp_allowed_path_prefixes` (`MUSE_MCP_ALLOWED_PATH_PREFIXES`) empty,
   paths under the current directory or `mcp.output_dir` are allowed; a cwd of
-  `/` is never allowed implicitly. A set value replaces that default with its
-  colon-separated directories, and `mcp.output_dir` stays writable either
-  way. Multipart `*_url` inputs are fetched by the MCP process through muse's
+  `/` is never allowed implicitly. A set value replaces the current-directory
+  default with its colon-separated directories; `mcp.output_dir` stays
+  allowed for reads and writes either way, so one tool's output file can be
+  another tool's input (speak, then align). Multipart `*_url` inputs are fetched by the MCP process through muse's
   SSRF guard; JSON `*_url` inputs are passed to the server, whose SSRF guard
   fetches them. Base64 inputs are not supported.
 - `X-Alignment` from `audio/speech align=true` is surfaced as

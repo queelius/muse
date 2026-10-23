@@ -331,3 +331,23 @@ def test_unknown_tool_returns_error_block(fake_http, media_env):
     srv = MCPServer(client=fake_http(), filter_kind="all")
     [block] = srv.call_handler("not_a_real_tool", {})
     assert block["error"] is True and "unknown tool" in block["text"]
+
+
+def test_after_request_never_refetches(fake_http, media_env, caps_doc, monkeypatch):
+    """The post-call list_changed check compares cached documents only, so a
+    hung muse cannot add discovery timeouts to every tool call."""
+    srv = MCPServer(client=fake_http(caps=caps_doc), filter_kind="inference")
+    srv.tools  # warm the cache
+    monkeypatch.setattr(server_mod, "CACHE_SECONDS", 0.0)  # cache now stale
+
+    class Sess:
+        async def send_tool_list_changed(self):
+            pass
+
+    sess = Sess()
+    srv._sessions[sess] = "old"
+    calls = []
+    monkeypatch.setattr(srv, "_refresh", lambda: calls.append(1))
+    monkeypatch.setattr(srv, "_current_session", lambda: sess)
+    asyncio.run(srv._after_request())
+    assert calls == []
