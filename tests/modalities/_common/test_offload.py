@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from muse.core import config
-from muse.modalities.video_generation.runtimes._offload import (
+from muse.modalities._common.offload import (
     place_pipeline,
     resolve_offload_mode,
 )
@@ -156,3 +156,12 @@ def test_place_pipeline_global_override_beats_capability(monkeypatch):
     place_pipeline(pipe, "cuda", cpu_offload="sequential")
     assert pipe.to_calls == ["cuda"]
     assert pipe.sequential_offload_calls == []
+
+
+def test_override_key_none_ignores_video_override(monkeypatch):
+    monkeypatch.setenv("MUSE_VIDEO_CPU_OFFLOAD", "off")
+    config.reset_config()
+    pipe = FakePipe()
+    place_pipeline(pipe, "cuda", cpu_offload="model", override_key=None)
+    assert pipe.model_offload_calls
+    assert resolve_offload_mode("model", override_key=None) == "model"

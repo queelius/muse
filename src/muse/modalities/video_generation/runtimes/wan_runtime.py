@@ -17,7 +17,7 @@ from typing import Any
 from muse.core.runtime_helpers import dtype_for_name, select_device
 from muse.modalities.video_generation.codec import frame_dimensions
 from muse.modalities.video_generation.protocol import VideoResult
-from muse.modalities.video_generation.runtimes._offload import place_pipeline
+from muse.modalities._common.offload import place_pipeline
 
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ class WanRuntime:
         default_guidance: manifest-driven defaults injected via the
         capabilities splat
       - cpu_offload: None|"model"|"sequential" -- per-model capability;
-        see muse.modalities.video_generation.runtimes._offload
+        see muse.modalities._common.offload
       - vae_tiling: bool -- enable_vae_tiling/slicing after placement
       - **kwargs: absorbed (future capability flags)
     """

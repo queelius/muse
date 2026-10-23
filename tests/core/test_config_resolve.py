@@ -128,7 +128,7 @@ def test_legacy_video_offload_false_alias_still_forces_off(
     assert c.get("server.video_cpu_offload") == "0"
 
     cfg.reset_config()
-    from muse.modalities.video_generation.runtimes._offload import (
+    from muse.modalities._common.offload import (
         resolve_offload_mode,
     )
 

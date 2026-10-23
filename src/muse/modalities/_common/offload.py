@@ -1,6 +1,6 @@
-"""Shared CPU-offload dispatch for diffusers video pipelines.
+"""Shared CPU-offload dispatch for diffusers pipelines.
 
-Both WanRuntime and CogVideoXRuntime (and the bundled wan2_1_t2v_1_3b
+Video (WanRuntime, CogVideoXRuntime, and the bundled wan2_1_t2v_1_3b
 Model script, which duplicates WanRuntime's construction logic for the
 one-off-script loading path) place their pipeline the same way: either
 the whole-pipeline `.to(device)` move, or one of diffusers' two CPU
@@ -23,18 +23,22 @@ logger = logging.getLogger(__name__)
 
 _OFF = {"", "off", "false", "none", "no", "0"}
 _MODES = {"model", "sequential"}
+_VIDEO_OVERRIDE_KEY = "server.video_cpu_offload"
 
 
-def resolve_offload_mode(capability_mode: Any) -> str | None:
+def resolve_offload_mode(
+    capability_mode: Any, *, override_key: str | None = _VIDEO_OVERRIDE_KEY,
+) -> str | None:
     """Effective offload mode: global config override > per-model capability > off.
 
     Returns "model", "sequential", or None (no offload). An unset
     global override (`server.video_cpu_offload`, env
     MUSE_VIDEO_CPU_OFFLOAD) falls through to `capability_mode`; a set
     override always wins, including forcing "off" over a model that
-    declares sequential offload.
+    declares sequential offload. `override_key=None` skips the
+    override so the capability alone decides.
     """
-    override = config.get("server.video_cpu_offload")
+    override = config.get(override_key) if override_key else None
     raw = override if override is not None else capability_mode
     if raw is None:
         return None
@@ -53,6 +57,7 @@ def place_pipeline(
     *,
     cpu_offload: Any = None,
     vae_tiling: bool = False,
+    override_key: str | None = _VIDEO_OVERRIDE_KEY,
 ) -> Any:
     """Place a diffusers pipeline on its device.
 
@@ -65,7 +70,7 @@ def place_pipeline(
     """
     if device == "cpu":
         return pipe
-    mode = resolve_offload_mode(cpu_offload)
+    mode = resolve_offload_mode(cpu_offload, override_key=override_key)
     if mode == "model":
         logger.info("enabling model cpu offload (device=%s)", device)
         pipe.enable_model_cpu_offload(device=device)
