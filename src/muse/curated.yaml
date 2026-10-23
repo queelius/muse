@@ -380,7 +380,7 @@
     - "Runs with CPU offload on 12 GB: slow first load, and about 16 GB of host RAM that muse's memory accounting does not count"
   quality_tier: good
   capabilities:
-    memory_gb: 8.5
+    memory_gb: 9.5
 
 - id: pixel-art-xl
   uri: hf://nerijs/pixel-art-xl

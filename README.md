@@ -12,7 +12,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - speech naturalness and production-quality scoring on `/v1/audio/quality`
 - reference-transcript word alignment on `/v1/audio/alignments`
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
-- text-to-image on `/v1/images/generations`, image inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
+- text-to-image on `/v1/images/generations`, multi-reference edits (consistent characters) and inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - image-to-image super-resolution on `/v1/images/upscale`
 - raster-to-editable-SVG vectorization on `/v1/images/vectorize`
 - image depth, keypoints, and object detection on `/v1/images/depth`, `/v1/images/keypoints`, and `/v1/images/detect`
@@ -195,6 +195,16 @@ curl -X POST http://localhost:8000/v1/images/edits \
   -F "model=sd-turbo" \
   -F "size=512x512" \
   -F "n=1"
+
+# Reference-image edit (multipart: 1-4 image[] parts, no mask; FLUX.2 klein).
+# Same request shape as OpenAI gpt-image edits; size/quality/output_format work too.
+curl -X POST http://localhost:8000/v1/images/edits \
+  -F "image[]=@character-front.png" \
+  -F "image[]=@character-side.png" \
+  -F "prompt=the same character, now reading in a library" \
+  -F "model=flux2-klein-4b" \
+  -F "size=1536x1024" \
+  -F "quality=medium"
 
 # Image variations (multipart: image only, no prompt)
 curl -X POST http://localhost:8000/v1/images/variations \
@@ -511,7 +521,7 @@ settings inventory and precedence rules.
 | `POST /v1/audio/translations` | transcribe + translate audio to English (OpenAI-compatible) |
 | `POST /v1/audio/alignments` | align trusted reference text to audio as word timestamps (muse-native multipart) |
 | `POST /v1/images/generations` | generate images (OpenAI-compatible; supports img2img via `image` + `strength`) |
-| `POST /v1/images/edits` | inpaint masked regions (OpenAI-compatible; multipart with image+mask+prompt) |
+| `POST /v1/images/edits` | multi-reference edits (`image[]`, no mask) or inpainting (image+mask); OpenAI-compatible multipart |
 | `POST /v1/images/variations` | generate alternates of one image (OpenAI-compatible; multipart, no prompt) |
 | `POST /v1/images/vectorize` | convert a raster icon/diagram to validated static SVG (multipart; JSON or image/svg+xml) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
