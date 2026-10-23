@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 PUBLIC_PREFIXES: tuple[str, ...] = ("supports_", "max_", "min_", "default_")
 
 PUBLIC_KEYS: frozenset[str] = frozenset({
+    "size_multiple", "quality_presets",
     "voices", "sample_rate", "dimensions", "supported_languages",
     "source_language", "target_language", "context_length", "device",
     "memory_gb", "quality_axes", "primary_score", "question_types",
@@ -27,6 +28,7 @@ PUBLIC_KEYS: frozenset[str] = frozenset({
 })
 
 HIDDEN_KEYS: frozenset[str] = frozenset({
+    "pipeline_class",
     "gguf_file", "chat_format", "n_gpu_layers", "n_threads",
     "n_threads_batch", "n_batch", "flash_attn", "use_mlock", "type_k",
     "type_v", "allow_patterns", "torch_compile", "cpu_offload", "vae_tiling",

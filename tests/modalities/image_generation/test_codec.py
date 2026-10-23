@@ -90,3 +90,21 @@ def test_to_data_url_jpeg():
     img = PIL.new("RGB", (4, 4))
     url = to_data_url(img, fmt="jpeg")
     assert url.startswith("data:image/jpeg;base64,")
+
+
+def test_webp_roundtrip():
+    from io import BytesIO
+    from PIL import Image
+    img = Image.new("RGB", (32, 32), "red")
+    assert Image.open(BytesIO(to_bytes(img, fmt="webp"))).format == "WEBP"
+
+
+def test_jpeg_compression_changes_size():
+    from PIL import Image
+    img = Image.effect_noise((128, 128), 60).convert("RGB")
+    assert len(to_bytes(img, fmt="jpeg", compression=10)) < len(to_bytes(img, fmt="jpeg", compression=95))
+
+
+def test_data_url_webp_mime():
+    from PIL import Image
+    assert to_data_url(Image.new("RGB", (8, 8)), fmt="webp").startswith("data:image/webp;base64,")

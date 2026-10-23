@@ -47,19 +47,36 @@ def to_pil(image: Any):
     raise ImageFormatError(f"cannot convert {type(image).__name__} to PIL")
 
 
-def to_bytes(image: Any, *, fmt: str = "png") -> bytes:
-    """Encode to raw image bytes (PNG or JPEG)."""
+_FORMATS = {
+    "png": ("PNG", "png"),
+    "jpeg": ("JPEG", "jpeg"),
+    "jpg": ("JPEG", "jpeg"),
+    "webp": ("WEBP", "webp"),
+}
+
+
+def to_bytes(image: Any, *, fmt: str = "png", compression: int | None = None) -> bytes:
+    """Encode to raw image bytes (PNG, JPEG or WebP).
+
+    `compression` (0-100) maps to Pillow `quality=` for JPEG and WebP; PNG ignores it.
+    """
     fmt = fmt.lower()
-    if fmt not in ("png", "jpeg", "jpg"):
+    if fmt not in _FORMATS:
         raise ImageFormatError(f"unsupported image format {fmt!r}")
+    pil_fmt = _FORMATS[fmt][0]
     pil = to_pil(image)
+    if pil_fmt == "JPEG" and pil.mode not in ("RGB", "L"):
+        pil = pil.convert("RGB")
+    kwargs = {}
+    if compression is not None and pil_fmt in ("JPEG", "WEBP"):
+        kwargs["quality"] = int(compression)
     buf = io.BytesIO()
-    pil.save(buf, format="JPEG" if fmt in ("jpeg", "jpg") else "PNG")
+    pil.save(buf, format=pil_fmt, **kwargs)
     return buf.getvalue()
 
 
-def to_data_url(image: Any, *, fmt: str = "png") -> str:
+def to_data_url(image: Any, *, fmt: str = "png", compression: int | None = None) -> str:
     """Encode as a data URL suitable for inline use."""
-    payload = to_bytes(image, fmt=fmt)
-    mime = "jpeg" if fmt in ("jpeg", "jpg") else "png"
+    payload = to_bytes(image, fmt=fmt, compression=compression)
+    mime = _FORMATS[fmt.lower()][1]
     return f"data:image/{mime};base64,{base64.b64encode(payload).decode()}"
