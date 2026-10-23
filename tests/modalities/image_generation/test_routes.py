@@ -1074,7 +1074,7 @@ def _ref_client(caps=None):
     return TestClient(app), model
 
 
-def _img_part(name, w=32, h=32):
+def _img_part(name, w=64, h=64):
     return (name, (f"{name}.png", _png_bytes(w, h), "image/png"))
 
 
@@ -1110,14 +1110,14 @@ def test_reference_edit_dispatch_order():
     r = c.post(
         "/v1/images/edits",
         files=[
-            _img_part("image", 16, 16),
-            _img_part("image[]", 32, 32),
-            _img_part("image[]", 48, 48),
+            _img_part("image", 64, 64),
+            _img_part("image[]", 96, 96),
+            _img_part("image[]", 128, 80),
         ],
         data={"prompt": "blend"},
     )
     assert r.status_code == 200, r.text
-    assert [im.size for im in model.edit_calls[0]["images"]] == [(16, 16), (32, 32), (48, 48)]
+    assert [im.size for im in model.edit_calls[0]["images"]] == [(64, 64), (96, 96), (128, 80)]
 
 
 def test_reference_edit_seed_offsets_with_n():
@@ -1201,7 +1201,7 @@ def test_decoded_images_closed_on_error(monkeypatch):
     from unittest.mock import MagicMock
 
     c, model = _ref_client()
-    decoded = [MagicMock(size=(8, 8)), MagicMock(size=(8, 8))]
+    decoded = [MagicMock(size=(64, 64)), MagicMock(size=(64, 64))]
     monkeypatch.setattr(routes_mod, "decode_image_file", AsyncMock(side_effect=decoded))
 
     def fail(prompt, **kw):
@@ -1229,3 +1229,64 @@ def test_inpaint_reports_unused_fields_as_ignored(client_with_edits_model):
     )
     assert r.status_code == 200
     assert r.json()["metadata"]["ignored"] == ["seed", "steps"]
+
+
+def test_reference_edit_rejects_tiny_reference():
+    c, model = _ref_client()
+    r = c.post("/v1/images/edits", files=[_img_part("image", 128, 128), _img_part("image[]", 32, 32)],
+               data={"prompt": "p"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert "reference image 1" in r.json()["error"]["message"]
+    assert model.edit_calls == []
+
+
+def test_reference_edit_rejects_elongated_reference():
+    c, model = _ref_client()
+    r = c.post("/v1/images/edits", files=[_img_part("image", 1024, 100)], data={"prompt": "p"})
+    assert r.status_code == 400
+    assert "reference image 0" in r.json()["error"]["message"]
+    assert model.edit_calls == []
+
+
+def test_reference_edit_accepts_128_square():
+    c, model = _ref_client()
+    r = c.post("/v1/images/edits", files=[_img_part("image", 128, 128)], data={"prompt": "p"})
+    assert r.status_code == 200, r.text
+
+
+def _gen_client(caps):
+    model = RecordingImageModel(model_id="fake-ref")
+    reg = ModalityRegistry()
+    reg.register("image/generation", model, manifest={
+        "model_id": "fake-ref", "modality": "image/generation", "capabilities": caps})
+    app = create_app(registry=reg, routers={"image/generation": build_router(reg)})
+    return TestClient(app), model
+
+
+@pytest.mark.parametrize("given,effective", [("standard", "medium"), ("hd", "high")])
+def test_dalle_quality_aliases_with_presets(given, effective):
+    c, _ = _gen_client(dict(_REF_CAPS))
+    r = c.post("/v1/images/generations", json={"prompt": "p", "quality": given})
+    assert r.status_code == 200, r.text
+    assert r.json()["quality"] == effective
+    assert "quality" not in r.json()["metadata"]["ignored"]
+
+
+@pytest.mark.parametrize("given", ["standard", "hd"])
+def test_dalle_quality_on_legacy_model_ignored(given):
+    c, _ = _gen_client({})
+    r = c.post("/v1/images/generations", json={"prompt": "p", "quality": given})
+    assert r.status_code == 200, r.text
+    assert "quality" in r.json()["metadata"]["ignored"]
+
+
+def test_style_listed_as_ignored():
+    c, _ = _gen_client(dict(_REF_CAPS))
+    r = c.post("/v1/images/generations", json={"prompt": "p", "style": "vivid"})
+    assert r.status_code == 200, r.text
+    assert "style" in r.json()["metadata"]["ignored"]
+    r = c.post("/v1/images/edits", files=[_img_part("image", 128, 128)],
+               data={"prompt": "p", "style": "natural"})
+    assert r.status_code == 200, r.text
+    assert "style" in r.json()["metadata"]["ignored"]

@@ -12,6 +12,8 @@ from typing import Any, Mapping
 _SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 _MIN_SIDE, _MAX_SIDE = 64, 2048
 _QUALITIES = ("low", "medium", "high", "auto")
+# OpenAI dall-e-3 quality names, accepted as aliases of the gpt-image ones.
+_QUALITY_ALIASES = {"standard": "medium", "hd": "high"}
 _FORMATS = ("png", "jpeg", "webp")
 
 
@@ -48,10 +50,12 @@ def parse_size(size: str | None, caps: Mapping) -> tuple[int, int]:
 
 
 def resolve_quality(quality: str | None, caps: Mapping) -> tuple[str, dict]:
+    quality = _QUALITY_ALIASES.get(quality, quality)
     if quality is not None and quality not in _QUALITIES:
         raise OptionError(
             "invalid_parameter",
-            f"quality must be one of low, medium, high, auto; got {quality!r}",
+            "quality must be one of low, medium, high, auto "
+            f"(or standard, hd); got {quality!r}",
         )
     presets = caps.get("quality_presets")
     if not presets:
@@ -101,8 +105,9 @@ def ignored_fields(sent: Mapping[str, Any], caps: Mapping) -> list[str]:
     """Names of provided fields that had no effect on this model."""
     out = set()
     given = {k for k, v in sent.items() if v is not None}
-    if "moderation" in given:
-        out.add("moderation")
+    for always in ("moderation", "style"):
+        if always in given:
+            out.add(always)
     if "quality" in given and not caps.get("quality_presets"):
         out.add("quality")
     if "negative_prompt" in given and caps.get("supports_negative_prompt") is False:

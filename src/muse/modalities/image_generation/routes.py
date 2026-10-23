@@ -69,6 +69,7 @@ class GenerationRequest(BaseModel):
     output_compression: int | None = None
     background: str | None = None
     moderation: str | None = None
+    style: str | None = None
 
     @field_validator("size")
     @classmethod
@@ -135,6 +136,7 @@ def _resolve_options(
     negative_prompt,
     guidance,
     steps,
+    style=None,
 ) -> dict:
     """Resolve the gpt-image options shared by generations and edits.
 
@@ -149,6 +151,7 @@ def _resolve_options(
     ignored = ignored_fields(
         {
             "moderation": moderation,
+            "style": style,
             "quality": quality,
             "negative_prompt": negative_prompt,
             "guidance": guidance,
@@ -221,6 +224,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 output_compression=req.output_compression,
                 background=req.background,
                 moderation=req.moderation,
+                style=req.style,
                 negative_prompt=req.negative_prompt,
                 guidance=req.guidance,
                 steps=req.steps,
@@ -310,6 +314,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         output_compression: int | None = Form(None),
         background: str | None = Form(None),
         moderation: str | None = Form(None),
+        style: str | None = Form(None),
         negative_prompt: str | None = Form(None),
         steps: int | None = Form(None),
         guidance: float | None = Form(None),
@@ -394,6 +399,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 output_compression=output_compression,
                 background=background,
                 moderation=moderation,
+                style=style,
                 negative_prompt=negative_prompt,
                 guidance=guidance,
                 steps=steps,
@@ -426,6 +432,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         except BaseException:
             close_decoded_images(decoded_images)
             raise
+
+        if mask_image is None:
+            # The reference pipeline's image processor rejects these shapes.
+            for idx, im in enumerate(decoded_images):
+                w, h = im.size
+                if min(w, h) < 64 or max(w, h) / min(w, h) > 8:
+                    close_decoded_images(decoded_images)
+                    return error_response(
+                        400, "invalid_parameter",
+                        f"reference image {idx} is {w}x{h}; each side must be "
+                        f"at least 64 px and the aspect ratio at most 8:1",
+                    )
 
         def _call_one(seed_offset: int):
             with backend._inference_lock:
