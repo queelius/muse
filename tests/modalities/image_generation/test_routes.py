@@ -1216,3 +1216,16 @@ def test_decoded_images_closed_on_error(monkeypatch):
         )
     for d in decoded:
         d.close.assert_called()
+
+
+def test_inpaint_reports_unused_fields_as_ignored(client_with_edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={"prompt": "p", "model": "fake-edits-model", "seed": "7", "steps": "3"},
+    )
+    assert r.status_code == 200
+    assert r.json()["metadata"]["ignored"] == ["seed", "steps"]

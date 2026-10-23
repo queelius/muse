@@ -401,6 +401,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         except OptionError as e:
             return error_response(400, e.code, e.message)
         width, height = opts["width"], opts["height"]
+        if mask is not None:
+            # backend.inpaint takes none of these; report them as ignored.
+            sent = {"steps": steps, "seed": seed, "guidance": guidance,
+                    "negative_prompt": negative_prompt}
+            opts["ignored"] = sorted(
+                set(opts["ignored"]) | {k for k, v in sent.items() if v is not None}
+            )
 
         decoded_images = []
         try:

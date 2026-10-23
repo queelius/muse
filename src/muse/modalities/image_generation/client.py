@@ -84,7 +84,7 @@ class ImageEditsClient:
         images: list[bytes] | None = None,
         model: str | None = None,
         n: int = 1,
-        size: str = "512x512",
+        size: str | None = None,
         response_format: str = "b64_json",
     ) -> list[bytes]:
         """Edit image(s) per `prompt`; returns raw PNG bytes per result.
@@ -114,9 +114,10 @@ class ImageEditsClient:
         data: list[tuple[str, str]] = [
             ("prompt", prompt),
             ("n", str(n)),
-            ("size", size),
             ("response_format", response_format),
         ]
+        if size is not None:
+            data.append(("size", size))
         if model is not None:
             data.append(("model", model))
 

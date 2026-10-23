@@ -334,3 +334,19 @@ def test_edits_images_list_sends_image_array_parts_and_no_mask():
     assert out == [fake_png]
     files = mock_post.call_args.kwargs["files"]
     assert [(name, f[1]) for name, f in files] == [("image[]", b"one"), ("image[]", b"two")]
+
+
+def test_edits_size_omitted_unless_given():
+    from muse.modalities.image_generation.client import ImageEditsClient
+
+    fake_png = b"\x89PNG" + b"\x00" * 10
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"data": [{"b64_json": base64.b64encode(fake_png).decode()}]},
+        )
+        c = ImageEditsClient()
+        c.edit("p", images=[b"a"])
+        assert "size" not in dict(mock_post.call_args.kwargs["data"])
+        c.edit("p", images=[b"a"], size="64x64")
+        assert dict(mock_post.call_args.kwargs["data"])["size"] == "64x64"
