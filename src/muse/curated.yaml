@@ -364,6 +364,24 @@
   capabilities:
     memory_gb: 24.0
 
+- id: flux2-klein-4b
+  uri: hf://black-forest-labs/FLUX.2-klein-4B
+  modality: image/generation
+  size_gb: 16.0
+  description: "FLUX.2 klein 4B: text-to-image and up to 4-reference editing, 4 steps, Apache 2.0"
+  summary: "Local stills and consistent-character scenes from reference images, on a 12 GB GPU"
+  strengths:
+    - "Text-to-image and multi-reference edits in one model (up to 4 references)"
+    - "Wide and tall sizes up to 4 MP, snapped to multiples of 16"
+    - "Apache 2.0; 4-step distilled"
+  limits:
+    - "Below gpt-image-2 at understanding scenes and context; text inside images is unreliable"
+    - "Guidance and negative_prompt have no effect (distilled)"
+    - "Runs with CPU offload on 12 GB: slow first load, and about 16 GB of host RAM that muse's memory accounting does not count"
+  quality_tier: good
+  capabilities:
+    memory_gb: 8.5
+
 - id: pixel-art-xl
   uri: hf://nerijs/pixel-art-xl
   modality: image/generation

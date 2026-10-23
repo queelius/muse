@@ -81,9 +81,16 @@ DISCOVERY = {
 
 # Per-modality probe defaults read by `muse models probe`. Defaults to
 # the model's own default size + steps; backends honor capabilities.
+def _probe_call(m):
+    result = m.generate("probe scene")
+    if getattr(m, "supports_reference_images", False):
+        m.edit("the same scene at night", images=[result.image])
+    return result
+
+
 PROBE_DEFAULTS = {
-    "shape": "default size, 1 image",
-    "call": lambda m: m.generate("probe scene"),
+    "shape": "default size, 1 image; plus 1 reference edit when supported",
+    "call": _probe_call,
 }
 
 __all__ = [

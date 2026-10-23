@@ -44,6 +44,53 @@ _PIP_EXTRAS = (
     "safetensors",
 )
 
+_REFERENCE_RUNTIME_PATH = (
+    "muse.modalities.image_generation.runtimes.reference"
+    ":DiffusersReferenceModel"
+)
+_KLEIN_PIP_EXTRAS = (
+    "torch>=2.1.0",
+    "diffusers>=0.37.0",
+    "transformers>=4.51.0",
+    "accelerate",
+    "Pillow",
+    "safetensors",
+)
+
+
+def _reference_family(repo_id: str) -> dict[str, Any] | None:
+    """Capabilities for repos served by the reference-image runtime, else None.
+
+    Matches FLUX.2 klein on the repo name part, case-insensitively. Returns
+    a fresh dict each call so callers may mutate it.
+    """
+    name = repo_id.rsplit("/", 1)[-1].lower()
+    if "flux.2-klein" not in name and "flux2-klein" not in name:
+        return None
+    return {
+        "pipeline_class": "Flux2KleinPipeline",
+        "default_size": [1024, 1024],
+        "default_steps": 4,
+        "default_guidance": 1.0,
+        "cpu_offload": "model",
+        "device": "cuda",
+        "supports_reference_images": True,
+        "max_reference_images": 4,
+        "size_multiple": 16,
+        "max_pixels": 4194304,
+        "quality_presets": {
+            "low": {"steps": 4, "max_pixels": 1048576},
+            "medium": {"steps": 4},
+            "high": {"steps": 6},
+        },
+        "supports_negative_prompt": False,
+        "supports_guidance": False,
+        "supports_seeded_generation": True,
+        "supports_img2img": False,
+        "supports_inpainting": False,
+        "supports_variations": False,
+    }
+
 
 def _infer_defaults(repo_id: str) -> dict[str, Any]:
     """Sensible per-pattern defaults so each model lands with reasonable
@@ -283,26 +330,33 @@ def _resolve(
     # Non-LoRA t2i repos have no base to override; base_override is a
     # silent no-op below (falls through to the standard pipeline path).
 
-    defaults = _infer_defaults(repo_id)
-    capabilities = {
-        **defaults,
-        "supports_negative_prompt": True,
-        "supports_seeded_generation": True,
-        "supports_img2img": True,
-        # Most diffusers text-to-image checkpoints support inpainting and
-        # variations via from_pipe(...) on the AutoPipelineForInpainting /
-        # AutoPipelineForImage2Image factories. Default both to True; rare
-        # exceptions can be overridden per-curated-entry.
-        "supports_inpainting": True,
-        "supports_variations": True,
-    }
+    reference_caps = _reference_family(repo_id)
+    if reference_caps is not None:
+        capabilities = reference_caps
+        runtime_path = _REFERENCE_RUNTIME_PATH
+        pip_extras = _KLEIN_PIP_EXTRAS
+    else:
+        runtime_path = _RUNTIME_PATH
+        pip_extras = _PIP_EXTRAS
+        capabilities = {
+            **_infer_defaults(repo_id),
+            "supports_negative_prompt": True,
+            "supports_seeded_generation": True,
+            "supports_img2img": True,
+            # Most diffusers text-to-image checkpoints support inpainting
+            # and variations via from_pipe(...) on the AutoPipelineForInpainting /
+            # AutoPipelineForImage2Image factories. Default both to True; rare
+            # exceptions can be overridden per-curated-entry.
+            "supports_inpainting": True,
+            "supports_variations": True,
+        }
     manifest = {
         "model_id": hf_model_id(repo_id),
         "modality": "image/generation",
         "hf_repo": repo_id,
         "description": f"Diffusers text-to-image: {repo_id}",
         "license": hf_repo_license(info),
-        "pip_extras": list(_PIP_EXTRAS),
+        "pip_extras": list(pip_extras),
         "system_packages": [],
         "capabilities": capabilities,
     }
@@ -346,7 +400,7 @@ def _resolve(
 
     return ResolvedModel(
         manifest=manifest,
-        backend_path=_RUNTIME_PATH,
+        backend_path=runtime_path,
         download=_download,
     )
 

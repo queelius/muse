@@ -401,3 +401,79 @@ def test_resolve_lora_download_patterns():
     assert "*.json" in patterns
     # No subfolder pipeline patterns for an adapter-only repo.
     assert "*/*.safetensors" not in patterns
+
+
+_KLEIN_REPO = "black-forest-labs/FLUX.2-klein-4B"
+_KLEIN_SIBLINGS = [
+    "model_index.json",
+    "flux-2-klein-4b.safetensors",  # top-level single file, never fetched
+    "transformer/diffusion_pytorch_model.safetensors",
+    "vae/diffusion_pytorch_model.safetensors",
+    "text_encoder/model-00001-of-00002.safetensors",
+]
+
+
+def _klein_info():
+    info = _fake_info(siblings=_KLEIN_SIBLINGS, tags=["text-to-image"])
+    info.card_data = MagicMock(license="apache-2.0")
+    return info
+
+
+def test_klein_repo_resolves_to_reference_runtime():
+    result = HF_PLUGIN["resolve"](_KLEIN_REPO, None, _klein_info())
+    assert result.backend_path == (
+        "muse.modalities.image_generation.runtimes.reference"
+        ":DiffusersReferenceModel"
+    )
+    caps = result.manifest["capabilities"]
+    assert caps == {
+        "pipeline_class": "Flux2KleinPipeline", "default_size": [1024, 1024],
+        "default_steps": 4, "default_guidance": 1.0, "cpu_offload": "model",
+        "device": "cuda", "supports_reference_images": True,
+        "max_reference_images": 4, "size_multiple": 16,
+        "max_pixels": 4194304,
+        "quality_presets": {
+            "low": {"steps": 4, "max_pixels": 1048576},
+            "medium": {"steps": 4},
+            "high": {"steps": 6},
+        },
+        "supports_negative_prompt": False, "supports_guidance": False,
+        "supports_seeded_generation": True, "supports_img2img": False,
+        "supports_inpainting": False, "supports_variations": False,
+    }
+    assert result.manifest["pip_extras"] == [
+        "torch>=2.1.0", "diffusers>=0.37.0", "transformers>=4.51.0",
+        "accelerate", "Pillow", "safetensors",
+    ]
+    assert result.manifest["license"] == "apache-2.0"
+
+
+def test_klein_download_excludes_top_level_single_file():
+    from pathlib import Path
+    from unittest.mock import patch
+
+    with patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as fake_snapshot:
+        result = HF_PLUGIN["resolve"](_KLEIN_REPO, None, _klein_info())
+        result.download(Path("/tmp/cache"))
+    patterns = fake_snapshot.call_args.kwargs["allow_patterns"]
+    assert "*/*.safetensors" in patterns
+    assert all(p == "model_index.json" or p.startswith("*/") for p in patterns)
+
+
+def test_klein_capabilities_are_fresh_copies():
+    a = HF_PLUGIN["resolve"](_KLEIN_REPO, None, _klein_info())
+    a.manifest["capabilities"]["quality_presets"]["low"]["steps"] = 99
+    b = HF_PLUGIN["resolve"](_KLEIN_REPO, None, _klein_info())
+    assert b.manifest["capabilities"]["quality_presets"]["low"]["steps"] == 4
+
+
+def test_other_repos_unchanged():
+    info = _fake_info(
+        siblings=["model_index.json", "unet/diffusion_pytorch_model.safetensors"],
+        tags=["text-to-image"],
+    )
+    result = HF_PLUGIN["resolve"]("stabilityai/sdxl-turbo", None, info)
+    assert result.backend_path.endswith(":DiffusersText2ImageModel")

@@ -435,3 +435,12 @@ def test_load_curated_includes_supertonic_3():
     by_id = {e.id: e for e in load_curated()}
     assert "supertonic-3" in by_id
     assert by_id["supertonic-3"].bundled is True
+
+
+def test_load_curated_includes_flux2_klein():
+    by_id = {e.id: e for e in load_curated()}
+    e = by_id["flux2-klein-4b"]
+    assert e.modality == "image/generation"
+    assert e.uri == "hf://black-forest-labs/FLUX.2-klein-4B"
+    assert e.quality_tier == "good"
+    assert e.limits
