@@ -215,6 +215,31 @@ class DiffusersText2ImageModel:
             # test doubles need not return ``self`` from ``to()``.
             self._pipe.to(self._device)
 
+    def _call_pipe(self, pipe: Any, call_kwargs: dict) -> Any:
+        """Run one pipeline call, restoring the VAE dtype if it raises.
+
+        SDXL-style pipelines upcast a float16 VAE to float32 for the
+        decode and cast it back only after the decode returns. A failure
+        mid-decode (typically CUDA OOM at a large size) leaves the shared
+        VAE at float32, and every later call then fails on a Half/float
+        mismatch because the pipeline no longer sees a float16 VAE to
+        upcast. Restoring it keeps one failed request from breaking the
+        worker for good.
+        """
+        try:
+            return pipe(**call_kwargs)
+        except BaseException:
+            vae = getattr(pipe, "vae", None)
+            if vae is not None and getattr(vae, "dtype", None) != self._torch_dtype:
+                try:
+                    vae.to(dtype=self._torch_dtype)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "%s: could not restore VAE dtype after a failed call",
+                        self.model_id, exc_info=True,
+                    )
+            raise
+
     def generate(
         self,
         prompt: str,
@@ -271,7 +296,7 @@ class DiffusersText2ImageModel:
             )
             call_kwargs["cross_attention_kwargs"] = {"scale": s_lora}
 
-        out = self._pipe(**call_kwargs)
+        out = self._call_pipe(self._pipe, call_kwargs)
         img = out.images[0]
         return ImageResult(
             image=img,
@@ -367,7 +392,7 @@ class DiffusersText2ImageModel:
             )
             call_kwargs["cross_attention_kwargs"] = {"scale": s_lora}
 
-        out = self._i2i_pipe(**call_kwargs)
+        out = self._call_pipe(self._i2i_pipe, call_kwargs)
         img = out.images[0]
         return ImageResult(
             image=img,
@@ -480,7 +505,7 @@ class DiffusersText2ImageModel:
                 "scale": self._default_lora_scale,
             }
 
-        out = self._inp_pipe(**call_kwargs)
+        out = self._call_pipe(self._inp_pipe, call_kwargs)
         img = out.images[0]
         return ImageResult(
             image=img,

@@ -1108,3 +1108,81 @@ class TestLoraScaleImg2Img:
         assert fake_i2i_pipe.call_args.kwargs["cross_attention_kwargs"] == {
             "scale": 0.5,
         }
+
+
+class _FakeVae:
+    """A VAE whose `.to(dtype=...)` records the dtype, like a torch module."""
+
+    def __init__(self, dtype):
+        self.dtype = dtype
+        self.to_calls = []
+
+    def to(self, *args, dtype=None, **kwargs):
+        self.to_calls.append(dtype)
+        if dtype is not None:
+            self.dtype = dtype
+        return self
+
+
+def _oom_model(fake_torch):
+    """A float16 model whose pipeline upcasts its VAE, then OOMs mid-decode.
+
+    This is what SDXL's pipeline does when the decode raises: the VAE is
+    left at float32 and every later call fails on a Half/float mismatch.
+    """
+    pipe = _patched_pipe()
+    pipe.vae = _FakeVae(fake_torch.float16)
+
+    def oom(**_):
+        pipe.vae.dtype = fake_torch.float32
+        raise RuntimeError("CUDA out of memory")
+
+    pipe.side_effect = oom
+    fake_class = MagicMock()
+    fake_class.from_pretrained.return_value = pipe
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.AutoPipelineForText2Image",
+        fake_class,
+    ), patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch", fake_torch,
+    ):
+        m = DiffusersText2ImageModel(
+            hf_repo="org/repo", device="cpu", dtype="float16", model_id="m",
+        )
+    return m, pipe
+
+
+def test_failed_call_restores_vae_dtype():
+    fake_torch = MagicMock()
+    m, pipe = _oom_model(fake_torch)
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch", fake_torch,
+    ):
+        with pytest.raises(RuntimeError, match="out of memory"):
+            m.generate("p")
+    assert pipe.vae.dtype is fake_torch.float16
+
+
+def test_failed_inpaint_restores_vae_dtype():
+    fake_torch = MagicMock()
+    m, pipe = _oom_model(fake_torch)
+    inp = MagicMock(side_effect=pipe.side_effect)
+    inp.vae = pipe.vae
+    m._inp_pipe = inp
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch", fake_torch,
+    ):
+        with pytest.raises(RuntimeError, match="out of memory"):
+            m.inpaint("p", init_image=MagicMock(), mask_image=MagicMock())
+    assert pipe.vae.dtype is fake_torch.float16
+
+
+def test_successful_call_leaves_vae_alone():
+    fake_torch = MagicMock()
+    m, pipe = _oom_model(fake_torch)
+    pipe.side_effect = None
+    with patch(
+        "muse.modalities.image_generation.runtimes.diffusers.torch", fake_torch,
+    ):
+        m.generate("p")
+    assert pipe.vae.to_calls == []
