@@ -26,6 +26,7 @@ import html
 import json
 import mimetypes
 import os
+import re
 import struct
 import sys
 import time
@@ -126,6 +127,11 @@ def cases_from_visuals(path) -> list[Case]:
     return cases
 
 
+def _safe_name(value: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", value).lstrip(".")
+    return name or "_"
+
+
 def _png_size(data: bytes) -> str | None:
     if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
         w, h = struct.unpack(">II", data[16:24])
@@ -152,7 +158,7 @@ def _request(client: httpx.Client, target: Target, case: Case, api_key: str | No
             files.append(("image[]", (ref_path.name, ref_path.read_bytes(), mime)))
         return client.post(f"{base}/images/edits", data=fields, files=files,
                            headers=headers, timeout=TIMEOUT)
-    return client.post(f"{base}/images/generations", json=fields,
+    return client.post(f"{base}/images/generations", json={**fields, "n": 1},
                        headers=headers, timeout=TIMEOUT)
 
 
@@ -183,10 +189,13 @@ def run(cases: list[Case], targets: list[Target], out_dir, client: httpx.Client)
                 else:
                     body = resp.json()
                     png = base64.b64decode(body["data"][0]["b64_json"])
-                    dest = out_dir / target.name / f"{case.id}.png"
+                    rel = f"{_safe_name(target.name)}/{_safe_name(case.id)}.png"
+                    dest = (out_dir / rel).resolve()
+                    if not dest.is_relative_to(out_dir.resolve()):
+                        raise ValueError(f"refusing to write outside --out: {rel}")
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(png)
-                    cell["path"] = f"{target.name}/{case.id}.png"
+                    cell["path"] = rel
                     cell["size"] = _png_size(png) or body.get("size")
             except Exception as exc:  # one bad cell must not stop the run
                 if cell["seconds"] is None:

@@ -49,6 +49,7 @@ def test_generation_and_edit_requests_shaped(tmp_path):
     assert gen.url.path == "/v1/images/generations"
     body = json.loads(gen.content)
     assert body["prompt"] == "a cat Do not include: text."
+    assert body["n"] == 1
     assert body["model"] == "flux" and body["size"] == "1536x1024"
     assert edit.url.path == "/v1/images/edits"
     assert edit.headers["content-type"].startswith("multipart/form-data")
@@ -124,3 +125,16 @@ def test_cases_from_visuals_maps_and_skips(tmp_path):
     assert tert.prompt == "tired officer, moody" and tert.avoid == "text"
     assert tert.refs == [str(d / "sheets/t.png")]
     assert tert.size == "1024x1024" and tert.quality == "low"
+
+
+def test_unsafe_ids_and_targets_stay_inside_out(tmp_path):
+    out = tmp_path / "out"
+    cases = [Case("../../x", "p"), Case("a/b", "p"), Case("..", "p")]
+    bad = Target("../m", "m", "http://muse.test/v1")
+    results = run(cases, [bad], out, _client(_ok))
+    written = [p for p in tmp_path.rglob("*.png")]
+    assert len(written) == 3
+    assert all(out.resolve() in p.resolve().parents for p in written)
+    assert all(r["error"] is None and ".." not in r["path"].split("/")
+               for r in results)
+    assert results[0]["case"] == "../../x" and results[0]["target"] == "../m"
