@@ -476,6 +476,10 @@ def test_multipart_list_field_sends_repeated_parts(caps_doc, openapi_doc, fake_h
     props = gen.tool.inputSchema["properties"]
     assert "image[]" not in props and "image" not in props
     assert "image_paths" in props and "mask_path" in props
+    for key in ("image_paths", "image_urls"):
+        assert "At least one image is required" in props[key]["description"]
+        assert "Optional." not in props[key]["description"]
+    assert props["mask_path"]["description"].endswith("Optional.")
     call_generated(fake_http(handler), gen, {
         "model": "sd-turbo", "prompt": "x",
         "image_paths": ["a.png", "b.png", "c.png"], "mask_path": "m.png"})

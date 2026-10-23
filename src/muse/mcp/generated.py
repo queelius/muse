@@ -148,7 +148,9 @@ def _request_schema(route: dict, openapi: dict) -> tuple[dict, bool]:
 
 def _file_props(name: str, many: bool, required: bool) -> dict:
     need = (f"Exactly one of {name}_path{'s' if many else ''} or "
-            f"{name}_url{'s' if many else ''} is required." if required else "Optional.")
+            f"{name}_url{'s' if many else ''} is required." if required else
+            f"At least one image is required via {name}_paths or {name}_urls."
+            if many else "Optional.")
     if many:
         arr = {"type": "array", "items": {"type": "string"}}
         return {

@@ -71,7 +71,7 @@ class MuseClient:
         *,
         json: Any = None,
         data: dict | None = None,
-        files: dict | None = None,
+        files: dict | list | None = None,
         params: dict | None = None,
     ) -> httpx.Response:
         """One request to a DISCOVERY route; raises on an error status.
