@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import mimetypes
@@ -132,6 +133,23 @@ def _safe_name(value: str) -> str:
     return name or "_"
 
 
+class _Names:
+    """Sanitised names, unique per scope: a different original that maps to
+    an already-used name gets a stable sha1 suffix; the same original always
+    maps to the same name."""
+
+    def __init__(self):
+        self._used: dict[str, dict[str, str]] = {}
+
+    def get(self, scope: str, original: str) -> str:
+        used = self._used.setdefault(scope, {})
+        name = _safe_name(original)
+        if used.get(name, original) != original:
+            name = f"{name}-{hashlib.sha1(original.encode()).hexdigest()[:8]}"
+        used[name] = original
+        return name
+
+
 def _png_size(data: bytes) -> str | None:
     if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
         w, h = struct.unpack(">II", data[16:24])
@@ -170,6 +188,7 @@ def run(cases: list[Case], targets: list[Target], out_dir, client: httpx.Client)
     out_dir = Path(out_dir)
     api_key = os.environ.get("OPENAI_API_KEY") or None
     results: list[dict] = []
+    names = _Names()
     for target in targets:
         if target.openai and not api_key:
             print(f"skipping {target.name}: OPENAI_API_KEY is not set", file=sys.stderr)
@@ -189,7 +208,8 @@ def run(cases: list[Case], targets: list[Target], out_dir, client: httpx.Client)
                 else:
                     body = resp.json()
                     png = base64.b64decode(body["data"][0]["b64_json"])
-                    rel = f"{_safe_name(target.name)}/{_safe_name(case.id)}.png"
+                    tdir = names.get("", target.name)
+                    rel = f"{tdir}/{names.get(tdir, case.id)}.png"
                     dest = (out_dir / rel).resolve()
                     if not dest.is_relative_to(out_dir.resolve()):
                         raise ValueError(f"refusing to write outside --out: {rel}")

@@ -138,3 +138,14 @@ def test_unsafe_ids_and_targets_stay_inside_out(tmp_path):
     assert all(r["error"] is None and ".." not in r["path"].split("/")
                for r in results)
     assert results[0]["case"] == "../../x" and results[0]["target"] == "../m"
+
+
+def test_colliding_sanitised_names_get_distinct_files(tmp_path):
+    cases = [Case("a/b", "p"), Case("a_b", "p"), Case("a/b", "p")]
+    targets = [Target("m/x", "m", "http://muse.test/v1"),
+               Target("m_x", "m", "http://muse.test/v1")]
+    results = run(cases[:2], targets, tmp_path, _client(_ok))
+    assert len({r["path"] for r in results}) == 4
+    assert len(list(tmp_path.rglob("*.png"))) == 4
+    again = run(cases[:1], targets[:1], tmp_path, _client(_ok))
+    assert again[0]["path"] == results[0]["path"]
