@@ -210,9 +210,11 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     for f in route.get("file_fields") or []:
         many = f.endswith("[]")
         name = f[:-2] if many else f
-        was_required = name in required
+        was_required = name in required or f in required
+        # The wire name (`image[]`) and the bare name are one logical input.
+        props.pop(f, None)
         props.pop(name, None)
-        required = [r for r in required if r != name]
+        required = [r for r in required if r not in (name, f)]
         props.update(_file_props(name, many, was_required))
         if was_required:
             required_files.append(name)
@@ -323,9 +325,14 @@ def _fetch_input(url: str, field_name: str) -> tuple[str, bytes, str]:
     return name, data, mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
-def _take_files(gen: GeneratedTool, args: dict, multipart: bool) -> dict:
-    """Move file arguments out of ``args``; returns multipart parts."""
-    parts = {}
+def _take_files(gen: GeneratedTool, args: dict, multipart: bool) -> list[tuple]:
+    """Move file arguments out of ``args``; returns multipart parts.
+
+    The parts are ``(field, (filename, bytes, mime))`` pairs, as httpx
+    ``files=`` accepts. A ``[]`` field on a multipart route sends one part
+    per file, each named with the declared ``X[]`` (the OpenAI SDK's name).
+    """
+    parts: list[tuple] = []
     for f in gen.route.get("file_fields") or []:
         many = f.endswith("[]")
         name = f[:-2] if many else f
@@ -337,11 +344,16 @@ def _take_files(gen: GeneratedTool, args: dict, multipart: bool) -> dict:
             if name in gen.required_files:
                 raise ValueError(f"{name}_path{s} or {name}_url{s} is required")
             continue
-        if many:
+        if many and multipart:
+            if path:
+                parts.extend((f, _read_named(p, name)) for p in path)
+            else:
+                parts.extend((f, _fetch_input(u, name)) for u in url)
+        elif many:
             args[name] = ([files.as_data_url(*_read(p, name)) for p in path]
                           if path else list(url))
         elif multipart:
-            parts[name] = (_read_named(path, name) if path else _fetch_input(url, name))
+            parts.append((name, _read_named(path, name) if path else _fetch_input(url, name)))
         else:
             args[name] = files.as_data_url(*_read(path, name)) if path else url
     return parts

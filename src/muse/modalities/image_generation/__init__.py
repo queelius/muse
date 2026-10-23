@@ -20,12 +20,13 @@ MODALITY = "image/generation"
 
 DISCOVERY = {
     "summary": (
-        "Still image generation. Creates images from a prompt, edits regions "
-        "with a mask, or makes variations of an image, returned as base64 "
-        "PNG."
+        "Still image generation. Creates images from a prompt, edits with up "
+        "to several reference images for consistent characters, inpaints with "
+        "a mask, or makes variations, returned as base64 PNG, JPEG or WebP."
     ),
     "use_for": [
         "illustrations, concept art and backgrounds from a prompt",
+        "new scenes of the same character from reference images",
         "inpainting a masked region of an image",
         "alternate takes on an existing image",
     ],
@@ -56,9 +57,13 @@ DISCOVERY = {
             "response_content_type": "application/json",
             "compat": "openai:images.edits",
             "mcp_tool": "muse_edit_image",
-            "file_fields": ["image", "mask"],
+            "file_fields": ["image[]", "mask"],
             "media_fields": ["data[].b64_json"],
-            "example": {"model": "<model>", "prompt": "replace the sky with a sunset"},
+            "example": {
+                "model": "<model>",
+                "prompt": "the same character, now reading in a library",
+                "size": "1536x1024",
+            },
         },
         {
             "method": "POST",

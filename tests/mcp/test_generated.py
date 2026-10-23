@@ -451,3 +451,59 @@ def test_vectorize_svg_text_written_to_file(caps_doc, openapi_doc, fake_http, me
     assert open(f["path"], encoding="utf-8").read() == SVG
     assert data["response"]["view_box"] == "0 0 8 8"
     assert SVG not in json.dumps(blocks)
+
+
+# ---- multipart list file fields ----
+
+def _part_names(body: bytes) -> list[str]:
+    import re
+
+    return [m.decode() for m in re.findall(rb'name="([^"]+)"', body)]
+
+
+def test_multipart_list_field_sends_repeated_parts(caps_doc, openapi_doc, fake_http,
+                                                   media_env):
+    for n in "abc":
+        (media_env / f"{n}.png").write_bytes(_png())
+    (media_env / "m.png").write_bytes(_png())
+    seen = {}
+
+    def handler(request):
+        seen["body"] = request.read()
+        return httpx.Response(200, json={"data": []})
+
+    gen = _gen(caps_doc, openapi_doc, "muse_edit_image")
+    props = gen.tool.inputSchema["properties"]
+    assert "image[]" not in props and "image" not in props
+    assert "image_paths" in props and "mask_path" in props
+    call_generated(fake_http(handler), gen, {
+        "model": "sd-turbo", "prompt": "x",
+        "image_paths": ["a.png", "b.png", "c.png"], "mask_path": "m.png"})
+    names = _part_names(seen["body"])
+    assert names.count("image[]") == 3
+    assert "image" not in names and "mask" in names
+
+
+def test_json_list_field_still_data_urls(caps_doc, openapi_doc, fake_http, media_env):
+    png = _png()
+    (media_env / "a.png").write_bytes(png)
+    gen = _gen(caps_doc, openapi_doc, "muse_embed_image")
+    call_generated(fake_http(lambda r: httpx.Response(200, json={"data": []})), gen,
+                   {"model": "dinov2-small", "input_paths": ["a.png"]})
+    sent = json.loads(fake_http.requests[-1].content)
+    assert sent["input"] == ["data:image/png;base64," + base64.b64encode(png).decode()]
+
+
+def test_multipart_list_url_fetched(caps_doc, openapi_doc, fake_http, media_env):
+    png = _png()
+    url = "data:image/png;base64," + base64.b64encode(png).decode()
+    seen = {}
+
+    def handler(request):
+        seen["body"] = request.read()
+        return httpx.Response(200, json={"data": []})
+
+    call_generated(fake_http(handler), _gen(caps_doc, openapi_doc, "muse_edit_image"),
+                   {"model": "sd-turbo", "prompt": "x", "image_urls": [url, url]})
+    assert _part_names(seen["body"]).count("image[]") == 2
+    assert seen["body"].count(png) == 2
