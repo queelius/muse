@@ -1,7 +1,7 @@
 """HTTP clients for the image_generation modality.
 
 - GenerationsClient: POST JSON to /v1/images/generations
-- ImageEditsClient:  POST multipart to /v1/images/edits (inpainting)
+- ImageEditsClient:  POST multipart to /v1/images/edits (inpainting or reference edits)
 - ImageVariationsClient: POST multipart to /v1/images/variations
 """
 from __future__ import annotations
@@ -79,22 +79,38 @@ class ImageEditsClient:
         self,
         prompt: str,
         *,
-        image: bytes,
-        mask: bytes,
+        image: bytes | None = None,
+        mask: bytes | None = None,
+        images: list[bytes] | None = None,
         model: str | None = None,
         n: int = 1,
         size: str = "512x512",
         response_format: str = "b64_json",
     ) -> list[bytes]:
-        """Inpaint the masked region of `image` per `prompt`.
+        """Edit image(s) per `prompt`; returns raw PNG bytes per result.
 
-        Returns a list of raw PNG bytes (one per requested variation).
-        Mask convention: white pixels are regenerated; black are kept.
+        Inpainting: pass `image` and `mask` (white pixels are regenerated;
+        black are kept). Reference edit: pass `images=[...]` (one
+        `image[]` part each) and no mask.
         """
-        files = {
-            "image": ("image.png", image, "image/png"),
-            "mask": ("mask.png", mask, "image/png"),
-        }
+        sources = list(images or [])
+        if image is not None:
+            sources.insert(0, image)
+        if not sources:
+            raise ValueError("edit() needs image= or images=[...]")
+        if mask is not None and len(sources) > 1:
+            raise ValueError("a mask applies to exactly one image")
+        files: Any
+        if mask is not None:
+            files = {
+                "image": ("image.png", sources[0], "image/png"),
+                "mask": ("mask.png", mask, "image/png"),
+            }
+        else:
+            files = [
+                ("image[]", (f"image{i}.png", src, "image/png"))
+                for i, src in enumerate(sources)
+            ]
         data: list[tuple[str, str]] = [
             ("prompt", prompt),
             ("n", str(n)),

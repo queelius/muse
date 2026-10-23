@@ -318,3 +318,19 @@ def test_variations_response_format_url_decodes_back_to_bytes():
         c = ImageVariationsClient()
         out = c.vary(image=b"i", response_format="url")
     assert out == [fake_png]
+
+
+def test_edits_images_list_sends_image_array_parts_and_no_mask():
+    from muse.modalities.image_generation.client import ImageEditsClient
+
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+    with patch("muse.modalities.image_generation.client.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"data": [{"b64_json": base64.b64encode(fake_png).decode()}]},
+        )
+        out = ImageEditsClient().edit("blend", images=[b"one", b"two"], model="klein")
+
+    assert out == [fake_png]
+    files = mock_post.call_args.kwargs["files"]
+    assert [(name, f[1]) for name, f in files] == [("image[]", b"one"), ("image[]", b"two")]

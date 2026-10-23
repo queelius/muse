@@ -120,6 +120,54 @@ def _build_response(
     }
 
 
+MAX_EDIT_IMAGES = 16
+
+
+def _resolve_options(
+    caps,
+    *,
+    size,
+    quality,
+    output_format,
+    output_compression,
+    background,
+    moderation,
+    negative_prompt,
+    guidance,
+    steps,
+) -> dict:
+    """Resolve the gpt-image options shared by generations and edits.
+
+    Raises OptionError; callers turn it into a 400 envelope.
+    """
+    width, height = parse_size(size, caps)
+    quality_name, preset = resolve_quality(quality, caps)
+    if snaps(caps):
+        width, height = snap_size(width, height, caps, preset)
+    fmt = check_output(output_format, output_compression)
+    bg = check_background(background)
+    ignored = ignored_fields(
+        {
+            "moderation": moderation,
+            "quality": quality,
+            "negative_prompt": negative_prompt,
+            "guidance": guidance,
+            "output_compression": output_compression,
+            "output_format": fmt,
+        },
+        caps,
+    )
+    return {
+        "width": width,
+        "height": height,
+        "quality": quality_name,
+        "output_format": fmt,
+        "background": bg,
+        "steps": steps if steps is not None else preset.get("steps"),
+        "ignored": ignored,
+    }
+
+
 def build_router(registry: ModalityRegistry) -> APIRouter:
     router = APIRouter(prefix="/v1/images", tags=["image/generation"])
 
@@ -165,27 +213,24 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         caps = registry.capabilities(MODALITY, effective_id)
         try:
-            width, height = parse_size(req.size, caps)
-            quality, preset = resolve_quality(req.quality, caps)
-            if snaps(caps):
-                width, height = snap_size(width, height, caps, preset)
-            output_format = check_output(req.output_format, req.output_compression)
-            background = check_background(req.background)
+            opts = _resolve_options(
+                caps,
+                size=req.size,
+                quality=req.quality,
+                output_format=req.output_format,
+                output_compression=req.output_compression,
+                background=req.background,
+                moderation=req.moderation,
+                negative_prompt=req.negative_prompt,
+                guidance=req.guidance,
+                steps=req.steps,
+            )
         except OptionError as e:
             close_decoded_images([init_image] if init_image is not None else [])
             return error_response(400, e.code, e.message)
-        steps = req.steps if req.steps is not None else preset.get("steps")
-        ignored = ignored_fields(
-            {
-                "moderation": req.moderation,
-                "quality": req.quality,
-                "negative_prompt": req.negative_prompt,
-                "guidance": req.guidance,
-                "output_compression": req.output_compression,
-                "output_format": output_format,
-            },
-            caps,
-        )
+        width, height = opts["width"], opts["height"]
+        steps = opts["steps"]
+        output_format = opts["output_format"]
 
         def _call_one(seed_offset: int):
             kwargs: dict = {
@@ -238,9 +283,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 response_format=req.response_format,
                 output_format=output_format,
                 compression=req.output_compression,
-                quality=quality,
-                background=background,
-                ignored=ignored,
+                quality=opts["quality"],
+                background=opts["background"],
+                ignored=opts["ignored"],
             )
         finally:
             close_decoded_images(
@@ -248,17 +293,27 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 + [getattr(r, "image", None) for r in results]
             )
 
-    # ---------------- /v1/images/edits (inpainting, multipart) ----------------
+    # ------- /v1/images/edits (inpainting or multi-reference, multipart) -------
 
     @router.post("/edits")
     async def edits(
-        image: UploadFile = File(...),
-        mask: UploadFile = File(...),
+        image: list[UploadFile] | None = File(None),
+        image_list: list[UploadFile] | None = File(None, alias="image[]"),
+        mask: UploadFile | None = File(None),
         prompt: str = Form(...),
         model: str | None = Form(None),
         n: int = Form(1),
-        size: str = Form("512x512"),
+        size: str | None = Form(None),
         response_format: str = Form("b64_json"),
+        quality: str | None = Form(None),
+        output_format: str | None = Form(None),
+        output_compression: int | None = Form(None),
+        background: str | None = Form(None),
+        moderation: str | None = Form(None),
+        negative_prompt: str | None = Form(None),
+        steps: int | None = Form(None),
+        guidance: float | None = Form(None),
+        seed: int | None = Form(None),
     ):
         # Validate Form fields by hand. Pydantic's BaseModel can't validate
         # a multipart body directly; we mirror the GenerationRequest range
@@ -277,34 +332,84 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_parameter",
                 "response_format must be 'b64_json' or 'url'",
             )
-        try:
-            w, h = map(int, size.split("x"))
-        except Exception:  # noqa: BLE001
+        if steps is not None and not (1 <= steps <= 100):
             return error_response(
-                400, "invalid_parameter",
-                f"size must be 'WIDTHxHEIGHT'; got {size!r}",
+                400, "invalid_parameter", "steps must be in [1, 100]",
             )
-        if not (64 <= w <= 2048 and 64 <= h <= 2048):
+        if guidance is not None and not (0.0 <= guidance <= 20.0):
+            return error_response(
+                400, "invalid_parameter", "guidance must be in [0, 20]",
+            )
+
+        # `image` parts first, then `image[]` parts, in arrival order.
+        parts = list(image or []) + list(image_list or [])
+        if not parts:
             return error_response(
                 400, "invalid_parameter",
-                f"size {size} out of supported range (64-2048 per side)",
+                "at least one image is required (parts 'image' or 'image[]')",
+            )
+        if len(parts) > MAX_EDIT_IMAGES:
+            return error_response(
+                400, "too_many_images",
+                f"at most {MAX_EDIT_IMAGES} images are accepted; got {len(parts)}",
+            )
+        if mask is not None and len(parts) > 1:
+            return error_response(
+                400, "invalid_parameter",
+                "a mask applies to exactly one image; send a single image with a mask",
             )
 
         backend = registry.get_or_404(MODALITY, model)
-
         effective_id = getattr(backend, "model_id", None) or (model or "<default>")
-        if not registry.capabilities(MODALITY, effective_id).get("supports_inpainting"):
-            return error_response(
-                400, "invalid_parameter",
-                f"model {effective_id!r} does not support inpainting",
+        caps = registry.capabilities(MODALITY, effective_id)
+
+        if mask is not None:
+            if not caps.get("supports_inpainting"):
+                return error_response(
+                    400, "invalid_parameter",
+                    f"model {effective_id!r} does not support inpainting",
+                )
+        else:
+            if not caps.get("supports_reference_images"):
+                return error_response(
+                    400, "reference_images_not_supported",
+                    f"model {effective_id!r} cannot edit from reference images "
+                    f"without a mask; see GET /v1/capabilities?modality=image/generation "
+                    f"for models that support reference images",
+                )
+            max_refs = caps.get("max_reference_images")
+            if max_refs is not None and len(parts) > int(max_refs):
+                return error_response(
+                    400, "too_many_images",
+                    f"model {effective_id!r} accepts at most {int(max_refs)} "
+                    f"reference images; got {len(parts)}",
+                )
+
+        try:
+            opts = _resolve_options(
+                caps,
+                size=size,
+                quality=quality,
+                output_format=output_format,
+                output_compression=output_compression,
+                background=background,
+                moderation=moderation,
+                negative_prompt=negative_prompt,
+                guidance=guidance,
+                steps=steps,
             )
+        except OptionError as e:
+            return error_response(400, e.code, e.message)
+        width, height = opts["width"], opts["height"]
 
         decoded_images = []
         try:
-            init_image = await decode_image_file(image)
-            decoded_images.append(init_image)
-            mask_image = await decode_image_file(mask)
-            decoded_images.append(mask_image)
+            for part in parts:
+                decoded_images.append(await decode_image_file(part))
+            mask_image = None
+            if mask is not None:
+                mask_image = await decode_image_file(mask)
+                decoded_images.append(mask_image)
             validate_total_image_pixels(decoded_images)
         except ValueError as e:
             close_decoded_images(decoded_images)
@@ -315,15 +420,27 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             close_decoded_images(decoded_images)
             raise
 
-        def _call_one():
-            kwargs: dict = {
-                "width": w,
-                "height": h,
-                "init_image": init_image,
-                "mask_image": mask_image,
-            }
+        def _call_one(seed_offset: int):
             with backend._inference_lock:
-                return backend.inpaint(prompt, **kwargs)
+                if mask_image is not None:
+                    return backend.inpaint(
+                        prompt,
+                        width=width,
+                        height=height,
+                        init_image=decoded_images[0],
+                        mask_image=mask_image,
+                    )
+                kwargs: dict = {
+                    "images": decoded_images,
+                    "width": width,
+                    "height": height,
+                    "steps": opts["steps"],
+                    "guidance": guidance,
+                    "negative_prompt": negative_prompt,
+                }
+                if seed is not None:
+                    kwargs["seed"] = seed + seed_offset
+                return backend.edit(prompt, **kwargs)
 
         results = []
 
@@ -335,9 +452,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         try:
-            for _ in range(n):
+            for i in range(n):
                 result = await run_native_offload(
-                    _call_one,
+                    lambda i=i: _call_one(i),
                     cleanup_abandoned=_cleanup_abandoned,
                 )
                 results.append(result)
@@ -350,24 +467,22 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
             raise
 
-        data = []
         try:
-            for r in results:
-                entry = {"revised_prompt": r.metadata.get("prompt", prompt)}
-                if response_format == "url":
-                    entry["url"] = to_data_url(r.image, fmt="png")
-                else:
-                    entry["b64_json"] = base64.b64encode(
-                        to_bytes(r.image, fmt="png"),
-                    ).decode()
-                data.append(entry)
+            return _build_response(
+                results,
+                prompt=prompt,
+                response_format=response_format,
+                output_format=opts["output_format"],
+                compression=output_compression,
+                quality=opts["quality"],
+                background=opts["background"],
+                ignored=opts["ignored"],
+            )
         finally:
             close_decoded_images(
                 decoded_images
                 + [getattr(r, "image", None) for r in results]
             )
-
-        return {"created": int(time.time()), "data": data}
 
     # ---------------- /v1/images/variations (multipart) ----------------
 

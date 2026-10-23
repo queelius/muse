@@ -42,6 +42,7 @@ class RecordingImageModel:
         self.calls: list[dict] = []
         self.inpaint_calls: list[dict] = []
         self.vary_calls: list[dict] = []
+        self.edit_calls: list[dict] = []
 
     def generate(self, prompt, **kwargs):
         self.calls.append({"prompt": prompt, **kwargs})
@@ -63,6 +64,17 @@ class RecordingImageModel:
             image=arr, width=w, height=h,
             seed=kwargs.get("seed", 0) or 0,
             metadata={"prompt": prompt, "mode": "inpaint"},
+        )
+
+    def edit(self, prompt, **kwargs):
+        self.edit_calls.append({"prompt": prompt, **kwargs})
+        w = kwargs.get("width", self.default_size[0])
+        h = kwargs.get("height", self.default_size[1])
+        arr = np.zeros((h, w, 3), dtype=np.uint8)
+        return ImageResult(
+            image=arr, width=w, height=h,
+            seed=kwargs.get("seed", 0) or 0,
+            metadata={"prompt": prompt, "mode": "edit"},
         )
 
     def vary(self, **kwargs):
@@ -1028,3 +1040,179 @@ def test_legacy_response_still_has_data_and_created(client):
 def test_out_of_range_size_still_422(snap_client):
     c, _ = snap_client
     assert _post(c, size="4096x4096").status_code == 422
+
+
+# ---------------- /v1/images/edits: multi-reference ----------------
+
+_REF_CAPS = {
+    "supports_reference_images": True,
+    "max_reference_images": 4,
+    "size_multiple": 16,
+    "max_pixels": 4_194_304,
+    "default_size": [1024, 1024],
+    "quality_presets": {
+        "low": {"steps": 4, "max_pixels": 1_048_576},
+        "medium": {"steps": 4},
+        "high": {"steps": 6},
+    },
+}
+
+
+def _ref_client(caps=None):
+    model = RecordingImageModel(model_id="fake-ref")
+    reg = ModalityRegistry()
+    reg.register(
+        "image/generation",
+        model,
+        manifest={
+            "model_id": "fake-ref",
+            "modality": "image/generation",
+            "capabilities": dict(_REF_CAPS if caps is None else caps),
+        },
+    )
+    app = create_app(registry=reg, routers={"image/generation": build_router(reg)})
+    return TestClient(app), model
+
+
+def _img_part(name, w=32, h=32):
+    return (name, (f"{name}.png", _png_bytes(w, h), "image/png"))
+
+
+def test_inpaint_unchanged_single_image_and_mask(client_with_edits_model, edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={"prompt": "p", "model": "fake-edits-model"},
+    )
+    assert r.status_code == 200
+    call = edits_model.inpaint_calls[0]
+    assert (call["width"], call["height"]) == (512, 512)
+    assert set(call) == {"prompt", "width", "height", "init_image", "mask_image"}
+
+
+def test_mask_with_two_images_400():
+    c, model = _ref_client({**_REF_CAPS, "supports_inpainting": True})
+    r = c.post(
+        "/v1/images/edits",
+        files=[_img_part("image"), _img_part("image[]"), ("mask", ("m.png", _mask_bytes(), "image/png"))],
+        data={"prompt": "p"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert model.inpaint_calls == [] and model.edit_calls == []
+
+
+def test_reference_edit_dispatch_order():
+    c, model = _ref_client()
+    r = c.post(
+        "/v1/images/edits",
+        files=[
+            _img_part("image", 16, 16),
+            _img_part("image[]", 32, 32),
+            _img_part("image[]", 48, 48),
+        ],
+        data={"prompt": "blend"},
+    )
+    assert r.status_code == 200, r.text
+    assert [im.size for im in model.edit_calls[0]["images"]] == [(16, 16), (32, 32), (48, 48)]
+
+
+def test_reference_edit_seed_offsets_with_n():
+    c, model = _ref_client()
+    r = c.post(
+        "/v1/images/edits",
+        files=[_img_part("image[]")],
+        data={"prompt": "p", "seed": "7", "n": "2"},
+    )
+    assert r.status_code == 200
+    assert [call["seed"] for call in model.edit_calls] == [7, 8]
+
+
+def test_too_many_for_model_400():
+    c, model = _ref_client()
+    r = c.post(
+        "/v1/images/edits",
+        files=[_img_part("image[]") for _ in range(5)],
+        data={"prompt": "p"},
+    )
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "too_many_images"
+    assert "4" in err["message"]
+    assert model.edit_calls == []
+
+
+def test_hard_cap_rejected_before_decode(monkeypatch):
+    c, _ = _ref_client()
+
+    async def boom(*a, **k):
+        raise AssertionError("decode called")
+
+    monkeypatch.setattr(routes_mod, "decode_image_file", boom)
+    r = c.post(
+        "/v1/images/edits",
+        files=[("image[]", ("a.png", b"x", "image/png")) for _ in range(17)],
+        data={"prompt": "p"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "too_many_images"
+
+
+def test_no_reference_support_400(client_with_edits_model, edits_model):
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files=[_img_part("image")],
+        data={"prompt": "p", "model": "fake-edits-model"},
+    )
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "reference_images_not_supported"
+    assert "/v1/capabilities?modality=image/generation" in err["message"]
+    assert edits_model.edit_calls == []
+
+
+def test_no_images_400():
+    c, _ = _ref_client()
+    r = c.post("/v1/images/edits", data={"prompt": "p"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
+
+
+def test_edit_size_omitted_uses_default_and_snaps():
+    c, model = _ref_client()
+    r = c.post("/v1/images/edits", files=[_img_part("image")], data={"prompt": "p"})
+    assert r.status_code == 200
+    assert (model.edit_calls[0]["width"], model.edit_calls[0]["height"]) == (1024, 1024)
+    assert r.json()["size"] == "1024x1024"
+    r = c.post(
+        "/v1/images/edits",
+        files=[_img_part("image")],
+        data={"prompt": "p", "size": "1536x1024", "quality": "low"},
+    )
+    assert r.status_code == 200
+    assert (model.edit_calls[1]["width"], model.edit_calls[1]["height"]) == (1248, 832)
+    assert model.edit_calls[1]["steps"] == 4
+
+
+def test_decoded_images_closed_on_error(monkeypatch):
+    from unittest.mock import MagicMock
+
+    c, model = _ref_client()
+    decoded = [MagicMock(size=(8, 8)), MagicMock(size=(8, 8))]
+    monkeypatch.setattr(routes_mod, "decode_image_file", AsyncMock(side_effect=decoded))
+
+    def fail(prompt, **kw):
+        raise RuntimeError("boom")
+
+    model.edit = fail
+    with pytest.raises(RuntimeError):
+        c.post(
+            "/v1/images/edits",
+            files=[("image[]", ("a.png", b"x", "image/png")) for _ in range(2)],
+            data={"prompt": "p"},
+        )
+    for d in decoded:
+        d.close.assert_called()

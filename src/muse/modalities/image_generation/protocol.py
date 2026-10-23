@@ -49,3 +49,22 @@ class ImageModel(Protocol):
         strength: float | None = None,
         **kwargs,
     ) -> ImageResult: ...
+
+
+@runtime_checkable
+class ReferenceImageModel(Protocol):
+    """Protocol for backends that edit from one or more reference images."""
+
+    def edit(
+        self,
+        prompt: str,
+        *,
+        images: list[Any],
+        width: int | None = None,
+        height: int | None = None,
+        steps: int | None = None,
+        guidance: float | None = None,
+        seed: int | None = None,
+        negative_prompt: str | None = None,
+        **kwargs,
+    ) -> ImageResult: ...
