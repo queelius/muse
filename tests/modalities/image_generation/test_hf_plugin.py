@@ -446,6 +446,39 @@ def test_klein_repo_resolves_to_reference_runtime():
         "accelerate", "Pillow", "safetensors",
     ]
     assert result.manifest["license"] == "apache-2.0"
+    assert result.manifest["description"] == f"Diffusers reference-image model: {_KLEIN_REPO}"
+
+
+def test_klein_base_repo_not_reference_family():
+    from muse.modalities.image_generation.hf import _reference_family
+
+    assert _reference_family("black-forest-labs/FLUX.2-klein-base-4B") is None
+    assert _reference_family(_KLEIN_REPO) is not None
+
+
+def test_klein_download_keeps_every_subfolder_file():
+    from pathlib import Path
+    from unittest.mock import patch
+    from huggingface_hub.utils import filter_repo_objects
+
+    files = [
+        "model_index.json", "flux-2-klein-4b.safetensors",
+        "transformer/config.json", "transformer/diffusion_pytorch_model.safetensors",
+        "text_encoder/config.json", "text_encoder/model-00001-of-00002.safetensors",
+        "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json",
+        "tokenizer/chat_template.jinja", "tokenizer/vocab.json", "tokenizer/merges.txt",
+        "vae/config.json", "vae/diffusion_pytorch_model.safetensors",
+        "scheduler/scheduler_config.json", "README.md",
+    ]
+    with patch(
+        "muse.modalities.image_generation.hf.snapshot_download", return_value="/tmp/fake",
+    ) as fake_snapshot:
+        result = HF_PLUGIN["resolve"](_KLEIN_REPO, None, _klein_info())
+        result.download(Path("/tmp/cache"))
+    patterns = fake_snapshot.call_args.kwargs["allow_patterns"]
+    kept = set(filter_repo_objects(files, allow_patterns=patterns))
+    assert kept == {f for f in files if "/" in f} | {"model_index.json"}
+    assert "tokenizer/chat_template.jinja" in kept
 
 
 def test_klein_download_excludes_top_level_single_file():

@@ -61,11 +61,14 @@ _KLEIN_PIP_EXTRAS = (
 def _reference_family(repo_id: str) -> dict[str, Any] | None:
     """Capabilities for repos served by the reference-image runtime, else None.
 
-    Matches FLUX.2 klein on the repo name part, case-insensitively. Returns
+    Matches distilled FLUX.2 klein on the repo name part, case-insensitively. Returns
     a fresh dict each call so callers may mutate it.
     """
     name = repo_id.rsplit("/", 1)[-1].lower()
     if "flux.2-klein" not in name and "flux2-klein" not in name:
+        return None
+    # Non-distilled "base" checkpoints are not tuned for the 4-step schedule.
+    if "base" in name:
         return None
     return {
         "pipeline_class": "Flux2KleinPipeline",
@@ -354,7 +357,11 @@ def _resolve(
         "model_id": hf_model_id(repo_id),
         "modality": "image/generation",
         "hf_repo": repo_id,
-        "description": f"Diffusers text-to-image: {repo_id}",
+        "description": (
+            f"Diffusers reference-image model: {repo_id}"
+            if reference_caps is not None
+            else f"Diffusers text-to-image: {repo_id}"
+        ),
         "license": hf_repo_license(info),
         "pip_extras": list(pip_extras),
         "system_packages": [],
@@ -380,6 +387,9 @@ def _resolve(
             "*/*.txt",
             # T5 text encoders' SentencePiece tokenizer (tokenizer_2/spiece.model).
             "*/*.model",
+            # Chat template shipped as a standalone file (klein's Qwen3
+            # tokenizer keeps it only in tokenizer/chat_template.jinja).
+            "*/*.jinja",
         ]
         if has_fp16_variants:
             allow_patterns.extend([
