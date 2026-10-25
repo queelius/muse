@@ -1,6 +1,7 @@
 """Validate pronunciation overrides and map spoken characters to written input."""
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import hashlib
@@ -9,6 +10,8 @@ import re
 from typing import Literal
 
 MAX_PRONUNCIATIONS = 2000
+MAX_SPANS = 2000
+_IPA_FORBIDDEN = frozenset("()[]/\n\r")
 MAX_TERM_CHARS = 200
 MAX_REPLACEMENT_CHARS = 500
 
@@ -40,7 +43,8 @@ def parse_pronunciations(raw: object, text: str) -> list[Pronunciation]:
         raise PronunciationError(f"at most {MAX_PRONUNCIATIONS} pronunciations are allowed")
 
     entries = []
-    occupied: list[tuple[int, int]] = []
+    occupied: list[tuple[int, int]] = []  # sorted by start, never overlapping
+    span_total = 0
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise PronunciationError("must be an object", index)
@@ -58,11 +62,18 @@ def parse_pronunciations(raw: object, text: str) -> list[Pronunciation]:
                 if not isinstance(value, str) or not value.strip() or len(value) > limit:
                     raise PronunciationError(f"{key} must be a nonblank string of at most {limit} characters", index)
 
+        if "ipa" in item and _IPA_FORBIDDEN & set(item["ipa"]):
+            raise PronunciationError(
+                "ipa must not contain parentheses, brackets, slashes or newlines", index)
+
         spans = None
         if "spans" in item:
             ranges = item["spans"]
             if not isinstance(ranges, list) or not ranges:
                 raise PronunciationError("spans must be a nonempty list of ranges", index)
+            span_total += len(ranges)
+            if span_total > MAX_SPANS:
+                raise PronunciationError(f"at most {MAX_SPANS} spans are allowed in total", index)
             parsed = []
             for span in ranges:
                 if (not isinstance(span, list) or len(span) != 2
@@ -71,9 +82,11 @@ def parse_pronunciations(raw: object, text: str) -> list[Pronunciation]:
                 start, end = span
                 if not 0 <= start < end <= len(text):
                     raise PronunciationError("span must satisfy 0 <= start < end <= len(input)", index)
-                if any(start < other_end and end > other_start for other_start, other_end in occupied):
+                at = bisect_right(occupied, (start, end))
+                if (at and occupied[at - 1][1] > start) or (
+                        at < len(occupied) and occupied[at][0] < end):
                     raise PronunciationError("spans must not overlap", index)
-                occupied.append((start, end))
+                occupied.insert(at, (start, end))
                 parsed.append((start, end))
             spans = tuple(parsed)
         entries.append(Pronunciation(index, item.get("term"), spans, item.get("ipa"), item.get("respell")))
@@ -95,7 +108,8 @@ def match_pronunciations(text: str, entries: list[Pronunciation]) -> tuple[list[
     """Match once from left to right; explicit spans suppress overlapping terms."""
     replacements = [Replacement(start, end, entry) for entry in entries
                     for start, end in (entry.spans or ())]
-    spans = [(rep.char_start, rep.char_end) for rep in replacements]
+    spans = sorted((rep.char_start, rep.char_end) for rep in replacements)
+    span_ends = [end for _, end in spans]
     counts = {entry.index: len(entry.spans or ()) for entry in entries}
     terms = [entry for entry in entries if entry.term is not None]
     if terms:
@@ -108,7 +122,8 @@ def match_pronunciations(text: str, entries: list[Pronunciation]) -> tuple[list[
         pattern = re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
         lookup = {re.sub(r"\s+", " ", entry.term).lower(): entry for entry in terms}
         for match in pattern.finditer(text):
-            if any(match.start() < end and match.end() > start for start, end in spans):
+            at = bisect_right(span_ends, match.start())
+            if at < len(spans) and spans[at][0] < match.end():
                 continue
             entry = lookup.get(re.sub(r"\s+", " ", match.group()).lower())
             if entry is not None:
@@ -153,7 +168,12 @@ def render_spoken(
         if entry.ipa is not None:
             if render_ipa is None:
                 raise PronunciationError("IPA pronunciation requires a renderer", entry.index)
-            spoken = render_ipa(text[start:end], entry.ipa)
+            original = text[start:end]
+            if "[" in original or "]" in original:
+                raise PronunciationError(
+                    "IPA cannot be applied to text containing square brackets", entry.index)
+            # Newlines would split the link before the pipeline parses it.
+            spoken = render_ipa(re.sub(r"\s+", " ", original), entry.ipa)
         else:
             spoken = entry.respell
         parts.append(spoken)

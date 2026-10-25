@@ -335,3 +335,61 @@ def test_unsupported_ipa_identifies_target(setup_client, target, label):
     assert error["code"] == "pronunciation_not_supported"
     assert "entry 0" in error["message"]
     assert label in error["message"]
+
+
+def test_rendered_text_over_limit_is_400_without_synthesis(setup_client):
+    model, make = setup_client
+    response = post(make(), input="a " * 24000, pronunciations=[{"term": "a", "respell": "x" * 500}])
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_pronunciation"
+    assert "48000" in error["message"] and "50000" in error["message"]
+    assert model.calls == []
+
+
+def test_ipa_on_bracketed_text_is_400(setup_client):
+    model, make = setup_client
+    model.render_ipa = lambda original, ipa: f"[{original}](/{ipa}/)"
+    response = post(make({"pronunciation_kinds": ["ipa"]}), input="a[b",
+                    pronunciations=[{"spans": [[0, 3]], "ipa": "x"}])
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_pronunciation"
+    assert model.calls == []
+
+
+def test_ipa_newline_target_renders_single_line_link(setup_client):
+    model, make = setup_client
+    model.render_ipa = lambda original, ipa: f"[{original}](/{ipa}/)"
+    response = post(make({"pronunciation_kinds": ["ipa"]}), input="Runge\nKutta",
+                    pronunciations=[{"term": "runge kutta", "ipa": "ab"}])
+    assert response.status_code == 200
+    assert model.calls[0][0] == "[Runge Kutta](/ab/)"
+
+
+def test_large_timestamps_request_completes(setup_client):
+    import time
+    model, make = setup_client
+    text = " ".join(["w"] * 8000)
+    started = time.perf_counter()
+    response = post(make(), input=text, timestamps=True)
+    assert response.status_code == 200 and len(response.json()["words"]) == 8000
+    assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize("speed", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_speed_is_400(setup_client, speed):
+    model, make = setup_client
+    response = make().post("/v1/audio/speech", content=(
+        '{"input": "hi", "model": "fake-timed", "timestamps": true, "speed": %s}' % speed),
+        headers={"content-type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_parameter"
+    assert model.calls == []
+
+
+def test_pronunciations_described_in_openapi(setup_client):
+    model, make = setup_client
+    schema = make().get("/openapi.json").json()
+    props = schema["components"]["schemas"]["SpeechRequest"]["properties"]
+    assert "respell" in props["pronunciations"]["description"]
+    assert "spans" in props["pronunciations"]["description"]

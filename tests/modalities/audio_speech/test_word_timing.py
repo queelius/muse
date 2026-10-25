@@ -119,3 +119,13 @@ def test_zero_duration_has_zero_times():
 def test_rounding_at_duration_stays_inside_audio():
     words = assemble_words("a bb", [TimedSpan(0, 1, 1.2346, 2.0)], 1.2346)
     assert timings(words) == [(1.234, 1.234, True), (1.234, 1.234, False)]
+
+
+def test_assembly_is_near_linear():
+    import time
+    text = " ".join(["word"] * 8000)
+    spans = [TimedSpan(5 * i, 5 * i + 4, i * 0.01, i * 0.01 + 0.005) for i in range(8000)]
+    started = time.perf_counter()
+    words = assemble_words(text, spans, 100.0)
+    assert time.perf_counter() - started < 2
+    assert len(words) == 8000 and all(w["measured"] for w in words)

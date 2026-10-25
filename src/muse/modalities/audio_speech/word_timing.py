@@ -1,6 +1,7 @@
 """Assemble written-word timings from measured character spans."""
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 import re
 
@@ -20,6 +21,7 @@ def assemble_words(text: str, spans: list[TimedSpan], duration: float) -> list[d
          "measured": False}
         for match in re.finditer(r"\S+", text)
     ]
+    ends = [word["char_end"] for word in words]
     times: list[tuple[float, float] | None] = [None] * len(words)
     coarse = []
 
@@ -39,10 +41,12 @@ def assemble_words(text: str, spans: list[TimedSpan], duration: float) -> list[d
             include(index, left, right)
 
     for span in spans:
-        overlapping = [
-            index for index, word in enumerate(words)
-            if max(span.char_start, word["char_start"]) < min(span.char_end, word["char_end"])
-        ]
+        # Words are sorted and disjoint, so overlap is a contiguous run.
+        first = bisect_right(ends, span.char_start)
+        last = first
+        while last < len(words) and words[last]["char_start"] < span.char_end:
+            last += 1
+        overlapping = list(range(first, last)) if span.char_start < span.char_end else []
         if len(overlapping) == 1:
             index = overlapping[0]
             include(index, span.start, span.end)

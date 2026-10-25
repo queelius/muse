@@ -208,3 +208,53 @@ def test_digest_unicode_and_list_order():
     a = {"term": "a", "respell": "b"}
     b = {"term": "c", "respell": "d"}
     assert pronunciations_digest([a, b]) != pronunciations_digest([b, a])
+
+
+def test_total_span_cap_names_entry():
+    from muse.modalities.audio_speech.pronunciations import MAX_SPANS
+    text = "a " * (MAX_SPANS + 10)
+    raw = [{"spans": [[2 * i, 2 * i + 1] for i in range(MAX_SPANS)], "respell": "x"},
+           {"spans": [[2 * MAX_SPANS, 2 * MAX_SPANS + 1]], "respell": "y"}]
+    with pytest.raises(PronunciationError, match="entry 1") as info:
+        parse_pronunciations(raw, text)
+    assert info.value.index == 1
+
+
+def test_many_spans_and_long_text_are_fast():
+    import time
+    from muse.modalities.audio_speech.pronunciations import MAX_SPANS
+    text = "ab " * 16666
+    raw = [{"spans": [[3 * i, 3 * i + 2] for i in range(MAX_SPANS)], "respell": "x"},
+           {"term": "ab", "respell": "y"}]
+    started = time.perf_counter()
+    entries = parse_pronunciations(raw, text)
+    reps, applied = match_pronunciations(text, entries)
+    assert time.perf_counter() - started < 1
+    assert applied[0]["count"] == MAX_SPANS and applied[1]["count"] == 16666 - MAX_SPANS
+
+
+def test_overlapping_spans_still_rejected_in_any_order():
+    with pytest.raises(PronunciationError, match="entry 1"):
+        parse_pronunciations([{"spans": [[5, 8]], "respell": "x"},
+                              {"spans": [[0, 3], [2, 6]], "respell": "y"}], "0123456789")
+
+
+@pytest.mark.parametrize("ipa", ["a)b", "a(b", "a[b", "a]b", "a/b", "a\nb", "a\rb"])
+def test_ipa_value_rejects_link_breaking_characters(ipa):
+    with pytest.raises(PronunciationError, match="entry 0"):
+        parse_pronunciations([{"term": "x", "ipa": ipa}], "x")
+
+
+def test_ipa_link_collapses_whitespace_in_original():
+    text = "Runge\nKutta"
+    reps, _ = match_pronunciations(text, parse_pronunciations([{"term": "runge kutta", "ipa": "ab"}], text))
+    spoken = render_spoken(text, reps, lambda original, ipa: f"[{original}](/{ipa}/)")
+    assert spoken.text == "[Runge Kutta](/ab/)"
+    assert spoken.to_input_span(0, 1) == (0, len(text))
+
+
+@pytest.mark.parametrize("text", ["a[b", "a]b"])
+def test_ipa_on_bracketed_original_rejected(text):
+    reps, _ = match_pronunciations(text, parse_pronunciations([{"spans": [[0, 3]], "ipa": "x"}], text))
+    with pytest.raises(PronunciationError, match="entry 0"):
+        render_spoken(text, reps, lambda original, ipa: f"[{original}](/{ipa}/)")

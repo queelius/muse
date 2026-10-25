@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import threading
 
 
@@ -67,7 +68,19 @@ class SpeechRequest(BaseModel):
     align: bool = False
     timestamps: bool = False
     # Keep raw values so our parser returns the pronunciation-specific 400.
-    pronunciations: SkipValidation[list | None] = None
+    pronunciations: SkipValidation[list | None] = Field(
+        default=None,
+        description=(
+            "Optional pronunciation overrides, a list of objects. Each entry has "
+            "exactly one target, either `term` (string; every whole-word, "
+            "case-insensitive match in `input`) or `spans` (list of [start, end] "
+            "character offsets into `input`), and exactly one replacement, either "
+            "`ipa` (IPA phonemes, on models that support it) or `respell` (ordinary "
+            "words spelled as they sound). Example: "
+            "[{\"term\": \"Kutta\", \"respell\": \"koo-tah\"}, "
+            "{\"spans\": [[0, 5]], \"ipa\": \"ˈrʊŋə\"}]."
+        ),
+    )
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -84,6 +97,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         model = registry.get_or_404(MODALITY, req.model)
 
         capabilities = registry.capabilities(MODALITY, model.model_id)
+        if not math.isfinite(req.speed):
+            return error_response(400, "invalid_parameter", "speed must be a finite number")
         if req.timestamps and req.stream:
             return error_response(
                 400, "timestamps_not_streamable",
@@ -113,7 +128,16 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                         "IPA is not supported by this model",
                     )
             replacements, applied = match_pronunciations(req.input, entries)
-            spoken = render_spoken(req.input, replacements, renderer)
+            try:
+                spoken = render_spoken(req.input, replacements, renderer)
+            except PronunciationError as exc:
+                return error_response(400, "invalid_pronunciation", str(exc))
+            if len(spoken.text) > MAX_INPUT_LENGTH:
+                return error_response(
+                    400, "invalid_pronunciation",
+                    f"Rendered text is too long ({len(spoken.text)} characters from "
+                    f"{len(req.input)} input characters; the limit is {MAX_INPUT_LENGTH})",
+                )
             pronunciations = {
                 "digest": pronunciations_digest(req.pronunciations), "applied": applied,
             }
@@ -160,10 +184,18 @@ async def _non_stream(
             kwargs = {"voice": req.voice, "speed": req.speed, "align": req.align}
             if req.timestamps:
                 kwargs["timestamps"] = True
-            return model.synthesize(spoken.text, **kwargs)
+            result = model.synthesize(spoken.text, **kwargs)
+        if not req.timestamps:
+            return result, None
+        # Span mapping and word assembly run off the event loop.
+        spans = [
+            TimedSpan(*spoken.to_input_span(span.char_start, span.char_end), span.start, span.end)
+            for span in ((result.metadata or {}).get("token_spans") or [])
+        ]
+        return result, assemble_words(req.input, spans, result.duration)
 
     try:
-        result = await asyncio.to_thread(_synth)
+        result, words = await asyncio.to_thread(_synth)
     except TimestampsUnavailableError:
         if req.timestamps:
             return _timestamps_not_supported()
@@ -201,11 +233,6 @@ async def _non_stream(
         headers["X-Alignment"] = json.dumps(result.metadata["alignment"])
 
     if req.timestamps:
-        spans = [
-            TimedSpan(*spoken.to_input_span(span.char_start, span.char_end), span.start, span.end)
-            for span in (metadata.get("token_spans") or [])
-        ]
-        words = assemble_words(req.input, spans, result.duration)
         measured = sum(word["measured"] for word in words)
         payload = {
             "object": "audio.speech", "model": model.model_id,
