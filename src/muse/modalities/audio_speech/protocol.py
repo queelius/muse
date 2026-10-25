@@ -71,6 +71,14 @@ class TTSModel(Protocol):
         """Convert *text* to audio.
 
         Keyword arguments are model-specific (temperature, top_p, etc.).
+        Backends advertising ``supports_word_timestamps`` accept
+        ``timestamps=True`` and return ``metadata["token_spans"]`` as
+        TimedSpans in the coordinates of *text*, with seconds relative to
+        the complete audio. ``metadata["timing_calibration"]`` records any
+        correction (or None); ``metadata["voice"]`` records the voice used.
+        IPA-capable backends expose ``render_ipa(original, ipa)`` and list
+        ``"ipa"`` in their ``pronunciation_kinds`` capability.
+
         Unknown kwargs should be silently ignored so that the server can
         forward request params without filtering per-model.
         """

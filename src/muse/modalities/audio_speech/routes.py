@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import threading
@@ -15,7 +16,8 @@ import threading
 
 import numpy as np
 from fastapi import APIRouter, Response
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, SkipValidation
 from sse_starlette.sse import EventSourceResponse
 
 from muse.modalities.audio_speech.codec import (
@@ -24,6 +26,11 @@ from muse.modalities.audio_speech.codec import (
     float_to_pcm16,
     wav_bytes_to_opus,
 )
+from muse.modalities.audio_speech.pronunciations import (
+    PronunciationError, SpokenText, match_pronunciations, parse_pronunciations,
+    pronunciations_digest, render_spoken,
+)
+from muse.modalities.audio_speech.word_timing import TimedSpan, assemble_words
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 
@@ -57,6 +64,9 @@ class SpeechRequest(BaseModel):
     stream: bool = False
     speed: float = 1.0
     align: bool = False
+    timestamps: bool = False
+    # Keep raw values so our parser returns the pronunciation-specific 400.
+    pronunciations: SkipValidation[list | None] = None
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -72,24 +82,89 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def speech(req: SpeechRequest):
         model = registry.get_or_404(MODALITY, req.model)
 
+        capabilities = registry.capabilities(MODALITY, model.model_id)
+        if req.timestamps and req.stream:
+            return error_response(
+                400, "timestamps_not_streamable",
+                "Word timestamps are not available while streaming",
+            )
+        if req.timestamps and not capabilities.get("supports_word_timestamps"):
+            return _timestamps_not_supported()
+
+        spoken = SpokenText(req.input)
+        pronunciations = None
+        if req.pronunciations is not None:
+            try:
+                entries = parse_pronunciations(req.pronunciations, req.input)
+            except PronunciationError as exc:
+                return error_response(400, "invalid_pronunciation", str(exc))
+            renderer = getattr(model, "render_ipa", None)
+            for entry in entries:
+                if entry.kind == "ipa" and (
+                    "ipa" not in (capabilities.get("pronunciation_kinds") or [])
+                    or not callable(renderer)
+                ):
+                    return error_response(
+                        400, "pronunciation_not_supported",
+                        f"Pronunciation entry {entry.index}: IPA is not supported by this model",
+                    )
+            replacements, applied = match_pronunciations(req.input, entries)
+            spoken = render_spoken(req.input, replacements, renderer)
+            pronunciations = {
+                "digest": pronunciations_digest(req.pronunciations), "applied": applied,
+            }
+
         if req.stream:
-            return await _stream(model, req)
-        return await _non_stream(model, req)
+            headers = _provenance_headers(model, req, {}, pronunciations)
+            return await _stream(model, req, spoken=spoken.text, headers=headers)
+        return await _non_stream(model, req, spoken, pronunciations)
 
     return router
 
 
-async def _non_stream(model, req: SpeechRequest) -> Response:
+def _timestamps_not_supported() -> Response:
+    return error_response(
+        400, "timestamps_not_supported",
+        "Native word timestamps are unavailable for this model or language; "
+        "use /v1/audio/alignments",
+    )
+
+
+def _voice(model, req: SpeechRequest, metadata: dict) -> str | None:
+    return metadata.get("voice") or req.voice or getattr(model, "default_voice", None)
+
+
+def _provenance_headers(
+    model, req: SpeechRequest, metadata: dict, pronunciations: dict | None,
+) -> dict[str, str]:
+    headers = {"X-Muse-Speed": str(float(req.speed))}
+    voice = _voice(model, req, metadata)
+    if voice:
+        headers["X-Muse-Voice"] = voice
+    if pronunciations is not None:
+        headers["X-Muse-Pronunciations-Digest"] = pronunciations["digest"]
+    return headers
+
+
+async def _non_stream(
+    model, req: SpeechRequest, spoken: SpokenText | None = None,
+    pronunciations: dict | None = None,
+) -> Response:
+    spoken = spoken if spoken is not None else SpokenText(req.input)
+
     def _synth():
         with model._inference_lock:
-            return model.synthesize(
-                req.input,
-                voice=req.voice,
-                speed=req.speed,
-                align=req.align,
-            )
+            kwargs = {"voice": req.voice, "speed": req.speed, "align": req.align}
+            if req.timestamps:
+                kwargs["timestamps"] = True
+            return model.synthesize(spoken.text, **kwargs)
 
-    result = await asyncio.to_thread(_synth)
+    try:
+        result = await asyncio.to_thread(_synth)
+    except ValueError:
+        if req.timestamps:
+            return _timestamps_not_supported()
+        raise
 
     try:
         wav = audio_to_wav_bytes(result.audio, result.sample_rate)
@@ -115,14 +190,47 @@ async def _non_stream(model, req: SpeechRequest) -> Response:
         body = wav
         media = "audio/wav"
 
-    headers: dict[str, str] = {}
+    metadata = result.metadata or {}
+    headers = _provenance_headers(model, req, metadata, pronunciations)
+    audio_sha256 = hashlib.sha256(body).hexdigest()
+    headers["X-Muse-Audio-SHA256"] = audio_sha256
     if req.align and result.metadata and "alignment" in result.metadata:
         headers["X-Alignment"] = json.dumps(result.metadata["alignment"])
+
+    if req.timestamps:
+        spans = [
+            TimedSpan(*spoken.to_input_span(span.char_start, span.char_end), span.start, span.end)
+            for span in metadata.get("token_spans", [])
+        ]
+        words = assemble_words(req.input, spans, result.duration)
+        measured = sum(word["measured"] for word in words)
+        payload = {
+            "object": "audio.speech", "model": model.model_id,
+            "voice": _voice(model, req, metadata), "speed": req.speed,
+            "audio": {
+                "format": "opus" if media == "audio/ogg" else "wav",
+                "b64_json": base64.b64encode(body).decode(),
+                "sha256": audio_sha256, "sample_rate": result.sample_rate,
+                "duration_seconds": result.duration,
+            },
+            "words": words,
+            "timing": {
+                "source": "native", "measured_words": measured,
+                "estimated_words": len(words) - measured,
+                "calibration": metadata.get("timing_calibration"),
+            },
+        }
+        if pronunciations is not None:
+            payload["pronunciations"] = pronunciations
+        return JSONResponse(payload, headers=headers)
 
     return Response(content=body, media_type=media, headers=headers)
 
 
-async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
+async def _stream(
+    model, req: SpeechRequest, *, spoken: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> EventSourceResponse:
     async def event_gen():
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_DEPTH)
@@ -166,7 +274,8 @@ async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
                     return
 
                 stream = iter(model.synthesize_stream(
-                    req.input, voice=req.voice, speed=req.speed,
+                    spoken if spoken is not None else req.input,
+                    voice=req.voice, speed=req.speed,
                 ))
                 while not cancelled.is_set():
                     try:
@@ -249,4 +358,4 @@ async def _stream(model, req: SpeechRequest) -> EventSourceResponse:
                     _STREAM_CLEANUP_GRACE_SECONDS,
                 )
 
-    return EventSourceResponse(event_gen())
+    return EventSourceResponse(event_gen(), headers=headers)
