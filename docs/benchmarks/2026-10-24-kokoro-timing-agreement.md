@@ -2,6 +2,7 @@ KOKORO_TIMING_OFFSET_SECONDS = 0.0
 Decision: PASS_NATIVE; raw 99.122%, constant-corrected 99.785% within 0.1 s.
 Per-chunk correction needed: no. Uncorrected later chunks pass at 98.921%; the first three words after each boundary pass at 100.000%.
 Measured constant candidate: +0.022999338 s added to Kokoro starts; unused because uncorrected agreement already exceeds 95%.
+The aligner reports starts on an 80 ms grid, so this result shows no systematic offset or chunk drift rather than sub-0.1 s accuracy; the conclusion assumes plain concatenation with no inter-chunk silence, speed 1.0, lang_code "a".
 
 # Kokoro timing agreement — 2026-10-24
 

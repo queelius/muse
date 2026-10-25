@@ -24,7 +24,7 @@ PUBLIC_KEYS: frozenset[str] = frozenset({
     "input_modalities", "image_size", "metric_depth", "word_timestamps",
     "calibrated", "lora_adapter", "base_model", "supported_scales",
     "safe_labels", "languages", "multi_label", "num_labels", "output_format",
-    "output_mime_type", "static_svg_only", "voice_cloning",
+    "output_mime_type", "static_svg_only", "voice_cloning", "pronunciation_kinds",
 })
 
 HIDDEN_KEYS: frozenset[str] = frozenset({

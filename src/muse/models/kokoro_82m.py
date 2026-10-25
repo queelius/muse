@@ -15,10 +15,13 @@ from typing import Any, Iterator
 import numpy as np
 
 from muse.modalities.audio_speech import AudioChunk, AudioResult
+from muse.modalities.audio_speech.word_timing import TimedSpan
 
 logger = logging.getLogger(__name__)
 
 KOKORO_SAMPLE_RATE = 24000
+# Measured with plain concatenation; see the timing agreement benchmark.
+KOKORO_TIMING_OFFSET_SECONDS = 0.0
 
 KOKORO_VOICES = [
     "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
@@ -56,7 +59,7 @@ MANIFEST = {
         "Apache 2.0",
     ],
     "limits": [
-        "No word timings at synthesis; run audio/alignment on the output for captions",
+        "Word timings come from the model's duration predictor (checked against the forced aligner, see docs/benchmarks/2026-10-24-kokoro-timing-agreement.md)",
         "No voice cloning; preset voices only",
         "Little control over emphasis or emotion beyond speed",
     ],
@@ -79,6 +82,8 @@ MANIFEST = {
     "capabilities": {
         "sample_rate": KOKORO_SAMPLE_RATE,
         "voices": KOKORO_VOICES,
+        "supports_word_timestamps": True,
+        "pronunciation_kinds": ["ipa", "respell"],
         "device": "auto",
         # Conservative architecture-derived peak-inference estimate.
         # ~82M params at fp32 is ~330 MB; with phonemizer + activation
@@ -152,6 +157,7 @@ class Model:
                 voice: str(path) for voice, path in voice_paths.items()
             }
         self._device = device
+        self._lang_code = lang_code
 
     @staticmethod
     def _validate_local_artifacts(
@@ -199,31 +205,79 @@ class Model:
     def sample_rate(self) -> int:
         return KOKORO_SAMPLE_RATE
 
+    @property
+    def default_voice(self) -> str:
+        return "af_heart"
+
+    def render_ipa(self, original: str, ipa: str) -> str:
+        """Render a pronunciation using Kokoro's phoneme link syntax."""
+        return f"[{original}](/{ipa}/)"
+
     def synthesize(self, text: str, **kwargs) -> AudioResult:
         """Synthesize speech from *text*.
 
         Kokoro-specific kwargs:
             voice (str): voice name (default ``'af_heart'``).
             speed (float): speaking speed multiplier (default 1.0).
+            timestamps (bool): include native token spans (English only).
         """
         voice = kwargs.get("voice") or "af_heart"
         speed = kwargs.get("speed", 1.0)
+        timestamps = kwargs.get("timestamps", False)
+        if timestamps and self._lang_code not in ("a", "b"):
+            raise ValueError("Kokoro timestamps are supported only on English pipelines (a, b)")
         pipeline_voice = self._pipeline_voice(voice)
 
         chunks = []
+        spans: list[TimedSpan] = []
+        text_cursor = 0
+        samples = 0
         for result in self._pipeline(text, voice=pipeline_voice, speed=speed):
+            if timestamps:
+                # Paragraph and long-sentence splits both retain their graphemes.
+                chunk_start = text.find(result.graphemes, text_cursor)
+                if chunk_start != -1:
+                    text_cursor = chunk_start + len(result.graphemes)
+                    token_cursor = 0
+                    offset = samples / KOKORO_SAMPLE_RATE + KOKORO_TIMING_OFFSET_SECONDS
+                    for token in result.tokens or []:
+                        if not token.text:
+                            continue
+                        start = result.graphemes.find(token.text, token_cursor)
+                        if start == -1:
+                            continue
+                        end = start + len(token.text)
+                        token_cursor = end
+                        if (result.audio is not None
+                                and token.start_ts is not None and token.end_ts is not None
+                                and any(char.isalnum() for char in token.text)):
+                            spans.append(TimedSpan(
+                                chunk_start + start, chunk_start + end,
+                                token.start_ts + offset, token.end_ts + offset,
+                            ))
             if result.audio is not None:
-                chunks.append(result.audio.numpy())
+                chunk = result.audio.numpy()
+                chunks.append(chunk)
+                samples += len(chunk)
 
         if chunks:
             audio = np.concatenate(chunks).astype(np.float32)
         else:
             audio = np.zeros(0, dtype=np.float32)
 
+        metadata: dict[str, Any] = {"voice": voice} if voice else {}
+        if timestamps:
+            metadata["token_spans"] = spans
+            metadata["timing_calibration"] = (
+                {"offset_seconds": KOKORO_TIMING_OFFSET_SECONDS,
+                 "basis": "docs/benchmarks/2026-10-24-kokoro-timing-agreement.md"}
+                if KOKORO_TIMING_OFFSET_SECONDS != 0 else None
+            )
+
         return AudioResult(
             audio=audio,
             sample_rate=KOKORO_SAMPLE_RATE,
-            metadata={"voice": voice} if voice else {},
+            metadata=metadata,
         )
 
     def synthesize_stream(self, text: str, **kwargs) -> Iterator[AudioChunk]:

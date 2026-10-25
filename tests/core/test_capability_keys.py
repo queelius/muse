@@ -9,8 +9,10 @@ from muse.core.curated import load_curated
 def test_public_and_hidden():
     assert public_capabilities({"supports_vision": True, "gguf_file": "x.gguf",
                                 "voices": ["a"], "max_concurrency": 1,
+                                "pronunciation_kinds": ["ipa", "respell"],
                                 "mystery": 1}) == \
-        {"supports_vision": True, "voices": ["a"]}
+        {"supports_vision": True, "voices": ["a"],
+         "pronunciation_kinds": ["ipa", "respell"]}
 
 
 def test_classify():

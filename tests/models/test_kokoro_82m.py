@@ -1,6 +1,7 @@
 """Tests for muse.models.kokoro_82m: Kokoro TTS adapter."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 import torch
 
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, TTSModel
+from muse.modalities.audio_speech.word_timing import TimedSpan
 
 
 def _write_local_bundle(root):
@@ -228,3 +230,121 @@ def test_manifest_has_required_fields():
     assert MANIFEST["revision"] == "f3ff3571791e39611d31c381e3a41a3af07b4987"
     assert "kokoro==0.9.4" in MANIFEST["pip_extras"]
     assert all(not requirement.startswith("misaki") for requirement in MANIFEST["pip_extras"])
+
+
+def _token(text, start=None, end=None, whitespace=""):
+    return SimpleNamespace(text=text, whitespace=whitespace, start_ts=start, end_ts=end)
+
+
+def _chunk(graphemes, tokens, samples=24000):
+    """Match KPipeline.Result fields without loading Kokoro or weights."""
+    return SimpleNamespace(
+        graphemes=graphemes, tokens=tokens,
+        audio=SimpleNamespace(numpy=lambda: np.ones(samples, dtype=np.float32)),
+    )
+
+
+def _timing_adapter(monkeypatch, chunks, lang_code="a"):
+    from muse.models.kokoro_82m import Model
+
+    fake_kokoro = _install_fake_kokoro(monkeypatch)
+    pipeline = fake_kokoro.KPipeline.return_value
+    pipeline.lang_code = lang_code
+    pipeline.return_value = chunks
+    return Model(device="cpu", lang_code=lang_code)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"timestamps": False}, {"timestamps": None}])
+def test_timestamps_off_returns_no_spans(monkeypatch, kwargs):
+    # Legacy results need only audio, not graphemes or tokens.
+    adapter = _timing_adapter(monkeypatch, [SimpleNamespace(audio=_chunk("", []).audio)])
+    result = adapter.synthesize("Hello", **kwargs)
+    assert result.metadata == {"voice": "af_heart"}
+    np.testing.assert_array_equal(result.audio, np.ones(24000, dtype=np.float32))
+
+
+def test_token_spans_locate_tokens_in_text(monkeypatch):
+    adapter = _timing_adapter(monkeypatch, [_chunk("Hello, world.", [
+        _token("Hello", .1, .4), _token(",", whitespace=" "),
+        _token("world", .5, .9), _token(".", .9, .9),
+    ])])
+    result = adapter.synthesize("Hello, world.", timestamps=True)
+    off = 0.0
+    assert result.metadata == {
+        "voice": "af_heart", "timing_calibration": None,
+        "token_spans": [TimedSpan(0, 5, .1 + off, .4 + off),
+                        TimedSpan(7, 12, .5 + off, .9 + off)],
+    }
+
+
+@pytest.mark.parametrize("text", ["One.\n\nTwo.", "One. Two."])
+def test_multi_chunk_offsets_accumulate(monkeypatch, text):
+    adapter = _timing_adapter(monkeypatch, [
+        _chunk("One.", [_token("One", .1, .4)]),
+        _chunk("Two.", [_token("Two", .1, .4)], samples=12000),
+    ])
+    result = adapter.synthesize(text, timestamps=True)
+    second = text.index("Two")
+    assert result.metadata["token_spans"] == [
+        TimedSpan(0, 3, .1, .4), TimedSpan(second, second + 3, 1.1, 1.4),
+    ]
+    assert len(result.audio) == 36000
+    assert all(0 <= span.start <= span.end <= len(result.audio) / 24000
+               for span in result.metadata["token_spans"])
+
+
+def test_link_token_maps_inside_link(monkeypatch):
+    text = "[Coulomb](/kuːˈlɒm/) law"
+    adapter = _timing_adapter(monkeypatch, [_chunk(text, [_token("Coulomb", .1, .4)])])
+    result = adapter.synthesize(text, timestamps=True)
+    assert result.metadata["token_spans"] == [TimedSpan(1, 8, .1, .4)]
+
+
+def test_unmappable_token_is_dropped(monkeypatch):
+    adapter = _timing_adapter(monkeypatch, [_chunk("One One", [
+        _token("missing", .0, .1), _token("One", .1, .4),
+        _token("missing", .4, .5), _token("One", .5, .9),
+    ])])
+    result = adapter.synthesize("One One", timestamps=True)
+    assert result.metadata["token_spans"] == [
+        TimedSpan(0, 3, .1, .4), TimedSpan(4, 7, .5, .9),
+    ]
+
+
+def test_untimed_token_advances_character_cursor(monkeypatch):
+    adapter = _timing_adapter(monkeypatch, [_chunk("One One", [
+        _token("One"), _token("One", .5, .9),
+    ])])
+    assert adapter.synthesize("One One", timestamps=True).metadata["token_spans"] == [
+        TimedSpan(4, 7, .5, .9),
+    ]
+
+
+@pytest.mark.parametrize("lang_code", ["a", "b"])
+def test_english_timestamps_preserve_speed(monkeypatch, lang_code):
+    adapter = _timing_adapter(monkeypatch, [_chunk("One", [_token("One", .1, .3)])], lang_code)
+    result = adapter.synthesize("One", timestamps=True, speed=1.5)
+    assert result.metadata["token_spans"] == [TimedSpan(0, 3, .1, .3)]
+    adapter._pipeline.assert_called_once_with("One", voice="af_heart", speed=1.5)
+
+
+@pytest.mark.parametrize("lang_code", ["e", "f", "h", "i", "j", "p", "z"])
+def test_non_english_timestamps_rejected(monkeypatch, lang_code):
+    adapter = _timing_adapter(monkeypatch, [_chunk("Hello", [])], lang_code)
+    with pytest.raises(ValueError, match="timestamps"):
+        adapter.synthesize("Hello", timestamps=True)
+    adapter._pipeline.assert_not_called()
+    assert adapter.synthesize("Hello").metadata == {"voice": "af_heart"}
+
+
+def test_render_ipa_and_caps(monkeypatch):
+    from muse.models.kokoro_82m import MANIFEST, KOKORO_TIMING_OFFSET_SECONDS
+
+    adapter = _timing_adapter(monkeypatch, [])
+    assert adapter.render_ipa("Coulomb", "kuːˈlɒm") == "[Coulomb](/kuːˈlɒm/)"
+    assert adapter.default_voice == "af_heart"
+    assert KOKORO_TIMING_OFFSET_SECONDS == 0.0
+    assert MANIFEST["capabilities"]["supports_word_timestamps"] is True
+    assert MANIFEST["capabilities"]["pronunciation_kinds"] == ["ipa", "respell"]
+    assert "Word timings come from the model's duration predictor (checked against the forced aligner, see docs/benchmarks/2026-10-24-kokoro-timing-agreement.md)" in MANIFEST["limits"]
+    assert not any("No word timings" in limit for limit in MANIFEST["limits"])
