@@ -12,6 +12,7 @@ from muse.modalities.audio_speech.protocol import (
     AudioChunk,
     AudioResult,
     TTSModel,
+    TimestampsUnavailableError,
 )
 from muse.modalities.audio_speech.routes import build_router
 
@@ -76,4 +77,5 @@ __all__ = [
     "AudioChunk",
     "AudioResult",
     "TTSModel",
+    "TimestampsUnavailableError",
 ]

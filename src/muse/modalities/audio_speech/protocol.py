@@ -13,6 +13,10 @@ from typing import Iterator, Protocol, runtime_checkable
 import numpy as np
 
 
+class TimestampsUnavailableError(ValueError):
+    """Native word timestamps are unavailable for the selected pipeline."""
+
+
 @dataclass
 class AudioResult:
     """Output from a TTS model synthesis.
@@ -76,6 +80,8 @@ class TTSModel(Protocol):
         TimedSpans in the coordinates of *text*, with seconds relative to
         the complete audio. ``metadata["timing_calibration"]`` records any
         correction (or None); ``metadata["voice"]`` records the voice used.
+        Raise ``TimestampsUnavailableError`` when the selected pipeline
+        cannot supply native timings.
         IPA-capable backends expose ``render_ipa(original, ipa)`` and list
         ``"ipa"`` in their ``pronunciation_kinds`` capability.
 

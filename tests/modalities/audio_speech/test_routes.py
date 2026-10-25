@@ -195,6 +195,7 @@ async def test_stream_backpressure_is_bounded_and_early_close_releases_model():
     response = await routes_mod._stream(
         model,
         routes_mod.SpeechRequest(input="hello", stream=True),
+        spoken="hello", headers={},
     )
     events = response.body_iterator
 
@@ -233,6 +234,7 @@ async def test_cancelled_stream_stops_waiting_for_inference_lock():
         response = await routes_mod._stream(
             model,
             routes_mod.SpeechRequest(input="hello", stream=True),
+            spoken="hello", headers={},
         )
         events = response.body_iterator
         pending = asyncio.create_task(events.__anext__())
@@ -264,6 +266,7 @@ async def test_stream_backend_error_is_structured_and_sanitized():
     response = await routes_mod._stream(
         _FailingStreamingTTS(),
         routes_mod.SpeechRequest(input="hello", stream=True),
+        spoken="hello", headers={},
     )
     events = [event async for event in response.body_iterator]
 
@@ -285,6 +288,7 @@ async def test_stream_encoding_error_is_structured_and_sanitized(monkeypatch):
     response = await routes_mod._stream(
         model,
         routes_mod.SpeechRequest(input="hello", stream=True),
+        spoken="hello", headers={},
     )
     events = [event async for event in response.body_iterator]
 

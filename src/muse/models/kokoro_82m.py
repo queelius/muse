@@ -16,7 +16,7 @@ import unicodedata
 
 import numpy as np
 
-from muse.modalities.audio_speech import AudioChunk, AudioResult
+from muse.modalities.audio_speech import AudioChunk, AudioResult, TimestampsUnavailableError
 from muse.modalities.audio_speech.word_timing import TimedSpan
 
 logger = logging.getLogger(__name__)
@@ -280,7 +280,9 @@ class Model:
         speed = kwargs.get("speed", 1.0)
         timestamps = kwargs.get("timestamps", False)
         if timestamps and self._lang_code not in ("a", "b"):
-            raise ValueError("Kokoro timestamps are supported only on English pipelines (a, b)")
+            raise TimestampsUnavailableError(
+                "Kokoro timestamps are supported only on English pipelines (a, b)"
+            )
         pipeline_voice = self._pipeline_voice(voice)
         mapping_text, char_positions = _link_stripped_text(text) if timestamps else (text, [])
 

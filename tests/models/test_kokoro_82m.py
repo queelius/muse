@@ -335,7 +335,9 @@ def test_english_timestamps_preserve_speed(monkeypatch, lang_code):
 @pytest.mark.parametrize("lang_code", ["e", "f", "h", "i", "j", "p", "z"])
 def test_non_english_timestamps_rejected(monkeypatch, lang_code):
     adapter = _timing_adapter(monkeypatch, [_chunk("Hello", [])], lang_code)
-    with pytest.raises(ValueError, match="timestamps"):
+    from muse.modalities.audio_speech import TimestampsUnavailableError
+
+    with pytest.raises(TimestampsUnavailableError, match="timestamps"):
         adapter.synthesize("Hello", timestamps=True)
     adapter._pipeline.assert_not_called()
     assert adapter.synthesize("Hello").metadata == {"voice": "af_heart"}

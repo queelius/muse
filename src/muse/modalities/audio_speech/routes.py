@@ -30,6 +30,7 @@ from muse.modalities.audio_speech.pronunciations import (
     PronunciationError, SpokenText, match_pronunciations, parse_pronunciations,
     pronunciations_digest, render_spoken,
 )
+from muse.modalities.audio_speech.protocol import TimestampsUnavailableError
 from muse.modalities.audio_speech.word_timing import TimedSpan, assemble_words
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
@@ -104,9 +105,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     "ipa" not in (capabilities.get("pronunciation_kinds") or [])
                     or not callable(renderer)
                 ):
+                    target = (f"term {entry.term!r}" if entry.term is not None else
+                              f"spans {[list(span) for span in entry.spans]}")
                     return error_response(
                         400, "pronunciation_not_supported",
-                        f"Pronunciation entry {entry.index}: IPA is not supported by this model",
+                        f"Pronunciation entry {entry.index} ({target}): "
+                        "IPA is not supported by this model",
                     )
             replacements, applied = match_pronunciations(req.input, entries)
             spoken = render_spoken(req.input, replacements, renderer)
@@ -139,7 +143,7 @@ def _provenance_headers(
 ) -> dict[str, str]:
     headers = {"X-Muse-Speed": str(float(req.speed))}
     voice = _voice(model, req, metadata)
-    if voice:
+    if voice and all(" " <= char <= "~" for char in voice):
         headers["X-Muse-Voice"] = voice
     if pronunciations is not None:
         headers["X-Muse-Pronunciations-Digest"] = pronunciations["digest"]
@@ -147,10 +151,9 @@ def _provenance_headers(
 
 
 async def _non_stream(
-    model, req: SpeechRequest, spoken: SpokenText | None = None,
-    pronunciations: dict | None = None,
+    model, req: SpeechRequest, spoken: SpokenText,
+    pronunciations: dict | None,
 ) -> Response:
-    spoken = spoken if spoken is not None else SpokenText(req.input)
 
     def _synth():
         with model._inference_lock:
@@ -161,7 +164,7 @@ async def _non_stream(
 
     try:
         result = await asyncio.to_thread(_synth)
-    except ValueError:
+    except TimestampsUnavailableError:
         if req.timestamps:
             return _timestamps_not_supported()
         raise
@@ -200,7 +203,7 @@ async def _non_stream(
     if req.timestamps:
         spans = [
             TimedSpan(*spoken.to_input_span(span.char_start, span.char_end), span.start, span.end)
-            for span in metadata.get("token_spans", [])
+            for span in (metadata.get("token_spans") or [])
         ]
         words = assemble_words(req.input, spans, result.duration)
         measured = sum(word["measured"] for word in words)
@@ -228,8 +231,8 @@ async def _non_stream(
 
 
 async def _stream(
-    model, req: SpeechRequest, *, spoken: str | None = None,
-    headers: dict[str, str] | None = None,
+    model, req: SpeechRequest, *, spoken: str,
+    headers: dict[str, str],
 ) -> EventSourceResponse:
     async def event_gen():
         loop = asyncio.get_running_loop()
@@ -274,7 +277,7 @@ async def _stream(
                     return
 
                 stream = iter(model.synthesize_stream(
-                    spoken if spoken is not None else req.input,
+                    spoken,
                     voice=req.voice, speed=req.speed,
                 ))
                 while not cancelled.is_set():

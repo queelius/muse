@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
-from muse.modalities.audio_speech import routes
+from muse.modalities.audio_speech import TimestampsUnavailableError, routes
 from muse.modalities.audio_speech.codec import AudioFormatError, audio_to_wav_bytes
 from muse.modalities.audio_speech.pronunciations import pronunciations_digest
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult
@@ -246,7 +246,7 @@ def test_unmeasured_words_and_written_offsets(setup_client):
 
 def test_language_without_native_timestamps_returns_400(setup_client):
     model, make = setup_client
-    model.failure = ValueError("Kokoro timestamps are supported only on English pipelines (a, b)")
+    model.failure = TimestampsUnavailableError("Kokoro timestamps are supported only on English pipelines (a, b)")
     response = post(make(), timestamps=True)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "timestamps_not_supported"
@@ -286,3 +286,52 @@ def test_successful_opus_encoding_reports_actual_bytes(setup_client, monkeypatch
     assert audio["format"] == "opus"
     assert base64.b64decode(audio["b64_json"]) == b"OggS fake opus"
     assert audio["sha256"] == hashlib.sha256(b"OggS fake opus").hexdigest()
+
+
+@pytest.mark.parametrize("timestamps", [False, True])
+def test_plain_backend_value_error_is_not_timestamp_rejection(setup_client, timestamps):
+    model, make = setup_client
+    model.failure = ValueError("Unknown bundled Kokoro voice")
+    with pytest.raises(ValueError, match="Unknown bundled Kokoro voice"):
+        post(make(), timestamps=timestamps)
+
+
+@pytest.mark.parametrize("voice", ["日本", "a\r\nX-Evil: 1", "a\tb", "a\x7fb"])
+@pytest.mark.parametrize("mode", ["plain", "timestamps", "stream"])
+@pytest.mark.parametrize("source", ["request", "metadata"])
+def test_unsafe_voice_omits_header(setup_client, voice, mode, source):
+    model, make = setup_client
+    model.metadata["voice"] = voice if source == "metadata" else None
+    # Streams have no result metadata; exercise their request voice in either case.
+    requested = voice if source == "request" or mode == "stream" else None
+    response = post(make(), voice=requested, timestamps=mode == "timestamps", stream=mode == "stream")
+    assert response.status_code == 200
+    assert "X-Muse-Voice" not in response.headers
+    assert "X-Evil" not in response.headers
+    if mode == "timestamps":
+        assert response.json()["voice"] == voice
+
+
+def test_null_token_spans_are_estimated(setup_client, monkeypatch):
+    model, make = setup_client
+    monkeypatch.setattr(model, "synthesize", lambda text, **kwargs: AudioResult(
+        model.audio, 24000, {"token_spans": None},
+    ))
+    response = post(make(), timestamps=True)
+    assert response.status_code == 200
+    assert all(word["measured"] is False for word in response.json()["words"])
+    assert response.json()["timing"]["estimated_words"] == 2
+
+
+@pytest.mark.parametrize("target,label", [
+    ({"term": "hello"}, "term 'hello'"),
+    ({"spans": [[0, 5]]}, "spans [[0, 5]]"),
+])
+def test_unsupported_ipa_identifies_target(setup_client, target, label):
+    _, make = setup_client
+    response = post(make({}), pronunciations=[{**target, "ipa": "xyz"}])
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "pronunciation_not_supported"
+    assert "entry 0" in error["message"]
+    assert label in error["message"]
