@@ -442,7 +442,7 @@
   quality_tier: good
   capabilities:
     device: auto
-    memory_gb: 5.0
+    memory_gb: 4.0
     supports_word_timestamps: false
     supports_segment_timestamps: false
     supports_translation: false
