@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 from typing import Any, Iterator
 import unicodedata
 
@@ -23,6 +24,24 @@ logger = logging.getLogger(__name__)
 KOKORO_SAMPLE_RATE = 24000
 # Measured with plain concatenation; see the timing agreement benchmark.
 KOKORO_TIMING_OFFSET_SECONDS = 0.0
+# misaki 0.9.4, en.LINK_REGEX: mirror its display-text preprocessing without
+# importing the heavyweight phonemizer at module import time.
+_LINK_REGEX = re.compile(r'\[([^\]]+)\]\(([^\)]*)\)')
+
+
+def _link_stripped_text(text: str) -> tuple[str, list[int]]:
+    """Return Misaki's link display view and its original character positions."""
+    pieces = []
+    positions = []
+    cursor = 0
+    for match in _LINK_REGEX.finditer(text):
+        pieces.extend((text[cursor:match.start()], match.group(1)))
+        positions.extend(range(cursor, match.start()))
+        positions.extend(range(match.start(1), match.end(1)))
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    positions.extend(range(cursor, len(text)))
+    return "".join(pieces), positions
 
 
 def _map_chunk_tokens(
@@ -263,6 +282,7 @@ class Model:
         if timestamps and self._lang_code not in ("a", "b"):
             raise ValueError("Kokoro timestamps are supported only on English pipelines (a, b)")
         pipeline_voice = self._pipeline_voice(voice)
+        mapping_text, char_positions = _link_stripped_text(text) if timestamps else (text, [])
 
         chunks = []
         spans: list[TimedSpan] = []
@@ -272,17 +292,21 @@ class Model:
         for result in self._pipeline(text, voice=pipeline_voice, speed=speed):
             if timestamps and mapping_valid:
                 # Paragraph and long-sentence splits both retain their graphemes.
-                chunk_start = text.find(result.graphemes, text_cursor)
-                if chunk_start == -1 or text[text_cursor:chunk_start].strip():
+                chunk_start = mapping_text.find(result.graphemes, text_cursor)
+                if chunk_start == -1 or mapping_text[text_cursor:chunk_start].strip():
                     # Once a chunk is lost, repeated text cannot be located safely.
                     mapping_valid = False
                 else:
                     text_cursor = chunk_start + len(result.graphemes)
                     if result.audio is not None:
                         offset = samples / KOKORO_SAMPLE_RATE + KOKORO_TIMING_OFFSET_SECONDS
-                        spans.extend(_map_chunk_tokens(
+                        chunk_spans = _map_chunk_tokens(
                             result.graphemes, result.tokens, chunk_start, offset,
-                        ))
+                        )
+                        spans.extend(TimedSpan(
+                            char_positions[span.char_start], char_positions[span.char_end - 1] + 1,
+                            span.start, span.end,
+                        ) for span in chunk_spans)
             if result.audio is not None:
                 chunk = result.audio.numpy()
                 chunks.append(chunk)

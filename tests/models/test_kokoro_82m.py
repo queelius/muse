@@ -295,9 +295,13 @@ def test_multi_chunk_offsets_accumulate(monkeypatch, text):
 
 def test_link_token_maps_inside_link(monkeypatch):
     text = "[Coulomb](/kuːˈlɒm/) law"
-    adapter = _timing_adapter(monkeypatch, [_chunk(text, [_token("Coulomb", .1, .4)])])
+    adapter = _timing_adapter(monkeypatch, [_chunk("Coulomb law", [
+        _token("Coulomb", .1, .4), _token("law", .5, .9),
+    ])])
     result = adapter.synthesize(text, timestamps=True)
-    assert result.metadata["token_spans"] == [TimedSpan(1, 8, .1, .4)]
+    assert result.metadata["token_spans"] == [
+        TimedSpan(1, 8, .1, .4), TimedSpan(21, 24, .5, .9),
+    ]
 
 
 def test_unmappable_token_is_dropped(monkeypatch):
@@ -395,3 +399,36 @@ def test_chunk_does_not_skip_non_whitespace_gap(monkeypatch):
     result = adapter.synthesize("Skipped.\n\nYes.", timestamps=True)
     assert result.metadata["token_spans"] == []
     assert len(result.audio) == 24000
+
+
+@pytest.mark.parametrize("tokens, expected", [
+    ([_token("Albert Camus", .1, .6)], [TimedSpan(1, 13, .1, .6)]),
+    ([_token("Albert", .1, .3), _token("Camus", .3, .6)],
+     [TimedSpan(1, 7, .1, .3), TimedSpan(8, 13, .3, .6)]),
+])
+def test_multi_word_link_maps_inside_brackets(monkeypatch, tokens, expected):
+    text = "[Albert Camus](/ˈælbɚt kæmˈuː/) wrote."
+    adapter = _timing_adapter(monkeypatch, [_chunk("Albert Camus wrote.", tokens + [
+        _token("wrote", .6, .9),
+    ])])
+    spans = adapter.synthesize(text, timestamps=True).metadata["token_spans"]
+    assert spans == expected + [TimedSpan(32, 37, .6, .9)]
+
+
+@pytest.mark.parametrize("split_chunks", [False, True])
+def test_two_links_and_repeated_word_keep_original_coordinates(monkeypatch, split_chunks):
+    text = "[One](/wʌn/) One [Two](/tuː/) One"
+    first_tokens = [_token("One", .1, .3), _token("One", .4, .6)]
+    second_tokens = [_token("Two", .1, .3), _token("One", .4, .6)]
+    if split_chunks:
+        chunks = [_chunk("One One", first_tokens), _chunk("Two One", second_tokens)]
+        expected_second = [TimedSpan(18, 21, 1.1, 1.3), TimedSpan(30, 33, 1.4, 1.6)]
+    else:
+        second_tokens = [_token("Two", .7, .8), _token("One", .8, .9)]
+        chunks = [_chunk("One One Two One", first_tokens + second_tokens)]
+        expected_second = [TimedSpan(18, 21, .7, .8), TimedSpan(30, 33, .8, .9)]
+    adapter = _timing_adapter(monkeypatch, chunks)
+    spans = adapter.synthesize(text, timestamps=True).metadata["token_spans"]
+    assert spans == [
+        TimedSpan(1, 4, .1, .3), TimedSpan(13, 16, .4, .6),
+    ] + expected_second
