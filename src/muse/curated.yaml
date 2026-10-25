@@ -424,6 +424,29 @@
     device: cpu
     memory_gb: 0.1
 
+- id: qwen3-asr-1.7b
+  uri: hf://Qwen/Qwen3-ASR-1.7B-hf
+  revision: bcd2b5b7f32b480ab5790554cfa8347f246a14f3
+  modality: audio/transcription
+  size_gb: 4.09
+  description: "Qwen3 ASR 1.7B: multilingual transcripts, Apache 2.0"
+  summary: "Transcripts only; no word or segment times (use /v1/audio/alignments). For pronunciation checks do not send prompt: context makes the model hear expected words."
+  strengths:
+    - "Multilingual transcription for 30 languages and 22 Chinese dialects"
+    - "Transcripts only; pair with audio/alignment for word or segment times"
+    - "For pronunciation checks omit prompt so context does not bias it toward expected words"
+  limits:
+    - "No word or segment times; use /v1/audio/alignments"
+    - "For pronunciation checks do not send prompt: context makes the model hear expected words"
+    - "No translation; up to 300 seconds of audio per request"
+  quality_tier: good
+  capabilities:
+    device: auto
+    memory_gb: 5.0
+    supports_word_timestamps: false
+    supports_segment_timestamps: false
+    supports_translation: false
+
 - id: whisper-base
   uri: hf://Systran/faster-whisper-base
   modality: audio/transcription

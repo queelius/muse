@@ -68,3 +68,45 @@ def test_search_yields_results():
     rows = list(HF_PLUGIN["search"](fake_api, "whisper", sort="downloads", limit=20))
     assert len(rows) == 1
     assert rows[0].modality == "audio/transcription"
+
+
+QWEN_FILES = ['config.json', 'model.safetensors', 'processor_config.json',
+              'tokenizer.json', 'tokenizer_config.json', 'generation_config.json',
+              'chat_template.jinja']
+QWEN_REVISION = 'bcd2b5b7f32b480ab5790554cfa8347f246a14f3'
+
+
+def _qwen_info(repo='Qwen/Qwen3-ASR-1.7B-hf', files=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(id=repo, sha=QWEN_REVISION,
+                           siblings=[SimpleNamespace(rfilename=f) for f in (QWEN_FILES if files is None else files)],
+                           tags=['automatic-speech-recognition'], card_data={'license': 'apache-2.0'})
+
+
+def test_qwen_exact_repo_and_required_files():
+    for repo in ['Qwen/Qwen3-ASR-1.7B-hf', 'qwen/QWEN3-asr-1.7b-HF']:
+        assert HF_PLUGIN['sniff'](_qwen_info(repo))
+    for repo in ['Qwen/Qwen3-ASR-0.6B-hf', 'other/Qwen3-ASR-1.7B-hf', 'Qwen/Qwen3-ASR-1.7B']:
+        assert not HF_PLUGIN['sniff'](_qwen_info(repo))
+    for missing in QWEN_FILES:
+        assert not HF_PLUGIN['sniff'](_qwen_info(files=[f for f in QWEN_FILES if f != missing]))
+
+
+def test_qwen_manifest_and_pinned_download(monkeypatch, tmp_path):
+    from muse.modalities.audio_transcription import hf
+    resolved = HF_PLUGIN['resolve']('Qwen/Qwen3-ASR-1.7B-hf', None, _qwen_info())
+    assert resolved.backend_path == 'muse.modalities.audio_transcription.runtimes.qwen3_asr:Qwen3ASRRuntime'
+    assert resolved.manifest['revision'] == QWEN_REVISION
+    assert resolved.manifest['capabilities'] == {
+        'device': 'auto', 'memory_gb': 5.0, 'supports_word_timestamps': False,
+        'supports_segment_timestamps': False, 'supports_translation': False,
+    }
+    assert resolved.manifest['pip_extras'] == ['torch>=2.11', 'torchcodec>=0.12', 'transformers>=5.13.0']
+    calls = []
+    def download(**kwargs):
+        calls.append(kwargs)
+        return str(tmp_path)
+    monkeypatch.setattr(hf, 'snapshot_download', download)
+    assert resolved.download(tmp_path) == tmp_path
+    assert calls[0]['revision'] == QWEN_REVISION
+    assert set(calls[0]['allow_patterns']) == set(QWEN_FILES + ['README.md'])

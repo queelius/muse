@@ -247,3 +247,49 @@ def test_backend_unrelated_error_re_raised_not_as_415():
         f"non-decoder RuntimeError must not be masked as 415; "
         f"body={r.text}"
     )
+
+
+@pytest.mark.parametrize('path,fields,code', [
+    ('transcriptions', {'timestamp_granularities[]': 'word'}, 'word_timestamps_not_supported'),
+    ('transcriptions', {'response_format': 'verbose_json'}, 'segment_timestamps_not_supported'),
+    ('transcriptions', {'response_format': 'srt'}, 'segment_timestamps_not_supported'),
+    ('transcriptions', {'response_format': 'vtt'}, 'segment_timestamps_not_supported'),
+    ('translations', {}, 'translation_not_supported'),
+])
+def test_transcript_only_capability_gates(path, fields, code):
+    backend = MagicMock(model_id='qwen')
+    reg = ModalityRegistry()
+    reg.register(MODALITY, backend, manifest={'model_id': 'qwen', 'capabilities': {
+        'supports_word_timestamps': False, 'supports_segment_timestamps': False,
+        'supports_translation': False,
+    }})
+    app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.post('/v1/audio/' + path, files={'file': ('a.wav', b'audio', 'audio/wav')},
+                    data={'model': 'qwen', **fields})
+    assert r.status_code == 400
+    assert r.json()['error']['code'] == code
+    if code == 'word_timestamps_not_supported':
+        assert '/v1/audio/alignments' in r.json()['error']['message']
+    backend.transcribe.assert_not_called()
+
+
+@pytest.mark.parametrize('error,expected_status,code', [
+    ('decode', 415, 'unsupported_media_type'),
+    ('duration', 413, 'payload_too_large'),
+])
+def test_qwen_decoder_failures_keep_error_envelope(error, expected_status, code):
+    from muse.modalities.audio_alignment.protocol import (
+        AudioAlignmentDecodeError, AudioAlignmentDurationExceededError,
+    )
+    backend = MagicMock()
+    backend.transcribe.side_effect = (
+        AudioAlignmentDecodeError('invalid audio') if error == 'decode'
+        else AudioAlignmentDurationExceededError(maximum_seconds=300)
+    )
+    r = _make_client(backend).post(
+        '/v1/audio/transcriptions', files={'file': ('a.wav', b'audio', 'audio/wav')},
+        data={'model': 'whisper-tiny'},
+    )
+    assert r.status_code == expected_status
+    assert r.json()['error']['code'] == code

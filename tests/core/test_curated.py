@@ -229,7 +229,7 @@ def test_load_curated_includes_whisper_entries():
     # Systran builds; community CT2 conversions (e.g. deepdml's turbo) are
     # equally valid, so assert the faster-whisper lineage, not the publisher.
     for e in entries:
-        if e.modality == "audio/transcription":
+        if e.modality == "audio/transcription" and e.id.startswith("whisper-"):
             assert e.uri is not None
             assert e.uri.startswith("hf://")
             assert "faster-whisper" in e.uri
@@ -444,3 +444,19 @@ def test_load_curated_includes_flux2_klein():
     assert e.uri == "hf://black-forest-labs/FLUX.2-klein-4B"
     assert e.quality_tier == "good"
     assert e.limits
+
+
+def test_load_curated_includes_qwen3_asr():
+    entry = find_curated("qwen3-asr-1.7b")
+    assert entry is not None
+    assert entry.uri == "hf://Qwen/Qwen3-ASR-1.7B-hf"
+    assert entry.revision == "bcd2b5b7f32b480ab5790554cfa8347f246a14f3"
+    assert entry.modality == "audio/transcription"
+    assert entry.quality_tier == "good"
+    assert entry.capabilities == {
+        "device": "auto", "memory_gb": 5.0,
+        "supports_word_timestamps": False, "supports_segment_timestamps": False,
+        "supports_translation": False,
+    }
+    assert "prompt" in entry.summary
+    assert any("context" in limit and "expected words" in limit for limit in entry.limits)

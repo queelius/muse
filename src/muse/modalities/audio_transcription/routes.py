@@ -36,6 +36,9 @@ from muse.modalities._common.uploads import (
     upload_suffix,
 )
 from muse.modalities.audio_transcription.codec import encode_transcription
+from muse.modalities.audio_alignment.protocol import (
+    AudioAlignmentDecodeError, AudioAlignmentDurationExceededError,
+)
 
 
 MODALITY = "audio/transcription"
@@ -74,6 +77,27 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"got {response_format!r}",
             )
 
+        backend = registry.get_or_404(MODALITY, model)
+        caps = registry.capabilities(MODALITY, model)
+        want_words = "word" in timestamp_granularities
+        if want_words and not caps.get("supports_word_timestamps", True):
+            return error_response(
+                400, "word_timestamps_not_supported",
+                "This model has no word timestamps; use /v1/audio/alignments.",
+            )
+        if (
+            response_format in {"verbose_json", "srt", "vtt"}
+            and not caps.get("supports_segment_timestamps", True)
+        ):
+            return error_response(
+                400, "segment_timestamps_not_supported",
+                "This model returns transcripts only; use /v1/audio/alignments for timestamps.",
+            )
+        if task == "translate" and not caps.get("supports_translation", True):
+            return error_response(
+                400, "translation_not_supported", "This model does not support translation.",
+            )
+
         max_bytes = _max_upload_bytes()
         data = await read_upload(
             file, max_bytes=max_bytes, label="file",
@@ -82,11 +106,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if isinstance(data, JSONResponse):
             return data
 
-        backend = registry.get_or_404(MODALITY, model)
-
-        want_words = "word" in timestamp_granularities
-
-        # Whisper inference is sync and CPU/GPU-bound; run it off-loop so a
+        # Model inference is sync and CPU/GPU-bound; run it off-loop so a
         # long transcription doesn't block /health, the gateway's
         # per-worker probing, or sibling requests.
         def _transcribe(path: str):
@@ -104,6 +124,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         try:
             result = await run_on_spooled_upload(
                 data, _transcribe, suffix=upload_suffix(file.filename, default=""),
+            )
+        except AudioAlignmentDurationExceededError as e:
+            return error_response(413, "payload_too_large", str(e))
+        except AudioAlignmentDecodeError:
+            return error_response(
+                415, "unsupported_media_type",
+                "audio decode failed; provide a supported audio file",
             )
         except Exception as e:  # noqa: BLE001
             # PyAV/ffmpeg decode failures map to 415; the raw exception
