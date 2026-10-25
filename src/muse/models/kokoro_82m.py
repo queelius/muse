@@ -127,6 +127,9 @@ MANIFEST = {
         "numpy",
         "kokoro==0.9.4",
         "soundfile",
+        # preshed 3.0.14 breaks spacy tokenizer loading ("Python int too large
+        # to convert to C ssize_t"), which misaki needs; found by a fresh pull.
+        "preshed<3.0.14",
     ),
     "allow_patterns": (
         "config.json",

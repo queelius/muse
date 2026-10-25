@@ -434,3 +434,7 @@ def test_two_links_and_repeated_word_keep_original_coordinates(monkeypatch, spli
     assert spans == [
         TimedSpan(1, 4, .1, .3), TimedSpan(13, 16, .4, .6),
     ] + expected_second
+
+
+def test_manifest_pins_preshed_below_broken_release():
+    assert "preshed<3.0.14" in MANIFEST["pip_extras"]
