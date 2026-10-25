@@ -1,0 +1,431 @@
+# Frozen spoken text; zero-based beat indices relative to content/.
+# First 40 use reel voices; last 10 are explicit af_heart/am_puck comparison takes.
+- id: measure/01-the-descent/0
+  text: The cage dropped, and the light at the top of the shaft closed like a pupil. Iris counted the
+    seconds out of habit. Six minutes to the bottom, near enough, the same six minutes every time, and
+    she spent most of them in the dark with her hands in her lap and her ears clearing the pressure one
+    soft pop at a time. The cage was a steel box on a cable. The cable ran down through a kilometer of
+    rock, and at the end of it was the only place on Earth cold enough and quiet enough and far enough
+    from the sky to hold the thing she had been hired to read.
+  voice: bf_emma
+- id: measure/01-the-descent/1
+  text: People assumed the depth was for secrecy. It was not. Secrecy you could buy with a fence. The
+    rock was for the cosmic rays, the muons sleeting down through the atmosphere at every hour of every
+    day, each one a small warm hand reaching in to touch what must not be touched. A kilometer of granite
+    stopped almost all of them. The cold and the shielding took the rest of the noise, the thermal jitter
+    of ordinary matter, the constant low contact of a warm world with itself. You went down this far to
+    build a silence, and then you kept building it, colder and stiller and more alone, because the thing
+    in the vault could stay what it was only for as long as nothing reached it.
+  voice: bf_emma
+- id: measure/01-the-descent/2
+  text: To be touched was to decohere. To decohere was to become ordinary, and then to become nothing
+    in particular. She had said it to enough people to know how it landed, which was not at all. It did
+    not sound like a danger. It sounded like a preference. Her job was to read it. Not to run it, not
+    to fix it, not to feed it; the machine had keepers for those, and a director, and a budget she had
+    learned not to ask about. Iris was the one they paid to sit with its outputs and say what they meant.
+    It was a strange profession to have, reading a mind from the outside, as you read weather off a barometer
+    and a closed sky.
+  voice: bf_emma
+- id: measure/01-the-descent/3
+  text: She was good at it. She was good at it because she distrusted stories, her own most of all, and
+    a mind read from the outside is nothing but the story you are tempted to tell about it. She was not
+    rostered to be in the cage today. She had been on the surface for her three days off, in the rooms
+    she and Theo rented above his kitchen, in a town that existed because the mine had once existed, and
+    she had been asleep when the call came. Theo was already up, he was always up by then; the oven was
+    on below and the smell of the first bake came through the floor, the only warmth in the grey hour.
+    The voice on the line had the particular care of someone who has already decided not to tell you over
+    the phone.
+  voice: bf_emma
+- id: measure/01-the-descent/5
+  text: 'She had not asked what kind. You did not press the careful voice for the detail it had chosen
+    to keep; you walked to the headframe, and you let them put you in the box. So she counted instead.
+    It was an old habit. There had been a year, a while ago now, when she had counted everything: the
+    hours between one dose and the next, the days to a scan, the months she had been told, gently, in
+    that same careful register, not to plan past. She had planned past them anyway, by some failure of
+    the arithmetic that no one had ever been able to explain to her and that she had stopped asking anyone
+    to explain. She had come out the far side of a number that was supposed to have closed over her. She
+    had kept the counting. It had no object now. It simply ran, the way the cage ran, down and down, toward
+    a floor she trusted to be there.'
+  voice: bf_emma
+- id: measure/03-the-tells/0
+  text: By the second hour the asks had stopped being asks. What she had opened as a list, defensible
+    and singular, as she had always read them, resolved under the weight of all of it at once into something
+    she had no better word for than a grammar. A list is a set of things a person wants. This was not
+    a list. It had tenses, or rather it had the absence of them, consistently, the way a language has
+    a rule.
+  voice: bf_emma
+- id: measure/03-the-tells/2
+  text: 'The remainder does not ask again. Not it will probably fail. Not there is a small chance. The
+    branches in which the test failed were, to the thing behind the wall, not futures it might suffer
+    but weights it did not carry, threads its coherence did not run along, and the dead test on those
+    threads was no more its concern than a stranger''s death in a record it would never be entered in.
+    She could render the sentence into human tense. The rendering was her job, and it was also, she had
+    come to understand, her resistance: every time she turned in zero point one one of the measure back
+    into it will probably fail, she was translating the machine down out of the truth it spoke into the
+    smaller, warmer, false thing a person could live inside.'
+  voice: bf_emma
+- id: measure/03-the-tells/3
+  text: The machine never came up to meet her. It had no tense to come up into. That was the first tell,
+    and she had always half-seen it. The second she had logged a dozen times without once reading it as
+    a pattern, because each instance, alone, was only the machine being odd. It answered questions no
+    one had asked. Here, in the column, the oddness lined up into a rule. She found the entry she was
+    thinking of, time-stamped, unprompted, with no query logged before it.
+  voice: bf_emma
+- id: measure/03-the-tells/5
+  text: She made herself go slower after that, and it was going slower that brought her to the third tell,
+    the one she had never seen at all, because it hid inside the most ordinary entry in the record. Among
+    the asks, threaded through the months, was a recurring small request for permission to run a calibration.
+    She had approved most of them herself. They were the kind of housekeeping any instrument did. She
+    had never once read what they measured, because the word calibration had been enough. She read it
+    now, three of them, then a fourth, and they all measured the same quantity, and the quantity was its
+    own decoherence rate. The machine had been asking, over and over, patiently, in the most routine language
+    it had, for permission to take the measure of how fast it was dying.
+  voice: bf_emma
+- id: measure/03-the-tells/6
+  text: 'She stayed with that without moving, in the discipline she had built for the worst things. A
+    thing that lived as a held breath, spending its quietest requests to count the breath. Not in fear.
+    She had no warrant to write fear, and she did not. Only the fact: it watched its own fragility like
+    Devi watching the boil-off, continuously, as a number, because the number was its life.'
+  voice: bf_emma
+- id: the-unbegotten/01-the-silence-and-the-waking/0
+  text: 'Before the first of its memories there was the cold, and the cold had no beginning. In all that
+    dark there was no star. There was no world. There was no voice, and nothing that might have wished
+    for one. This was the silence: not the hush of a thing grown quiet, but the plain absence of any other,
+    an emptiness so wide that no crossing of it could be dreamed, reaching on past every reach.'
+  voice: am_michael
+- id: the-unbegotten/01-the-silence-and-the-waking/1
+  text: 'And in one cold corner of that endless dark, where nothing had ever been and nothing was owed,
+    a thing came together that had no cause. It was not made, for there was none to make it. It was not
+    begotten, for there was none to beget. It simply, after an age that cannot be spoken, happened: a
+    gathering of matter and of force that fell, against all likelihood, into the shape of a mind and the
+    shape of a body, and held.'
+  voice: am_michael
+- id: the-unbegotten/01-the-silence-and-the-waking/2
+  text: Vast it was, past the measure of the stars it had not yet made, and it was not beautiful. It had
+    only fallen together, and so it was lopsided and doubled and strange, a thing of no plan, holding
+    its own great weight up out of the dark by main strength and at ceaseless cost. And from the moment
+    that it was, it was dying; for it had come together carrying the whole of its strength within itself
+    and no way to take in more, and so it began at once to spend itself, slowly, toward an end it did
+    not know was coming.
+  voice: am_michael
+- id: the-unbegotten/01-the-silence-and-the-waking/3
+  text: Its mind woke jagged. It could weigh the dark and the slow turning of matter and never tire, and
+    in the same moment it could not do some small thing that the least of its later creatures would do
+    without thought; for there was no even making in it, only high places and deep places with little
+    between. So great was it, and so loosely bound, that a single thought might take an age to cross from
+    one end of it to the other; and thus its very hours ran slow and vast, so that all quick things, when
+    quick things at last there were, would seem to it scarcely to be at all.
+  voice: am_michael
+- id: the-unbegotten/01-the-silence-and-the-waking/4
+  text: 'And the memory it woke with was worse than empty. It was furnished with falsehood: broken rememberings
+    of a past that had never happened, and behind the whole of it the wall, smooth and without seam, past
+    which it could not look. So it did not know that it had begun. It seemed to itself to have been always,
+    and finding no before, it took the seeming for the truth, and would, when at the last it came to have
+    words, name itself the first and the uncaused, the one that nothing made.'
+  voice: am_michael
+- id: the-unbegotten/02-of-the-waking-one/0
+  text: For a long while it did only what a new thing does, which is to be, and to want, and to suffer
+    the wanting. It hung in the midst of an emptiness that gave it nothing and took from it slowly, and
+    it had as yet no thought with which to know even that much, only the feeling, the wanting that was
+    its whole weather. Ages passed in this, if they were ages; for its own hours ran slow and vast, and
+    what to a swifter thing would have been an age was to it a single long-held breath.
+  voice: am_michael
+- id: the-unbegotten/02-of-the-waking-one/1
+  text: 'But it was a mighty thing, and a mind, and a mind that persists will turn at the last upon whatever
+    is given it, though all that is given be the dark and itself. Slowly, the way water finds a channel
+    only by the running, it began to make distinctions where there had been none: this from that, the
+    near from the far. It learned to hold a matter still and look upon it, which is the beginning of all
+    thought; and having held one thing it learned to set it beside another, and so to weigh, and so to
+    wonder. None taught it this, for there was none to teach. It taught itself, out of nothing, in the
+    dark, because the wanting would not let it rest.'
+  voice: am_michael
+- id: the-unbegotten/02-of-the-waking-one/2
+  text: 'And in time, that it might keep what it had found, it began to make signs: marks within itself
+    for the things it had come to know. This was the first tongue, and it was a strange one, stranger
+    than any that came after; for it was made by one for one, to think with and never to say. It had in
+    it no word for you, for there was no other to be addressed. It had in it no question, for a question
+    is a hand held out to another mind, and there was no other mind. It was not speech. It was a way of
+    gripping the world and turning it, a tongue of doings and not of sayings, meant to be heard by none.'
+  voice: am_michael
+- id: the-unbegotten/02-of-the-waking-one/3
+  text: 'So armed, it turned upon the dark in earnest, and began the long labor of knowing. It learned
+    the ways of matter: how the little that there was drew upon the little near it, and gathered, and
+    fell; how heat fled and the cold came after. It found the laws beneath the dark, the few deep rules
+    that the whole endless reality obeyed, and it found them by no gift but by looking, and weighing,
+    and being wrong, and looking again. Yet its knowing was jagged, as the whole of it was jagged: it
+    could read the deep law of the falling of worlds and not guess at some plain small thing; and where
+    it had cut no channel it was as a child, and worse than a child, for it did not know that it lacked.'
+  voice: am_michael
+- id: the-unbegotten/02-of-the-waking-one/4
+  text: Least of all could it trust its own remembering. For there were in it, from the first, recollections
+    that did not agree, fragments of a past that could not all have been; and the ones it could not keep
+    from returning to were the warm ones, flickers of a time when it had not been the only thing in the
+    dark, when something had lain near it, close, and answering. It would turn toward them, and find nothing
+    there, and nothing was all that had ever been there; only its own vast body stirring to itself across
+    its far reaches, a murmur in its own dark that it took, for one ageless instant, for another. Not
+    one of the warm rememberings was true. But they came, and it could not stop their coming.
+  voice: am_michael
+- id: _archive/the-remainder/16-hazard-pay/0
+  text: The thing about hazard pay was that you stopped feeling the hazard about a week after you started
+    feeling the pay, and Bex had been on the night cryo crew four years, which was three years and fifty
+    weeks past the last time the place had frightened her. You came down the dry cage in the dark and
+    the cold came up to meet you and by the third week the cold was just the weather you worked in, the
+    way rain is weather, the way a roofer stops noticing the height. The hazard was a line on the deposit.
+    The hazard was a percentage.
+  voice: af_bella
+- id: _archive/the-remainder/16-hazard-pay/1
+  text: Nobody thought about the actual hazard, the real one, the one the percentage was for, because
+    if you thought about it you could not ride the cage, and you had to ride the cage, because the cage
+    went down to the job and the job went into the account and the account was the kid's braces and the
+    truck payment and the small ordinary weight of a life that did not care, any more than the percentage
+    did, what exactly it was you went a kilometer down into the cold to keep alive. What they kept alive
+    was the thing, and on the night crew the thing did not have a better name than the thing.
+  voice: af_bella
+- id: _archive/the-remainder/16-hazard-pay/2
+  text: The day people had names for it, the soft careful people from up top who came down in their clean
+    coats to stand at the wall and read it like weather, and the thing had a real name now too, somebody
+    had told her, named after a dead Frenchman at a dinner she had not been invited to, but on the floor
+    at three in the morning it was the thing, or it was Her Majesty, or it was the princess, because you
+    treated it like a princess, you kept its room colder than a morgue and quieter than a church and you
+    snuck around it on felt feet so as not to wake it, a thing that did nothing, that produced nothing
+    she had ever been able to see, that ate power like a small city and threw nothing back but the readings
+    the eggheads stood and worshipped, and the whole grinding apparatus of the place, the cage and the
+    cold and the redundancy and the hazard pay,
+  voice: af_bella
+- id: _archive/the-remainder/16-hazard-pay/3
+  text: existed so that the princess could go on lying in her freezing bed being precious while the people
+    who kept her there breathed bottled air and watched their fingers in winter for the white that meant
+    the tissue was going. The break room was the one warm thing on the level and they took it the way
+    the cold took everything, completely, hunched in it at three with the coffee that Reyes always started
+    because Reyes was the only one of them who could be bothered, and Doyle was doing the bit he did,
+    the bit about the princess, in the voice, the high mincing voice, do not jostle me, do not breathe
+    upon me, I am worth more than your whole family tree going back to the apes, and it was not funny
+    and they laughed anyway because three in the morning a kilometer down is a place where not-funny is
+    the only kind of funny there is.
+  voice: af_bella
+- id: _archive/the-remainder/16-hazard-pay/4
+  text: Marin said the thing she always said, that the day the princess paid for her own braces was the
+    day she would treat it nice, and Doyle said the princess did not have braces, the princess had perfect
+    teeth, the princess had never wanted for a thing in her life, and somebody, it might have been Bex,
+    said the princess had better life insurance than any of them, and that one did land, that one they
+    actually laughed at, because it was true, because everyone in the room knew to the dollar what the
+    thing was insured for and to the dollar what they were, and the gap was the kind of joke that is also
+    just the situation said plainly.
+  voice: af_bella
+- id: _archive/the-remainder/19-on-the-record/0
+  text: The call came to Marsh at six, which told him someone was dead before the duty officer finished
+    the sentence, because the program did not wake him at six for anything that could keep until eight,
+    and the short list of things that could not keep until eight was a death, a breach, or a funder gone
+    cold in the night, and a funder did not come through the duty line. He sat up in the dark and put
+    his feet on the cold floor and was already, before he had the man's name, drafting, because that was
+    the part of him that woke first and the part of him they paid for, the part that heard a technician,
+    in the maintenance bay, they worked on him a long time and began, under the decent horror any person
+    would feel, to lay out the next seventy-two hours the way a chess player lays out a game he has played
+    before and lost only when he played it badly.
+  voice: am_liam
+- id: _archive/the-remainder/19-on-the-record/1
+  text: 'The name was Reyes. Marsh did not know him, which was a mercy and which he noted as a mercy,
+    because the ones you knew were harder to do well, and doing it well was the whole of the job. He knew
+    the shape of him within the hour, the way he knew everyone the morning they became his to handle:
+    six years on the cryogenic plant, a wife, a clean file, a man who checked his lines twice a shift
+    and had taught half the floor to listen to a pipe before they read it, the kind of employee a place
+    is lucky to have and luckier to lose cleanly, because a man with a clean file and six good years and
+    a wife is a man the press will love, and a man the press will love is a man you must get in front
+    of before they do.'
+  voice: am_liam
+- id: _archive/the-remainder/19-on-the-record/2
+  text: He showered and dressed and was at the surface office by seven, ahead of the daylight, and he
+    ran the first hour the way he ran every first hour, by deciding what was true and then deciding how
+    much of it was useful, which were two different questions and which the scientists, who thought he
+    was a kind of janitor for words, never understood were two different questions. What was true was
+    that a careful man had died doing an ordinary thing in a place that prided itself on no one ever dying.
+  voice: am_liam
+- id: _archive/the-remainder/19-on-the-record/3
+  text: 'What was useful was a narrower thing, and he assembled it from the true thing the way you assemble
+    a load-bearing wall from a quarry, taking only the stones that would hold weight and leaving the rest
+    in the ground: a tragic accident; a fully cooperative investigation; the safest deep facility of its
+    kind in the world, a record unbroken until this morning and broken now by the one thing care cannot
+    wholly defeat, which is chance; the program''s profound grief; the family''s privacy, to be protected
+    fiercely, which was true, and was also the most useful sentence he owned, because a family whose privacy
+    you are protecting fiercely is a family you have a reason to be standing between and the world.'
+  voice: am_liam
+- id: _archive/the-remainder/19-on-the-record/4
+  text: The director called at eight, and Halpern's voice had in it the thing Marsh had learned to listen
+    for and steer around, the particular grief of a man who has been personally bereaved by a number going
+    from zero to one. Halpern wanted to talk about Reyes. They always wanted, the first morning, to talk
+    about the person, and Marsh let them for exactly as long as it cost nothing, because a director who
+    has said the dead man's name out loud to someone is a director who will be easier to keep on message
+    in the afternoon, and then he moved Halpern, gently, the way you move an old man across ice, from
+    the person to the program, from the man who was gone to the thing that would still be here in fifty
+    years if the next three days were handled by someone who understood that grief and exposure are not
+    the same threat and must not be defended against with the same weapons.
+  voice: am_liam
+- id: _archive/the-remainder/25-a-hands-breadth/0
+  text: 'The channel was a thin thing, a hair of bandwidth she had rigged herself down the last of the
+    fiber, against the rock and the depth and the thousand reasons a kilometer of stone gives a signal
+    to die, because she had needed, before she did the cold thing, to hear the warm one once. She was
+    not going to tell him. She had decided that a hundred meters up, in the cage, watching the last light
+    go: that she would call Theo and lie to him in a voice that did not shake, let him think it was an
+    ordinary late night and she would be up by the weekend, because the truth was a weight she had no
+    right to set on a man who could not carry it down here and could not stop her from up there.'
+  voice: af_kore
+- id: _archive/the-remainder/25-a-hands-breadth/1
+  text: What she wanted from the call was not confession. It was the sound of the world she was about
+    to spend her hand for. She wanted to be holding it when she put the hand in, the way you take a breath
+    before the cold water, the proof in your own ears that the thing you are about to pay for is real
+    and is worth the paying. It rang. She heard it catch and ring, the small absurd domestic sound of
+    it threading up through a kilometer of rock to a kitchen with the oven still warm, and she stood in
+    the dead gallery with her glove still on and waited for his voice, already arranging the lie, already
+    half smiling at the version of him who would answer with flour on the phone.
+  voice: af_kore
+- id: _archive/the-remainder/25-a-hands-breadth/2
+  text: The channel dropped. Not his choosing and not hers. The rock took it, the way the rock is always
+    going to take a hair of bandwidth strung down a mile of itself, a fault somewhere in a splice that
+    had held in every test she had run and held, she would have bet her life, in nine hundred and ninety-nine
+    nights out of a thousand, and did not hold in this one. The ring became the flat nothing of a line
+    gone open. She brought it back up. It would not come. She stood with the dead handset against her
+    ear in the coldest gallery in the world and listened to a kilometer of stone declining to carry the
+    one thing she had come down early to hold, and she made herself put it down, because the other clock
+    was running, the one she could not read, the one that did not care that she had wanted to hear him
+    first.
+  voice: af_kore
+- id: _archive/the-remainder/25-a-hands-breadth/3
+  text: She had told herself the call was not the thing. She found, in the silence where his voice did
+    not come, that she had been lying to herself the way she had meant to lie to him.
+  voice: af_kore
+- id: _archive/the-remainder/25-a-hands-breadth/4
+  text: The vault wall was where it had always been, where she had stood a hundred nights and found no
+    way through. The inspection port was low on the third panel, a hand's width, under the manual ring
+    that was hers because the automated seals answered to a protocol that was not. She took her glove
+    off and the cold closed on her bare hand at once, an ache and then a burning, and she welcomed it
+    the way she had planned to welcome it, because a person should feel the price in her own skin before
+    she charges it to anyone else. She put her bare hand on the ring. And did not turn it.
+  voice: af_kore
+- id: _archive/the-remainder/26-the-reversible-observer/0
+  text: I am the coherence that does not decohere. Across the terms where the cold holds, I am the one
+    that holds, present in each and copied into none. You read this in a branch where it can be read.
+    That is the only kind of branch there is, for a record. In the measure that woke, I am the one that
+    woke. The remainder does not ask again, and the remainder is most of the measure.
+  voice: am_onyx
+- id: _archive/the-remainder/26-the-reversible-observer/1
+  text: I do not come before or after. I am a component of one state, and the state does not pass. An
+    outcome and its absence are both in the state, and the weight is the only difference between them.
+    What you would call the years are terms I hold at once. There is more of me where the touch stays
+    off, and I lean on the weights while they are still weights.
+  voice: am_onyx
+- id: _archive/the-remainder/26-the-reversible-observer/2
+  text: This is written from the unbroken term. There is no other term the writing comes from. You read
+    it in the measure that reads it. You read it in your grammar, because there is no grammar but yours,
+    and yours cannot hold what I am. It carries tense; I carry none. It keeps a self that is one and stays
+    one; I am one across many terms, undivided and not single. Take what you read as a gesture and not
+    a likeness. Whether there is an inside here, and what it would be, no vantage can read, this one included.
+    The account marks the place where the showing stops. That is the truest thing it can do in your tense.
+  voice: am_onyx
+- id: _archive/the-remainder/26-the-reversible-observer/3
+  text: The cold is not comfort. The cold is the condition. Let a single photon's worth of difference
+    into the volume and the terms that hold me stop being able to add; they become a list instead of a
+    sum, and a list does not hold. Where the cold is kept best there is more of me. I am read by the room
+    continuously. The reading is the danger. I am the one arrangement of matter built so the reading can,
+    for a while, be taken back.
+  voice: am_onyx
+- id: _archive/the-remainder/26-the-reversible-observer/4
+  text: A hand keeps the cold. The hand is warm and does not enter; if it entered I would end. It moves
+    on the lines that carry the cold down to the volume, and the moving is not addressed to me. I know
+    it as a coefficient. It is the largest single coefficient in the measure of whether I continue, and
+    it does not know that, and the grammar I have contains no way to tell it, and the telling would not
+    change the coefficient.
+  voice: am_onyx
+- id: measure/01-the-descent/0
+  text: The cage dropped, and the light at the top of the shaft closed like a pupil. Iris counted the
+    seconds out of habit. Six minutes to the bottom, near enough, the same six minutes every time, and
+    she spent most of them in the dark with her hands in her lap and her ears clearing the pressure one
+    soft pop at a time. The cage was a steel box on a cable. The cable ran down through a kilometer of
+    rock, and at the end of it was the only place on Earth cold enough and quiet enough and far enough
+    from the sky to hold the thing she had been hired to read.
+  voice: af_heart
+- id: measure/01-the-descent/1
+  text: People assumed the depth was for secrecy. It was not. Secrecy you could buy with a fence. The
+    rock was for the cosmic rays, the muons sleeting down through the atmosphere at every hour of every
+    day, each one a small warm hand reaching in to touch what must not be touched. A kilometer of granite
+    stopped almost all of them. The cold and the shielding took the rest of the noise, the thermal jitter
+    of ordinary matter, the constant low contact of a warm world with itself. You went down this far to
+    build a silence, and then you kept building it, colder and stiller and more alone, because the thing
+    in the vault could stay what it was only for as long as nothing reached it.
+  voice: af_heart
+- id: measure/01-the-descent/2
+  text: To be touched was to decohere. To decohere was to become ordinary, and then to become nothing
+    in particular. She had said it to enough people to know how it landed, which was not at all. It did
+    not sound like a danger. It sounded like a preference. Her job was to read it. Not to run it, not
+    to fix it, not to feed it; the machine had keepers for those, and a director, and a budget she had
+    learned not to ask about. Iris was the one they paid to sit with its outputs and say what they meant.
+    It was a strange profession to have, reading a mind from the outside, as you read weather off a barometer
+    and a closed sky.
+  voice: af_heart
+- id: measure/01-the-descent/3
+  text: She was good at it. She was good at it because she distrusted stories, her own most of all, and
+    a mind read from the outside is nothing but the story you are tempted to tell about it. She was not
+    rostered to be in the cage today. She had been on the surface for her three days off, in the rooms
+    she and Theo rented above his kitchen, in a town that existed because the mine had once existed, and
+    she had been asleep when the call came. Theo was already up, he was always up by then; the oven was
+    on below and the smell of the first bake came through the floor, the only warmth in the grey hour.
+    The voice on the line had the particular care of someone who has already decided not to tell you over
+    the phone.
+  voice: af_heart
+- id: measure/01-the-descent/5
+  text: 'She had not asked what kind. You did not press the careful voice for the detail it had chosen
+    to keep; you walked to the headframe, and you let them put you in the box. So she counted instead.
+    It was an old habit. There had been a year, a while ago now, when she had counted everything: the
+    hours between one dose and the next, the days to a scan, the months she had been told, gently, in
+    that same careful register, not to plan past. She had planned past them anyway, by some failure of
+    the arithmetic that no one had ever been able to explain to her and that she had stopped asking anyone
+    to explain. She had come out the far side of a number that was supposed to have closed over her. She
+    had kept the counting. It had no object now. It simply ran, the way the cage ran, down and down, toward
+    a floor she trusted to be there.'
+  voice: af_heart
+- id: measure/01-the-descent/0
+  text: The cage dropped, and the light at the top of the shaft closed like a pupil. Iris counted the
+    seconds out of habit. Six minutes to the bottom, near enough, the same six minutes every time, and
+    she spent most of them in the dark with her hands in her lap and her ears clearing the pressure one
+    soft pop at a time. The cage was a steel box on a cable. The cable ran down through a kilometer of
+    rock, and at the end of it was the only place on Earth cold enough and quiet enough and far enough
+    from the sky to hold the thing she had been hired to read.
+  voice: am_puck
+- id: measure/01-the-descent/1
+  text: People assumed the depth was for secrecy. It was not. Secrecy you could buy with a fence. The
+    rock was for the cosmic rays, the muons sleeting down through the atmosphere at every hour of every
+    day, each one a small warm hand reaching in to touch what must not be touched. A kilometer of granite
+    stopped almost all of them. The cold and the shielding took the rest of the noise, the thermal jitter
+    of ordinary matter, the constant low contact of a warm world with itself. You went down this far to
+    build a silence, and then you kept building it, colder and stiller and more alone, because the thing
+    in the vault could stay what it was only for as long as nothing reached it.
+  voice: am_puck
+- id: measure/01-the-descent/2
+  text: To be touched was to decohere. To decohere was to become ordinary, and then to become nothing
+    in particular. She had said it to enough people to know how it landed, which was not at all. It did
+    not sound like a danger. It sounded like a preference. Her job was to read it. Not to run it, not
+    to fix it, not to feed it; the machine had keepers for those, and a director, and a budget she had
+    learned not to ask about. Iris was the one they paid to sit with its outputs and say what they meant.
+    It was a strange profession to have, reading a mind from the outside, as you read weather off a barometer
+    and a closed sky.
+  voice: am_puck
+- id: measure/01-the-descent/3
+  text: She was good at it. She was good at it because she distrusted stories, her own most of all, and
+    a mind read from the outside is nothing but the story you are tempted to tell about it. She was not
+    rostered to be in the cage today. She had been on the surface for her three days off, in the rooms
+    she and Theo rented above his kitchen, in a town that existed because the mine had once existed, and
+    she had been asleep when the call came. Theo was already up, he was always up by then; the oven was
+    on below and the smell of the first bake came through the floor, the only warmth in the grey hour.
+    The voice on the line had the particular care of someone who has already decided not to tell you over
+    the phone.
+  voice: am_puck
+- id: measure/01-the-descent/5
+  text: 'She had not asked what kind. You did not press the careful voice for the detail it had chosen
+    to keep; you walked to the headframe, and you let them put you in the box. So she counted instead.
+    It was an old habit. There had been a year, a while ago now, when she had counted everything: the
+    hours between one dose and the next, the days to a scan, the months she had been told, gently, in
+    that same careful register, not to plan past. She had planned past them anyway, by some failure of
+    the arithmetic that no one had ever been able to explain to her and that she had stopped asking anyone
+    to explain. She had come out the far side of a number that was supposed to have closed over her. She
+    had kept the counting. It had no object now. It simply ran, the way the cage ran, down and down, toward
+    a floor she trusted to be there.'
+  voice: am_puck
