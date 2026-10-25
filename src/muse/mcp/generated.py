@@ -575,10 +575,12 @@ def _render(resp: Any, gen: GeneratedTool, *, out_path: str | None,
         response = None
     for header, key in DATA_HEADERS.items():
         if header in resp.headers:
-            try:
-                value = json.loads(resp.headers[header])
-            except ValueError:
-                value = resp.headers[header]
+            value = resp.headers[header]
+            if header in {"x-alignment", "x-muse-speed"}:
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    pass
             response = {**(response if isinstance(response, dict) else {}), key: value}
     structured = {
         "model": resp.headers.get("x-muse-model") or model,

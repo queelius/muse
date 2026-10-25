@@ -573,3 +573,16 @@ def test_multipart_list_url_fetched(caps_doc, openapi_doc, fake_http, media_env)
                    {"model": "sd-turbo", "prompt": "x", "image_urls": [url, url]})
     assert _part_names(seen["body"]).count("image[]") == 2
     assert seen["body"].count(png) == 2
+
+
+@pytest.mark.parametrize("value", ["123", "true", "null", "1e20"])
+def test_speech_identity_headers_stay_strings(caps_doc, openapi_doc, media_env, value):
+    resp = httpx.Response(200, content=_wav(), headers={
+        "content-type": "audio/wav", "x-muse-voice": value,
+        "x-muse-audio-sha256": value, "x-muse-pronunciations-digest": value,
+        "x-muse-speed": "1.25",
+    })
+    data = _structured(_render(resp, _gen(caps_doc, openapi_doc, "muse_speak"),
+                               out_path=None, preview=False, model="kokoro-82m"))
+    assert data["response"] == dict(voice=value, audio_sha256=value,
+                                    pronunciations_digest=value, speed=1.25)
