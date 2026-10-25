@@ -22,7 +22,11 @@ DISCOVERY = {
     "summary": (
         "Text-to-speech. Turns a script into a spoken narration track in a "
         "chosen voice, as WAV or Opus audio (or streamed PCM chunks). Set "
-        "align=true to also get word timings in the X-Alignment header."
+        "timestamps: true to return JSON with base64 audio and one timing per "
+        "written word (Kokoro only). Models without native timings refuse; "
+        "use audio/alignment for those models. Send pronunciations to keep "
+        "input as the written text while applying respellings or supported IPA. "
+        "Set align=true for Soprano's paragraph timings in the X-Alignment header."
     ),
     "use_for": [
         "narration and voiceover for a video from a written script",
@@ -43,7 +47,7 @@ DISCOVERY = {
             "compat": "openai:audio.speech",
             "mcp_tool": "muse_speak",
             "file_fields": [],
-            "media_fields": [],
+            "media_fields": ["audio.b64_json"],
             "example": {"model": "<model>", "input": "Hello from muse.", "voice": "<voice>"},
         },
         {

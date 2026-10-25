@@ -15,6 +15,7 @@ import pytest
 from muse.core.discovery import modality_discovery
 from muse.mcp.generated import (
     OUTPUT_SCHEMA,
+    _render,
     call_generated,
     describe_tool,
     generate_tools,
@@ -171,6 +172,67 @@ def test_describe_tool_shape():
 
 
 # ---- calls and results ----
+
+def test_speak_schema_exposes_timestamps_and_pronunciations(caps_doc, openapi_doc):
+    schema = _gen(caps_doc, openapi_doc, "muse_speak").tool.inputSchema
+    props = schema["properties"]
+    assert props["timestamps"]["type"] == "boolean"
+    assert props["timestamps"]["default"] is False
+    assert "pronunciations" in props
+    jsonschema.validate({
+        "model": "kokoro-82m", "input": "hi", "timestamps": True,
+        "pronunciations": [{"term": "hi", "respell": "hello"}],
+    }, schema)
+
+
+@pytest.mark.parametrize("timestamps", [True, False], ids=["json", "binary"])
+def test_speak_writes_audio_from_json_and_binary(caps_doc, openapi_doc, media_env,
+                                                timestamps):
+    wav = _wav()
+    audio_sha256 = hashlib.sha256(wav).hexdigest()
+    digest = "c" * 64
+    headers = {
+        **HEADERS,
+        "X-Muse-Voice": "af_heart", "X-Muse-Speed": "1.25",
+        "X-Muse-Audio-SHA256": audio_sha256,
+        "X-Muse-Pronunciations-Digest": digest,
+    }
+    payload = {
+        "object": "audio.speech", "model": "kokoro-82m",
+        "voice": "af_heart", "speed": 1.25,
+        "audio": {
+            "format": "wav", "b64_json": base64.b64encode(wav).decode(),
+            "sha256": audio_sha256, "sample_rate": 8000, "duration_seconds": 0.5,
+        },
+        "words": [{"word": "hi", "char_start": 0, "char_end": 2,
+                   "start": 0.0, "end": 0.4, "measured": True}],
+        "timing": {"source": "native", "measured_words": 1,
+                   "estimated_words": 0, "calibration": None},
+        "pronunciations": {
+            "digest": digest, "applied": [{"term": "hi", "kind": "respell", "count": 1}],
+        },
+    }
+    resp = (httpx.Response(200, json=payload, headers=headers) if timestamps else
+            httpx.Response(200, content=wav,
+                           headers={**headers, "content-type": "audio/wav"}))
+    blocks = _render(resp, _gen(caps_doc, openapi_doc, "muse_speak"),
+                     out_path=None, preview=False, model="kokoro-82m")
+    data = _structured(blocks)
+    jsonschema.validate(data, OUTPUT_SCHEMA)
+    [written] = data["files"]
+    assert written["mime"] == "audio/wav"
+    assert written["sha256"] == audio_sha256
+    assert open(written["path"], "rb").read() == wav
+    assert data["model"] == "kokoro-82m" and data["revision"] == "b" * 40
+    expected = {
+        "voice": "af_heart", "speed": 1.25, "audio_sha256": audio_sha256,
+        "pronunciations_digest": digest,
+    }
+    if timestamps:
+        expected = {**payload, **expected,
+                    "audio": {**payload["audio"], "b64_json": written["path"]}}
+    assert data["response"] == expected
+
 
 def test_speak_writes_wav_and_returns_link(caps_doc, openapi_doc, fake_http, media_env):
     wav = _wav(0.5)

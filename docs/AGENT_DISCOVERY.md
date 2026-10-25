@@ -111,8 +111,14 @@ models, not an enum, so a model enabled mid-session is accepted. Behaviour:
   another tool's input (speak, then align). Multipart `*_url` inputs are fetched by the MCP process through muse's
   SSRF guard; JSON `*_url` inputs are passed to the server, whose SSRF guard
   fetches them. Base64 inputs are not supported.
-- `X-Alignment` from `audio/speech align=true` is surfaced as
-  `response.alignment`.
+- Speech with `timestamps: true` (Kokoro only) returns one timing per written
+  word in `response.words`; `response.audio.b64_json` becomes the audio file
+  path. Models without native timings refuse the request. `pronunciations`
+  carries respellings or supported IPA separately from the written input.
+- Speech headers surface as `response.voice`, `response.speed`,
+  `response.audio_sha256`, and, when supplied, `response.pronunciations_digest`.
+- `X-Alignment` from `audio/speech align=true` contains Soprano's paragraph
+  timings and is surfaced as `response.alignment`.
 - Tool descriptions come from the capabilities document, so they carry the
   model notes.
 

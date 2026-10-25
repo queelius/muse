@@ -54,8 +54,14 @@ DESCRIBE = "muse_describe"
 LARGE_JSON_CHARS = 20_000
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 _REF = "#/components/schemas/"
-# Response headers that carry data (not provenance) -> key in ``response``.
-DATA_HEADERS = {"x-alignment": "alignment"}
+# Response headers surfaced as keys in ``response``.
+DATA_HEADERS = {
+    "x-alignment": "alignment",
+    "x-muse-voice": "voice",
+    "x-muse-speed": "speed",
+    "x-muse-audio-sha256": "audio_sha256",
+    "x-muse-pronunciations-digest": "pronunciations_digest",
+}
 # Property names MCP clients accept (the Claude API enforces this pattern).
 _PROP_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MAX_DEPTH = 64  # JSON nesting; bounds a cyclic $ref
