@@ -36,6 +36,7 @@ from muse.modalities._common.uploads import (
     upload_suffix,
 )
 from muse.modalities.audio_transcription.codec import encode_transcription
+from muse.modalities.audio_transcription.protocol import InvalidLanguageError
 from muse.modalities.audio_alignment.protocol import (
     AudioAlignmentDecodeError, AudioAlignmentDurationExceededError,
 )
@@ -125,6 +126,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             result = await run_on_spooled_upload(
                 data, _transcribe, suffix=upload_suffix(file.filename, default=""),
             )
+        except InvalidLanguageError as e:
+            return error_response(400, "invalid_language", str(e))
         except AudioAlignmentDurationExceededError as e:
             return error_response(413, "payload_too_large", str(e))
         except AudioAlignmentDecodeError:

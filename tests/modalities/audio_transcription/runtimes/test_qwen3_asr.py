@@ -63,3 +63,11 @@ def test_runtime_refuses_oversize_before_decode(runtime, monkeypatch):
     with pytest.raises(ValueError, match='MUSE_ASR_MAX_MB'):
         backend.transcribe(path)
     processor.apply_chat_template.assert_not_called()
+
+
+def test_unsupported_language_is_typed(runtime):
+    from muse.modalities.audio_transcription.protocol import InvalidLanguageError
+    backend, processor, _, path, _ = runtime
+    with pytest.raises(InvalidLanguageError, match="unsupported Qwen3-ASR language"):
+        backend.transcribe(path, language="klingon")
+    processor.apply_chat_template.assert_not_called()

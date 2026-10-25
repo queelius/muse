@@ -18,7 +18,7 @@ from typing import Any, Literal
 from muse.core import config
 from muse.core.runtime_helpers import LoadTimer, select_device, set_inference_mode
 from muse.modalities.audio_alignment.decoding import decode_audio
-from muse.modalities.audio_transcription.protocol import Segment, TranscriptionResult
+from muse.modalities.audio_transcription.protocol import InvalidLanguageError, Segment, TranscriptionResult
 
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ class Qwen3ASRRuntime:
                     language_code, canonical_language = code, name
                     break
             if canonical_language is None:
-                raise ValueError(f'unsupported Qwen3-ASR language: {language!r}')
+                raise InvalidLanguageError(f'unsupported Qwen3-ASR language: {language!r}')
         messages = []
         if prompt:
             messages.append({'role': 'system', 'content': [{'type': 'text', 'text': prompt}]})

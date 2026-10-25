@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
 
+class InvalidLanguageError(ValueError):
+    """The requested transcription language is unsupported by the backend."""
+
+
 @dataclass
 class Word:
     """A single word with its start/end timestamps."""

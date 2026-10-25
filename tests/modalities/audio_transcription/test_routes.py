@@ -293,3 +293,18 @@ def test_qwen_decoder_failures_keep_error_envelope(error, expected_status, code)
     )
     assert r.status_code == expected_status
     assert r.json()['error']['code'] == code
+
+
+@pytest.mark.parametrize("typed", [True, False])
+def test_invalid_language_only_maps_typed_error(typed):
+    from muse.modalities.audio_transcription.protocol import InvalidLanguageError
+    backend = MagicMock()
+    error = InvalidLanguageError if typed else ValueError
+    backend.transcribe.side_effect = error("unsupported language")
+    response = _make_client(backend).post(
+        "/v1/audio/transcriptions", data={"model": "whisper-tiny", "language": "klingon"},
+        files={"file": ("a.wav", b"FAKEWAV", "audio/wav")},
+    )
+    assert response.status_code == (400 if typed else 500)
+    if typed:
+        assert response.json()["error"]["code"] == "invalid_language"
