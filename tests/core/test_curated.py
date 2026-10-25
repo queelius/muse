@@ -454,7 +454,7 @@ def test_load_curated_includes_qwen3_asr():
     assert entry.modality == "audio/transcription"
     assert entry.quality_tier == "good"
     assert entry.capabilities == {
-        "device": "auto", "memory_gb": 5.0,
+        "device": "auto", "memory_gb": 4.0,
         "supports_word_timestamps": False, "supports_segment_timestamps": False,
         "supports_translation": False,
     }
