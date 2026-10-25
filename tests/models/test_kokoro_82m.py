@@ -437,4 +437,5 @@ def test_two_links_and_repeated_word_keep_original_coordinates(monkeypatch, spli
 
 
 def test_manifest_pins_preshed_below_broken_release():
+    from muse.models.kokoro_82m import MANIFEST
     assert "preshed<3.0.14" in MANIFEST["pip_extras"]
