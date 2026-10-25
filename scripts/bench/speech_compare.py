@@ -88,14 +88,12 @@ def normalize(text: str) -> str:
 def _ordinary_replacement(text: str) -> bool:
     """Conservative spelling heuristic, not a dictionary or phoneme recognizer.
 
-    Reject hyphenated/emphasized respellings and the phonetic syllables in
-    `mah noyd`; these require the written term or an explicit `accept` alias.
+    Reject hyphenated respellings and mid-word capitals; these require the
+    written term or an explicit `accept` alias.
     """
     return bool(normalize(text)) and not any(
         unicodedata.category(c) == "Pd" for c in text
-    ) and not any(a.isalpha() and b.isupper() for a, b in zip(text, text[1:])) and not (
-        {"mah", "noyd"} & set(normalize(text).split())
-    )
+    ) and not any(a.isalpha() and b.isupper() for a, b in zip(text, text[1:]))
 
 
 def heard(transcript: str, term: str, replacement: str | None,
