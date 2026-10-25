@@ -249,7 +249,7 @@ def _timing_adapter(monkeypatch, chunks, lang_code="a"):
 
     fake_kokoro = _install_fake_kokoro(monkeypatch)
     pipeline = fake_kokoro.KPipeline.return_value
-    pipeline.lang_code = lang_code
+    pipeline.lang_code = {"en-us": "a", "en-gb": "b"}.get(lang_code.lower(), lang_code.lower())
     pipeline.return_value = chunks
     return Model(device="cpu", lang_code=lang_code)
 
@@ -320,7 +320,7 @@ def test_untimed_token_advances_character_cursor(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("lang_code", ["a", "b"])
+@pytest.mark.parametrize("lang_code", ["a", "b", "en-us", "en-gb", "EN-US", "EN-GB", "A", "B"])
 def test_english_timestamps_preserve_speed(monkeypatch, lang_code):
     adapter = _timing_adapter(monkeypatch, [_chunk("One", [_token("One", .1, .3)])], lang_code)
     result = adapter.synthesize("One", timestamps=True, speed=1.5)
@@ -348,3 +348,50 @@ def test_render_ipa_and_caps(monkeypatch):
     assert MANIFEST["capabilities"]["pronunciation_kinds"] == ["ipa", "respell"]
     assert "Word timings come from the model's duration predictor (checked against the forced aligner, see docs/benchmarks/2026-10-24-kokoro-timing-agreement.md)" in MANIFEST["limits"]
     assert not any("No word timings" in limit for limit in MANIFEST["limits"])
+
+
+def test_normalized_punctuation_does_not_jump_over_repeated_words(monkeypatch):
+    text = '“Yes” Yes "Yes"'
+    adapter = _timing_adapter(monkeypatch, [_chunk(text, [
+        _token('"'), _token("Yes", .1, .3), _token('"'),
+        _token("Yes", .4, .6), _token('"'), _token("Yes", .7, .9), _token('"'),
+    ])])
+    assert adapter.synthesize(text, timestamps=True).metadata["token_spans"] == [
+        TimedSpan(1, 4, .1, .3), TimedSpan(6, 9, .4, .6), TimedSpan(11, 14, .7, .9),
+    ]
+
+
+@pytest.mark.parametrize("text, token", [("another", "a"), ("beta", "a"), ("with", "it")])
+def test_short_token_does_not_match_inside_other_word(text, token):
+    from muse.models.kokoro_82m import _map_chunk_tokens
+
+    assert _map_chunk_tokens(text, [_token(token, .1, .4)], 0, 0.0) == []
+
+
+def test_token_does_not_skip_unmapped_lexical_word():
+    from muse.models.kokoro_82m import _map_chunk_tokens
+
+    spans = _map_chunk_tokens("One two One", [
+        _token("One", .1, .3), _token("One", .6, .9),
+    ], 0, 0.0)
+    assert spans == [
+        TimedSpan(0, 3, .1, .3),
+    ]
+
+
+def test_missed_chunk_disables_spans_for_later_repeated_text(monkeypatch):
+    adapter = _timing_adapter(monkeypatch, [
+        _chunk("First.", [_token("First", .1, .4)]),
+        _chunk("YES.", [_token("YES", .1, .4)]),
+        _chunk("Yes.", [_token("Yes", .1, .4)]),
+    ])
+    result = adapter.synthesize("First.\n\nYes.\n\nYes.", timestamps=True)
+    assert result.metadata["token_spans"] == [TimedSpan(0, 5, .1, .4)]
+    assert len(result.audio) == 72000
+
+
+def test_chunk_does_not_skip_non_whitespace_gap(monkeypatch):
+    adapter = _timing_adapter(monkeypatch, [_chunk("Yes.", [_token("Yes", .1, .4)])])
+    result = adapter.synthesize("Skipped.\n\nYes.", timestamps=True)
+    assert result.metadata["token_spans"] == []
+    assert len(result.audio) == 24000

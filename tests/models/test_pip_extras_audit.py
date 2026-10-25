@@ -93,6 +93,7 @@ SKIP_NAMES: set[str] = {
     "traceback",
     "types",
     "typing",
+    "unicodedata",
     "unittest",
     "urllib",
     "uuid",

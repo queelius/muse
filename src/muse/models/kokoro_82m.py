@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, Iterator
+import unicodedata
 
 import numpy as np
 
@@ -22,6 +23,41 @@ logger = logging.getLogger(__name__)
 KOKORO_SAMPLE_RATE = 24000
 # Measured with plain concatenation; see the timing agreement benchmark.
 KOKORO_TIMING_OFFSET_SECONDS = 0.0
+
+
+def _map_chunk_tokens(
+    graphemes: str, tokens: list[Any] | None, char_offset: int, time_offset: float,
+) -> list[TimedSpan]:
+    """Map literal tokens conservatively; never skip lexical text to find a match."""
+    spans = []
+    cursor = 0
+    for token in tokens or []:
+        if not token.text:
+            continue
+        start = graphemes.find(token.text, cursor)
+        if start == -1 or any(
+            not (char.isspace() or unicodedata.category(char).startswith("P"))
+            for char in graphemes[cursor:start]
+        ):
+            continue
+        end = start + len(token.text)
+        lexical = any(char.isalnum() for char in token.text)
+        if lexical:
+            # Check the lexical edges, allowing punctuation inside contractions.
+            if (token.text[0].isalnum() and start > 0
+                    and (graphemes[start - 1].isalnum() or graphemes[start - 1] == "_")):
+                continue
+            if (token.text[-1].isalnum() and end < len(graphemes)
+                    and (graphemes[end].isalnum() or graphemes[end] == "_")):
+                continue
+        cursor = end
+        if lexical and token.start_ts is not None and token.end_ts is not None:
+            spans.append(TimedSpan(
+                char_offset + start, char_offset + end,
+                token.start_ts + time_offset, token.end_ts + time_offset,
+            ))
+    return spans
+
 
 KOKORO_VOICES = [
     "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
@@ -157,7 +193,7 @@ class Model:
                 voice: str(path) for voice, path in voice_paths.items()
             }
         self._device = device
-        self._lang_code = lang_code
+        self._lang_code = self._pipeline.lang_code
 
     @staticmethod
     def _validate_local_artifacts(
@@ -231,30 +267,22 @@ class Model:
         chunks = []
         spans: list[TimedSpan] = []
         text_cursor = 0
+        mapping_valid = True
         samples = 0
         for result in self._pipeline(text, voice=pipeline_voice, speed=speed):
-            if timestamps:
+            if timestamps and mapping_valid:
                 # Paragraph and long-sentence splits both retain their graphemes.
                 chunk_start = text.find(result.graphemes, text_cursor)
-                if chunk_start != -1:
+                if chunk_start == -1 or text[text_cursor:chunk_start].strip():
+                    # Once a chunk is lost, repeated text cannot be located safely.
+                    mapping_valid = False
+                else:
                     text_cursor = chunk_start + len(result.graphemes)
-                    token_cursor = 0
-                    offset = samples / KOKORO_SAMPLE_RATE + KOKORO_TIMING_OFFSET_SECONDS
-                    for token in result.tokens or []:
-                        if not token.text:
-                            continue
-                        start = result.graphemes.find(token.text, token_cursor)
-                        if start == -1:
-                            continue
-                        end = start + len(token.text)
-                        token_cursor = end
-                        if (result.audio is not None
-                                and token.start_ts is not None and token.end_ts is not None
-                                and any(char.isalnum() for char in token.text)):
-                            spans.append(TimedSpan(
-                                chunk_start + start, chunk_start + end,
-                                token.start_ts + offset, token.end_ts + offset,
-                            ))
+                    if result.audio is not None:
+                        offset = samples / KOKORO_SAMPLE_RATE + KOKORO_TIMING_OFFSET_SECONDS
+                        spans.extend(_map_chunk_tokens(
+                            result.graphemes, result.tokens, chunk_start, offset,
+                        ))
             if result.audio is not None:
                 chunk = result.audio.numpy()
                 chunks.append(chunk)
