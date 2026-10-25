@@ -36,8 +36,9 @@ Speech `timestamps: true` returns JSON with the audio and its SHA-256, one
 entry per whitespace-separated written word, and native timing provenance.
 Words without native measurements have `measured: false`; no silent timing
 fallback is presented as measured. `pronunciations` keeps respellings or IPA
-separate from display text. Kokoro native times support English voices;
-unsupported models/voices and streaming timestamps return 400. Legacy
+separate from display text. Kokoro native times come from its English pipeline
+(`lang_code`, always "a" in muse today), so non-English voices get timings from
+English G2P; models without native timings and streaming timestamps return 400. Legacy
 `align` / `X-Alignment` remains Soprano paragraph timing. Qwen3-ASR returns
 transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
 `vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.

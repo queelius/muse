@@ -361,15 +361,17 @@ Path("flag.mp4").write_bytes(mp4_bytes)
 Kokoro supports `timestamps: true` on `/v1/audio/speech`: the response becomes
 JSON containing the encoded audio, its SHA-256, and one timing per written
 whitespace-separated word. `measured: false` marks words without native timing;
-`timing.estimated_words` makes that visible. Native timings support English
-voices; streaming timestamps and models without native timings return 400.
+`timing.estimated_words` makes that visible. Native timings come from Kokoro's English pipeline
+(its `lang_code` is always `a` in muse today), so a non-English voice gets timings
+from English G2P and is not a reliable measurement; streaming timestamps and models
+without native timings return 400.
 Send `pronunciations` separately from display `input`, using whole-word `term`
 or character `spans` targets with `respell` or supported `ipa` replacements.
 
 ```bash
 curl http://localhost:8000/v1/audio/speech \
   -H 'Content-Type: application/json' \
-  -d '{"model":"kokoro-82m","voice":"af_heart","input":"Coulomb measured charge.","timestamps":true,"pronunciations":[{"term":"Coulomb","ipa":"kuːˈlɒm"}]}'
+  -d '{"model":"kokoro-82m","voice":"af_heart","input":"Superposition adds waves.","timestamps":true,"pronunciations":[{"term":"superposition","ipa":"ˌsupɚpəzˈɪʃən"}]}'
 ```
 
 Speech responses carry voice, speed, audio fingerprint (except streaming), and

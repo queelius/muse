@@ -25,9 +25,11 @@ MODALITY = "audio/transcription"
 
 DISCOVERY = {
     "summary": (
-        "Speech recognition. Turns spoken audio into text, with optional "
-        "segment and word timestamps and subtitle formats (srt, vtt). The "
-        "translations route renders non-English speech as English text."
+        "Speech recognition. Turns spoken audio into text. Segment and word "
+        "timestamps, subtitle formats (srt, vtt) and the translations route "
+        "(non-English speech to English text) depend on the model: check "
+        "supports_segment_timestamps, supports_word_timestamps and "
+        "supports_translation. Qwen3-ASR is transcript-only."
     ),
     "use_for": [
         "transcribing recorded speech or a narration track",

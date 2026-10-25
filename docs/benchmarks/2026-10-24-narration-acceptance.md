@@ -4,9 +4,10 @@ Isolated server on :8010 (catalog outside ~/.muse), kokoro-82m, qwen3-asr-1.7b (
 
 ## Word-timing agreement (Kokoro native vs forced aligner)
 
-- Takes: 100 (the 50 frozen beats in docs/benchmarks/2026-10-24-kokoro-timing-beats.yaml, each under both targets), 0 errors.
-- Words compared: 12092; within 0.1 s: 11952; **agreement 98.84%** (bar 95%: met). Worst single take: 95.45%.
-- Each beat's own voice overrides the `af_heart` / `am_puck` target, so the two targets repeat the same voices; the figure is over every take.
+- Takes: 100, which are two passes over the same 50 frozen beats (docs/benchmarks/2026-10-24-kokoro-timing-beats.yaml), 0 errors. Each beat's own voice overrides the pass target (`af_heart` / `am_puck`), so both passes use the same per-beat voices and are near-identical repeats (small run-to-run variation), not two voices.
+- Pass 1 (target labelled af_heart): 5978/6046 words within 0.1 s = **98.88%**. Pass 2 (target labelled am_puck): 5974/6046 = **98.81%**. Combined 11952/12092 = 98.84% (bar 95%: met), but the second pass adds no independent evidence. Worst single take: 95.45%.
+- Per beat voice, pass 1: bf_emma 98.83, am_michael 98.81, af_bella 98.66, am_liam 98.44, af_kore 98.98, am_onyx 99.09, af_heart 98.82, am_puck 99.56.
+- In the table below, the `kokoro-82m:af_heart` / `kokoro-82m:am_puck` labels name the pass target only; the voice actually spoken is the beat's own.
 
 ### Every disagreement
 
@@ -197,4 +198,5 @@ Live result: Coulomb 0.275-0.600, measured 0.600-1.012, charge. 1.012-1.650; `ti
 ## Misses (reported, bar not loosened)
 
 - Lexicon: runge kutta, lipschitz, coulomb and blaise pascal were not heard for either voice (12 of 16 heard per voice). The first three are proper names for which the lexicon asks for a hyphenated respelling or an unadorned name; the listener's guess ("rungakuta", "elipsits", "kulam") differs from the written term, and "blaze Pascal" is a plausible hearing of a Blaise respelling. Whether these are speech or listening errors needs a human ear.
-- Timing agreement met the bar; 32 of the 140 disagreements are unmatched words (aligner spells numbers as one word, for example "ninetynine").
+- Entry kinds: coulomb and lipschitz are IPA links; runge kutta and blaise pascal are hyphenated respellings. "Heard" accepts the written term, a respelling made of ordinary words, or the entry's `accept` aliases. The four misses' transcripts ("rungakuta", "elipsits"/"alipshits", "kulam"/"koulom", "blaze Pascal") need the owner's ear; lipschitz suggests an extra leading vowel in both voices.
+- Timing agreement met the bar; 32 of the 140 disagreements are unmatched-word artifacts of hyphen pairing, not number spelling: Kokoro's written "half-seen" is paired against the aligner's "halfseen" and counted as two unmatched words (fixed in `speech_compare.agreement`, which now pairs on an alphanumeric-only key; the committed table predates the fix).

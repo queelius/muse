@@ -120,12 +120,17 @@ def wer(ref: str, hyp: str) -> float:
     return previous[-1] / max(1, len(reference))
 
 
+def _key(word: str) -> str:
+    """Alphanumeric-only pairing key, so "half-seen" matches "halfseen"."""
+    return normalize(word).replace(" ", "")
+
+
 def agreement(words: list[dict], aligned: list[dict], tolerance: float = 0.1) -> dict:
-    """Pair normalized words in order; unmatched words on either side count."""
-    native = [w for w in words if normalize(w["word"])]
-    aligned = [w for w in aligned if normalize(w["word"])]
-    matcher = SequenceMatcher(None, [normalize(w["word"]) for w in native],
-                              [normalize(w["word"]) for w in aligned], autojunk=False)
+    """Pair alphanumeric-keyed words in order; unmatched words on either side count."""
+    native = [w for w in words if _key(w["word"])]
+    aligned = [w for w in aligned if _key(w["word"])]
+    matcher = SequenceMatcher(None, [_key(w["word"]) for w in native],
+                              [_key(w["word"]) for w in aligned], autojunk=False)
     within = total = 0
     disagreements = []
     for op, i, j, a, b in matcher.get_opcodes():

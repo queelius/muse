@@ -223,3 +223,11 @@ def test_load_case_options_and_infer_terms_from_pronunciations(tmp_path):
     assert case.accept == ("hello",) and case.terms == ()
     (row,) = _run([case], [Target("m", "v")], tmp_path / "out", _client())
     assert row["heard"] == {"json": True}
+
+
+def test_agreement_pairs_hyphenated_words_with_joined_aligner_words():
+    native = [{"word": "half-seen", "start": 0.5}, {"word": "idea.", "start": 1.0}]
+    aligned = [{"word": "halfseen", "start": 0.55}, {"word": "idea", "start": 1.0}]
+    result = agreement(native, aligned)
+    assert result["total"] == 2 and result["within"] == 2
+    assert result["disagreements"] == []
