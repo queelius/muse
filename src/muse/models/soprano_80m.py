@@ -7,6 +7,10 @@ The encode/decode split, hidden-state IR, and Vocos decoder are all
 internal to this backend -- the server and clients never
 see them. Delegates to the Narro engine (in muse.modalities.audio_speech.tts)
 for actual inference.
+
+Weights are Eugene Kwek's ekwek/Soprano-1.1-80M. Muse began as a fork of
+Ekwek's ekwek1/soprano repository; Narro is that code evolved inside Muse.
+Soprano remains pullable with quality_tier: draft; prefer Kokoro for narration.
 """
 from __future__ import annotations
 

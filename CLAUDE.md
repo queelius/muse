@@ -12,8 +12,8 @@ twenty-four modalities:
 - **audio/embedding**: audio-to-vector via `/v1/audio/embeddings` (mert-v1-95m bundled; CLAP, MERT, wav2vec family via the resolver; multipart upload + OpenAI-shape envelope mirroring `/v1/embeddings`)
 - **audio/generation**: text-to-music + text-to-SFX via `/v1/audio/music` and `/v1/audio/sfx` (Stable Audio Open 1.0 bundled; ACE-Step v1 3.5B for full songs with optional structured lyrics + instrumentals; per-model capability gates on `supports_music` / `supports_sfx`; optional `lyrics` field on `/v1/audio/music`)
 - **audio/quality**: single-ended speech naturalness and audio production-quality assessment via `/v1/audio/quality` (UTMOS 1-5 naturalness MOS + Meta Audiobox Aesthetics four-axis 1-10 scoring via curated HF models; multipart upload; named scaled scores with a model-selected `primary_score`)
-- **audio/speech**: text-to-speech via `/v1/audio/speech` (Soprano, Kokoro, Bark, Supertonic-3: the last is an ONNX on-device CPU engine, 31 languages, preset voice styles)
-- **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Systran faster-whisper family; any CT2 Whisper on HF)
+- **audio/speech**: text-to-speech via `/v1/audio/speech` (Kokoro with `timestamps` / `pronunciations`, Soprano, Bark, Supertonic-3: the last is an ONNX on-device CPU engine, 31 languages, preset voice styles)
+- **audio/transcription**: speech-to-text via `/v1/audio/transcriptions` and `/v1/audio/translations` (Qwen3-ASR-1.7B transcripts and Systran faster-whisper family; any CT2 Whisper on HF)
 - **chat/completion**: text-to-text LLMs AND vision-language models via `/v1/chat/completions` (OpenAI-compatible incl. tools + streaming + multimodal `messages` content; powered by llama-cpp-python for GGUF chat; `transformers.AutoModelForImageTextToText` for VLMs; SmolVLM, Qwen2-VL, LLaVA via the resolver)
 - **decision/evaluation**: typed Choice / Score / Noul decisions via `/v1/systemone` (a text-only subset of TypeSafe's System One wire shape; explicit `model` required; Decision-0.8B Q8 GGUF scored by option-letter logits and Decima-base INT8 ONNX on CPU, both exact-repo and commit-pinned; complete probability distributions, never generated text; see docs/DECISIONS.md)
 - **embedding/text**: text-to-vector via `/v1/embeddings` (MiniLM, Qwen3-Embedding, NV-Embed-v2; any sentence-transformers HF repo via the resolver)
@@ -31,6 +31,17 @@ twenty-four modalities:
 - **text/translation**: machine translation via `/v1/translate` and the bare `/translate` alias, plus `GET /languages` (LibreTranslate-compat wire shape; m2m100-418m bundled, ~2GB CPU-runnable; NLLB-200-distilled-600M and Opus-MT en-es/en-de curated via the resolver; the gateway's `MODEL_OPTIONAL_PATHS` default-model seam resolves the model when LibreTranslate clients omit `model` entirely)
 - **video/generation**: text-to-video via `/v1/video/generations` (wan2-1-t2v-1-3b bundled with sequential CPU offload by default to fit 8-12GB GPUs; Wan / CogVideoX / LTX-Video families via the resolver; narrative clips up to 30s; mp4/webm/frames_b64 output; GPU-required; `cpu_offload` capability (model|sequential) + `vae_tiling`, globally overridable via `server.video_cpu_offload`)
 - **3d/generation**: image-to-3d via `/v1/3d/from-image` and text-to-3d via `/v1/3d/generations` (triposr bundled; TRELLIS, Wonder3D, Hunyuan3D-2, Shap-E via the resolver; Shap-E is text-to-3D only via `diffusers.ShapEPipeline`; GLB output as `data:model/gltf-binary;base64,...` URL or b64_json; capability flags `supports_text_to_3d` / `supports_image_to_3d` gate per route; sync/blocking pattern mirroring video/generation)
+
+Speech `timestamps: true` returns JSON with the audio and its SHA-256, one
+entry per whitespace-separated written word, and native timing provenance.
+Words without native measurements have `measured: false`; no silent timing
+fallback is presented as measured. `pronunciations` keeps respellings or IPA
+separate from display text. Kokoro native times support English voices;
+unsupported models/voices and streaming timestamps return 400. Legacy
+`align` / `X-Alignment` remains Soprano paragraph timing. Qwen3-ASR returns
+transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
+`vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.
+For pronunciation checks omit `prompt`, whose context biases the listener.
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
 path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,

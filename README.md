@@ -69,7 +69,7 @@ Optional extras:
 
 ```bash
 # Pull bundled models by id (creates a dedicated venv + installs deps + downloads weights)
-muse pull soprano-80m
+muse pull kokoro-82m
 muse pull sd-turbo
 
 # Or pull anything resolvable from HuggingFace by URI
@@ -88,7 +88,7 @@ muse models list
 muse serve --host 0.0.0.0 --port 8000
 
 # Optional: pre-warm a model so the first real request is hot
-muse models warmup soprano-80m
+muse models warmup kokoro-82m
 ```
 
 From any client, generation is an HTTP call:
@@ -97,7 +97,7 @@ From any client, generation is an HTTP call:
 # Text-to-speech
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"input":"Hello world","model":"soprano-80m"}' \
+  -d '{"input":"Hello world","model":"kokoro-82m"}' \
   --output hello.wav
 
 # Embeddings (accepts single string or list)
@@ -355,6 +355,37 @@ mp4_bytes = vid.generate(
 )
 Path("flag.mp4").write_bytes(mp4_bytes)
 ```
+
+### Narration speech
+
+Kokoro supports `timestamps: true` on `/v1/audio/speech`: the response becomes
+JSON containing the encoded audio, its SHA-256, and one timing per written
+whitespace-separated word. `measured: false` marks words without native timing;
+`timing.estimated_words` makes that visible. Native timings support English
+voices; streaming timestamps and models without native timings return 400.
+Send `pronunciations` separately from display `input`, using whole-word `term`
+or character `spans` targets with `respell` or supported `ipa` replacements.
+
+```bash
+curl http://localhost:8000/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"kokoro-82m","voice":"af_heart","input":"Coulomb measured charge.","timestamps":true,"pronunciations":[{"term":"Coulomb","ipa":"kuːˈlɒm"}]}'
+```
+
+Speech responses carry voice, speed, audio fingerprint (except streaming), and
+pronunciation digest headers alongside model provenance. Timings belong to that
+exact take; preserve them with its audio through client-side joins/conversions.
+Legacy `align` / `X-Alignment` continues to provide Soprano paragraph timings.
+Soprano remains pullable as `soprano-80m`, with draft quality.
+
+Pull `qwen3-asr-1.7b` for transcript-only listening on
+`/v1/audio/transcriptions`. It refuses word timestamps, segment formats
+(`verbose_json`, `srt`, `vtt`), and translation; use `/v1/audio/alignments` for
+reference-word times. Omit `prompt` during pronunciation checks so the listener
+is not biased toward the expected words. The standalone
+`scripts/bench/speech_compare.py` checks real beats or a pronunciation lexicon
+with `af_heart` and `am_puck`; see the
+[narration acceptance results](docs/benchmarks/2026-10-24-narration-acceptance.md).
 
 ### Audio alignment
 
