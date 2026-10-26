@@ -197,6 +197,6 @@ Live result: Coulomb 0.275-0.600, measured 0.600-1.012, charge. 1.012-1.650; `ti
 
 ## Misses (reported, bar not loosened)
 
-- Lexicon: runge kutta, lipschitz, coulomb and blaise pascal were not heard for either voice (12 of 16 heard per voice). The first three are proper names for which the lexicon asks for a hyphenated respelling or an unadorned name; the listener's guess ("rungakuta", "elipsits", "kulam") differs from the written term, and "blaze Pascal" is a plausible hearing of a Blaise respelling. Whether these are speech or listening errors needs a human ear.
+- Lexicon: runge kutta, lipschitz, coulomb and blaise pascal were not heard for either voice (12 of 16 heard per voice). Whether these are speech or listening errors needs a human ear.
 - Entry kinds: coulomb and lipschitz are IPA links; runge kutta and blaise pascal are hyphenated respellings. "Heard" accepts the written term, a respelling made of ordinary words, or the entry's `accept` aliases. The four misses' transcripts ("rungakuta", "elipsits"/"alipshits", "kulam"/"koulom", "blaze Pascal") need the owner's ear; lipschitz suggests an extra leading vowel in both voices.
 - Timing agreement met the bar; 32 of the 140 disagreements are unmatched-word artifacts of hyphen pairing, not number spelling: Kokoro's written "half-seen" is paired against the aligner's "halfseen" and counted as two unmatched words (fixed in `speech_compare.agreement`, which now pairs on an alphanumeric-only key; the committed table predates the fix).
