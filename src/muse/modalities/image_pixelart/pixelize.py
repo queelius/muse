@@ -6,7 +6,7 @@ Pillow + numpy only. The fixed operation order is:
 2. grid snap (detect or take the grid, majority-vote each cell)
 3. palette mapping (nearest colour in OKLab)
 4. alpha binarize (output alpha is only ever 0 or 255)
-5. cleanup (orphan pixels)
+5. cleanup (orphan pixels; by default only when the grid was snapped)
 6. outline
 7. seamless wrap
 8. nearest-neighbour preview scale
@@ -72,12 +72,26 @@ class GridInfo:
 
 @dataclass(frozen=True)
 class PixelizeOptions:
+    """Options for ``pixelize``.
+
+    - ``grid``: None auto-detects; an integer forces that cell size; 1 means
+      no grid snap and no downscale.
+    - ``background``: ``auto`` keys a uniform border colour (flood from the
+      border, only when >= 90% of border pixels are one colour); ``#rrggbb``
+      is a global chroma key; ``none`` and ``transparent-keep`` are synonyms:
+      nothing is keyed and the existing alpha is kept (binarized at
+      ``alpha_threshold``).
+    - ``cleanup``: None (default) cleans orphan pixels only when the grid was
+      snapped (``grid.cell > 1``), so deliberate 1 px detail in true 1:1 art
+      survives; True / False force it on / off.
+    """
+
     grid: int | None  # None = auto-detect; 1 = no grid snap / downscale
     target_size: tuple[int, int] | None
     palette: PaletteSpec
     background: str  # auto / none / transparent-keep / #rrggbb
     alpha_threshold: int = 128
-    cleanup: bool = True
+    cleanup: bool | None = None
     outline: str = "none"  # none / dark / #rrggbb
     seamless: bool = False
     sheet: tuple[int, int] | None = None  # (columns, rows)
@@ -134,6 +148,8 @@ def _validate(opts: PixelizeOptions, width: int, height: int) -> None:
     bg = opts.background
     if not isinstance(bg, str) or (bg not in _BACKGROUND_WORDS and not _HEX_RE.match(bg)):
         raise ValueError("background must be auto, none, transparent-keep or #rrggbb")
+    if opts.cleanup is not None and not isinstance(opts.cleanup, bool):
+        raise ValueError("cleanup must be true, false or unset")
     if not _is_int(opts.alpha_threshold) or not 0 <= opts.alpha_threshold <= 255:
         raise ValueError("alpha_threshold must be an integer in 0..255")
     ol = opts.outline
@@ -347,27 +363,68 @@ def _delta_e_to(rgb: np.ndarray, ref_lab: np.ndarray) -> np.ndarray:
     return d[inv.reshape(-1)].reshape(keys.shape)
 
 
-def _fill_runs(seed: np.ndarray, cand: np.ndarray) -> np.ndarray:
-    """Grow ``seed`` along whole candidate runs of each row (axis 1)."""
+def _row_runs(cand: np.ndarray) -> np.ndarray:
+    """Label each horizontal run of candidate pixels 1..R (0 = not a candidate)."""
     h, w = cand.shape
     starts = cand.copy()
     starts[:, 1:] &= ~cand[:, :-1]
-    ids = np.cumsum(starts.ravel()).reshape(h, w) * cand
-    hit = np.bincount(ids.ravel(), weights=(seed & cand).ravel().astype(np.float64),
-                      minlength=int(ids.max()) + 1) > 0
-    hit[0] = False
-    return hit[ids] | seed
+    ids = np.cumsum(starts.ravel(), dtype=np.int64).reshape(h, w)
+    ids[~cand] = 0
+    return ids
+
+
+def _run_edges(ids: np.ndarray, cand: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pairs of vertically touching runs, one pair per overlap segment."""
+    both = cand[:-1] & cand[1:]
+    top, bot = ids[:-1], ids[1:]
+    first = both.copy()
+    first[:, 1:] &= ~(both[:, :-1] & (top[:, 1:] == top[:, :-1])
+                      & (bot[:, 1:] == bot[:, :-1]))
+    return top[first], bot[first]
+
+
+def _flood_with_rounds(seed: np.ndarray, cand: np.ndarray) -> tuple[np.ndarray, int]:
+    """4-connected flood of ``cand`` from ``seed``; also returns the number of
+    hooking rounds (a complexity proxy for tests).
+
+    Connected-component labelling on the graph of horizontal runs: every
+    round hooks each component root to the smallest neighbouring label, then
+    pointer jumping flattens the forest. Seeded runs start at label 0, so a
+    run is filled iff its component's minimum label is 0. Rounds are
+    O(log runs) in practice (each round merges every non-minimal component),
+    each O(runs + touching pairs), so a winding maze no longer costs one
+    full-image pass per corridor turn.
+    """
+    ids = _row_runs(cand)
+    n_runs = int(ids.max())
+    if n_runs == 0:
+        return np.zeros(cand.shape, dtype=bool), 0
+    a, b = _run_edges(ids, cand)
+    label = np.arange(n_runs + 1, dtype=np.int64)
+    label[np.unique(ids[seed & cand])] = 0
+    rounds = 0
+    while True:
+        la, lb = label[a], label[b]
+        diff = la != lb
+        if not diff.any():
+            break
+        rounds += 1
+        la, lb = la[diff], lb[diff]
+        low = np.minimum(la, lb)
+        np.minimum.at(label, la, low)
+        np.minimum.at(label, lb, low)
+        while True:  # pointer jumping until every run points at its root
+            nxt = label[label]
+            if np.array_equal(nxt, label):
+                break
+            label = nxt
+    filled = (label[ids] == 0) & cand
+    return filled, rounds
 
 
 def _flood(seed: np.ndarray, cand: np.ndarray) -> np.ndarray:
-    """4-connected flood of ``cand`` from ``seed`` (scanline run growth)."""
-    filled = seed & cand
-    while True:
-        nxt = _fill_runs(filled, cand)
-        nxt = _fill_runs(nxt.T, cand.T).T
-        if np.array_equal(nxt, filled):
-            return filled
-        filled = nxt
+    """4-connected flood of ``cand`` from ``seed`` (see ``_flood_with_rounds``)."""
+    return _flood_with_rounds(seed, cand)[0]
 
 
 def _ring_mask(h: int, w: int, regions) -> np.ndarray:
@@ -600,10 +657,11 @@ def _keys(img: np.ndarray) -> np.ndarray:
 _NEIGHBOURS = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)]
 
 
-def _cleanup(img: np.ndarray, wrap: bool) -> int:
+def _cleanup(img: np.ndarray, wrap: bool, only: np.ndarray | None = None) -> int:
     """In place: an opaque pixel whose 8 neighbours all share one other colour
     (transparent counts as a colour) takes that colour. Without ``wrap`` the
-    image's edge pixels are left alone. Returns the number changed."""
+    image's edge pixels are left alone; with ``wrap``, ``only`` limits the
+    pixels that may change. Returns the number changed."""
     h, w = img.shape[:2]
     if h < 3 or w < 3:
         return 0
@@ -621,6 +679,8 @@ def _cleanup(img: np.ndarray, wrap: bool) -> int:
     for n in nbs[1:]:
         same &= n == first
     change = same & (centre != 0) & (first != centre)
+    if wrap and only is not None:
+        change &= only
     if wrap:
         img[change] = src[change]
     else:
@@ -712,10 +772,15 @@ def _equalize_edges(img: np.ndarray) -> None:
 
 def _seamless(img: np.ndarray) -> None:
     _equalize_edges(img)
-    # With the edges equal, no edge pixel can be an orphan across the wrap;
-    # one wrapped cleanup pass fixes any orphan the equalizing created and
-    # cannot create a new one.
-    _cleanup(img, wrap=True)
+    # With the edges equal, no edge pixel can be an orphan across the wrap.
+    # Equalizing can only create orphans next to the edges, so one wrapped
+    # cleanup pass over the 2 px seam band fixes them (and cannot create new
+    # ones); the rest of the tile is left to the ``cleanup`` option.
+    h, w = img.shape[:2]
+    band = np.zeros((h, w), dtype=bool)
+    band[:2] = band[-2:] = True
+    band[:, :2] = band[:, -2:] = True
+    _cleanup(img, wrap=True, only=band)
 
 
 # ---------------------------------------------------------------------- driver
@@ -801,10 +866,11 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
         outline_cands = pal
     else:  # palette none: the most used colours stand in for the palette
         outline_cands = unpack_rgb(_colours_by_use(art)[:REPORTED_PALETTE_CAP])
+    do_cleanup = opts.cleanup if opts.cleanup is not None else grid.cell > 1
     for y0 in y_starts:
         for x0 in x_starts:
             cell = art[y0:y0 + ch, x0:x0 + cw]
-            if opts.cleanup:
+            if do_cleanup:
                 changed += _cleanup(cell, wrap=False)
             if outline != "none":
                 outlined += _outline(cell, outline, outline_cands)
@@ -836,6 +902,7 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
         "palette_truncated": truncated,
         "background": opts.background,
         "alpha_threshold": int(opts.alpha_threshold),
+        "cleanup_applied": bool(do_cleanup),
         "cleanup_changed": changed,
         "outline": outline,
         "outline_pixels": outlined,

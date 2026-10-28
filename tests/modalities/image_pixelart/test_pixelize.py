@@ -339,6 +339,71 @@ def test_background_auto_does_not_key_interior_islands_of_border_colour():
     assert np.all(out[30:34, 30:34, 3] == 255)
 
 
+def _serpentine_maze(n: int) -> np.ndarray:
+    """Magenta corridors winding through dark walls, a fully magenta border
+    and a single entrance: the worst case for row/column flood growth."""
+    a = np.zeros((n, n, 4), dtype=np.uint8)
+    a[..., :3] = (255, 0, 255)
+    a[..., 3] = 255
+    wall = (30, 30, 60)
+    a[1, 1:n - 1, :3] = wall
+    a[n - 2, 1:n - 1, :3] = wall
+    a[1:n - 1, 1, :3] = wall
+    a[1:n - 1, n - 2, :3] = wall
+    a[1, 3, :3] = (255, 0, 255)  # the one entrance
+    for i, y in enumerate(range(3, n - 3, 2)):
+        a[y, 2:n - 2, :3] = wall
+        gap = n - 4 if i % 2 == 0 else 2  # alternate ends: one long corridor
+        a[y, gap, :3] = (255, 0, 255)
+    return a
+
+
+def test_background_flood_is_near_linear_on_a_maze():
+    from muse.modalities.image_pixelart import pixelize as P
+
+    a = _serpentine_maze(1024)
+    corridor = np.all(a[..., :3] == (255, 0, 255), axis=-1)
+    seed = np.zeros(corridor.shape, dtype=bool)
+    seed[0] = seed[-1] = True
+    seed[:, 0] = seed[:, -1] = True
+    filled, rounds = P._flood_with_rounds(seed & corridor, corridor)
+    assert np.array_equal(filled, corridor)  # the whole maze is reachable
+    # Row/column growth needs ~n/2 rounds here; label propagation with
+    # pointer jumping needs O(log n).
+    assert rounds <= 40, rounds
+    import time
+    t = time.time()
+    r = pixelize(Image.fromarray(a), opts(grid=1, palette=parse_palette("none"),
+                                          cleanup=False))
+    assert time.time() - t < 20  # the old flood took ~23 s here
+    out = np.asarray(r.image)
+    assert r.background_removed is True
+    assert np.array_equal(out[..., 3] == 0, corridor)
+
+
+def test_background_flood_matches_bfs_reference():
+    from collections import deque
+
+    from muse.modalities.image_pixelart import pixelize as P
+
+    rng = np.random.default_rng(1)
+    for _ in range(120):
+        h, w = (int(v) for v in rng.integers(1, 30, 2))
+        cand = rng.random((h, w)) < rng.uniform(0.3, 0.8)
+        seed = rng.random((h, w)) < 0.03
+        ref = np.zeros_like(cand)
+        q = deque(zip(*np.nonzero(seed & cand)))
+        for y, x in q:
+            ref[y, x] = True
+        while q:
+            y, x = q.popleft()
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and cand[ny, nx] and not ref[ny, nx]:
+                    ref[ny, nx] = True
+                    q.append((ny, nx))
+        assert np.array_equal(P._flood(seed, cand), ref)
+
+
 def test_background_chroma_key_is_global():
     a = _sprite_on((0, 255, 0))
     a[30:34, 30:34, :3] = (0, 255, 0)
@@ -367,11 +432,52 @@ def test_cleanup_removes_orphans():
     a[4, 4, :3] = (250, 20, 20)
     img = Image.fromarray(a)
     on = np.asarray(pixelize(img, opts(grid=1, palette=parse_palette("none"),
-                                       background="none")).image)
+                                       background="none", cleanup=True)).image)
     off = np.asarray(pixelize(img, opts(grid=1, palette=parse_palette("none"),
                                         background="none", cleanup=False)).image)
     assert tuple(on[4, 4, :3]) == (40, 120, 200)
     assert tuple(off[4, 4, :3]) == (250, 20, 20)
+
+
+def _sprite_with_eye() -> np.ndarray:
+    a = np.zeros((16, 16, 4), dtype=np.uint8)
+    a[3:13, 3:13] = (*_rgb("#eec39a"), 255)  # skin
+    a[6, 6] = (*_rgb("#000000"), 255)  # a deliberate single-pixel eye
+    return a
+
+
+def test_default_cleanup_keeps_1to1_single_pixel_detail():
+    a = _sprite_with_eye()
+    r = pixelize(Image.fromarray(a), opts(palette=parse_palette("db32")))
+    assert r.grid.cell == 1
+    assert tuple(np.asarray(r.image)[6, 6, :3]) == (0, 0, 0)
+    assert r.metadata["cleanup_applied"] is False
+    forced = pixelize(Image.fromarray(a), opts(palette=parse_palette("db32"), cleanup=True))
+    assert tuple(np.asarray(forced.image)[6, 6, :3]) == _rgb("#eec39a")
+    assert forced.metadata["cleanup_applied"] is True
+
+
+def test_default_cleanup_runs_when_the_grid_was_snapped():
+    a = np.array(make_sprite(24, 24, colors=DB12, seed=3))
+    a[6:9, 6:9] = (*_rgb("#639bff"), 255)
+    a[7, 7] = (*_rgb("#ac3232"), 255)  # an orphan cell in AI output
+    big = jitter(blur(Image.fromarray(a).resize((96, 96), Image.NEAREST), 0.6), noise=6)
+    r = pixelize(big, opts(palette=parse_palette("db32")))
+    assert r.grid.cell == 4
+    assert r.metadata["cleanup_applied"] is True
+    assert tuple(np.asarray(r.image)[7, 7, :3]) == _rgb("#639bff")
+    kept = pixelize(big, opts(palette=parse_palette("db32"), cleanup=False))
+    assert kept.metadata["cleanup_applied"] is False
+    assert tuple(np.asarray(kept.image)[7, 7, :3]) == _rgb("#ac3232")
+
+
+def test_cleanup_option_type_is_checked():
+    with pytest.raises(ValueError):
+        pixelize(SMALL, opts(cleanup="yes"))
+
+
+def test_pixelize_options_cleanup_defaults_to_none():
+    assert opts().cleanup is None
 
 
 def test_outline_dark_adds_one_pixel_ring():
@@ -450,7 +556,12 @@ def test_seamless_wraps(upscaled):
     assert r.size == (24, 24)
     tiled = np.tile(out, (3, 3, 1))
     orph = orphans(tiled, wrap=False)[24:48, 24:48]
-    assert not orph.any()
+    band = np.zeros((24, 24), dtype=bool)
+    band[:2] = band[-2:] = True
+    band[:, :2] = band[:, -2:] = True
+    assert not (orph & band).any()  # nothing breaks the cleanup rule at the seam
+    if r.metadata["cleanup_applied"]:
+        assert not orph.any()
     # Edges agree across the wrap.
     assert np.array_equal(out[:, 0], out[:, -1])
     assert np.array_equal(out[0], out[-1])
