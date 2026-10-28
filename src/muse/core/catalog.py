@@ -18,6 +18,11 @@ Structure:
         python_path,                   # <venv_path>/bin/python for workers
     }]
 
+A weightless script (`MANIFEST["weights"] = "none"`) has no hf_repo or
+revision: its row carries `weights: "none"`, an empty owned `local_dir`
+under `<catalog>/local/`, and a one-item `code` receipt over the script
+source (`kind`, `model_id`, `muse_version`, `source_sha256`).
+
 This module is the public catalog facade. It owns per-model operator state
 (enable/disable, device and GPU-layer pins) and backend loading with its
 provenance checks, and re-exports the names callers use from the modules
@@ -50,6 +55,7 @@ from muse.core.catalog_models import (
     _manifest_to_catalog_entry,
     _reset_known_models_cache,
     get_manifest,
+    is_weightless,
     known_models,
     list_known,
 )
@@ -247,6 +253,9 @@ def _validate_bundled_catalog_provenance(
     # pin validation. A receipt is written only by the script-based pull path.
     if "manifest" in entry_data:
         return
+    if is_weightless(entry):
+        _validate_weightless_catalog_provenance(model_id, entry, entry_data)
+        return
     if not entry.bundled and "artifact_provenance" not in entry_data:
         return
 
@@ -265,6 +274,40 @@ def _validate_bundled_catalog_provenance(
         raise RuntimeError(
             f"model {model_id!r} does not match the current immutable "
             f"artifact provenance ({', '.join(mismatches)}); re-run "
+            f"`muse pull {model_id}` before loading it"
+        )
+
+
+# The receipt fields that identify the pulled code. `muse_version` records
+# which release pulled it; it is informational, so a `muse models refresh`
+# (which upgrades the venv's muse without re-pulling) does not block loads.
+_CODE_RECEIPT_IDENTITY = ("kind", "model_id", "source_sha256")
+
+
+def _validate_weightless_catalog_provenance(
+    model_id: str,
+    entry: CatalogEntry,
+    entry_data: dict,
+) -> None:
+    """Reject a weightless row whose code receipt no longer matches the script."""
+    # Re-validates the manifest (no revision / hf_repo / downloads) and
+    # hashes the script as it is on disk now.
+    spec = _bundled_download_spec(model_id, entry)
+    expected = (spec.artifact_provenance or ({},))[0]
+    mismatches: list[str] = []
+    if entry_data.get("weights") != "none" or "revision" in entry_data:
+        mismatches.append("weightless catalog row")
+    receipt = entry_data.get("artifact_provenance")
+    stored = receipt[0] if isinstance(receipt, list) and len(receipt) == 1 else None
+    if not isinstance(stored, dict):
+        mismatches.append("code receipt")
+    else:
+        if any(stored.get(key) != expected[key] for key in _CODE_RECEIPT_IDENTITY):
+            mismatches.append("code receipt")
+    if mismatches:
+        raise RuntimeError(
+            f"model {model_id!r} does not match the current code "
+            f"provenance ({', '.join(mismatches)}); re-run "
             f"`muse pull {model_id}` before loading it"
         )
 

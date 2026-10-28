@@ -10,6 +10,7 @@ merged view is keyed by the catalog file's identity.
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import stat
 import threading
@@ -26,7 +27,12 @@ from muse.core.catalog_store import (
     _validated_persisted_manifest,
 )
 from muse.core.curated import find_curated, find_curated_by_uri
-from muse.core.discovery import DiscoveredModel, discover_models
+from muse.core.discovery import (
+    WEIGHTLESS,
+    DiscoveredModel,
+    discover_models,
+    is_weightless_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +104,11 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
         python_sources  -> python_sources            (tuple-coerced, defaults ())
         capabilities    -> extra                    (dict-copied, defaults {})
         revision, allow_patterns, hf_artifacts -> extra (download metadata)
+        weights         -> extra["weights"]         (only "none": weightless)
     backend_path is synthesized from the Model class's module and name.
+
+    A weightless script (`weights: "none"`) has no `hf_repo`; its entry
+    carries `hf_repo == ""` and `extra["weights"] == "none"`.
     """
     m = discovered.manifest
     cls = discovered.model_class
@@ -107,11 +117,16 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
     for key in ("revision", "allow_patterns", "hf_artifacts"):
         if key in m:
             extra[key] = copy.deepcopy(m[key])
+    if is_weightless_manifest(m):
+        extra["weights"] = WEIGHTLESS
+        hf_repo = m.get("hf_repo") or ""
+    else:
+        hf_repo = m["hf_repo"]
     return CatalogEntry(
         model_id=m["model_id"],
         modality=m["modality"],
         backend_path=f"{cls.__module__}:{cls.__name__}",
-        hf_repo=m["hf_repo"],
+        hf_repo=hf_repo,
         description=m.get("description", ""),
         pip_extras=tuple(m.get("pip_extras", ())),
         system_packages=tuple(m.get("system_packages", ())),
@@ -132,6 +147,7 @@ def _manifest_to_catalog_entry(discovered: DiscoveredModel) -> CatalogEntry:
 # their projected entries for get_manifest().
 _discovered_entries_cache: dict[str, CatalogEntry] | None = None
 _discovered_manifests_cache: dict[str, dict] | None = None
+_discovered_sources_cache: dict[str, Path] | None = None
 
 
 # Merged known-models cache, keyed by the catalog.json identity
@@ -261,7 +277,7 @@ def known_models() -> dict[str, CatalogEntry]:
     which is always acquired before _CATALOG_WRITE_LOCK.
     """
     global _known_models_cache, _discovered_entries_cache
-    global _discovered_manifests_cache
+    global _discovered_manifests_cache, _discovered_sources_cache
     # Fast path: cache built against the current catalog file identity.
     key = _catalog_cache_key()
     cached = _known_models_cache
@@ -284,6 +300,11 @@ def known_models() -> dict[str, CatalogEntry]:
             }
             _discovered_manifests_cache = {
                 model_id: d.manifest for model_id, d in discovered.items()
+            }
+            _discovered_sources_cache = {
+                model_id: Path(d.source_path)
+                for model_id, d in discovered.items()
+                if getattr(d, "source_path", None) is not None
             }
         entries = dict(_discovered_entries_cache)
         catalog = _read_catalog()
@@ -355,11 +376,12 @@ def _reset_known_models_cache() -> None:
     rebuild, so the next known_models() call always rebuilds fresh.
     """
     global _known_models_cache, _discovered_entries_cache
-    global _discovered_manifests_cache
+    global _discovered_manifests_cache, _discovered_sources_cache
     with _KNOWN_MODELS_LOCK:
         _known_models_cache = None
         _discovered_entries_cache = None
         _discovered_manifests_cache = None
+        _discovered_sources_cache = None
 
 
 def list_known(modality: str | None = None) -> list[CatalogEntry]:
@@ -367,6 +389,31 @@ def list_known(modality: str | None = None) -> list[CatalogEntry]:
     if modality is None:
         return entries
     return [e for e in entries if e.modality == modality]
+
+
+def is_weightless(entry: CatalogEntry) -> bool:
+    """True for a script-discovered model that declares `weights: "none"`."""
+    return entry.extra.get("weights") == WEIGHTLESS
+
+
+def script_source_sha256(model_id: str) -> str:
+    """SHA-256 (hex) of the discovered model script file's bytes.
+
+    This is the weightless models' provenance: their code is the whole
+    model, so the receipt pins the script source instead of an HF commit.
+    Raises KeyError for an id that is not a discovered script and OSError
+    when the file cannot be read.
+    """
+    known_models()  # populates the discovery cache
+    with _KNOWN_MODELS_LOCK:
+        source = (_discovered_sources_cache or {}).get(model_id)
+    if source is None:
+        raise KeyError(f"{model_id!r} is not a discovered model script")
+    digest = hashlib.sha256()
+    with open(source, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _script_model_ids() -> set[str]:

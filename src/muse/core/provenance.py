@@ -4,6 +4,8 @@ A model's primary revision is the exact HF commit its weights were pulled
 at. Models that combine several artifacts (a LoRA over a base model,
 multi-repo pulls, pinned code) also carry a component list and a short
 digest over it, so a downstream pipeline can pin the full weight set.
+A weightless model (`weights: "none"`) has no revision; its one `code`
+component's digest is the first 16 hex characters of its script SHA-256.
 
 Stdlib only. `lookup_revision` never raises: unknown or broken metadata
 yields a revision of None.
@@ -19,6 +21,7 @@ from typing import Any, Mapping
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _SNAP = re.compile(r"/snapshots/([0-9a-f]{40})(?:/|$)")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -78,10 +81,27 @@ def _base_component(entry, manifest, catalog) -> ArtifactComponent | None:
     return ArtifactComponent("base", base, None)
 
 
+def _weightless_revision(model_id: str, entry: Mapping) -> ModelRevision:
+    """A weightless model: no HF revision, one code component."""
+    digest = None
+    prov = entry.get("artifact_provenance")
+    if isinstance(prov, list):
+        for item in prov:
+            if (isinstance(item, Mapping) and item.get("kind") == "code"
+                    and isinstance(item.get("source_sha256"), str)
+                    and _SHA256.match(item["source_sha256"])):
+                digest = item["source_sha256"][:16]
+                break
+    component = ArtifactComponent("code", f"muse/{model_id}", None)
+    return ModelRevision(model_id, None, (component,), digest)
+
+
 def model_revision(model_id: str, entry: Mapping, manifest: Mapping,
                    catalog: Mapping[str, Mapping] | None = None) -> ModelRevision:
     entry = entry if isinstance(entry, Mapping) else {}
     manifest = manifest if isinstance(manifest, Mapping) else {}
+    if entry.get("weights") == "none":
+        return _weightless_revision(model_id, entry)
     primary = _primary(entry, manifest)
     repo = _str(entry.get("hf_repo")) or _str(manifest.get("hf_repo")) or ""
     components: list[ArtifactComponent] = []

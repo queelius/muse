@@ -202,7 +202,9 @@ def format_info(
     # Basics
     lines.append("Basics:")
     lines.append(f"  modality:        {entry.modality}")
-    lines.append(f"  hf_repo:         {entry.hf_repo}")
+    weightless = (entry.extra or {}).get("weights") == "none"
+    hf_repo = "(none: weightless)" if weightless else entry.hf_repo
+    lines.append(f"  hf_repo:         {hf_repo}")
     if entry.description:
         lines.append(f"  description:     {entry.description}")
     if catalog_data.get("source"):
@@ -227,7 +229,9 @@ def format_info(
         local_dir = catalog_data.get("local_dir")
         venv_path = catalog_data.get("venv_path")
         weights = catalog_data.get("local_dir_size_bytes")
-        if weights:
+        if weightless:
+            lines.append("  weights:         none (the model is its script)")
+        elif weights:
             lines.append(f"  weights:         {_format_bytes(weights)}")
         elif local_dir:
             lines.append(f"  weights:         {local_dir}")
@@ -268,7 +272,8 @@ def format_info(
     extra = entry.extra or {}
     if extra:
         # Memory annotation already shown above; don't repeat in caps.
-        skip = {"memory_gb", "allow_patterns"}
+        # `weights` (weightless marker) is shown under Basics / Storage.
+        skip = {"memory_gb", "allow_patterns", "weights"}
         known_lines: list[str] = []
         unknown: list[tuple[str, Any]] = []
         for k, v in extra.items():

@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_MANIFEST_KEYS = ("model_id", "modality", "hf_repo")
 
+# A script declaring `MANIFEST["weights"] = "none"` ships no weights (its
+# code is the whole model), so it need not name an `hf_repo`.
+WEIGHTLESS = "none"
+
+
+def is_weightless_manifest(manifest: dict) -> bool:
+    """True when a script MANIFEST opts into the weightless seam."""
+    return manifest.get("weights") == WEIGHTLESS
+
 
 @dataclass
 class DiscoveredModel:
@@ -76,7 +85,10 @@ def discover_models(dirs: list[Path]) -> dict[str, DiscoveredModel]:
                 )
                 continue
 
-            missing = [k for k in REQUIRED_MANIFEST_KEYS if k not in manifest]
+            required = REQUIRED_MANIFEST_KEYS
+            if is_weightless_manifest(manifest):
+                required = tuple(k for k in required if k != "hf_repo")
+            missing = [k for k in required if k not in manifest]
             if missing:
                 logger.warning(
                     "skipping model script %s: MANIFEST missing required keys %s",

@@ -226,6 +226,7 @@ def _validated_persisted_manifest(
 
 
 _MODEL_ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _validate_model_id_for_fs(model_id: str) -> None:
@@ -341,7 +342,24 @@ def _validate_catalog_json_value(value: Any, *, path: str, depth: int = 0) -> No
     )
 
 
-def _validate_artifact_receipt(value: Any, *, path: str) -> None:
+def _validate_code_receipt_item(item: dict, *, path: str) -> None:
+    """A weightless model's receipt: the digest of its script source."""
+    for field_name in ("model_id", "muse_version"):
+        field = item.get(field_name)
+        if not isinstance(field, str) or not field:
+            raise _CatalogSchemaError(
+                f"{path}.{field_name} must be a non-empty string"
+            )
+    digest = item.get("source_sha256")
+    if not isinstance(digest, str) or _SHA256_HEX_RE.fullmatch(digest) is None:
+        raise _CatalogSchemaError(
+            f"{path}.source_sha256 must be a 64-character SHA-256 hex digest"
+        )
+
+
+def _validate_artifact_receipt(
+    value: Any, *, path: str, allow_code: bool = False,
+) -> None:
     if (
         isinstance(value, (str, bytes))
         or not isinstance(value, (list, tuple))
@@ -352,6 +370,9 @@ def _validate_artifact_receipt(value: Any, *, path: str) -> None:
         item_path = f"{path}[{index}]"
         if not isinstance(item, dict):
             raise _CatalogSchemaError(f"{item_path} must be an object")
+        if allow_code and item.get("kind") == "code":
+            _validate_code_receipt_item(item, path=item_path)
+            continue
         for field_name in ("repo_id", "revision", "subdir"):
             field = item.get(field_name)
             if not isinstance(field, str):
@@ -440,12 +461,15 @@ def _validate_catalog_entry(
             raise _CatalogSchemaError(
                 f"{path}.{field_name} must be a non-empty string"
             )
+    if "weights" in entry and entry["weights"] != "none":
+        raise _CatalogSchemaError(f"{path}.weights must be \"none\" when present")
     if "measurements" in entry:
         _validate_measurements(entry["measurements"], path=f"{path}.measurements")
     if "artifact_provenance" in entry:
         _validate_artifact_receipt(
             entry["artifact_provenance"],
             path=f"{path}.artifact_provenance",
+            allow_code=True,
         )
     if strict_manifest and "manifest" in entry:
         try:

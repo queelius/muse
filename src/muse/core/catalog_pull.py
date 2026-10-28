@@ -31,7 +31,9 @@ from muse.core.catalog_models import (
     CatalogEntry,
     _reset_known_models_cache,
     _script_model_ids,
+    is_weightless,
     known_models,
+    script_source_sha256,
 )
 from muse.core.catalog_store import (
     _CATALOG_WRITE_LOCK,
@@ -554,6 +556,66 @@ class _BundledDownloadSpec:
     allow_patterns: tuple[str, ...] | None
     artifacts: tuple[Any, ...] | None
     artifact_provenance: tuple[dict[str, Any], ...] | None
+    # True for a `weights: "none"` script: nothing to download, and the
+    # receipt is one `code` item over the script source.
+    weightless: bool = False
+
+
+# Download metadata a weightless script must not declare: its pull performs
+# no download, so any of these would be silently ignored.
+_WEIGHTLESS_FORBIDDEN_KEYS = ("revision", "allow_patterns", "hf_artifacts")
+
+
+def _code_provenance_item(model_id: str) -> dict[str, Any]:
+    """Build the receipt for a weightless script: its source digest."""
+    from muse import __version__
+
+    try:
+        source_sha256 = script_source_sha256(model_id)
+    except (KeyError, OSError) as exc:
+        raise CatalogError(
+            f"cannot hash the model script for weightless model {model_id!r}: {exc}"
+        ) from exc
+    return {
+        "kind": "code",
+        "model_id": model_id,
+        "muse_version": __version__,
+        "source_sha256": source_sha256,
+    }
+
+
+def _weightless_download_spec(
+    model_id: str,
+    entry: CatalogEntry,
+) -> _BundledDownloadSpec:
+    """Validate a weightless script and build its code receipt."""
+    declared = [key for key in _WEIGHTLESS_FORBIDDEN_KEYS if key in entry.extra]
+    if entry.hf_repo:
+        declared.insert(0, "hf_repo")
+    if declared:
+        raise CatalogError(
+            f"model {model_id!r} declares weights: none but also "
+            f"{', '.join(declared)}; a weightless script downloads nothing"
+        )
+    # With no weights on disk the supervisor's sizing ladder has nothing to
+    # fall back on, so the declared annotation is the model's size.
+    memory_gb = entry.extra.get("memory_gb")
+    if (
+        isinstance(memory_gb, bool)
+        or not isinstance(memory_gb, (int, float))
+        or not memory_gb > 0
+    ):
+        raise CatalogError(
+            f"weightless model {model_id!r} must declare a positive "
+            "capabilities.memory_gb (it has no weights to size from)"
+        )
+    return _BundledDownloadSpec(
+        revision=None,
+        allow_patterns=None,
+        artifacts=None,
+        artifact_provenance=(_code_provenance_item(model_id),),
+        weightless=True,
+    )
 
 
 def _artifact_provenance_item(
@@ -586,8 +648,11 @@ def _bundled_download_spec(
 
     Packaged manifests must be immutable. User drop-in scripts retain the
     historical option of an unpinned snapshot, but receive the same receipt
-    protection whenever they opt into a concrete revision.
+    protection whenever they opt into a concrete revision. A weightless
+    script (`weights: "none"`) gets no revision and a `code` receipt.
     """
+    if is_weightless(entry):
+        return _weightless_download_spec(model_id, entry)
     raw_revision = entry.extra.get("revision")
     if raw_revision is None:
         if entry.bundled:
@@ -732,6 +797,10 @@ def _pull_bundled_transaction(
     # revoke its old .pth activation from a cloned/reused environment.
     install_python_sources(venv_path, entry.python_sources)
 
+    if download_spec.weightless:
+        _register_weightless(model_id, venv_path, download_spec)
+        return
+
     # Bundled MANIFESTs may declare `capabilities.allow_patterns` to
     # restrict the snapshot_download manifest (mirrors what the resolver
     # plugins do for fp16-shaped or BIN-only repos). This avoids hauling
@@ -795,6 +864,48 @@ def _pull_bundled_transaction(
                 catalog.get(model_id),
             )
             _write_catalog(catalog)
+    _reset_known_models_cache()
+
+
+def _weightless_local_dir(model_id: str) -> Path:
+    """The empty owned directory a weightless model records as `local_dir`."""
+    return _catalog_dir() / "local" / model_id
+
+
+def _register_weightless(
+    model_id: str,
+    venv_path: Path,
+    download_spec: _BundledDownloadSpec,
+) -> None:
+    """Create the empty owned `local_dir` and commit the catalog row.
+
+    There is no download, so no storage-cache lock: nothing under
+    `weights/` is created that a concurrent cleaner could misclassify.
+    The directory exists so every "model files are present" check stays
+    meaningful without a weightless special case.
+    """
+    local_root = _catalog_dir() / "local"
+    _ensure_owned_directory(local_root, private=True)
+    local_dir = _weightless_local_dir(model_id)
+    _ensure_owned_directory(local_dir, private=True)
+    with _CATALOG_WRITE_LOCK:
+        catalog = _read_catalog()
+        replacement = {
+            "pulled_at": datetime.now(timezone.utc).isoformat(),
+            "weights": "none",
+            "local_dir": str(local_dir),
+            "venv_path": str(venv_path),
+            "python_path": str(venv_python(venv_path)),
+            "enabled": True,
+            "artifact_provenance": copy.deepcopy(
+                list(download_spec.artifact_provenance or ())
+            ),
+        }
+        catalog[model_id] = _preserve_operator_state(
+            replacement,
+            catalog.get(model_id),
+        )
+        _write_catalog(catalog)
     _reset_known_models_cache()
 
 

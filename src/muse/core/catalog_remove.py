@@ -35,8 +35,9 @@ def _strict_owned_purge_path(
     *,
     field_name: str,
     model_id: str,
+    root_label: str = "venv",
 ) -> Path:
-    """Resolve a venv target and require this model's exact owned directory."""
+    """Resolve a target and require this model's exact owned directory."""
     try:
         resolved_root = root.expanduser().resolve()
         resolved_path = Path(raw_path).expanduser().resolve()
@@ -44,7 +45,7 @@ def _strict_owned_purge_path(
     except (TypeError, ValueError, OSError) as exc:
         raise CatalogError(
             f"refusing to purge model {model_id!r}: catalog {field_name} "
-            "does not resolve inside the owned venv root"
+            f"does not resolve inside the owned {root_label} root"
         ) from exc
     if relative.parts != (model_id,):
         expected_path = resolved_root / model_id
@@ -177,6 +178,7 @@ def _remove_locked(model_id: str, *, purge: bool = False) -> None:
         catalog entry references that ownership unit. Legacy bundled pulls
         stored in the shared HF cache (`~/.cache/huggingface`) are left alone;
         Muse does not own that location.
+      - rmtree a weightless model's empty owned `<catalog>/local/<id>` dir.
 
     Tolerates either path being already gone. Once catalog removal commits,
     every independent owned target is attempted; unsafe or failed filesystem
@@ -189,6 +191,7 @@ def _remove_locked(model_id: str, *, purge: bool = False) -> None:
     """
     venv_target: Path | None = None
     weights_target: Path | None = None
+    local_target: Path | None = None
     with _CATALOG_WRITE_LOCK:
         catalog = _read_catalog()
         entry = catalog.get(model_id, {}) or {}
@@ -202,7 +205,17 @@ def _remove_locked(model_id: str, *, purge: bool = False) -> None:
                     field_name="venv_path",
                     model_id=model_id,
                 )
-            if local_dir:
+            if local_dir and entry.get("weights") == "none":
+                # A weightless model's empty owned directory; never a
+                # shared weights cache, so no cross-reference check.
+                local_target = _strict_owned_purge_path(
+                    local_dir,
+                    _catalog_dir() / "local",
+                    field_name="local_dir",
+                    model_id=model_id,
+                    root_label="local",
+                )
+            elif local_dir:
                 weights_target = _owned_weights_purge_path(
                     local_dir,
                     _catalog_dir() / "weights",
@@ -255,6 +268,15 @@ def _remove_locked(model_id: str, *, purge: bool = False) -> None:
                 venv_target,
                 model_id=model_id,
                 label="venv",
+            )
+        except CatalogError as exc:
+            failures.append(str(exc))
+    if local_target is not None:
+        try:
+            _purge_owned_directory(
+                local_target,
+                model_id=model_id,
+                label="local dir",
             )
         except CatalogError as exc:
             failures.append(str(exc))
