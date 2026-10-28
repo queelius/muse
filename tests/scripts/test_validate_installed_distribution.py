@@ -28,7 +28,7 @@ class _FakeDistribution:
         self.version = "1.2.3"
         self.metadata = {"Requires-Python": ">=3.10"}
         self.requires = [
-            "mcp<2,>=1.8.0",
+            "mcp<2,>=1.19",
             "sse-starlette<3.1.0,>=3.0.0",
             "requests",
         ]
@@ -74,5 +74,5 @@ def test_validate_distribution_reports_metadata_and_data_errors(tmp_path):
     assert any("curated.yaml" in error for error in errors)
     assert any("console script" in error for error in errors)
     assert any("Requires-Python" in error for error in errors)
-    assert any("mcp>=1.8.0,<2" in error for error in errors)
+    assert any("mcp>=1.19,<2" in error for error in errors)
     assert any("sse-starlette>=3.0.0,<3.1.0" in error for error in errors)

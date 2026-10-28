@@ -46,7 +46,7 @@ def _to_pil(frame: Any):
     import numpy as np
     arr = np.asarray(frame)
     if arr.ndim == 2:
-        return Image.fromarray(arr.astype(np.uint8), mode="L")
+        return Image.fromarray(arr.astype(np.uint8))
     if arr.dtype != np.uint8:
         if arr.max() <= 1.0:
             arr = (arr * 255).clip(0, 255).astype(np.uint8)

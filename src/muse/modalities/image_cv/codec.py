@@ -59,8 +59,9 @@ def encode_depth_png16(depth: Any) -> tuple[bytes, float, float]:
     else:
         norm = np.zeros_like(arr)
     quantized = (norm * 65535.0).clip(0, 65535).astype(np.uint16)
-    # PIL's "I;16" mode is 16-bit unsigned grayscale.
-    img = Image.fromarray(quantized, mode="I;16")
+    # A uint16 array becomes mode "I;16" (16-bit unsigned grayscale); Pillow 13
+    # removed fromarray's mode argument.
+    img = Image.fromarray(quantized)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue(), lo, hi

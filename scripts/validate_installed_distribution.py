@@ -69,11 +69,11 @@ def validate_distribution(
     normalized = [requirement.replace(" ", "").lower() for requirement in requirements]
     if not any(
         requirement.startswith("mcp")
-        and ">=1.8.0" in requirement
+        and ">=1.19" in requirement
         and "<2" in requirement
         for requirement in normalized
     ):
-        errors.append("artifact metadata lacks the required mcp>=1.8.0,<2 bound")
+        errors.append("artifact metadata lacks the required mcp>=1.19,<2 bound")
     if not any(
         requirement.startswith("sse-starlette")
         and ">=3.0.0" in requirement
