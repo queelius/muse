@@ -160,6 +160,7 @@ A snapshot of the defaults:
 | `limits.segmentation_max_input_side` | `MUSE_SEGMENTATION_MAX_INPUT_SIDE` | 2048 |
 | `limits.upscale_max_input_side` | `MUSE_UPSCALE_MAX_INPUT_SIDE` | 1024 |
 | `limits.vectorization_max_input_side` | `MUSE_VECTORIZATION_MAX_INPUT_SIDE` | 2048 |
+| `limits.pixelart_max_input_side` | `MUSE_PIXELART_MAX_INPUT_SIDE` | 4096 |
 | `limits.model_3d_input_max_bytes` | `MUSE_3D_INPUT_MAX_BYTES` | 20971520 (20 MB) |
 | `limits.moderations_max_batch` | `MUSE_MODERATIONS_MAX_BATCH` | 1024 |
 | `limits.moderations_max_chars_per_item` | `MUSE_MODERATIONS_MAX_CHARS_PER_ITEM` | 100000 |

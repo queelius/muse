@@ -16,7 +16,10 @@ Input changes against the route's own schema:
     route's modality (not an ``enum``: clients validate against a cached
     schema, which would reject a model enabled mid-session);
   - ``stream`` is removed and always sent as false (MCP results are whole);
-  - optional ``out_path``, and ``preview`` on image-producing routes.
+  - optional ``out_path``, and ``preview`` on image-producing routes;
+  - a DISCOVERY ``mcp_defaults`` entry ({wire field: value}) becomes that
+    property's ``default`` and is sent when the caller omits the field (e.g.
+    a zip ``response_format`` whose bundle keeps file names consistent).
 
 Outputs never come back inline: binary bodies and every base64 (or data:
 URL) string at a DISCOVERY ``media_fields`` path, or in a sibling ``url``,
@@ -98,6 +101,7 @@ class GeneratedTool:
     fixed: dict = field(default_factory=dict)   # body values always sent
     image_output: bool = False
     aliases: dict = field(default_factory=dict)  # schema name -> wire name
+    defaults: dict = field(default_factory=dict)  # wire name -> value when omitted
 
 
 # ---- schema generation ----
@@ -182,7 +186,8 @@ def _is_image_output(modality: str, route: dict) -> bool:
     return modality.startswith("image/") and bool(route.get("media_fields"))
 
 
-def _description(mod: dict, route: dict, models: list[dict], from_openapi: bool) -> str:
+def _description(mod: dict, route: dict, models: list[dict], from_openapi: bool,
+                 defaults: dict | None = None) -> str:
     lines = [mod.get("summary") or f"muse {mod['modality']}", ""]
     compat = f" (follows {route['compat']})" if route.get("compat") else ""
     lines.append(f"Route: {route['method']} {route['path']}{compat}.")
@@ -195,6 +200,9 @@ def _description(mod: dict, route: dict, models: list[dict], from_openapi: bool)
     if not from_openapi:
         lines.append("The server publishes no request schema for this route; the "
                      "fields come from its example and extra fields pass through.")
+    if defaults:
+        lines.append("This tool's defaults differ from the HTTP route's: " + ", ".join(
+            f"{k}={json.dumps(v)}" for k, v in defaults.items()) + ".")
     if _has_media(route):
         lines.append("Media outputs are written to local files (out_path, else "
                      "MUSE_MCP_OUTPUT_DIR); the result links them.")
@@ -226,6 +234,11 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
         props.update(_file_props(name, many, was_required))
         if was_required:
             required_files.append(name)
+    defaults = dict(route.get("mcp_defaults") or {})
+    for wire, value in defaults.items():
+        name = next((n for n, w in aliases.items() if w == wire), wire)
+        if isinstance(props.get(name), dict):
+            props[name]["default"] = value
     fixed = {}
     if "stream" in props:
         props.pop("stream")
@@ -257,11 +270,12 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
               "required": sorted(set(required)),
               "additionalProperties": bool(base.get("additionalProperties", not from_openapi))}
     tool = types.Tool(name=route["mcp_tool"],
-                      description=_description(mod, route, models, from_openapi),
+                      description=_description(mod, route, models, from_openapi, defaults),
                       inputSchema=schema, outputSchema=OUTPUT_SCHEMA)
     return GeneratedTool(name=route["mcp_tool"], tool=tool, route=copy.deepcopy(route),
                          modality=mod["modality"], required_files=tuple(required_files),
-                         fixed=fixed, image_output=image_output, aliases=aliases)
+                         fixed=fixed, image_output=image_output, aliases=aliases,
+                         defaults=defaults)
 
 
 def generate_tools(capabilities: dict, openapi: dict) -> list[GeneratedTool]:
@@ -393,7 +407,8 @@ def call_generated(client: Any, gen: GeneratedTool, args: dict) -> list[dict]:
     method = route["method"].upper()
     multipart = route.get("request_content_type") == "multipart/form-data"
     parts = _take_files(gen, args, multipart)
-    body = {gen.aliases.get(k, k): v for k, v in args.items() if v is not None}
+    body = {**gen.defaults,
+            **{gen.aliases.get(k, k): v for k, v in args.items() if v is not None}}
     if method == "GET":
         resp = client.call(route, params=body)
     elif multipart:

@@ -48,6 +48,20 @@ def test_malformed_text_media_fields_skipped(tmp_path, bad):
     assert "audio/x" not in modality_discovery([tmp_path])
 
 
+def test_route_may_declare_mcp_defaults(tmp_path):
+    route = ROUTE[:-1] + ', "mcp_defaults": {"response_format": "zip", "n": 1}}'
+    _pkg(tmp_path, f'DISCOVERY = {{"summary": "s", "use_for": [], "not_for": [], "routes": [{route}]}}\n')
+    got = modality_discovery([tmp_path])["audio/x"]["routes"][0]
+    assert got["mcp_defaults"] == {"response_format": "zip", "n": 1}
+
+
+@pytest.mark.parametrize("bad", ['["zip"]', '{"f": [1]}', '{"f": None}', '{1: "zip"}', '{"": 1}'])
+def test_malformed_mcp_defaults_skipped(tmp_path, bad):
+    route = ROUTE[:-1] + f', "mcp_defaults": {bad}}}'
+    _pkg(tmp_path, f'DISCOVERY = {{"summary": "s", "use_for": [], "not_for": [], "routes": [{route}]}}\n')
+    assert "audio/x" not in modality_discovery([tmp_path])
+
+
 @pytest.mark.parametrize("body", [
     'DISCOVERY = {"summary": "s", "use_for": [], "not_for": []}\n',
     f'DISCOVERY = {{"summary": 1, "use_for": [], "not_for": [], "routes": [{ROUTE}]}}\n',

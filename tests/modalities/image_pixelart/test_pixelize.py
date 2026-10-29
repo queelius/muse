@@ -632,9 +632,15 @@ def test_never_passes_mode_to_fromarray():
                 assert len(node.args) <= 1, path
 
 
-def test_package_init_is_import_light_and_not_a_modality_yet():
+def test_package_init_imports_only_the_light_modules():
+    """The package is a live modality now (Task 4); its top-level imports are
+    only the wire modules, never the numpy/Pillow library (see also
+    test_discovery.py::test_package_import_is_light)."""
     tree = ast.parse((PKG / "__init__.py").read_text())
-    assert not [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    names = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
-             if isinstance(t, ast.Name)}
-    assert "MODALITY" not in names
+    mods = {n.module for n in tree.body if isinstance(n, ast.ImportFrom)}
+    assert not [n for n in tree.body if isinstance(n, ast.Import)]
+    assert mods == {
+        "muse.modalities.image_pixelart.client",
+        "muse.modalities.image_pixelart.protocol",
+        "muse.modalities.image_pixelart.routes",
+    }

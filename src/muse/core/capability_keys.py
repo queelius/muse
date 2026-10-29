@@ -22,7 +22,7 @@ PUBLIC_KEYS: frozenset[str] = frozenset({
     "source_language", "target_language", "context_length", "device",
     "memory_gb", "quality_axes", "primary_score", "question_types",
     "input_modalities", "image_size", "metric_depth", "word_timestamps",
-    "calibrated", "lora_adapter", "base_model", "supported_scales",
+    "calibrated", "lora_adapter", "base_model", "supported_scales", "supported_tile_sizes",
     "safe_labels", "languages", "multi_label", "num_labels", "output_format",
     "output_mime_type", "static_svg_only", "voice_cloning", "pronunciation_kinds",
 })

@@ -37,6 +37,8 @@ jobs:
           - vitpose-base-simple
           - detr-resnet-50
           - ast-audioset
+          # Weightless (Pillow + numpy, CPU): exercises the venv-only pull.
+          - pixel-tools
           # Resolver curations below run a real 1-second inference probe so
           # TorchCodec/FFmpeg decoding is tested, not merely model imports.
           - utmos

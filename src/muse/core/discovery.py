@@ -300,13 +300,29 @@ def _valid_text_media(value: Any) -> bool:
     )
 
 
+def _valid_mcp_defaults(value: Any) -> bool:
+    """Optional ``mcp_defaults``: {request field: scalar} that the generated
+    MCP tool sends when the caller omits the field (e.g. a zip
+    ``response_format`` whose bundle keeps cross-file references intact,
+    where per-file outputs would be saved under content-hash names)."""
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and k and isinstance(v, (str, int, float, bool))
+        for k, v in value.items()
+    )
+
+
+_OPTIONAL_ROUTE_KEYS = {"text_media_fields", "mcp_defaults"}
+
+
 def _valid_discovery_route(route: Any) -> bool:
     if not isinstance(route, dict):
         return False
     required = set(_DISCOVERY_ROUTE_KEYS) | {"request_content_type", "compat"}
-    if set(route) - {"text_media_fields"} != required:
+    if set(route) - _OPTIONAL_ROUTE_KEYS != required:
         return False
     if "text_media_fields" in route and not _valid_text_media(route["text_media_fields"]):
+        return False
+    if "mcp_defaults" in route and not _valid_mcp_defaults(route["mcp_defaults"]):
         return False
     if not all(isinstance(route[k], t) for k, t in _DISCOVERY_ROUTE_KEYS.items()):
         return False

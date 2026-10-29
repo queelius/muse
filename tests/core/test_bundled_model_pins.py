@@ -39,6 +39,12 @@ def test_bundled_hugging_face_artifacts_use_immutable_revisions():
     assert manifests
 
     for model_id, manifest in manifests.items():
+        if manifest.get("weights") == "none":
+            # Weightless scripts download nothing and claim no HF revision
+            # (their provenance is a code receipt over the script source).
+            for key in ("hf_repo", "revision", "hf_artifacts", "allow_patterns"):
+                assert not manifest.get(key), f"{model_id}: weightless with {key}"
+            continue
         repo_id = manifest.get("hf_repo")
         revision = manifest.get("revision")
         assert isinstance(repo_id, str) and repo_id, model_id
