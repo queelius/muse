@@ -84,6 +84,11 @@ class PixelizeOptions:
     - ``cleanup``: None (default) cleans orphan pixels only when the grid was
       snapped (``grid.cell > 1``), so deliberate 1 px detail in true 1:1 art
       survives; True / False force it on / off.
+    - ``max_preview_side``: when set, a preview whose long side (art size x
+      ``preview_scale``) would exceed it raises ``PreviewTooLargeError``
+      before the preview (or, when the art size is known up front, any
+      other work) is allocated. The route sets it to
+      ``limits.pixelart_max_input_side``.
     """
 
     grid: int | None  # None = auto-detect; 1 = no grid snap / downscale
@@ -96,6 +101,18 @@ class PixelizeOptions:
     seamless: bool = False
     sheet: tuple[int, int] | None = None  # (columns, rows)
     preview_scale: int = 1
+    max_preview_side: int | None = None
+
+
+class PreviewTooLargeError(ValueError):
+    """The nearest-neighbour preview would exceed ``max_preview_side``."""
+
+    def __init__(self, width: int, height: int, scale: int, cap: int) -> None:
+        self.width, self.height, self.scale, self.cap = width, height, scale, cap
+        super().__init__(
+            f"preview {width * scale}x{height * scale} ({width}x{height} art at "
+            f"preview_scale {scale}) exceeds max side {cap}"
+        )
 
 
 @dataclass
@@ -131,6 +148,8 @@ def _validate(opts: PixelizeOptions, width: int, height: int) -> None:
         raise ValueError("palette must be a PaletteSpec (see parse_palette)")
     if opts.grid is not None and (not _is_int(opts.grid) or opts.grid < 1):
         raise ValueError("grid must be 'auto' or an integer of at least 1")
+    if opts.grid is not None and (opts.grid > width or opts.grid > height):
+        raise ValueError(f"grid {int(opts.grid)} exceeds image size {width}x{height}")
     if opts.target_size is not None:
         tw, th = _pair(opts.target_size, "target_size")
         if opts.grid is not None:
@@ -157,6 +176,17 @@ def _validate(opts: PixelizeOptions, width: int, height: int) -> None:
         raise ValueError("outline must be none, dark or #rrggbb")
     if not _is_int(opts.preview_scale) or not 1 <= opts.preview_scale <= MAX_PREVIEW_SCALE:
         raise ValueError(f"preview_scale must be an integer in 1..{MAX_PREVIEW_SCALE}")
+    cap = opts.max_preview_side
+    if cap is not None and (not _is_int(cap) or cap < 1):
+        raise ValueError("max_preview_side must be a positive integer or unset")
+
+
+def _check_preview(art_w: int, art_h: int, opts: PixelizeOptions) -> None:
+    """Raise ``PreviewTooLargeError`` when the preview of ``art_w`` x ``art_h``
+    art would exceed ``opts.max_preview_side`` on its long side."""
+    cap, s = opts.max_preview_side, int(opts.preview_scale)
+    if cap is not None and max(art_w, art_h) * s > cap:
+        raise PreviewTooLargeError(int(art_w), int(art_h), s, int(cap))
 
 
 # --------------------------------------------------------------- grid detection
@@ -558,12 +588,16 @@ def _mode_per_cell(cid: np.ndarray, labels: np.ndarray, weights: np.ndarray,
 
 
 def _vote_labels(px: np.ndarray, pal: np.ndarray) -> np.ndarray:
-    """Approximate nearest-palette labels for voting, in O(N).
+    """Approximate nearest-palette labels for the per-cell vote, in O(N).
 
     A pixel that is exactly a palette colour gets that colour's index; any
-    other pixel is looked up in a 32x32x32 table of OKLab-nearest palette
-    indices. Only the per-cell vote uses this; final colours are mapped with
-    the exact ``nearest_palette_index``.
+    other pixel gets the palette index OKLab-nearest to the centre of its
+    32x32x32 RGB bin (a lookup table), which can differ from the pixel's own
+    nearest colour near a bin edge. With a fixed palette the winning label
+    IS the cell's colour (the LUT picks the voted cell colour; no exact
+    re-mapping follows). With the fine median-cut labels of ``_fine_labels``
+    the label only groups pixels; the cell colour is the mean of its winning
+    pixels, later mapped exactly by ``nearest_palette_index``.
     """
     keys = pack_rgb(px)
     pal_keys = pack_rgb(pal)
@@ -811,6 +845,10 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
     rgba = np.array(img.convert("RGBA"), dtype=np.uint8)
     h, w = rgba.shape[:2]
     _validate(opts, w, h)
+    if opts.target_size is not None:  # the art size is known before any work
+        _check_preview(*(int(v) for v in opts.target_size), opts)
+    elif opts.grid == 1 and opts.sheet is None:
+        _check_preview(w, h, opts)
     rgba[rgba[..., 3] == 0] = 0
 
     x_regions, y_regions = _sheet_regions(w, h, opts.sheet)
@@ -839,6 +877,7 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
     xmap, xw, cw, x_starts = _axis_map(w, x_spans)
     ymap, yw, ch, y_starts = _axis_map(h, y_spans)
     gw, gh = cw * len(x_spans), ch * len(y_spans)
+    _check_preview(gw, gh, opts)  # before the vote and the preview allocate
 
     # 2 + 3. vote per cell, then map to the palette (nearest in OKLab)
     spec = opts.palette

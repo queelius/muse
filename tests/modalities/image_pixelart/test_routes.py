@@ -207,6 +207,63 @@ def test_pixelize_preview_scale_bounds(client, scale):
     assert r.status_code == 400 and err(r) == "invalid_parameter"
 
 
+def test_pixelize_preview_over_side_cap_413(client, monkeypatch):
+    # 32x32 art at preview_scale 3 is a 96 px preview: over a 95 px cap.
+    import muse.modalities.image_pixelart.pixelize as pz
+
+    def boom(*a, **k):  # the preview check must run before the grid vote
+        raise AssertionError("_snap ran for an over-cap preview")
+
+    monkeypatch.setattr(pz, "_snap", boom)
+    monkeypatch.setenv("MUSE_PIXELART_MAX_INPUT_SIDE", "95")
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(2))},
+                    data={"grid": "2", "preview_scale": "3"})
+    assert r.status_code == 413, r.text
+    assert err(r) == "input_too_large"
+    msg = r.json()["error"]["message"]
+    assert "96x96" in msg and "95" in msg
+    assert "limits.pixelart_max_input_side" in msg and "MUSE_PIXELART_MAX_INPUT_SIDE" in msg
+
+
+def test_pixelize_preview_at_side_cap_ok(client, monkeypatch):
+    monkeypatch.setenv("MUSE_PIXELART_MAX_INPUT_SIDE", "96")
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(2))},
+                    data={"grid": "2", "preview_scale": "3", "response_format": "png"})
+    assert r.status_code == 200, r.text
+    assert Image.open(io.BytesIO(r.content)).size == (96, 96)
+
+
+def test_pixelize_target_size_preview_over_cap_rejected_early(client, monkeypatch):
+    import muse.modalities.image_pixelart.pixelize as pz
+
+    def boom(*a, **k):
+        raise AssertionError("background removal ran for an over-cap preview")
+
+    monkeypatch.setattr(pz, "_remove_background", boom)
+    monkeypatch.setenv("MUSE_PIXELART_MAX_INPUT_SIDE", "64")
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(2))},
+                    data={"target_size": "40x20", "preview_scale": "2"})
+    assert r.status_code == 413 and err(r) == "input_too_large"
+    assert "80x40" in r.json()["error"]["message"]
+
+
+def test_pixelize_sheet_preview_over_cap_413(client, monkeypatch):
+    # A 2x1 sheet of 32x32 cells at grid 2 is 32x16 art; scale 4 -> 128x64.
+    monkeypatch.setenv("MUSE_PIXELART_MAX_INPUT_SIDE", "127")
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(2, 32, 16))},
+                    data={"grid": "2", "sheet": "2x1", "preview_scale": "4",
+                          "background": "none"})
+    assert r.status_code == 413 and err(r) == "input_too_large"
+    assert "128x64" in r.json()["error"]["message"]
+
+
+def test_pixelize_grid_larger_than_image_400(client):
+    r = client.post("/v1/images/pixelize", files={"image": png(sprite(64, 64))},
+                    data={"grid": "100"})
+    assert r.status_code == 400 and err(r) == "invalid_parameter"
+    assert r.json()["error"]["message"] == "grid 100 exceeds image size 64x64"
+
+
 def test_pixelize_unknown_model_404(client):
     r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(4))},
                     data={"model": "nope"})
@@ -363,6 +420,13 @@ def test_autotile_fill_oversize_413(client, monkeypatch):
     r = client.post("/v1/images/autotile", files={"fill": png(texture(side=48))},
                     data={"tile_size": "16"})
     assert r.status_code == 413 and err(r) == "input_too_large"
+
+
+def test_autotile_negative_seed_400_names_field(client):
+    r = client.post("/v1/images/autotile", files={"fill": png(texture())},
+                    data={"tile_size": "16", "seed": "-1"})
+    assert r.status_code == 400 and err(r) == "invalid_parameter"
+    assert "seed" in r.json()["error"]["message"]
 
 
 def test_autotile_seeded_deterministic(client):

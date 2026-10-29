@@ -3,8 +3,9 @@
 Both mirror /v1/images/upscale: files arrive as multipart uploads read
 through the shared bounded decoder (``limits.image_input_max_bytes``), the
 other fields as Form parameters validated here (400 ``invalid_parameter``).
-Inputs larger than ``limits.pixelart_max_input_side`` on either side are 413
-``input_too_large``; oversize bytes are 413 ``payload_too_large``. Any
+Inputs larger than ``limits.pixelart_max_input_side`` on either side, and
+pixelize previews whose long side (art size x ``preview_scale``) would exceed
+it, are 413 ``input_too_large``; oversize bytes are 413 ``payload_too_large``. Any
 ValueError from the library is a client error (400), never a 500.
 
 The CPU work runs off the event loop through ``run_native_offload`` and
@@ -171,13 +172,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         backend = registry.get_or_404(MODALITY, model)
 
         from muse.modalities.image_pixelart.codec import encode_pixelize, png_bytes
-        from muse.modalities.image_pixelart.pixelize import PixelizeOptions
+        from muse.modalities.image_pixelart.pixelize import (
+            PixelizeOptions,
+            PreviewTooLargeError,
+        )
 
         opts = PixelizeOptions(
             grid=grid_value, target_size=target, palette=spec,
             background=background.strip(), alpha_threshold=alpha_threshold,
             cleanup=cleanup, outline=outline.strip(), seamless=seamless,
             sheet=sheet_value, preview_scale=preview_scale,
+            max_preview_side=_max_input_side(),
         )
         source, error = await _decode(image, "image")
         if error is not None:
@@ -191,6 +196,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         try:
             out = await _run(backend, _call, [source])
+        except PreviewTooLargeError as e:
+            return error_response(
+                413, "input_too_large",
+                f"{e} (limits.pixelart_max_input_side; set {_SIDE_ENV} to raise)",
+            )
         except ValueError as e:
             return error_response(400, "invalid_parameter", str(e))
         except Exception:  # noqa: BLE001

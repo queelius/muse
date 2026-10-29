@@ -280,8 +280,8 @@ def _geometry(style: EdgeStyle, t: int) -> _Geometry:
     if (not isinstance(rough, (int, float, np.integer, np.floating)) or isinstance(rough, bool)
             or not math.isfinite(rough) or not 0.0 <= rough <= 1.0):
         raise ValueError("roughness must be a number in 0..1")
-    if not _is_int(style.seed):
-        raise ValueError("seed must be an integer")
+    if not _is_int(style.seed) or style.seed < 0:
+        raise ValueError("seed must be a non-negative integer")
     amp = float(rough) * margin / 2.0
     wander = math.ceil(amp)
     # Every quadrant border a neighbour shares must stay clear of the rounding
