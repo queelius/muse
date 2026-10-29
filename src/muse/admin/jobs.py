@@ -233,7 +233,9 @@ class JobStore:
 
             process = subprocess.Popen(cmd, **popen_kwargs)
             pid = _concrete_safe_id(getattr(process, "pid", None))
-            pgid = _validated_isolated_group(pid)
+            pgid = _validated_isolated_group(
+                pid, new_session=popen_kwargs.get("start_new_session") is True,
+            )
             job.process = process
             job.process_pid = pid
             job.process_group_id = pgid
@@ -562,9 +564,13 @@ def _thread_stopped(thread: Any) -> bool:
 _concrete_safe_id = concrete_safe_id
 
 
-def _validated_isolated_group(pid: int | None) -> int | None:
+def _validated_isolated_group(
+    pid: int | None, *, new_session: bool = False,
+) -> int | None:
     """Return the child's isolated PGID, or None when it cannot be proven."""
-    return validated_isolated_group(pid, os_name=os.name, label=_PROCESS_LABEL)
+    return validated_isolated_group(
+        pid, os_name=os.name, label=_PROCESS_LABEL, new_session=new_session,
+    )
 
 
 def _supports_pinned_target(target: _ProcessTarget) -> bool:
@@ -651,10 +657,11 @@ def _signal_target(
                 return False
             if not force and state is not True:
                 return state is False
-            # ESRCH with the PID==PGID leader still pinned proves the group
+            # ESRCH/EPERM (macOS: every member is a zombie) while the
+            # PID==PGID leader is still pinned and exited proves the group
             # has no signalable members left, which also counts as delivered.
             delivered = signal_isolated_group(
-                target.pid, target.pgid, sig, label=_PROCESS_LABEL,
+                target.pid, target.pgid, sig, label=_PROCESS_LABEL, pinned=True,
             )
             if delivered and force:
                 target.final_signal_delivered = True

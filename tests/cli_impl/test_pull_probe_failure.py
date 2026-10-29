@@ -18,6 +18,7 @@ from muse.core.catalog import (
     _reset_known_models_cache,
     _reset_read_catalog_cache,
 )
+from tests import darwin_process_semantics
 
 
 @pytest.fixture(autouse=True)
@@ -102,8 +103,8 @@ def test_pull_returns_the_installed_id_for_a_bundled_model(tmp_catalog):
         assert catalog.pull("kokoro-82m") == "kokoro-82m"
 
 
-@pytest.mark.parametrize("wnowait", [True, False], ids=["waitid", "no-waitid"])
-def test_admin_pull_job_fails_when_the_cli_exits_nonzero(wnowait, monkeypatch):
+@pytest.mark.parametrize("platform", darwin_process_semantics.PLATFORMS)
+def test_admin_pull_job_fails_when_the_cli_exits_nonzero(platform, monkeypatch):
     """The admin pull job runs `muse pull` as a subprocess, so the new
     nonzero exit marks the job failed with the CLI's stderr.
 
@@ -111,11 +112,9 @@ def test_admin_pull_job_fails_when_the_cli_exits_nonzero(wnowait, monkeypatch):
     ``os.waitid`` there), which used to fail every admin job as "subprocess
     identity is ambiguous".
     """
-    import os
     import sys
 
-    if not wnowait:
-        monkeypatch.delattr(os, "waitid", raising=False)
+    darwin_process_semantics.apply_platform(platform, monkeypatch)
 
     from muse.admin import operations
     from muse.admin.jobs import JobStore

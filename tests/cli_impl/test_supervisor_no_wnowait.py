@@ -18,6 +18,7 @@ import pytest
 from muse.cli_impl import supervisor
 from muse.cli_impl.supervisor import WorkerSpec
 from muse.core import resource_registry
+from tests import darwin_process_semantics
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 
@@ -43,12 +44,10 @@ time.sleep(60)
 """
 
 
-@pytest.fixture(params=["waitid", "no-waitid"])
+@pytest.fixture(params=darwin_process_semantics.PLATFORMS)
 def platform(request, monkeypatch):
-    if request.param == "no-waitid":
-        monkeypatch.delattr(os, "waitid", raising=False)
-    elif not callable(getattr(os, "waitid", None)):
-        pytest.skip("platform has no waitid")
+    """``+darwin`` adds macOS's zombie killpg/getpgid rules (EPERM / ESRCH)."""
+    darwin_process_semantics.apply_platform(request.param, monkeypatch)
     return request.param
 
 

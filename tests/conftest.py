@@ -23,3 +23,17 @@ def _isolate_host_configuration(tmp_path, monkeypatch):
     config.reset_config()
     _reset_known_models_cache()
     _reset_read_catalog_cache()
+
+
+@pytest.fixture(autouse=True)
+def _darwin_process_semantics_everywhere(monkeypatch):
+    """``MUSE_TEST_DARWIN_PROCESS_SEMANTICS=1``: run the suite with macOS's
+    zombie rules for ``killpg`` / ``getpgid`` (see
+    ``tests/darwin_process_semantics.py``)."""
+    from tests import darwin_process_semantics
+
+    if darwin_process_semantics.globally_enabled():
+        if not darwin_process_semantics.supported():
+            pytest.skip("darwin process-semantics emulation needs Linux /proc")
+        darwin_process_semantics.install(monkeypatch)
+    yield

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from muse.core import owned_process as op
+from tests import darwin_process_semantics
 
 
 # WNOWAIT, or psutil zombie status where the interpreter lacks waitid.
@@ -110,7 +111,8 @@ class TestSignalIsolatedGroup:
 
     @pytest.mark.parametrize("effect,expected", [
         (None, True),
-        (ProcessLookupError, True),
+        # Without pinned=True neither ESRCH nor EPERM proves anything.
+        (ProcessLookupError, False),
         (PermissionError, False),
     ])
     def test_delivery_outcomes(self, effect, expected):
@@ -120,6 +122,155 @@ class TestSignalIsolatedGroup:
                 4242, 4242, signal.SIGTERM, label="t", still_owned=lambda: True,
             ) is expected
         killpg.assert_called_once_with(4242, signal.SIGTERM)
+
+    @pytest.mark.parametrize("effect", [ProcessLookupError, PermissionError])
+    @pytest.mark.parametrize("observed,expected", [
+        (True, True),                          # pinned zombie: proven empty
+        (False, False),                        # live leader: fail closed
+        (ChildProcessError("reaped"), False),  # reaped elsewhere
+        (OSError("no observer"), False),
+        (InterruptedError(), False),
+    ])
+    def test_pinned_failure_counts_only_for_an_exited_pinned_leader(
+        self, effect, observed, expected,
+    ):
+        calls = []
+
+        def observe(pid):
+            calls.append(pid)
+            if isinstance(observed, BaseException):
+                raise observed
+            return observed
+
+        with patch("muse.core.owned_process.os.getpgrp", return_value=31337), \
+             patch("muse.core.owned_process.os.killpg", side_effect=effect), \
+             patch.object(op, "leader_exited_nowait", side_effect=observe):
+            assert op.signal_isolated_group(
+                4242, 4242, signal.SIGKILL, label="t", pinned=True,
+            ) is expected
+        # Re-observed once, right after the failed signal.
+        assert calls == [4242]
+
+    def test_unpinned_failure_never_observes_the_leader(self):
+        with patch("muse.core.owned_process.os.getpgrp", return_value=31337), \
+             patch("muse.core.owned_process.os.killpg", side_effect=PermissionError), \
+             patch.object(op, "leader_exited_nowait") as observe:
+            assert op.signal_isolated_group(
+                4242, 4242, signal.SIGKILL, label="t",
+            ) is False
+        observe.assert_not_called()
+
+    def test_other_errors_fail_closed_even_when_pinned(self):
+        with patch("muse.core.owned_process.os.getpgrp", return_value=31337), \
+             patch("muse.core.owned_process.os.killpg", side_effect=OSError("EIO")), \
+             patch.object(op, "leader_exited_nowait", return_value=True):
+            assert op.signal_isolated_group(
+                4242, 4242, signal.SIGKILL, label="t", pinned=True,
+            ) is False
+
+
+@pytest.mark.skipif(
+    not darwin_process_semantics.supported(), reason="emulation reads Linux /proc",
+)
+class TestDarwinZombieSemantics:
+    """macOS kill/getpgid rules for zombies, emulated on Linux.
+
+    ``tests/darwin_process_semantics.py`` cites the XNU sources: killpg of a
+    group whose members are all zombies is EPERM, getpgid of a zombie is
+    ESRCH. Linux returns 0 and the group respectively.
+    """
+
+    @pytest.fixture(params=["waitid", "no-waitid"])
+    def platform(self, request, monkeypatch):
+        darwin_process_semantics.apply_platform(
+            f"{request.param}+darwin", monkeypatch,
+        )
+        return request.param
+
+    @staticmethod
+    def _zombie():
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"], **op.new_process_group_kwargs("posix"),
+        )
+        deadline = time.monotonic() + 10.0
+        while not op.leader_exited_nowait(process.pid):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        return process
+
+    def test_emulation_matches_xnu(self, platform):
+        process = self._zombie()
+        try:
+            with pytest.raises(PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with pytest.raises(PermissionError):
+                os.kill(-process.pid, signal.SIGKILL)
+            with pytest.raises(ProcessLookupError):
+                os.getpgid(process.pid)
+            os.kill(process.pid, 0)  # a zombie pid itself still accepts kill
+        finally:
+            process.wait(timeout=10.0)
+        with pytest.raises(ProcessLookupError):  # reaped: the group is gone
+            os.killpg(process.pid, signal.SIGKILL)
+
+    def test_emulation_still_signals_a_group_with_a_live_member(self, platform):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            **op.new_process_group_kwargs("posix"),
+        )
+        try:
+            assert os.getpgid(process.pid) == process.pid
+            os.killpg(process.pid, signal.SIGKILL)
+            assert process.wait(timeout=10.0) == -signal.SIGKILL
+        finally:
+            if process.returncode is None:
+                process.kill()
+                process.wait(timeout=10.0)
+
+    def test_final_signal_to_a_pinned_zombie_group_is_delivered(self, platform):
+        """The CI signature: 'could not deliver final cleanup signal'."""
+        process = self._zombie()
+        try:
+            pid = process.pid
+            assert op.signal_isolated_group(
+                pid, pid, op.kill_signal(), label="t", pinned=True,
+            ) is True
+            # Unpinned callers keep failing closed on the same EPERM.
+            assert op.signal_isolated_group(
+                pid, pid, op.kill_signal(), label="t",
+            ) is False
+            assert process.returncode is None  # never reaped by the check
+        finally:
+            process.wait(timeout=10.0)
+
+    def test_a_reaped_leader_is_never_proven(self, platform):
+        process = self._zombie()
+        pid = process.pid
+        process.wait(timeout=10.0)
+        assert op.signal_isolated_group(
+            pid, pid, op.kill_signal(), label="t", pinned=True,
+        ) is False
+
+    def test_zombie_group_is_validated_from_its_new_session_spawn(self, platform):
+        """The memory-route signature: a leader that exited before its group
+        was read must still be pinned, not left unvalidated."""
+        process = self._zombie()
+        try:
+            pid = process.pid
+            assert op.validated_isolated_group(
+                pid, os_name="posix", label="t", new_session=True,
+            ) == pid
+            # Without the new-session statement the zombie is unprovable.
+            assert op.validated_isolated_group(
+                pid, os_name="posix", label="t",
+            ) is None
+            assert process.returncode is None
+        finally:
+            process.wait(timeout=10.0)
+        # Reaped: nothing pins the PID any more.
+        assert op.validated_isolated_group(
+            pid, os_name="posix", label="t", new_session=True,
+        ) is None
 
 
 class TestObserveAndReap:
@@ -364,7 +515,9 @@ class TestObserveAndReap:
         assert op.reap_exited_leader(stuck, 4242, label="t") is None
 
     @pytest.mark.skipif(not _POSIX_WNOWAIT, reason="requires POSIX WNOWAIT")
-    def test_real_leader_stays_pinned_until_reaped(self):
+    @pytest.mark.parametrize("platform", darwin_process_semantics.PLATFORMS)
+    def test_real_leader_stays_pinned_until_reaped(self, platform, monkeypatch):
+        darwin_process_semantics.apply_platform(platform, monkeypatch)
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             **op.new_process_group_kwargs("posix"),
@@ -382,11 +535,15 @@ class TestObserveAndReap:
             while not op.leader_exited_nowait(pid):
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
-            # Observed, not reaped: the zombie still pins PID == PGID.
+            # Observed, not reaped: the zombie still pins PID == PGID. (macOS
+            # getpgid cannot read a zombie, so ask the validator, which falls
+            # back to the new-session spawn there.)
             assert process.returncode is None
-            assert os.getpgid(pid) == pgid
+            assert op.validated_isolated_group(
+                pid, os_name="posix", label="t", new_session=True,
+            ) == pgid
             assert op.signal_isolated_group(
-                pid, pgid, op.kill_signal(), label="t",
+                pid, pgid, op.kill_signal(), label="t", pinned=True,
             ) is True
             assert op.reap_exited_leader(process, pid, label="t") == -signal.SIGTERM
         finally:

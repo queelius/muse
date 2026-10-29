@@ -360,10 +360,12 @@ _concrete_worker_id = concrete_safe_id
 
 def _validated_worker_process_group(proc: Any) -> int | None:
     """Capture the child's isolated POSIX group immediately after spawn."""
+    # Workers are always spawned with start_new_session on POSIX.
     return validated_isolated_group(
         _concrete_worker_id(getattr(proc, "pid", None)),
         os_name=_OS_NAME,
         label="worker",
+        new_session=True,
     )
 
 
@@ -994,7 +996,9 @@ def _signal_worker_process(spec: WorkerSpec, proc: Any, sig: signal.Signals) -> 
         return False
     pid = _concrete_worker_id(getattr(proc, "pid", None))
     if _supports_pinned_worker_leader(proc, pid, spec.process_group_id):
-        return signal_isolated_group(pid, spec.process_group_id, sig, label="worker")
+        return signal_isolated_group(
+            pid, spec.process_group_id, sig, label="worker", pinned=True,
+        )
     if uses_exact_handle_fallback(proc, pid, spec.process_group_id, os_name=_OS_NAME):
         # Unpinnable without WNOWAIT: the poll above saw it unreaped.
         return signal_live_fallback_leader(
@@ -1043,9 +1047,11 @@ def _signal_worker_target(
             if not force and state is not True:
                 return state is False
             # With the unreaped PID==PGID leader still pinning identity,
-            # ESRCH proves there are no signalable members left.
+            # ESRCH/EPERM (macOS: every member is a zombie) proves there are
+            # no signalable members left.
             delivered = signal_isolated_group(
                 target.pid, target.process_group_id, sig, label="worker",
+                pinned=True,
             )
             if delivered and force:
                 target.final_signal_delivered = True

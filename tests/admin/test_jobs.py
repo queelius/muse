@@ -18,6 +18,7 @@ from muse.admin.jobs import (
     get_default_store,
     reset_default_store,
 )
+from tests import darwin_process_semantics
 
 
 class TestJobStore:
@@ -623,12 +624,10 @@ class TestNoWnowaitFallback:
     here runs the exact code path the macOS py3.12 CI job takes.
     """
 
-    @pytest.fixture(autouse=True, params=["waitid", "no-waitid"])
+    @pytest.fixture(autouse=True, params=darwin_process_semantics.PLATFORMS)
     def _platform(self, request, monkeypatch):
-        if request.param == "no-waitid":
-            monkeypatch.delattr(os, "waitid", raising=False)
-        elif not callable(getattr(os, "waitid", None)):
-            pytest.skip("platform has no waitid")
+        """``+darwin`` adds macOS's zombie killpg/getpgid rules."""
+        darwin_process_semantics.apply_platform(request.param, monkeypatch)
 
     def _spawn(self, store, code):
         import subprocess
@@ -719,8 +718,8 @@ class TestNoWnowaitFallback:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX zombie")
-@pytest.mark.parametrize("wnowait", [True, False], ids=["waitid", "no-waitid"])
-def test_child_that_exits_before_registration_reports_its_status(wnowait, monkeypatch):
+@pytest.mark.parametrize("platform", darwin_process_semantics.PLATFORMS)
+def test_child_that_exits_before_registration_reports_its_status(platform, monkeypatch):
     """A child can exit before its identity is read (seen under CI load):
     the job must still report the child's own exit status, not a registry
     failure, and leave no record behind."""
@@ -731,10 +730,7 @@ def test_child_that_exits_before_registration_reports_its_status(wnowait, monkey
 
     from muse.admin import jobs as jobs_mod
 
-    if not wnowait:
-        monkeypatch.delattr(os, "waitid", raising=False)
-    elif not callable(getattr(os, "waitid", None)):
-        pytest.skip("platform has no waitid")
+    darwin_process_semantics.apply_platform(platform, monkeypatch)
     real_register = jobs_mod.register_process
 
     def register_after_exit(**kwargs):

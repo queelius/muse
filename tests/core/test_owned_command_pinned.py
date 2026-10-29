@@ -16,17 +16,17 @@ import pytest
 
 from muse.core import owned_process
 from muse.core.owned_command import run_owned_command
+from tests import darwin_process_semantics
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 
 
-@pytest.fixture(params=["waitid", "no-waitid"])
+@pytest.fixture(params=darwin_process_semantics.PLATFORMS)
 def platform(request, monkeypatch):
-    if request.param == "no-waitid":
-        monkeypatch.delattr(os, "waitid", raising=False)
+    """``+darwin`` adds macOS's zombie killpg/getpgid rules (EPERM / ESRCH)."""
+    darwin_process_semantics.apply_platform(request.param, monkeypatch)
+    if request.param.startswith("no-waitid"):
         assert owned_process.can_observe_exit_without_reaping()
-    elif not callable(getattr(os, "waitid", None)):
-        pytest.skip("platform has no waitid")
     return request.param
 
 

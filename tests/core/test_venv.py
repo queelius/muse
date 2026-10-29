@@ -3,10 +3,12 @@ import errno
 import fcntl
 import io
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -28,6 +30,7 @@ from muse.core.venv import (
 from muse.core.pip_install import install_into_venv
 from muse.core.ports import find_free_port
 from muse.core.python_sources import install_python_sources
+from tests import darwin_process_semantics
 
 
 _TRELLIS_REVISION = "442aa1e1afb9014e80681d3bf604e8d728a86ee7"
@@ -884,11 +887,22 @@ class TestInstallIntoVenv:
         ).can_observe_exit_without_reaping(),
         reason="requires a non-reaping exit observer (WNOWAIT or psutil)",
     )
-    def test_completed_leader_cleans_term_ignoring_descendant(self, tmp_path):
+    @pytest.mark.parametrize("platform", darwin_process_semantics.PLATFORMS)
+    def test_completed_leader_cleans_term_ignoring_descendant(
+        self, tmp_path, platform, monkeypatch,
+    ):
         """A child-held file lock proves the exact descendant released state."""
+        darwin_process_semantics.apply_platform(platform, monkeypatch)
         ready_path = tmp_path / "owned-child.ready"
         lock_path = tmp_path / "owned-child.lock"
-        control_path = tmp_path / "owned-child.sock"
+        # AF_UNIX paths are capped at 104 bytes on macOS (108 on Linux), and
+        # the macOS CI tmp_path alone is 114 bytes, so the descendant's bind()
+        # failed there and the group was left with only its zombie leader.
+        socket_dir = Path(tempfile.mkdtemp(
+            prefix="muse-sock-", dir="/tmp" if os.path.isdir("/tmp") else None,
+        ))
+        control_path = socket_dir / "c.sock"
+        assert len(os.fsencode(control_path)) < 104
         script = (
             "import fcntl, os, signal, socket, sys, time\n"
             "child = os.fork()\n"
@@ -966,6 +980,7 @@ class TestInstallIntoVenv:
                     pass
             probe.close()
             runner.join(timeout=2.0)
+            shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 class TestFindFreePort:

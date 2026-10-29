@@ -107,9 +107,13 @@ class _CaptureReader:
 _concrete_safe_id = concrete_safe_id
 
 
-def _validated_isolated_group(pid: int | None) -> int | None:
+def _validated_isolated_group(
+    pid: int | None, *, new_session: bool = False,
+) -> int | None:
     """Return a child-owned POSIX process group only when fully proven."""
-    return validated_isolated_group(pid, os_name=_OS_NAME, label="installer")
+    return validated_isolated_group(
+        pid, os_name=_OS_NAME, label="installer", new_session=new_session,
+    )
 
 
 def _spawn_owned(
@@ -145,7 +149,9 @@ def _spawn_owned(
     return _OwnedProcess(
         process=process,
         pid=pid,
-        process_group=_validated_isolated_group(pid),
+        process_group=_validated_isolated_group(
+            pid, new_session=popen_kwargs.get("start_new_session") is True,
+        ),
     )
 
 
@@ -382,6 +388,8 @@ def _signal_owned(target: _OwnedProcess, sig: signal.Signals, *, force: bool) ->
         # A verified group that failed signaling must not fall through to a
         # second numeric identity; the caller reports cleanup failure. Mock
         # children re-poll between validation and killpg (double poll).
+        # ESRCH/EPERM counts as delivered only for a pinned leader that is
+        # still our unreaped, exited child right after the signal.
         return signal_isolated_group(
             target.pid,
             process_group,
@@ -390,6 +398,7 @@ def _signal_owned(target: _OwnedProcess, sig: signal.Signals, *, force: bool) ->
             still_owned=(
                 (lambda: _target_alive(target)) if mocked_group else None
             ),
+            pinned=pinned,
         )
 
     if not _target_alive(target):

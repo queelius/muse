@@ -10,13 +10,19 @@ and signalling primitives they must agree on:
 * a spawned child is placed in a new session (POSIX) or process group
   (Windows) via :func:`new_process_group_kwargs`;
 * its group is recorded only when :func:`validated_isolated_group` proves
-  ``PGID == PID`` and that the group is not this process's own;
+  ``PGID == PID`` and that the group is not this process's own (for a
+  leader that is already a pinned zombie, from its new-session spawn: macOS
+  ``getpgid`` cannot read a zombie);
 * a real POSIX leader is observed WITHOUT reaping it
   (:func:`leader_exited_nowait`, :func:`observe_leader`): with
   ``waitid(WNOWAIT)`` where the interpreter has it, else (macOS before
   Python 3.13) by psutil's zombie status. Either way the unreaped leader
   keeps its PID==PGID pinned against reuse while the group is signalled
   (:func:`signal_isolated_group`);
+* ESRCH or EPERM from that signal counts as delivered only while the
+  leader is still pinned and observed exited, re-checked right after the
+  signal (:func:`signal_isolated_group` with ``pinned=True``): macOS
+  returns EPERM for a group whose members are all zombies, ours included;
 * the exact leader is reaped (:func:`reap_exited_leader`) only after the
   final group signal;
 * only where neither observer works (no WNOWAIT and no psutil, or no
@@ -96,18 +102,58 @@ def new_process_group_kwargs(
     return {}
 
 
+def _pinned_exited_leader(pid: int) -> bool:
+    """Whether ``pid`` is our unreaped child, observed exited without reaping.
+
+    A True answer is the pinned-zombie state: :func:`leader_exited_nowait`
+    proves the PID is still our child (waitid ``P_PID``, or psutil
+    ``ppid() == os.getpid()``) and that it has exited, and only its owner
+    reaps it, so the PID (and an equal PGID) cannot be reused. Any failure to
+    prove that is False.
+    """
+    try:
+        return leader_exited_nowait(pid)
+    except (InterruptedError, ChildProcessError, OSError) as exc:
+        logger.warning("could not prove leader %r is a pinned zombie: %s", pid, exc)
+        return False
+
+
+def _leader_group(pid: int, *, new_session: bool) -> int | None:
+    """``getpgid(pid)``, or ``pid`` for a pinned zombie started in a new session.
+
+    macOS cannot read a zombie's group: XNU's ``getpgid`` looks the pid up
+    with ``proc_find``, which refuses an exited process, so it is ESRCH
+    (``bsd/kern/kern_prot.c``); Linux still finds a zombie. A child spawned
+    with ``start_new_session=True`` ran ``setsid()`` before exec (CPython's
+    Popen raises in the parent when that fails), so it became a session
+    leader with PGID == PID, and a session leader can never change its group
+    (``setpgid`` is EPERM). While that child is our pinned zombie its PID
+    cannot be reused, so PGID == PID still holds. ``new_session`` is the
+    caller's statement that it passed ``start_new_session=True``.
+    """
+    try:
+        return concrete_safe_id(os.getpgid(pid))
+    except ProcessLookupError:
+        if new_session and _pinned_exited_leader(pid):
+            return pid
+        raise
+
+
 def validated_isolated_group(
-    pid: int | None, *, os_name: str, label: str,
+    pid: int | None, *, os_name: str, label: str, new_session: bool = False,
 ) -> int | None:
     """Return the child's isolated PGID only when positively proven.
 
     Proven means POSIX, ``getpgid(pid) == pid`` (the child leads a new
-    session), and that group differs from this process's own group.
+    session), and that group differs from this process's own group. Where
+    ``getpgid`` cannot read an exited leader (macOS), a child the caller
+    started with ``start_new_session=True`` (``new_session``) that is still
+    our pinned zombie is proven by its spawn instead (:func:`_leader_group`).
     """
     if os_name != "posix" or pid is None:
         return None
     try:
-        process_group = concrete_safe_id(os.getpgid(pid))
+        process_group = _leader_group(pid, new_session=new_session)
         own_group = concrete_safe_id(os.getpgrp())
     except OSError as exc:
         logger.warning(
@@ -357,6 +403,7 @@ def signal_isolated_group(
     *,
     label: str,
     still_owned: Callable[[], bool] | None = None,
+    pinned: bool = False,
 ) -> bool:
     """Signal a validated, still-owned isolated group exactly once.
 
@@ -367,9 +414,33 @@ def signal_isolated_group(
     ``still_owned`` is an optional last-moment ownership check run after
     validation and immediately before ``killpg``.
 
-    Returns True when the signal was delivered or ESRCH proved the group has
-    no members left; False when refused or delivery failed. Never falls
-    through to a second numeric identity.
+    Returns True when the signal was delivered; False when refused or
+    delivery failed. Never falls through to a second numeric identity.
+
+    ``pinned=True`` is the caller's statement that the leader is pinned
+    (:func:`supports_pinned_leader`, observed under its owning lock). Then,
+    and only then, ESRCH or EPERM also counts as delivered, provided a
+    non-reaping observation made right after the failed ``killpg`` (still
+    under the caller's lock) shows the leader is our unreaped, exited child
+    (:func:`_pinned_exited_leader`). That zombie keeps the PID, so no other
+    group can carry this id, and the failure proves the group has no live
+    member this process may signal:
+
+    * macOS returns EPERM here. XNU's ``killpg1`` (``bsd/kern/kern_sig.c``)
+      skips members with ``p_stat == SZOMB`` and, finding none, returns
+      ``posix ? EPERM : ESRCH``; libc's ``killpg`` passes ``posix=1``. The
+      group cannot be missing (ESRCH) while its zombie leader is unreaped,
+      because a process leaves its group only when reaped
+      (``reap_child_locked``, ``bsd/kern/kern_exit.c``).
+    * Linux never fails here: ``__kill_pgrp_info`` (``kernel/signal.c``)
+      succeeds once any member, the zombie leader included, accepts the
+      signal. So a live member this process may not signal (a descendant
+      that became another user) is not detected on Linux either; treating
+      EPERM as delivered gives macOS exactly Linux's guarantee.
+
+    A live leader, a leader that cannot be observed, or one reaped
+    elsewhere keeps the failure fail-closed, as does ESRCH/EPERM whenever
+    ``pinned`` is False.
     """
     try:
         own_group = concrete_safe_id(os.getpgrp())
@@ -395,8 +466,18 @@ def signal_isolated_group(
         return False
     try:
         os.killpg(process_group, sig)
-    except ProcessLookupError:
-        return True
+    except (ProcessLookupError, PermissionError) as exc:
+        if pinned and _pinned_exited_leader(pid):
+            logger.debug(
+                "%s group %s has no live signalable member (%s) while its "
+                "exited leader is pinned; counting the signal as delivered",
+                label, process_group, exc,
+            )
+            return True
+        logger.warning(
+            "could not signal %s process group %s: %s", label, process_group, exc,
+        )
+        return False
     except (OSError, TypeError, ValueError) as exc:
         logger.warning(
             "could not signal %s process group %s: %s", label, process_group, exc,

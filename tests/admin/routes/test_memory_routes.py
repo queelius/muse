@@ -17,6 +17,7 @@ from muse.cli_impl.supervisor import (
     clear_supervisor_state,
     set_supervisor_state,
 )
+from tests import darwin_process_semantics
 
 
 @pytest.fixture
@@ -593,8 +594,8 @@ class TestRecentDecisions:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX zombie")
-@pytest.mark.parametrize("wnowait", [True, False], ids=["waitid", "no-waitid"])
-def test_memory_listing_never_reaps_a_worker_leader(wnowait, monkeypatch):
+@pytest.mark.parametrize("platform", darwin_process_semantics.PLATFORMS)
+def test_memory_listing_never_reaps_a_worker_leader(platform, monkeypatch):
     """GET /v1/admin/memory is not a worker owner: it must observe an exited
     leader without reaping it, else teardown loses the pinned PID==PGID it
     needs for the final group KILL."""
@@ -608,10 +609,7 @@ def test_memory_listing_never_reaps_a_worker_leader(wnowait, monkeypatch):
     from muse.cli_impl import supervisor
     from muse.core.owned_process import new_process_group_kwargs
 
-    if not wnowait:
-        monkeypatch.delattr(os, "waitid", raising=False)
-    elif not callable(getattr(os, "waitid", None)):
-        pytest.skip("platform has no waitid")
+    darwin_process_semantics.apply_platform(platform, monkeypatch)
     exited = subprocess.Popen(
         [sys.executable, "-c", "pass"], **new_process_group_kwargs(os.name),
     )
