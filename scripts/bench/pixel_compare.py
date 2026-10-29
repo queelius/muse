@@ -100,14 +100,12 @@ def _label(fields: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in fields.items()) or "defaults"
 
 
-def _generate(client, base, case, prompt, rid_seed=None) -> tuple[bytes, float]:
+def _generate(client, base, case, prompt) -> tuple[bytes, float]:
     body = {"model": case["model"], "prompt": prompt, "n": 1,
             "size": str(case.get("size") or "512x512"), "response_format": "b64_json"}
     for key in ("seed", "steps"):
         if case.get(key) is not None:
             body[key] = case[key]
-    if rid_seed is not None:
-        body["seed"] = rid_seed
     start = time.perf_counter()
     resp = client.post(f"{base}/images/generations", json=body, timeout=TIMEOUT)
     took = round(time.perf_counter() - start, 2)
