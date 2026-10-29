@@ -126,6 +126,18 @@ def test_autocorr_skipped_under_128px():
     assert image_stats(_noise(128))[1] is not None
 
 
+def test_wide_image_keeps_the_noise_check():
+    # 1024x256 downsamples to 256x64; the skip is decided on the source
+    # short side (256 px), so noise is still caught.
+    rng = np.random.default_rng(5)
+    wide = Image.fromarray(rng.integers(0, 256, (256, 1024, 3), dtype=np.uint8))
+    std, ac = image_stats(wide)
+    assert ac is not None and abs(ac) < 0.1
+    with pytest.raises(DegenerateImageError):
+        check_not_degenerate(wide)
+    check_not_degenerate(_scene(1024).resize((1024, 256)))
+
+
 def test_numpy_and_float_inputs_are_normalized():
     arr = np.asarray(_scene(256), dtype=np.float32) / 255.0
     check_not_degenerate(arr)
@@ -162,14 +174,46 @@ def test_probe_passes_good_outputs():
     assert PROBE_DEFAULTS["call"](m) is m.generate.return_value
 
 
-def test_probe_failure_fails_the_probe_record(monkeypatch):
-    """The probe worker turns the raise into inference_error, which
-    run_probe treats as a failure (exit 6) and the pull then disables the
-    model; here: the exception summary carries the metric values."""
-    from muse.cli_impl.probe_worker import _exception_summary
+def test_probe_failure_fails_the_probe_record(tmp_path, monkeypatch, capsys):
+    """End to end over the probe seams: the in-venv worker runs the real
+    image/generation PROBE_DEFAULTS on a backend that draws noise and
+    records inference_error with the metric values; run_probe, fed that
+    record through its run_owned_command seam, returns 6 (which makes
+    muse pull disable the model)."""
+    import json
+    from unittest.mock import patch
 
-    try:
-        check_not_degenerate(_noise(512))
-    except DegenerateImageError as e:
-        detail = _exception_summary(e)
-    assert "probe output looks degenerate" in detail and "std=" in detail
+    from muse.cli_impl.probe import run_probe
+    from muse.cli_impl.probe_worker import run_probe_worker
+    from muse.core import catalog as catalog_mod
+    from muse.core.catalog import CatalogEntry, _reset_read_catalog_cache, _write_catalog
+
+    entry = CatalogEntry(
+        model_id="noisy-lora", modality="image/generation",
+        backend_path="muse.modalities.image_generation.runtimes.reference:DiffusersReferenceModel",
+        hf_repo="someone/noisy-lora", description="", pip_extras=(),
+        system_packages=(), extra={"device": "cpu"},
+    )
+    backend = MagicMock(spec=["generate"])
+    backend.generate.return_value = _Result(_noise(512))
+    with patch.object(catalog_mod, "known_models", return_value={"noisy-lora": entry}), \
+         patch.object(catalog_mod, "load_backend", return_value=backend):
+        assert run_probe_worker(model_id="noisy-lora", device="cpu", run_inference=True) == 0
+    out = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    record = json.loads(out[-1])
+    assert record["inference_error"].startswith(
+        "DegenerateImageError: probe output looks degenerate: std=")
+    assert "autocorr=" in record["inference_error"]
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    _write_catalog({"noisy-lora": {
+        "pulled_at": "2026-10-28T00:00:00+00:00", "hf_repo": "someone/noisy-lora",
+        "local_dir": str(tmp_path / "w"), "venv_path": str(tmp_path / "v"),
+        "python_path": str(tmp_path / "v" / "bin" / "python"), "enabled": True,
+    }})
+    _reset_read_catalog_cache()
+    done = MagicMock(returncode=0, stdout=json.dumps(record) + "\n", stderr="")
+    with patch("muse.cli_impl.probe.run_owned_command", return_value=done), \
+         patch("muse.cli_impl.probe.known_models", return_value={"noisy-lora": entry}):
+        rc = run_probe(model_id="noisy-lora", no_inference=False, device=None, as_json=True)
+    assert rc == 6

@@ -242,14 +242,14 @@ def test_header_reader_raises_valueerror_on_corruption(tmp_path):
 
 
 def test_header_reader_refuses_oversized_header(tmp_path):
-    # The safetensors format caps the header at 100 MB; a larger length
-    # prefix is corruption, rejected before reading it.
+    # An adapter header is tens of KB (Limbicnation's is 25 KB); a length
+    # prefix over 16 MB is corruption, rejected before reading it.
     p = tmp_path / "x.safetensors"
     with open(p, "wb") as f:
-        f.write(struct.pack("<Q", 100 * 1024 * 1024 + 1))
-        f.seek(100 * 1024 * 1024 + 16)
+        f.write(struct.pack("<Q", 16 * 1024 * 1024 + 1))
+        f.seek(16 * 1024 * 1024 + 16)
         f.write(b"\0")
-    with pytest.raises(ValueError, match="header"):
+    with pytest.raises(ValueError, match="exceeds 16 MB"):
         read_safetensors_header(p)
 
 

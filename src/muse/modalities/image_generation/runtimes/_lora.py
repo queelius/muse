@@ -77,8 +77,9 @@ def resolve_lora_base(
 LORA_ADAPTER_METADATA_KEY = "lora_adapter_metadata"
 # diffusers' own adapter file name, which load_lora_weights prefers.
 LORA_WEIGHT_NAME_SAFE = "pytorch_lora_weights.safetensors"
-# The safetensors format caps the JSON header at 100 MB.
-_MAX_HEADER_BYTES = 100 * 1024 * 1024
+# A LoRA adapter's JSON header is tens of KB (Limbicnation's is 25 KB); the
+# safetensors format allows 100 MB, but anything past 16 MB is not an adapter.
+_MAX_HEADER_BYTES = 16 * 1024 * 1024
 # Files diffusers' weight-name guess skips (lora_base._best_guess_weight_name).
 _UNALLOWED_SUBSTRINGS = ("scheduler", "optimizer", "checkpoint")
 _CONFIG_FIELDS = ("r", "lora_alpha", "use_rslora", "rank_pattern", "alpha_pattern")
@@ -111,7 +112,7 @@ def read_safetensors_header(path: str | os.PathLike) -> dict:
         (n,) = struct.unpack("<Q", prefix)
         size = os.fstat(f.fileno()).st_size
         if n > _MAX_HEADER_BYTES:
-            raise ValueError(f"{path}: safetensors header of {n} bytes exceeds 100 MB")
+            raise ValueError(f"{path}: safetensors header of {n} bytes exceeds 16 MB")
         if n > size - 8:
             raise ValueError(f"{path}: safetensors header length {n} runs past the file end")
         raw = f.read(n)

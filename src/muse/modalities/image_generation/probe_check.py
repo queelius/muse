@@ -11,7 +11,7 @@ the probe image on its luminance, downsampled with a box filter to at most
   vertical neighbour Pearson correlations. Natural and generated images read
   above 0.85 and i.i.d. noise about 0; below 0.5 the frame is noise-like.
 
-Images whose short side is under 128 px get the flatness check only: 1x
+Images whose source short side is under 128 px get the flatness check only: 1x
 pixel art reads 0.44-0.48 at 16 px. Nearest-upsampling them first would not
 help, since k-fold nearest noise reads (k-1)/k and would pass. So noise in a
 tiny image is not caught; probe images are the model's default size
@@ -52,8 +52,8 @@ def _lag1(a, b) -> float:
 
 
 def image_stats(image: Any) -> tuple[float, float | None]:
-    """(std, autocorr) of `image`'s luminance; autocorr is None under
-    MIN_AUTOCORR_SIDE px on the short side."""
+    """(std, autocorr) of `image`'s luminance; autocorr is None when the
+    source image's short side is under MIN_AUTOCORR_SIDE px."""
     import numpy as np
     from PIL import Image
 
@@ -61,12 +61,15 @@ def image_stats(image: Any) -> tuple[float, float | None]:
 
     im = to_pil(image).convert("L")
     w, h = im.size
+    # The skip is decided on the source size: a 1024x256 frame downsamples
+    # to 256x64 but is no tiny image.
+    skip_autocorr = min(w, h) < MIN_AUTOCORR_SIDE
     if max(w, h) > MAX_SIDE:
         s = MAX_SIDE / max(w, h)
         im = im.resize((max(1, round(w * s)), max(1, round(h * s))), Image.BOX)
     a = np.asarray(im, dtype=np.float64)
     std = float(a.std())
-    if min(a.shape) < MIN_AUTOCORR_SIDE:
+    if skip_autocorr or min(a.shape) < 2:
         return std, None
     horizontal = _lag1(a[:, :-1], a[:, 1:])
     vertical = _lag1(a[:-1, :], a[1:, :])
