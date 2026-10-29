@@ -116,6 +116,24 @@ def validated_isolated_group(
     return process_group
 
 
+def platform_supports_pinned_leaders() -> bool:
+    """Whether this interpreter exposes ``waitid(WNOWAIT)`` at all.
+
+    CPython before 3.13 never builds ``os.waitid`` on macOS (posixmodule.c
+    guarded it with ``defined(HAVE_WAITID) && !defined(__APPLE__)`` until
+    gh-113536) even though the ``P_PID`` / ``WEXITED`` / ``WNOWAIT``
+    constants are still exported, so an exited leader cannot be observed
+    there without reaping it.
+    """
+    return bool(
+        callable(getattr(os, "waitid", None))
+        and getattr(os, "P_PID", None) is not None
+        and getattr(os, "WEXITED", None) is not None
+        and getattr(os, "WNOHANG", None) is not None
+        and getattr(os, "WNOWAIT", None) is not None
+    )
+
+
 def supports_pinned_leader(
     process: Any, pid: int | None, process_group: int | None, *, os_name: str,
 ) -> bool:
@@ -125,11 +143,7 @@ def supports_pinned_leader(
         and pid is not None
         and process_group == pid
         and isinstance(process, REAL_POPEN_TYPE)
-        and callable(getattr(os, "waitid", None))
-        and getattr(os, "P_PID", None) is not None
-        and getattr(os, "WEXITED", None) is not None
-        and getattr(os, "WNOHANG", None) is not None
-        and getattr(os, "WNOWAIT", None) is not None
+        and platform_supports_pinned_leaders()
     )
 
 

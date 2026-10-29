@@ -64,6 +64,37 @@ def test_register_list_unregister_round_trip(tmp_path, monkeypatch):
     assert registry.list_resources(catalog_dir=tmp_path) == []
 
 
+def test_register_reports_an_already_exited_process_distinctly(tmp_path, monkeypatch):
+    """A zombie/absent pid is ResourceProcessExited (still a registry error)."""
+    _identity_map(monkeypatch, {200: None, 100: 5.0})
+
+    with pytest.raises(registry.ResourceProcessExited, match="already exited"):
+        registry.register_process(
+            kind="admin_job", pid=200, owner_pid=100, catalog_dir=tmp_path,
+        )
+    assert issubclass(registry.ResourceProcessExited, registry.ResourceRegistryError)
+    assert registry.list_resources(catalog_dir=tmp_path) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX zombie")
+def test_register_real_zombie_child_is_process_exited(tmp_path):
+    import subprocess
+    import time
+
+    import psutil
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10.0
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        with pytest.raises(registry.ResourceProcessExited):
+            registry.register_process(kind="admin_job", pid=child.pid, catalog_dir=tmp_path)
+    finally:
+        child.wait(timeout=10.0)
+
+
 def test_schema_validation_rejects_valid_but_malformed_json(tmp_path):
     runtime = _private_runtime(tmp_path)
     _private_write(runtime / "resources.lock", b"\0")

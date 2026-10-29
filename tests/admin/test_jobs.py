@@ -605,6 +605,171 @@ class TestJobStore:
         popen.assert_not_called()
 
 
+def _process_gone(pid: int) -> bool:
+    """Whether a numeric pid has exited (absent, or a zombie awaiting init)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+class TestNoWnowaitFallback:
+    """Real children on a POSIX platform without ``os.waitid`` (macOS).
+
+    CPython before 3.13 never builds ``os.waitid`` on macOS, so hiding it
+    here runs the exact code path the macOS py3.12 CI job takes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _hide_waitid(self, monkeypatch):
+        monkeypatch.delattr(os, "waitid", raising=False)
+
+    def _spawn(self, store, code):
+        import subprocess
+        import sys
+
+        job = store.create(op="pull", model_id="m")
+        process = store.spawn_process(
+            job.job_id, [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return job, process
+
+    def test_fast_nonzero_exit_reports_status_and_releases(self):
+        store = JobStore()
+        job, process = self._spawn(store, "import sys; sys.exit(3)")
+        assert job.process_group_id == process.pid
+
+        with patch("muse.core.owned_process.os.killpg") as killpg:
+            assert store.wait_process(job.job_id, process, timeout=10.0) == 3
+            store.release_process(job.job_id, process)
+
+        # The leader was reaped by poll(), so its numeric group was never
+        # signalled afterwards, and ownership is positively released.
+        killpg.assert_not_called()
+        assert job.process is None
+        assert job.resource_id is None
+
+    def test_terminate_signals_live_group_including_descendant(self, tmp_path):
+        store = JobStore()
+        pid_file = tmp_path / "grandchild.pid"
+        code = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+        job, process = self._spawn(store, code)
+        deadline = time.monotonic() + 10.0
+        while not (pid_file.exists() and pid_file.read_text()):
+            assert time.monotonic() < deadline, "child never started its descendant"
+            time.sleep(0.02)
+        grandchild = int(pid_file.read_text())
+
+        store.terminate_process(job.job_id, process, timeout=5.0)
+        store.release_process(job.job_id, process)
+
+        assert process.returncode is not None
+        assert job.process is None and job.resource_id is None
+        deadline = time.monotonic() + 5.0
+        while not _process_gone(grandchild):
+            assert time.monotonic() < deadline, "descendant survived the group signal"
+            time.sleep(0.02)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX zombie")
+@pytest.mark.parametrize("wnowait", [True, False], ids=["waitid", "no-waitid"])
+def test_child_that_exits_before_registration_reports_its_status(wnowait, monkeypatch):
+    """A child can exit before its identity is read (seen under CI load):
+    the job must still report the child's own exit status, not a registry
+    failure, and leave no record behind."""
+    import subprocess
+    import sys
+
+    import psutil
+
+    from muse.admin import jobs as jobs_mod
+
+    if not wnowait:
+        monkeypatch.delattr(os, "waitid", raising=False)
+    elif not callable(getattr(os, "waitid", None)):
+        pytest.skip("platform has no waitid")
+    real_register = jobs_mod.register_process
+
+    def register_after_exit(**kwargs):
+        deadline = time.monotonic() + 10.0
+        while psutil.Process(kwargs["pid"]).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline, "child never exited"
+            time.sleep(0.01)
+        return real_register(**kwargs)
+
+    store = JobStore()
+    job = store.create(op="pull", model_id="m")
+    monkeypatch.setattr(jobs_mod, "register_process", register_after_exit)
+    process = store.spawn_process(
+        job.job_id, [sys.executable, "-c", "import sys; sys.exit(3)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    assert job.resource_id is None
+    assert store.wait_process(job.job_id, process, timeout=10.0) == 3
+    store.release_process(job.job_id, process)
+    assert job.process is None
+
+
+def test_registration_of_a_live_child_still_fails_closed_when_it_reports_exited():
+    """ResourceProcessExited is only trusted once the owned handle agrees."""
+    from muse.core.resource_registry import ResourceProcessExited, ResourceRegistryError
+
+    store = JobStore()
+    job = store.create(op="pull", model_id="m")
+    process = MagicMock(pid=4242)
+    process.poll.return_value = None
+
+    with patch("muse.admin.jobs.subprocess.Popen", return_value=process), \
+         patch("muse.admin.jobs.os.getpgid", return_value=4242), \
+         patch("muse.admin.jobs.os.getpgrp", return_value=31337), \
+         patch("muse.admin.jobs.os.killpg"), \
+         patch(
+             "muse.admin.jobs.register_process",
+             side_effect=ResourceProcessExited("gone"),
+         ), \
+         patch("muse.admin.jobs._terminate_targets") as terminate:
+        with pytest.raises(ResourceRegistryError, match="persisted process identity"):
+            store.spawn_process(job.job_id, ["muse", "pull", "m"])
+    terminate.assert_called_once()
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not callable(getattr(os, "waitid", None)),
+    reason="requires a POSIX platform with waitid",
+)
+def test_wnowait_platform_still_fails_closed_for_unpinned_real_child():
+    """The exact-handle fallback is per platform: where waitid exists, a real
+    child whose group could not be validated stays ambiguous."""
+    import subprocess
+    import sys
+
+    store = JobStore()
+    job = store.create(op="pull", model_id="m")
+    with patch("muse.admin.jobs._validated_isolated_group", return_value=None):
+        process = store.spawn_process(
+            job.job_id, [sys.executable, "-c", "import time; time.sleep(60)"],
+        )
+    try:
+        with pytest.raises(RuntimeError, match="identity is ambiguous"):
+            store.wait_process(job.job_id, process, timeout=1.0)
+    finally:
+        process.kill()
+        process.wait(timeout=10.0)
+
+
 class TestDefaultStore:
     def test_get_default_store_returns_singleton(self):
         reset_default_store()

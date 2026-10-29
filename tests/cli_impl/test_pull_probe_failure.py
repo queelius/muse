@@ -102,10 +102,20 @@ def test_pull_returns_the_installed_id_for_a_bundled_model(tmp_catalog):
         assert catalog.pull("kokoro-82m") == "kokoro-82m"
 
 
-def test_admin_pull_job_fails_when_the_cli_exits_nonzero():
+@pytest.mark.parametrize("wnowait", [True, False], ids=["waitid", "no-waitid"])
+def test_admin_pull_job_fails_when_the_cli_exits_nonzero(wnowait, monkeypatch):
     """The admin pull job runs `muse pull` as a subprocess, so the new
-    nonzero exit marks the job failed with the CLI's stderr."""
+    nonzero exit marks the job failed with the CLI's stderr.
+
+    ``no-waitid`` is the macOS path (CPython before 3.13 does not build
+    ``os.waitid`` there), which used to fail every admin job as "subprocess
+    identity is ambiguous".
+    """
+    import os
     import sys
+
+    if not wnowait:
+        monkeypatch.delattr(os, "waitid", raising=False)
 
     from muse.admin import operations
     from muse.admin.jobs import JobStore
