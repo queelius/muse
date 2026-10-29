@@ -29,8 +29,14 @@ if mode == "exit":
 if mode == "exit_soon":
     time.sleep(2.0)
     sys.exit(3)
-if mode == "grandchild":
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+if mode in ("grandchild", "stubborn_grandchild"):
+    code = "import time; time.sleep(60)"
+    if mode == "stubborn_grandchild":
+        code = (
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(60)"
+        )
+    child = subprocess.Popen([sys.executable, "-c", code])
     with open(os.environ["FAKE_WORKER_PIDFILE"], "w") as handle:
         handle.write(str(child.pid))
 time.sleep(60)
@@ -68,15 +74,13 @@ def spec(fake_python):
 
 
 def _process_gone(pid: int) -> bool:
+    """Whether a numeric pid has exited (absent, or a zombie awaiting reap)."""
+    import psutil
+
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:  # includes ZombieProcess
         return True
-    try:
-        with open(f"/proc/{pid}/stat") as handle:
-            return handle.read().rsplit(")", 1)[1].split()[0] == "Z"
-    except OSError:
-        return False
 
 
 def _state(spec: WorkerSpec, proc) -> bool | None:
@@ -131,6 +135,37 @@ def test_fast_exiting_worker_reports_its_exit(platform, spec, monkeypatch):
     assert supervisor._shutdown_workers([spec], grace=1.0).complete
     _assert_released(spec, proc)
     assert proc.returncode == 3
+
+
+def _wait_for_grandchild(pid_file) -> int:
+    deadline = time.monotonic() + 10.0
+    while not (pid_file.exists() and pid_file.read_text()):
+        assert time.monotonic() < deadline, "worker never started its descendant"
+        time.sleep(0.02)
+    return int(pid_file.read_text())
+
+
+def test_term_ignoring_grandchild_is_killed_when_the_leader_exits_on_term(
+    platform, spec, tmp_path, monkeypatch,
+):
+    """The leader honours TERM; the final group KILL must still reach a
+    descendant that ignores it, while the exited leader stays pinned."""
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("FAKE_WORKER_MODE", "stubborn_grandchild")
+    monkeypatch.setenv("FAKE_WORKER_PIDFILE", str(pid_file))
+    supervisor.spawn_worker(spec, device="cpu")
+    proc = spec.process
+    grandchild = _wait_for_grandchild(pid_file)
+    time.sleep(0.2)  # let the grandchild install its SIGTERM handler
+
+    result = supervisor._shutdown_workers([spec], grace=2.0)
+    assert result.complete
+    assert proc.returncode == -signal.SIGTERM
+    _assert_released(spec, proc)
+    deadline = time.monotonic() + 5.0
+    while not _process_gone(grandchild):
+        assert time.monotonic() < deadline, "TERM-ignoring descendant survived"
+        time.sleep(0.02)
 
 
 def test_teardown_kills_the_group_including_a_grandchild(

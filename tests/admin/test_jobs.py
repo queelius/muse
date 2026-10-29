@@ -606,16 +606,13 @@ class TestJobStore:
 
 
 def _process_gone(pid: int) -> bool:
-    """Whether a numeric pid has exited (absent, or a zombie awaiting init)."""
+    """Whether a numeric pid has exited (absent, or a zombie awaiting reap)."""
+    import psutil
+
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:  # includes ZombieProcess
         return True
-    try:
-        with open(f"/proc/{pid}/stat") as handle:
-            return handle.read().rsplit(")", 1)[1].split()[0] == "Z"
-    except OSError:
-        return False
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
@@ -626,9 +623,12 @@ class TestNoWnowaitFallback:
     here runs the exact code path the macOS py3.12 CI job takes.
     """
 
-    @pytest.fixture(autouse=True)
-    def _hide_waitid(self, monkeypatch):
-        monkeypatch.delattr(os, "waitid", raising=False)
+    @pytest.fixture(autouse=True, params=["waitid", "no-waitid"])
+    def _platform(self, request, monkeypatch):
+        if request.param == "no-waitid":
+            monkeypatch.delattr(os, "waitid", raising=False)
+        elif not callable(getattr(os, "waitid", None)):
+            pytest.skip("platform has no waitid")
 
     def _spawn(self, store, code):
         import subprocess
@@ -646,15 +646,49 @@ class TestNoWnowaitFallback:
         job, process = self._spawn(store, "import sys; sys.exit(3)")
         assert job.process_group_id == process.pid
 
-        with patch("muse.core.owned_process.os.killpg") as killpg:
+        signalled_while_unreaped: list[bool] = []
+
+        def record_killpg(pgid, _sig):
+            # The exited leader must still pin its PID==PGID (unreaped).
+            assert pgid == process.pid
+            signalled_while_unreaped.append(process.returncode is None)
+
+        with patch("muse.core.owned_process.os.killpg", side_effect=record_killpg):
             assert store.wait_process(job.job_id, process, timeout=10.0) == 3
             store.release_process(job.job_id, process)
 
-        # The leader was reaped by poll(), so its numeric group was never
-        # signalled afterwards, and ownership is positively released.
-        killpg.assert_not_called()
+        assert signalled_while_unreaped and all(signalled_while_unreaped)
         assert job.process is None
         assert job.resource_id is None
+
+    def test_term_ignoring_descendant_is_killed_when_leader_exits_on_term(self, tmp_path):
+        store = JobStore()
+        pid_file = tmp_path / "grandchild.pid"
+        code = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(60)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+        job, process = self._spawn(store, code)
+        deadline = time.monotonic() + 10.0
+        while not (pid_file.exists() and pid_file.read_text()):
+            assert time.monotonic() < deadline, "child never started its descendant"
+            time.sleep(0.02)
+        grandchild = int(pid_file.read_text())
+        time.sleep(0.2)  # let the grandchild install its SIGTERM handler
+
+        store.terminate_process(job.job_id, process, timeout=5.0)
+        store.release_process(job.job_id, process)
+
+        assert process.returncode == -signal.SIGTERM
+        assert job.process is None and job.resource_id is None
+        deadline = time.monotonic() + 5.0
+        while not _process_gone(grandchild):
+            assert time.monotonic() < deadline, "TERM-ignoring descendant survived"
+            time.sleep(0.02)
 
     def test_terminate_signals_live_group_including_descendant(self, tmp_path):
         store = JobStore()

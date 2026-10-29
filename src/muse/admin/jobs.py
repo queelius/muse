@@ -575,7 +575,7 @@ def _supports_pinned_target(target: _ProcessTarget) -> bool:
 
 
 def _uses_exact_handle_fallback(target: _ProcessTarget) -> bool:
-    """Whether this child is owned through its Popen handle alone (no WNOWAIT)."""
+    """Whether this unpinnable child is owned through its Popen handle alone."""
     return uses_exact_handle_fallback(target.process, target.pid, os_name=os.name)
 
 
@@ -591,9 +591,10 @@ def _target_state_locked(target: _ProcessTarget) -> bool | None:
         return None
     if type(getattr(target.process, "returncode", None)) is int:
         return False
-    # Pinned leaders are observed with WNOWAIT; an unpinned real POSIX child
-    # fails closed, except on a platform with no WNOWAIT at all, where the
-    # exact handle is polled; an ambiguous poll leaves the registry record.
+    # Pinned leaders are observed without reaping (WNOWAIT, else psutil
+    # zombie status); an unpinned real POSIX child fails closed, except
+    # without WNOWAIT, where its exact handle is polled; an ambiguous poll
+    # leaves the registry record.
     return observe_leader(
         target.process,
         target.pid,
@@ -660,9 +661,9 @@ def _signal_target(
             return False
 
         if _uses_exact_handle_fallback(target):
-            # No-WNOWAIT fallback: the poll() above returned None under
-            # process_lock, so the unreaped leader still pins PID==PGID and
-            # no getpgid revalidation is needed.
+            # Unpinnable without WNOWAIT: the poll() above returned None
+            # under process_lock, so the unreaped leader still holds any
+            # validated PID==PGID and no getpgid revalidation is needed.
             delivered = signal_live_fallback_leader(
                 target.process, target.pid, target.pgid, sig,
                 label=_PROCESS_LABEL,

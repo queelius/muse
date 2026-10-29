@@ -879,9 +879,10 @@ class TestInstallIntoVenv:
     @pytest.mark.skipif(
         os.name != "posix"
         or not hasattr(os, "fork")
-        or not hasattr(os, "waitid")
-        or not hasattr(os, "WNOWAIT"),
-        reason="requires POSIX WNOWAIT",
+        or not __import__(
+            "muse.core.owned_process", fromlist=["x"],
+        ).can_observe_exit_without_reaping(),
+        reason="requires a non-reaping exit observer (WNOWAIT or psutil)",
     )
     def test_completed_leader_cleans_term_ignoring_descendant(self, tmp_path):
         """A child-held file lock proves the exact descendant released state."""

@@ -14,9 +14,8 @@ import pytest
 from muse.core import owned_process as op
 
 
-_POSIX_WNOWAIT = (
-    os.name == "posix" and hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
-)
+# WNOWAIT, or psutil zombie status where the interpreter lacks waitid.
+_POSIX_WNOWAIT = os.name == "posix" and op.can_observe_exit_without_reaping()
 
 
 class TestIdentityChecks:
@@ -161,6 +160,68 @@ class TestObserveAndReap:
             MagicMock(spec=subprocess.Popen, returncode=None), None,
             pinned=False, os_name="posix", label="t",
         ) is None
+
+    def test_no_wnowait_observes_exit_by_psutil_zombie_status(self, monkeypatch):
+        import psutil
+
+        monkeypatch.delattr(os, "waitid", raising=False)
+        real = MagicMock(spec=subprocess.Popen, returncode=None)
+        assert op.supports_pinned_leader(real, 4242, 4242, os_name="posix")
+        assert not op.supports_pinned_leader(real, 4242, None, os_name="posix")
+
+        def proc_with(status=None, error=None):
+            handle = MagicMock()
+            if error is not None:
+                handle.status.side_effect = error
+            else:
+                handle.status.return_value = status
+            return handle
+
+        cases = [
+            (proc_with(psutil.STATUS_ZOMBIE), True),
+            (proc_with(psutil.STATUS_SLEEPING), False),
+            (proc_with(error=psutil.ZombieProcess(4242)), True),
+        ]
+        for handle, expected in cases:
+            with patch("psutil.Process", return_value=handle):
+                assert op.leader_exited_nowait(4242) is expected
+        with patch("psutil.Process", side_effect=psutil.NoSuchProcess(4242)):
+            with pytest.raises(ChildProcessError):
+                op.leader_exited_nowait(4242)
+            # Reaped elsewhere: never treated as a live or signalable leader.
+            assert op.observe_leader(
+                real, 4242, pinned=True, os_name="posix", label="t",
+            ) is None
+        with patch("psutil.Process", return_value=proc_with(error=psutil.AccessDenied(4242))):
+            with pytest.raises(OSError):
+                op.leader_exited_nowait(4242)
+            assert op.observe_leader(
+                real, 4242, pinned=True, os_name="posix", label="t",
+            ) is None
+        real.poll.assert_not_called()
+
+    def test_no_wnowait_and_no_psutil_is_not_pinnable(self, monkeypatch):
+        monkeypatch.delattr(os, "waitid", raising=False)
+        monkeypatch.setattr(op, "_psutil_zombie_observer_available", lambda: False)
+        real = MagicMock(spec=subprocess.Popen, returncode=None)
+        assert not op.supports_pinned_leader(real, 4242, 4242, os_name="posix")
+        assert op.uses_exact_handle_fallback(real, 4242, os_name="posix")
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX zombie")
+    def test_real_zombie_stays_pinned_without_waitid(self, monkeypatch):
+        monkeypatch.delattr(os, "waitid", raising=False)
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"], **op.new_process_group_kwargs("posix"),
+        )
+        try:
+            deadline = time.monotonic() + 10.0
+            while not op.leader_exited_nowait(process.pid):
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            assert process.returncode is None  # observed, not reaped
+            assert op.leader_exited_nowait(process.pid) is True
+        finally:
+            process.wait(timeout=10.0)
 
     def test_wnowait_platform_never_uses_the_fallback(self, monkeypatch):
         monkeypatch.setattr(op, "platform_supports_pinned_leaders", lambda: True)

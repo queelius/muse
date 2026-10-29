@@ -551,6 +551,8 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             # drains and reaps it, instead of a misleading registry failure.
             if _worker_process_state_locked(spec, proc) is not False:
                 registration_error = exc
+            # No new record supersedes the prior one, so it stays attached
+            # and is released with this generation's teardown.
             next_resource_id = previous_resource_id
         except (ResourceRegistryError, TypeError, ValueError) as exc:
             registration_error = exc
@@ -618,8 +620,9 @@ def _worker_process_state_locked(spec: WorkerSpec, proc: Any) -> bool | None:
     # be validated and stored at spawn, polling could reap the leader and
     # make that unknown numeric group reusable before descendants are
     # drained, so observe_leader retains ownership and fails closed instead.
-    # On a platform with no WNOWAIT at all (macOS before Python 3.13) it
-    # polls the exact handle under this lock (uses_exact_handle_fallback).
+    # Without WNOWAIT (macOS before Python 3.13) a validated leader is still
+    # pinned, via psutil zombie status; only an unvalidated group (or no
+    # psutil) polls the exact handle under this lock instead.
     return observe_leader(
         proc,
         pid,
@@ -968,8 +971,9 @@ def _signal_worker_process(spec: WorkerSpec, proc: Any, sig: signal.Signals) -> 
     later teardown can still signal and drain the group. (``poll()`` here
     used to reap a just-exited leader, after which teardown refused the
     group signal, the spec was retained, and no replacement could spawn.)
-    Where no WNOWAIT exists at all, the exact handle is polled under the
-    lock instead and only a just-seen-unreaped leader's group is signalled.
+    Without WNOWAIT a validated leader is pinned via psutil zombie status;
+    only an unpinnable child falls back to polling the exact handle under
+    the lock, signalling just a leader that poll has seen unreaped.
     Ambiguous or exited generations fail closed.
 
     Returns whether a signal was sent.
@@ -980,7 +984,7 @@ def _signal_worker_process(spec: WorkerSpec, proc: Any, sig: signal.Signals) -> 
     if _supports_pinned_worker_leader(proc, pid, spec.process_group_id):
         return signal_isolated_group(pid, spec.process_group_id, sig, label="worker")
     if uses_exact_handle_fallback(proc, pid, os_name=_OS_NAME):
-        # No WNOWAIT: the poll above saw the leader unreaped under the lock.
+        # Unpinnable without WNOWAIT: the poll above saw it unreaped.
         return signal_live_fallback_leader(
             proc, pid, spec.process_group_id, sig, label="worker",
         )
@@ -1043,8 +1047,8 @@ def _signal_worker_target(
         if state is not True:
             return False
         if uses_exact_handle_fallback(proc, target.pid, os_name=_OS_NAME):
-            # No WNOWAIT: the poll above saw the leader unreaped under the
-            # lock, so its validated PID==PGID group is still pinned.
+            # Unpinnable without WNOWAIT: the poll above saw the leader
+            # unreaped under the lock, so any validated group is still held.
             delivered = signal_live_fallback_leader(
                 proc, target.pid, target.process_group_id, sig, label="worker",
             )

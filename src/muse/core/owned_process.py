@@ -11,19 +11,26 @@ and signalling primitives they must agree on:
   (Windows) via :func:`new_process_group_kwargs`;
 * its group is recorded only when :func:`validated_isolated_group` proves
   ``PGID == PID`` and that the group is not this process's own;
-* a real POSIX leader is observed with ``waitid(WNOWAIT)``
-  (:func:`leader_exited_nowait`, :func:`observe_leader`), never ``poll()``,
-  so the unreaped leader keeps its PID==PGID pinned against reuse while
-  the group is signalled (:func:`signal_isolated_group`);
+* a real POSIX leader is observed WITHOUT reaping it
+  (:func:`leader_exited_nowait`, :func:`observe_leader`): with
+  ``waitid(WNOWAIT)`` where the interpreter has it, else (macOS before
+  Python 3.13) by psutil's zombie status. Either way the unreaped leader
+  keeps its PID==PGID pinned against reuse while the group is signalled
+  (:func:`signal_isolated_group`);
 * the exact leader is reaped (:func:`reap_exited_leader`) only after the
   final group signal;
+* only where neither observer works (no WNOWAIT and no psutil, or no
+  validated group) is the exact Popen handle polled under the owner's lock
+  (:func:`uses_exact_handle_fallback`, :func:`signal_live_fallback_leader`),
+  and a ``poll()``-reaped leader's number is never signalled again;
 * :class:`BoundedTail` and :func:`drain_stream_into` retain a bounded tail
   of a child pipe that is drained continuously.
 
 A numeric PGID is only ever passed to ``os.killpg`` after it has been
 re-checked as a concrete integer > 1 equal to the leader PID and distinct
 from the caller's own group: ``killpg(0)`` signals our own group and
-``killpg(1)``/``kill(-1)`` broadcast. Stdlib-only; safe to import from
+``killpg(1)``/``kill(-1)`` broadcast. Stdlib-only at import (psutil is
+imported lazily, only where WNOWAIT is missing); safe to import from
 ``muse --help`` paths.
 """
 from __future__ import annotations
@@ -134,16 +141,35 @@ def platform_supports_pinned_leaders() -> bool:
     )
 
 
+def _psutil_zombie_observer_available() -> bool:
+    """Whether psutil can report an unreaped child's zombie status."""
+    try:
+        import psutil  # noqa: F401 - lazy: a muse[server] dependency
+    except ImportError:
+        return False
+    return True
+
+
+def can_observe_exit_without_reaping() -> bool:
+    """WNOWAIT, or (where the interpreter lacks it) psutil zombie status."""
+    return platform_supports_pinned_leaders() or _psutil_zombie_observer_available()
+
+
 def supports_pinned_leader(
     process: Any, pid: int | None, process_group: int | None, *, os_name: str,
 ) -> bool:
-    """Whether WNOWAIT can pin this exact real POSIX PID==PGID leader."""
+    """Whether this exact real POSIX PID==PGID leader can be pinned.
+
+    Pinned means its exit can be observed without reaping it
+    (:func:`leader_exited_nowait`), so the zombie keeps PID==PGID reserved
+    through the final group signal.
+    """
     return bool(
         os_name == "posix"
         and pid is not None
         and process_group == pid
         and isinstance(process, REAL_POPEN_TYPE)
-        and platform_supports_pinned_leaders()
+        and can_observe_exit_without_reaping()
     )
 
 
@@ -153,16 +179,18 @@ def uses_exact_handle_fallback(
     """Whether a real POSIX child must be owned through its Popen handle alone.
 
     True only on a platform with no ``waitid(WNOWAIT)`` at all (see
-    :func:`platform_supports_pinned_leaders`). There the exact Popen handle
-    is the ownership token: :func:`observe_leader` uses ``poll()``, which
-    may reap. Because only the owner reaps, under its owning lock, a
-    ``None`` poll proves the leader, and so its PID and PID==PGID group,
-    are still unreaped and cannot have been reused; a leader that exits
-    right after that poll stays an unreaped zombie until the owner reaps
-    it. Once ``poll()`` has reaped the leader its numeric identity is never
-    signalled again, so descendants that outlive the leader are not drained
-    (best effort, like the installer runner's fallback). Where WNOWAIT
-    exists an unpinned real child keeps failing closed.
+    :func:`platform_supports_pinned_leaders`), for a child that is not
+    pinned by :func:`supports_pinned_leader` (no validated group, or no
+    psutil). There the exact Popen handle is the ownership token:
+    :func:`observe_leader` uses ``poll()``, which may reap. Because only the
+    owner reaps, under its owning lock, a ``None`` poll proves the leader,
+    and so its PID and any PID==PGID group, are still unreaped and cannot
+    have been reused; a leader that exits right after that poll stays an
+    unreaped zombie until the owner reaps it. Once ``poll()`` has reaped
+    the leader its numeric identity is never signalled again, so
+    descendants that outlive it are not drained (best effort, like the
+    installer runner's fallback). Where WNOWAIT exists an unpinned real
+    child keeps failing closed.
     """
     return bool(
         os_name == "posix"
@@ -207,10 +235,30 @@ def leader_exited_nowait(pid: int) -> bool:
     be reused until the owner reaps it. ``InterruptedError``,
     ``ChildProcessError`` (another reaper took it) and other ``OSError`` are
     left to the caller, whose fail-closed policy differs per site.
+
+    Uses ``waitid(WNOWAIT)`` where the interpreter has it, else psutil's
+    process status: an unreaped child of ours is either running or a
+    zombie, and its PID cannot be reused, so ``STATUS_ZOMBIE`` is an exact,
+    non-reaping exit observation. A vanished PID means another reaper took
+    it (``ChildProcessError``, like waitid's ECHILD); AccessDenied or any
+    other psutil failure is an ``OSError``.
     """
-    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
-    status = os.waitid(os.P_PID, pid, flags)
-    return status is not None and getattr(status, "si_pid", pid) == pid
+    if platform_supports_pinned_leaders():
+        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+        status = os.waitid(os.P_PID, pid, flags)
+        return status is not None and getattr(status, "si_pid", pid) == pid
+    try:
+        import psutil
+    except ImportError as exc:
+        raise OSError("no non-reaping exit observer (no WNOWAIT, no psutil)") from exc
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.ZombieProcess:
+        return True
+    except psutil.NoSuchProcess as exc:
+        raise ChildProcessError(f"pid {pid} was reaped outside its owner") from exc
+    except psutil.Error as exc:
+        raise OSError(f"cannot observe pid {pid}: {exc}") from exc
 
 
 def observe_leader(
@@ -219,7 +267,8 @@ def observe_leader(
     """Return True alive, False exited, or None when identity is ambiguous.
 
     ``pinned`` is the caller's :func:`supports_pinned_leader` verdict. A
-    pinned leader is observed with WNOWAIT. A real POSIX child that is NOT
+    pinned leader is observed without reaping (WNOWAIT, or psutil zombie
+    status where WNOWAIT is missing). A real POSIX child that is NOT
     pinned fails closed (None): polling would reap it and release an
     unknown numeric group before its descendants are drained. The exception
     is a platform with no WNOWAIT at all (:func:`uses_exact_handle_fallback`),
