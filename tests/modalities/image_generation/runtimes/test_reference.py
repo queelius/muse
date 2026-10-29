@@ -40,8 +40,18 @@ class RecordingPipe:
 
 
 class NoNegPipe(RecordingPipe):
+    """A pipeline without a negative_prompt parameter. `**extra` records any
+    other keyword the runtime sends, so a dropped field is visibly absent
+    (not passed as None)."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = []
+
     def __call__(self, prompt, image=None, width=None, height=None,
-                 num_inference_steps=None, guidance_scale=None, generator=None):
+                 num_inference_steps=None, guidance_scale=None, generator=None,
+                 **extra):
+        self.extra.append(extra)
         return super().__call__(
             prompt, image=image, width=width, height=height,
             num_inference_steps=num_inference_steps,
@@ -130,10 +140,58 @@ def test_generate_rejects_init_image():
 def test_negative_prompt_dropped_when_pipeline_lacks_it():
     m, pipe, _, _ = _build(pipe=NoNegPipe())
     m.generate("x", negative_prompt="bad")
-    assert "negative_prompt" not in pipe.calls[0] or pipe.calls[0]["negative_prompt"] is None
+    m.edit("x", images=[Image.new("RGB", (4, 4))], negative_prompt="bad")
+    # Not passed at all (neither as a value nor as None).
+    assert pipe.extra == [{}, {}]
     m2, pipe2, _, _ = _build()
     m2.generate("x", negative_prompt="bad")
     assert pipe2.calls[0]["negative_prompt"] == "bad"
+
+
+def test_negative_prompt_reported_ignored_through_the_route():
+    """Behind the real route, with the klein capabilities the HF plugin
+    synthesizes (supports_negative_prompt False): the pipeline never sees
+    negative_prompt and the response lists it in metadata.ignored."""
+    from fastapi.testclient import TestClient
+
+    from muse.core.registry import ModalityRegistry
+    from muse.core.server import create_app
+    from muse.modalities.image_generation.hf import _klein_capabilities
+    from muse.modalities.image_generation.routes import build_router
+
+    m, pipe, _, _ = _build(pipe=NoNegPipe(), default_size=(256, 256))
+    caps = _klein_capabilities()
+    reg = ModalityRegistry()
+    reg.register("image/generation", m, manifest={
+        "model_id": "klein", "modality": "image/generation", "capabilities": caps,
+    })
+    app = create_app(registry=reg, routers={"image/generation": build_router(reg)})
+    r = TestClient(app).post("/v1/images/generations", json={
+        "model": "klein", "prompt": "a fox", "negative_prompt": "blurry",
+        "size": "256x256",
+    })
+    assert r.status_code == 200, r.text
+    assert "negative_prompt" in r.json()["metadata"]["ignored"]
+    assert pipe.extra == [{}]
+    assert pipe.calls[0]["prompt"] == "a fox"
+
+
+def test_explicit_device_kwarg_is_used(monkeypatch):
+    # An explicit device (e.g. a set-device pin) goes through select_device
+    # verbatim and reaches placement; "auto" would consult torch instead.
+    seen = []
+    monkeypatch.setattr(
+        f"{MOD}.select_device",
+        lambda device, torch_module=None: seen.append(device) or device,
+    )
+    monkeypatch.setenv("MUSE_VIDEO_CPU_OFFLOAD", "off")
+    m, pipe, _, _ = _build(device="cpu")
+    assert seen == ["cpu"]
+    assert m._device == "cpu"
+    assert pipe.to_calls == [] and pipe.model_offload == []
+    m2, pipe2, _, _ = _build(device="cuda", cpu_offload="model")
+    assert seen[-1] == "cuda"
+    assert pipe2.model_offload == ["cuda"]
 
 
 def test_metadata_counts_references():

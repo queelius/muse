@@ -4237,3 +4237,64 @@ def test_resolver_pull_seeds_only_the_files_it_downloads(tmp_catalog, source):
     seed.assert_called_once()
     assert seed.call_args.args[1] == "org/repo"
     assert list(seed.call_args.kwargs["allow_patterns"]) == patterns
+
+
+def test_pull_curated_klein_lora_lands_curated_capabilities(tmp_catalog):
+    """The real curated klein-pixel-art entry over the real HF plugin's
+    synthesized klein LoRA manifest: the curated capabilities (base pairing,
+    the explicit rsLoRA lora_scale_factor, prompt prefix, size and steps)
+    land in the persisted catalog manifest and win on collision, while the
+    synthesized runtime settings the curated entry does not name survive."""
+    import dataclasses
+    from unittest.mock import patch
+
+    from muse.core.catalog import (
+        _read_catalog, _reset_read_catalog_cache, _write_catalog, get_manifest, pull,
+    )
+    from muse.core.curated import find_curated
+    from muse.modalities.image_generation.hf import _resolve_lora
+    from tests.modalities.image_generation.test_hf_plugin import (
+        _LIMBIC_REPO, _limbic_info,
+    )
+
+    curated = find_curated("klein-pixel-art")
+    # The LoRA pull is refused until its muse-id base is pulled.
+    _write_catalog({"flux2-klein-4b": {"local_dir": str(tmp_catalog / "klein"), "enabled": True}})
+    _reset_read_catalog_cache()
+
+    info = _limbic_info()
+    info.sha = "0ac8e5c3400af68228811edc324721e25fc26777"
+    resolved = _resolve_lora(_LIMBIC_REPO, info)
+    synthesized = dict(resolved.manifest["capabilities"])
+    weights = tmp_catalog / "weights" / "klein-pixel-art"
+    resolved = dataclasses.replace(
+        resolved,
+        download=lambda cache_root: weights,
+        artifact_provenance=({
+            "repo_id": _LIMBIC_REPO, "revision": info.sha, "subdir": ".",
+        },),
+    )
+    with patch("muse.core.resolvers.resolve", return_value=resolved), \
+         patch("muse.core.catalog_pull.create_venv"), \
+         patch("muse.core.catalog_pull.install_into_venv"), \
+         patch("muse.core.catalog_pull.check_system_packages", return_value=[]), \
+         patch("muse.core.catalog_pull.venv_python", return_value="/fake/py"):
+        assert pull("klein-pixel-art") == "klein-pixel-art"
+
+    persisted = _read_catalog()["klein-pixel-art"]["manifest"]
+    caps = persisted["capabilities"]
+    for key, value in curated.capabilities.items():
+        assert caps[key] == value, key
+    # Curated wins where both set a value: the base pairing and the size.
+    assert synthesized["base_model"] == "black-forest-labs/FLUX.2-klein-4B"
+    assert caps["base_model"] == "flux2-klein-4b"
+    assert synthesized["default_size"] == [1024, 1024]
+    assert caps["default_size"] == [512, 512]
+    assert caps["lora_scale_factor"] == 0.0625
+    # Synthesized klein runtime settings the curated entry leaves alone.
+    for key in ("pipeline_class", "cpu_offload", "device", "supports_reference_images",
+                "max_reference_images", "size_multiple", "max_pixels"):
+        assert caps[key] == synthesized[key], key
+    assert persisted["backend_path"].endswith("runtimes.reference:DiffusersReferenceModel")
+    # The runtime reads the same merged view.
+    assert get_manifest("klein-pixel-art")["capabilities"]["lora_scale_factor"] == 0.0625
