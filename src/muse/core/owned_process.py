@@ -147,6 +147,59 @@ def supports_pinned_leader(
     )
 
 
+def uses_exact_handle_fallback(
+    process: Any, pid: int | None, *, os_name: str,
+) -> bool:
+    """Whether a real POSIX child must be owned through its Popen handle alone.
+
+    True only on a platform with no ``waitid(WNOWAIT)`` at all (see
+    :func:`platform_supports_pinned_leaders`). There the exact Popen handle
+    is the ownership token: :func:`observe_leader` uses ``poll()``, which
+    may reap. Because only the owner reaps, under its owning lock, a
+    ``None`` poll proves the leader, and so its PID and PID==PGID group,
+    are still unreaped and cannot have been reused; a leader that exits
+    right after that poll stays an unreaped zombie until the owner reaps
+    it. Once ``poll()`` has reaped the leader its numeric identity is never
+    signalled again, so descendants that outlive the leader are not drained
+    (best effort, like the installer runner's fallback). Where WNOWAIT
+    exists an unpinned real child keeps failing closed.
+    """
+    return bool(
+        os_name == "posix"
+        and pid is not None
+        and isinstance(process, REAL_POPEN_TYPE)
+        and not platform_supports_pinned_leaders()
+    )
+
+
+def signal_live_fallback_leader(
+    process: Any,
+    pid: int | None,
+    process_group: int | None,
+    sig: signal.Signals,
+    *,
+    label: str,
+) -> bool:
+    """Signal an exact-handle-fallback child just observed alive by ``poll()``.
+
+    The caller holds the owning lock and has just seen
+    :func:`observe_leader` return True (an unreaped leader), so a validated
+    PID==PGID group is still pinned and is signalled whole, descendants
+    included. Without a validated group only the exact child is signalled,
+    through ``Popen.send_signal``, which itself skips a reaped child.
+    """
+    if process_group is not None:
+        return signal_isolated_group(pid, process_group, sig, label=label)
+    try:
+        process.send_signal(sig)
+    except ProcessLookupError:
+        return True
+    except Exception as exc:  # noqa: BLE001 - platform Popen handles vary
+        logger.warning("could not signal %s child %r: %s", label, pid, exc)
+        return False
+    return True
+
+
 def leader_exited_nowait(pid: int) -> bool:
     """Whether ``pid`` has exited, observed WITHOUT reaping it.
 
@@ -168,8 +221,11 @@ def observe_leader(
     ``pinned`` is the caller's :func:`supports_pinned_leader` verdict. A
     pinned leader is observed with WNOWAIT. A real POSIX child that is NOT
     pinned fails closed (None): polling would reap it and release an
-    unknown numeric group before its descendants are drained. Anything else
-    (test doubles, non-POSIX) falls back to ``poll()``, mirroring Popen's
+    unknown numeric group before its descendants are drained. The exception
+    is a platform with no WNOWAIT at all (:func:`uses_exact_handle_fallback`),
+    where ``poll()`` under the owning lock is the only exact observation.
+    Anything else (test doubles, non-POSIX) falls back to ``poll()``,
+    mirroring Popen's
     side effect of storing the polled status on ``returncode``. Callers
     decide whether an unsafe (None) PID is ambiguous before calling: the
     exact Popen handle is still a valid ownership token for ``poll()``.
@@ -187,7 +243,11 @@ def observe_leader(
                 label, pid, exc,
             )
             return None
-    if os_name == "posix" and isinstance(process, REAL_POPEN_TYPE):
+    if (
+        os_name == "posix"
+        and isinstance(process, REAL_POPEN_TYPE)
+        and not uses_exact_handle_fallback(process, pid, os_name=os_name)
+    ):
         return None
     try:
         observed = process.poll()

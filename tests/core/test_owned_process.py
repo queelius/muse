@@ -131,12 +131,63 @@ class TestObserveAndReap:
         ) is False
         process.poll.assert_not_called()
 
-    def test_real_unpinned_posix_child_fails_closed_without_polling(self):
+    def test_real_unpinned_posix_child_fails_closed_without_polling(self, monkeypatch):
+        monkeypatch.setattr(op, "platform_supports_pinned_leaders", lambda: True)
         process = MagicMock(spec=subprocess.Popen, returncode=None)
         assert op.observe_leader(
             process, 4242, pinned=False, os_name="posix", label="t",
         ) is None
         process.poll.assert_not_called()
+
+    def test_no_wnowait_platform_polls_the_exact_real_child(self, monkeypatch):
+        """macOS before Python 3.13 has no os.waitid: poll the exact handle."""
+        monkeypatch.delattr(os, "waitid", raising=False)
+        assert op.platform_supports_pinned_leaders() is False
+        process = MagicMock(spec=subprocess.Popen, returncode=None)
+        assert op.uses_exact_handle_fallback(process, 4242, os_name="posix")
+        assert not op.uses_exact_handle_fallback(process, None, os_name="posix")
+        assert not op.uses_exact_handle_fallback(MagicMock(), 4242, os_name="posix")
+        assert not op.uses_exact_handle_fallback(process, 4242, os_name="nt")
+        process.poll.return_value = None
+        assert op.observe_leader(
+            process, 4242, pinned=False, os_name="posix", label="t",
+        ) is True
+        process.poll.return_value = 3
+        assert op.observe_leader(
+            process, 4242, pinned=False, os_name="posix", label="t",
+        ) is False
+        # Without a concrete pid the real child still fails closed.
+        assert op.observe_leader(
+            MagicMock(spec=subprocess.Popen, returncode=None), None,
+            pinned=False, os_name="posix", label="t",
+        ) is None
+
+    def test_wnowait_platform_never_uses_the_fallback(self, monkeypatch):
+        monkeypatch.setattr(op, "platform_supports_pinned_leaders", lambda: True)
+        process = MagicMock(spec=subprocess.Popen, returncode=None)
+        assert not op.uses_exact_handle_fallback(process, 4242, os_name="posix")
+
+    def test_live_fallback_signal_targets_group_else_exact_child(self):
+        process = MagicMock()
+        with patch.object(op, "signal_isolated_group", return_value=True) as group:
+            assert op.signal_live_fallback_leader(
+                process, 4242, 4242, signal.SIGTERM, label="t",
+            ) is True
+        group.assert_called_once_with(4242, 4242, signal.SIGTERM, label="t")
+        process.send_signal.assert_not_called()
+
+        assert op.signal_live_fallback_leader(
+            process, 4242, None, signal.SIGTERM, label="t",
+        ) is True
+        process.send_signal.assert_called_once_with(signal.SIGTERM)
+        process.send_signal.side_effect = ProcessLookupError
+        assert op.signal_live_fallback_leader(
+            process, 4242, None, signal.SIGKILL, label="t",
+        ) is True
+        process.send_signal.side_effect = OSError("denied")
+        assert op.signal_live_fallback_leader(
+            process, 4242, None, signal.SIGKILL, label="t",
+        ) is False
 
     def test_double_poll_mirrors_returncode(self):
         process = MagicMock(returncode=None)

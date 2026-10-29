@@ -29,10 +29,11 @@ from muse.core.owned_process import (
     kill_signal,
     new_process_group_kwargs,
     observe_leader,
-    platform_supports_pinned_leaders,
     reap_exited_leader,
     signal_isolated_group,
+    signal_live_fallback_leader,
     supports_pinned_leader,
+    uses_exact_handle_fallback,
     validated_isolated_group,
 )
 from muse.core.resource_registry import (
@@ -574,38 +575,8 @@ def _supports_pinned_target(target: _ProcessTarget) -> bool:
 
 
 def _uses_exact_handle_fallback(target: _ProcessTarget) -> bool:
-    """Whether this real POSIX child is owned through its Popen handle alone.
-
-    Only on a platform with no ``waitid(WNOWAIT)`` at all (macOS before
-    Python 3.13, which does not build ``os.waitid``). The exact Popen handle
-    is then the
-    ownership token: ``poll()`` observes the leader, and since only the
-    owner reaps it (under ``process_lock``), a ``None`` poll proves the
-    leader, and so its PID and PID==PGID group, are still unreaped and
-    cannot have been reused. Once ``poll()`` reaps the leader, its numeric
-    identity is never signalled again, so descendants that outlive the
-    leader are not drained (best effort, as in the installer runner's
-    fallback). Where WNOWAIT exists, an unpinned real child still fails
-    closed (``_target_state_locked`` returns None).
-    """
-    return bool(
-        os.name == "posix"
-        and target.pid is not None
-        and isinstance(target.process, _REAL_POPEN_TYPE)
-        and not platform_supports_pinned_leaders()
-    )
-
-
-def _poll_exact_leader(target: _ProcessTarget) -> bool | None:
-    """Exact-handle liveness for the no-WNOWAIT fallback; may reap."""
-    try:
-        observed = target.process.poll()
-    except Exception as exc:  # noqa: BLE001 - platform Popen handles vary
-        logger.warning(
-            "could not inspect %s leader %r: %s", _PROCESS_LABEL, target.pid, exc,
-        )
-        return None
-    return type(observed) is not int
+    """Whether this child is owned through its Popen handle alone (no WNOWAIT)."""
+    return uses_exact_handle_fallback(target.process, target.pid, os_name=os.name)
 
 
 def _target_state_locked(target: _ProcessTarget) -> bool | None:
@@ -620,10 +591,9 @@ def _target_state_locked(target: _ProcessTarget) -> bool | None:
         return None
     if type(getattr(target.process, "returncode", None)) is int:
         return False
-    if _uses_exact_handle_fallback(target):
-        return _poll_exact_leader(target)
     # Pinned leaders are observed with WNOWAIT; an unpinned real POSIX child
-    # fails closed; an ambiguous poll leaves the registry record for repair.
+    # fails closed, except on a platform with no WNOWAIT at all, where the
+    # exact handle is polled; an ambiguous poll leaves the registry record.
     return observe_leader(
         target.process,
         target.pid,
@@ -689,13 +659,13 @@ def _signal_target(
         if state is not True:
             return False
 
-        if target.pgid is not None and _uses_exact_handle_fallback(target):
+        if _uses_exact_handle_fallback(target):
             # No-WNOWAIT fallback: the poll() above returned None under
             # process_lock, so the unreaped leader still pins PID==PGID and
-            # no getpgid revalidation is needed (a leader that exits after
-            # that poll stays an unreaped zombie until this owner reaps it).
-            delivered = signal_isolated_group(
-                target.pid, target.pgid, sig, label=_PROCESS_LABEL,
+            # no getpgid revalidation is needed.
+            delivered = signal_live_fallback_leader(
+                target.process, target.pid, target.pgid, sig,
+                label=_PROCESS_LABEL,
             )
             if delivered and force:
                 target.final_signal_delivered = True
