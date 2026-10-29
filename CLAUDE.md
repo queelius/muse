@@ -532,8 +532,7 @@ apply it.
 control plane (v0.48.0).** An `auto` model that loads on the GPU must be
 *sized, admitted, and evicted* against the VRAM pool, not host RAM -- else
 the LoadDirector would think it "fits" against terabytes of host RAM while
-the GPU OOMs. Three sites share one resolution (a GPU is present iff live
-VRAM info is available): `LoadDirector._resolve_pool_device` (admission /
+the GPU OOMs. Three sites share one resolution: `LoadDirector._resolve_pool_device` (admission /
 LRU eviction), `supervisor._servability_reason` (boot + request-path
 capacity check), and `memory._resolve_auto_side` (the `/v1/admin/memory`
 per-model breakdown, which also honors the supervisor `--device` flag
@@ -541,9 +540,11 @@ first). The sizing ladder reads an `auto` model's (and an `auto` LoRA's
 base's) `measurements.<pool>` the same way (`supervisor._measurement_key`),
 falling back to another device's measurement only when that pool has none,
 so a catalog copied from a GPU box does not size a CPU-only host's load from
-a VRAM peak. The director, servability and the ladder call one predicate,
-`memory_probe.auto_uses_cuda` (live NVML reading, else the torch CUDA/ROCm
-detector). `mps` is its own case: it pools against host RAM for sizing
+a VRAM peak. All four (director, servability, the ladder and the admin
+breakdown) call one predicate, `memory_probe.auto_uses_cuda` (live NVML
+reading, else the torch CUDA/ROCm detector). A probe whose inference fails
+keeps an earlier, larger successful inference peak rather than replacing it
+with its load-only peak. `mps` is its own case: it pools against host RAM for sizing
 (pynvml is CUDA-only, and MPS is unified memory) but keeps its own `mps`
 measurements bucket in `_record_observed_peak`, matching what
 `muse models probe` persists. This bug never surfaced in CI because a

@@ -180,6 +180,73 @@ def test_run_probe_persists_measurement_to_catalog(tmp_catalog):
     assert persisted["shape"] == "5s synthesis"
 
 
+def _run_probe_with_record(record):
+    fake_completed = MagicMock()
+    fake_completed.returncode = 0
+    fake_completed.stdout = json.dumps(record) + "\n"
+    fake_completed.stderr = ""
+    with patch("muse.cli_impl.probe.run_owned_command", return_value=fake_completed):
+        return run_probe(
+            model_id="kokoro-82m",
+            no_inference=False,
+            device=None,
+            as_json=False,
+        )
+
+
+def _probe_record(**overrides):
+    record = {
+        "model_id": "kokoro-82m",
+        "modality": "audio/speech",
+        "device": "cpu",
+        "weights_bytes": 500_000_000,
+        "peak_bytes": 900_000_000,
+        "load_seconds": 1.5,
+        "ran_inference": True,
+        "shape": "5s synthesis",
+        "probed_at": "2026-04-28T00:00:00+00:00",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_failed_inference_probe_keeps_the_existing_inference_peak(tmp_catalog):
+    _seed_pulled_entry(tmp_catalog)
+    assert _run_probe_with_record(_probe_record()) == 0
+
+    failed = _probe_record(
+        peak_bytes=500_000_000,
+        probed_at="2026-04-29T00:00:00+00:00",
+        inference_error="probe output looks degenerate: std=1.0, autocorr=0.0",
+    )
+    assert _run_probe_with_record(failed) == 6
+
+    persisted = _read_catalog()["kokoro-82m"]["measurements"]["cpu"]
+    assert persisted["peak_bytes"] == 900_000_000
+    assert "inference_error" not in persisted
+
+
+def test_failed_inference_probe_records_when_nothing_was_measured(tmp_catalog):
+    _seed_pulled_entry(tmp_catalog)
+    failed = _probe_record(peak_bytes=500_000_000, inference_error="boom")
+    assert _run_probe_with_record(failed) == 6
+
+    persisted = _read_catalog()["kokoro-82m"]["measurements"]["cpu"]
+    assert persisted["peak_bytes"] == 500_000_000
+
+
+def test_failed_inference_probe_replaces_a_smaller_load_only_peak(tmp_catalog):
+    _seed_pulled_entry(tmp_catalog)
+    assert _run_probe_with_record(
+        _probe_record(peak_bytes=400_000_000, ran_inference=False)) == 0
+
+    failed = _probe_record(peak_bytes=500_000_000, inference_error="boom")
+    assert _run_probe_with_record(failed) == 6
+
+    persisted = _read_catalog()["kokoro-82m"]["measurements"]["cpu"]
+    assert persisted["peak_bytes"] == 500_000_000
+
+
 def test_run_probe_json_output_emits_record(tmp_catalog, capsys):
     _seed_pulled_entry(tmp_catalog)
     record = {

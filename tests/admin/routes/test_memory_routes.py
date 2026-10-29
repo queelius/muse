@@ -393,8 +393,19 @@ class TestResolveAutoSide:
         set_supervisor_state(SupervisorState(workers=[], device="auto"))
         from muse.core import memory_probe
         monkeypatch.setattr(memory_probe, "gpu_free_gb", lambda: None)
+        monkeypatch.setattr(memory_probe, "cuda_runtime_available", lambda: False)
         from muse.admin.routes.memory import _resolve_auto_side
         assert _resolve_auto_side() == "cpu"
+
+    def test_auto_flag_with_rocm_runtime_resolves_gpu(self, monkeypatch):
+        # No NVML reading, but torch sees a CUDA-compatible runtime (ROCm):
+        # the same auto_uses_cuda verdict the director and servability use.
+        set_supervisor_state(SupervisorState(workers=[], device="auto"))
+        from muse.core import memory_probe
+        monkeypatch.setattr(memory_probe, "gpu_free_gb", lambda: None)
+        monkeypatch.setattr(memory_probe, "cuda_runtime_available", lambda: True)
+        from muse.admin.routes.memory import _resolve_auto_side
+        assert _resolve_auto_side() == "gpu"
 
     def test_auto_flag_probe_exception_resolves_cpu(self, monkeypatch):
         set_supervisor_state(SupervisorState(workers=[], device="auto"))

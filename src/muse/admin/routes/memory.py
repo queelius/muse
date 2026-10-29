@@ -197,7 +197,10 @@ def _resolve_auto_side() -> str:
         return "cpu"
     try:
         from muse.core import memory_probe
-        return "gpu" if memory_probe.gpu_free_gb() is not None else "cpu"
+        uses_cuda = memory_probe.auto_uses_cuda(
+            memory_probe.gpu_free_gb(), memory_probe.cuda_runtime_available,
+        )
+        return "gpu" if uses_cuda else "cpu"
     except Exception:  # noqa: BLE001
         return "cpu"
 

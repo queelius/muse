@@ -197,8 +197,10 @@ def _run_probe_locked(
             if not isinstance(device_key, str) or not device_key:
                 print("error: probe returned an invalid device", file=sys.stderr)
                 return 4
-            catalog[model_id]["measurements"][device_key] = record
-            _write_catalog(catalog)
+            previous = catalog[model_id]["measurements"].get(device_key)
+            if not _keeps_previous_measurement(previous, record):
+                catalog[model_id]["measurements"][device_key] = record
+                _write_catalog(catalog)
     _reset_known_models_cache()
 
     if as_json:
@@ -215,6 +217,24 @@ def _run_probe_locked(
         )
         return 6
     return 0
+
+
+def _keeps_previous_measurement(previous: object, record: dict) -> bool:
+    """Whether a failed-inference record must not replace `previous`.
+
+    A record with `inference_error` carries only the load-time peak. It
+    must not overwrite an earlier successful inference peak that is
+    larger, or the director would undersize the model until a load
+    self-heals the number.
+    """
+    if not record.get("inference_error") or not isinstance(previous, dict):
+        return False
+    if previous.get("inference_error") or not previous.get("ran_inference"):
+        return False
+    old, new = previous.get("peak_bytes"), record.get("peak_bytes")
+    if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
+        return False
+    return old >= new
 
 
 def run_probe_all(
