@@ -434,6 +434,51 @@
     default_size: [512, 512]
     default_steps: 4
 
+- id: flux2-klein-base-4b
+  uri: hf://black-forest-labs/FLUX.2-klein-base-4B
+  modality: image/generation
+  size_gb: 16.0
+  description: "FLUX.2 klein base 4B (undistilled): 28-step text-to-image with real guidance; the base for klein-pixel-walk, Apache 2.0"
+  summary: "Undistilled FLUX.2 klein for LoRAs trained on the base model, such as klein-pixel-walk"
+  strengths:
+    - "Real classifier-free guidance (default 4.0) and the 20-50 step range base-trained LoRAs expect"
+    - "Text-to-image and up to 4-reference edits, like flux2-klein-4b"
+  limits:
+    - "28 steps against flux2-klein-4b's 4, so several times slower; use flux2-klein-4b for plain stills"
+    - "negative_prompt has no effect"
+    - "Runs with CPU offload on 12 GB: slow first load, and about 16 GB of host RAM that muse's memory accounting does not count"
+  quality_tier: good
+  capabilities:
+    # Opts this "base" repo into the reference runtime with undistilled
+    # presets (28 steps, guidance 4.0); see image_generation/hf.py.
+    reference_runtime: true
+    memory_gb: 9.5
+
+- id: klein-pixel-walk
+  uri: hf://svntax-dev/pixel_spritesheet_4walk_small_lora_v1
+  modality: image/generation
+  size_gb: 0.09
+  description: "4-direction walk-cycle spritesheet LoRA for FLUX.2 klein base 4B (4x4 sheet of 32x32 characters, card template prepended automatically); pre-paired with flux2-klein-base-4b (pull it first)"
+  summary: "4x4 walk-cycle spritesheets of small characters; send the output through /v1/images/pixelize with sheet=4x4 grid=4 for 32x32 frames"
+  strengths:
+    - "One 512x512 image holds walk frames facing down, left, right and up, plus arms-raised, jump and lying frames"
+    - "The card's spritesheet template sentence is prepended unless the prompt already has it; describe only the character"
+    - "Apache 2.0; per-request lora_scale (1.0 = the card's ComfyUI strength 1.0)"
+  limits:
+    - "Requires flux2-klein-base-4b pulled first; 28 steps under CPU offload: about 45 s per sheet on a 12 GB RTX 3060 once loaded, and about 16 GB of host RAM"
+    - "Pixelize with sheet=4x4 grid=4 (palette=auto:24) before use; the raw grid is soft. Frames are 32x32 and the walk cycle is 3 frames per direction"
+    - "Back-view frames and non-human anatomy are the least consistent (per its card)"
+  quality_tier: draft
+  capabilities:
+    lora_adapter: true
+    base_model: flux2-klein-base-4b
+    # A plain LoRA (ai-toolkit, rank 32, no alpha keys, no rsLoRA metadata),
+    # so diffusers applies weight 1.0 as is and no lora_scale_factor is set.
+    # Live: 0.5-1.0 draw clean sheets, 1.5 smears, 0 equals the base exactly.
+    lora_scale: 1.0
+    prompt_prefix: "The spritesheet is a 4 by 4 grid of four rows of frames - first row is 3 walking frames facing down and 1 frame both arms raised, second row is 3 walking frames facing left and 1 frame jumping left, third row is 3 walking frames facing right and 1 frame jumping right, fourth row is 3 walking frames back view facing up and 1 frame lying on floor. "
+    default_size: [512, 512]
+
 # ---------- audio/transcription (ASR via faster-whisper) ----------
 
 - id: whisper-tiny

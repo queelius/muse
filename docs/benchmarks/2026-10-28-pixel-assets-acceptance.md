@@ -272,3 +272,51 @@ sound.
   (`flux2-klein-4b` does the same).
 - The code receipt's `muse_version` comes from installed dist metadata (0.68.0 on
   this host versus pyproject 0.69.0).
+
+## Walk-sheet spike
+
+**Verdict: GO, 4 of 4.** All four sheets read as consistent 4-direction walk
+cycles after pixelize: knight, witch, goblin and elf ranger. Down, left, right
+and up rows hold one character with stable colours and outfit, the left and
+right rows really face opposite ways, and the three walk frames alternate the
+legs. A second seed (11) for each character gave four more coherent sheets, so
+the result is not one lucky seed.
+
+Setup:
+
+- `flux2-klein-base-4b` (curated, `reference_runtime: true`).
+- `klein-pixel-walk` (svntax-dev/pixel_spritesheet_4walk_small_lora_v1, the
+  final 3000-step weight only).
+- 512x512, 28 steps, guidance 4.0, `lora_scale` 1.0, seed 7, on the local
+  RTX 3060 under model CPU offload.
+- The prompt is "A pixel art spritesheet of <character>.", with the card's
+  4x4 template sentence prepended by `prompt_prefix`.
+- Pixelize: `sheet=4x4 grid=4 palette=auto:24`, giving a 128x128 sheet of
+  32x32 frames. That is the card's 4x downscale.
+
+Results:
+
+- **Grid detection.** Unlike klein-pixel-art, this LoRA draws on a real 4 px
+  grid. `grid=auto` detected cell 4 on all four sheets.
+- **Adapter scale.** It is a plain ai-toolkit LoRA: rank 32, no `.alpha`
+  keys, no rsLoRA metadata. So no `lora_scale_factor` is needed.
+- **Seeded sweep.** At 0 the output is bit-identical to `flux2-klein-base-4b`
+  (max diff 0), and the base alone draws an unstructured 3-row sheet. 0.5 and
+  1.0 give clean 4x4 sheets, and 1.5 smears.
+- **Timings.**
+  - Base pull: 30 min, mostly the download. Probe peak 8.98 GB.
+  - LoRA pull: 6.5 min, mostly the venv. Probe peak 8.04 GB.
+  - Generation: 43-52 s per sheet once loaded, 87-142 s for the first request
+    including the worker load. Pixelize takes 0.5-3 s.
+
+Weak points:
+
+- Back-view frames drift, as the card warns: the knight's plume and the elf's
+  hood.
+- The auto:24 palette shifts the knight's orange face toward tan.
+- Props (bow, dagger) show up only in the jump and back frames.
+
+Outputs are under `.superpowers/sdd/2026-10-28-retro-pixel-assets/live/walk/`:
+`sheet/index.html` is the contact sheet, `sheet/<case>/v0.png` the pixelized
+sheets, `sweep/` the scale sweep and `seed11/` the second seed. The cases are
+in `scripts/bench/pixel_walk_cases.yaml`.

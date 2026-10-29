@@ -10,7 +10,7 @@ Loaded via single-file import; no relative imports.
 from __future__ import annotations
 
 import logging
-
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -68,6 +68,36 @@ def _is_klein_name(ref: str) -> bool:
     return "flux.2-klein" in name or "flux2-klein" in name
 
 
+def _is_klein_base_name(ref: str) -> bool:
+    """True for a non-distilled klein "base" repo or catalog id."""
+    return _is_klein_name(ref) and "base" in ref.rsplit("/", 1)[-1].lower()
+
+
+def _curated_reference_opt_in(ref: str) -> bool:
+    """True when the curated entry for `ref` sets `reference_runtime: true`.
+
+    `ref` is an HF repo id (matched against the entry's hf:// URI) or a muse
+    catalog id (matched against the entry's id), case-insensitively. This is
+    the only way a klein "base" repo reaches the reference runtime with its
+    undistilled presets: an explicit curated entry, never a name match.
+    """
+    try:
+        from muse.core.curated import load_curated
+
+        entries = load_curated()
+    except Exception as e:  # noqa: BLE001 - a broken yaml must not break resolve
+        logger.debug("curated lookup failed for %s: %s", ref, e)
+        return False
+    key = ref.lower()
+    for e in entries:
+        uri_ref = None
+        if e.uri and e.uri.startswith("hf://"):
+            uri_ref = e.uri[len("hf://"):].split("@", 1)[0].lower()
+        if e.id.lower() == key or uri_ref == key:
+            return (e.capabilities or {}).get("reference_runtime") is True
+    return False
+
+
 def _reference_family(
     repo_id: str, *, allow_base: bool = False,
 ) -> dict[str, Any] | None:
@@ -76,12 +106,33 @@ def _reference_family(
     Matches distilled FLUX.2 klein on the repo name part, case-insensitively. Returns
     a fresh dict each call so callers may mutate it. `allow_base` keeps
     non-distilled "base" names (used for LoRA bases, whose adapter decides).
+    A "base" repo opted in by a curated `reference_runtime: true` entry is
+    always kept and gets undistilled presets (28 steps, real CFG 4.0).
     """
     if not _is_klein_name(repo_id):
         return None
+    is_base = _is_klein_base_name(repo_id)
+    opted_in = is_base and _curated_reference_opt_in(repo_id)
     # Non-distilled "base" checkpoints are not tuned for the 4-step schedule.
-    if not allow_base and "base" in repo_id.rsplit("/", 1)[-1].lower():
+    if is_base and not (allow_base or opted_in):
         return None
+    caps = _klein_capabilities()
+    if opted_in:
+        caps.update(
+            default_steps=28,
+            default_guidance=4.0,
+            supports_guidance=True,
+            quality_presets={
+                "low": {"steps": 20, "max_pixels": 1048576},
+                "medium": {"steps": 28},
+                "high": {"steps": 50},
+            },
+        )
+    return caps
+
+
+def _klein_capabilities() -> dict[str, Any]:
+    """Fresh distilled-klein capability dict (4-step presets)."""
     return {
         "pipeline_class": "Flux2KleinPipeline",
         "default_size": [1024, 1024],
@@ -226,6 +277,26 @@ def _estimate_repo_weights_gb(repo_id: str) -> float | None:
         return None
 
 
+_STEP_SUFFIX_RE = re.compile(r"[_-]\d{3,}$")
+
+
+def _final_checkpoint(weights: list[str]) -> str | None:
+    """The final adapter among `weights` when every other file is one of its
+    numbered intermediate checkpoints (`<stem>_<digits>.safetensors`, as
+    ai-toolkit and kohya save them), else None."""
+    if len(weights) < 2:
+        return None
+    stems = {w: w[: -len(".safetensors")] for w in weights}
+    finals = [w for w, st in stems.items() if not _STEP_SUFFIX_RE.search(st)]
+    if len(finals) != 1:
+        return None
+    final_stem = stems[finals[0]]
+    for w, st in stems.items():
+        if w != finals[0] and _STEP_SUFFIX_RE.sub("", st) != final_stem:
+            return None
+    return finals[0]
+
+
 def _resolve_lora(
     repo_id: str, info, *, base_override: str | None = None,
 ) -> ResolvedModel:
@@ -250,10 +321,16 @@ def _resolve_lora(
     weights = [
         f for f in siblings if f.endswith(".safetensors") and "/" not in f
     ]
+    final = _final_checkpoint(weights)
     if len(weights) > 1 and _DIFFUSERS_LORA_WEIGHT in weights:
         # e.g. a diffusers copy next to a ComfyUI copy: fetch only the
         # diffusers one, which load_lora_weights picks by name.
         allow_patterns = [_DIFFUSERS_LORA_WEIGHT, "*.json"]
+    elif final is not None:
+        # A final adapter next to its own intermediate training checkpoints
+        # (name.safetensors + name_000002750.safetensors): fetch only the
+        # final one, so load_lora_weights finds a single weight file.
+        allow_patterns = [final, "*.json", "*.txt"]
     elif len(weights) == 1:
         # Adapter repos are flat: weights + configs at the top level,
         # tens of MB total. No subfolder pipeline tree to filter.

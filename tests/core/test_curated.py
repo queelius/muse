@@ -489,3 +489,39 @@ def test_curated_klein_pixel_art_entry():
     # Listed right after the SDXL pixel LoRA.
     ids = [e.id for e in load_curated()]
     assert ids.index("klein-pixel-art") == ids.index("pixel-art-xl") + 1
+
+
+_WALK_TEMPLATE = (
+    "The spritesheet is a 4 by 4 grid of four rows of frames - first row is 3 "
+    "walking frames facing down and 1 frame both arms raised, second row is 3 "
+    "walking frames facing left and 1 frame jumping left, third row is 3 walking "
+    "frames facing right and 1 frame jumping right, fourth row is 3 walking "
+    "frames back view facing up and 1 frame lying on floor."
+)
+
+
+def test_curated_klein_base_entry_opts_into_reference_runtime():
+    entry = find_curated("flux2-klein-base-4b")
+    assert entry is not None
+    assert entry.uri == "hf://black-forest-labs/FLUX.2-klein-base-4B"
+    assert entry.modality == "image/generation"
+    assert entry.capabilities["reference_runtime"] is True
+    assert entry.limits
+
+
+def test_curated_klein_pixel_walk_entry():
+    entry = find_curated("klein-pixel-walk")
+    assert entry is not None
+    assert entry.uri == "hf://svntax-dev/pixel_spritesheet_4walk_small_lora_v1"
+    assert entry.modality == "image/generation"
+    caps = entry.capabilities
+    assert caps["lora_adapter"] is True
+    assert caps["base_model"] == "flux2-klein-base-4b"
+    assert caps["lora_scale"] == 1.0
+    # The card's template sentence, copied verbatim.
+    assert caps["prompt_prefix"] == _WALK_TEMPLATE + " "
+    assert caps["default_size"] == [512, 512]
+    assert "memory_gb" not in caps
+    # Plain LoRA (no alpha keys, no rsLoRA metadata): weight 1.0 is the card's.
+    assert "lora_scale_factor" not in caps
+    assert "sheet=4x4" in " ".join((entry.summary or "", *entry.strengths, *entry.limits))

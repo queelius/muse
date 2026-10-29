@@ -161,6 +161,20 @@ def test_shipped_case_file_is_valid():
     assert all("seamless" in c[k] for c in tiles for k in ("fill_prompt", "base_prompt"))
 
 
+
+def test_shipped_walk_case_file_is_valid():
+    from pathlib import Path
+    cases = load_cases(Path(__file__).resolve().parents[2] / "scripts/bench/pixel_walk_cases.yaml")
+    assert [c["id"] for c in cases] == [
+        "walk-knight", "walk-witch", "walk-goblin", "walk-elf-ranger"]
+    for c in cases:
+        assert c["model"] == "klein-pixel-walk" and c["kind"] == "sprite"
+        # The model's prompt_prefix adds the card's 4x4 template sentence.
+        assert "4 by 4" not in c["prompt"]
+        assert all(v["sheet"] == "4x4" and v["palette"] == "auto:24"
+                   for v in c["pixelize"])
+        assert c["pixelize"][0]["grid"] == 4
+
 def _cells(img, t=4):
     """{(col, row): set of pixels} for a painted map."""
     out = {}

@@ -450,9 +450,12 @@ def test_klein_repo_resolves_to_reference_runtime():
 
 
 def test_klein_base_repo_not_reference_family():
+    """Without a curated reference_runtime opt-in, base repos stay excluded."""
+    from unittest.mock import patch
     from muse.modalities.image_generation.hf import _reference_family
 
-    assert _reference_family("black-forest-labs/FLUX.2-klein-base-4B") is None
+    with patch("muse.core.curated.load_curated", return_value=[]):
+        assert _reference_family("black-forest-labs/FLUX.2-klein-base-4B") is None
     assert _reference_family(_KLEIN_REPO) is not None
 
 
@@ -679,3 +682,147 @@ def test_resolve_lora_sdxl_unchanged():
         "*.safetensors", "*.json", "*.txt",
     ]
     assert r.allow_patterns == ("*.safetensors", "*.json", "*.txt")
+
+
+# ---------------- klein base opt-in (curated reference_runtime: true) ----------------
+
+_KLEIN_BASE_REPO = "black-forest-labs/FLUX.2-klein-base-4B"
+_WALK_REPO = "svntax-dev/pixel_spritesheet_4walk_small_lora_v1"
+_WALK_FINAL = "pixel_4walk_small_flux2_klein_base_4b_v1.safetensors"
+_WALK_SIBLINGS = [
+    ".gitattributes", "README.md",
+    "flux2_klein_image_edit_4b_base_pixel_spritesheet_workflow.json",
+    "images/knight.png",
+    _WALK_FINAL,
+    "pixel_4walk_small_flux2_klein_base_4b_v1_000002750.safetensors",
+]
+
+
+def _curated_stub(*, opted_in=True):
+    from muse.core.curated import CuratedEntry
+    caps = {"reference_runtime": True, "memory_gb": 9.5} if opted_in else {}
+    return [CuratedEntry(
+        id="flux2-klein-base-4b", bundled=False,
+        uri=f"hf://{_KLEIN_BASE_REPO}", modality="image/generation",
+        size_gb=16.0, description=None, tags=(), capabilities=caps,
+    )]
+
+
+def _klein_base_info():
+    info = _fake_info(
+        siblings=[s.replace("flux-2-klein-4b", "flux-2-klein-base-4b")
+                  for s in _KLEIN_SIBLINGS],
+        tags=["text-to-image", "image-to-image"], pipeline_tag="image-to-image",
+    )
+    info.card_data = MagicMock(license="apache-2.0")
+    return info
+
+
+def _walk_info():
+    info = _fake_info(
+        siblings=_WALK_SIBLINGS,
+        tags=[
+            "diffusers", "text-to-image", "lora", "template:diffusion-lora",
+            f"base_model:{_KLEIN_BASE_REPO}",
+            f"base_model:adapter:{_KLEIN_BASE_REPO}", "license:apache-2.0",
+        ],
+        pipeline_tag="text-to-image",
+    )
+    info.card_data = MagicMock(license="apache-2.0")
+    return info
+
+
+def _assert_base_presets(caps):
+    assert caps["pipeline_class"] == "Flux2KleinPipeline"
+    assert caps["default_steps"] == 28
+    assert caps["default_guidance"] == 4.0
+    # Undistilled: guidance is real CFG.
+    assert caps["supports_guidance"] is True
+    assert caps["quality_presets"]["medium"] == {"steps": 28}
+    assert all(p["steps"] >= 20 for p in caps["quality_presets"].values())
+    assert caps["cpu_offload"] == "model"
+    assert caps["size_multiple"] == 16
+
+
+def test_klein_base_opt_in_routes_to_reference_runtime():
+    from unittest.mock import patch
+    with patch("muse.core.curated.load_curated", return_value=_curated_stub()):
+        r = HF_PLUGIN["resolve"](_KLEIN_BASE_REPO, None, _klein_base_info())
+    assert r.backend_path.endswith("runtimes.reference:DiffusersReferenceModel")
+    _assert_base_presets(r.manifest["capabilities"])
+    assert r.manifest["pip_extras"][1] == "diffusers>=0.37.0"
+
+
+def test_klein_base_without_opt_in_keeps_exclusion():
+    from unittest.mock import patch
+    for entries in ([], _curated_stub(opted_in=False)):
+        with patch("muse.core.curated.load_curated", return_value=entries):
+            r = HF_PLUGIN["resolve"](_KLEIN_BASE_REPO, None, _klein_base_info())
+        assert r.backend_path.endswith(":DiffusersText2ImageModel")
+
+
+def test_klein_distilled_repo_ignores_opt_in_lookup():
+    """The distilled repo keeps its 4-step presets whatever curated says."""
+    from unittest.mock import patch
+    with patch("muse.core.curated.load_curated", return_value=_curated_stub()):
+        r = HF_PLUGIN["resolve"](_KLEIN_REPO, None, _klein_info())
+    assert r.manifest["capabilities"]["default_steps"] == 4
+
+
+def test_real_curated_opts_klein_base_in():
+    r = HF_PLUGIN["resolve"](_KLEIN_BASE_REPO, None, _klein_base_info())
+    assert r.backend_path.endswith(":DiffusersReferenceModel")
+    _assert_base_presets(r.manifest["capabilities"])
+
+
+def test_lora_on_opted_in_base_gets_base_presets():
+    from unittest.mock import patch
+    with patch("muse.core.curated.load_curated", return_value=_curated_stub()):
+        tagged = HF_PLUGIN["resolve"](_WALK_REPO, None, _walk_info())
+        pinned = HF_PLUGIN["resolve"](
+            _WALK_REPO, None, _walk_info(), base_override="flux2-klein-base-4b",
+        )
+    for r in (tagged, pinned):
+        assert r.backend_path.endswith(":DiffusersReferenceModel")
+        caps = r.manifest["capabilities"]
+        _assert_base_presets(caps)
+        assert caps["lora_adapter"] is True
+        assert "memory_gb" not in caps
+    assert pinned.manifest["capabilities"]["base_model"] == "flux2-klein-base-4b"
+
+
+def test_lora_on_klein_base_without_opt_in_keeps_distilled_presets():
+    from unittest.mock import patch
+    with patch("muse.core.curated.load_curated", return_value=[]):
+        r = HF_PLUGIN["resolve"](_WALK_REPO, None, _walk_info())
+    assert r.backend_path.endswith(":DiffusersReferenceModel")
+    assert r.manifest["capabilities"]["default_steps"] == 4
+
+
+def test_lora_prefers_final_weight_over_intermediate_checkpoints():
+    from pathlib import Path
+    from unittest.mock import patch
+    from huggingface_hub.utils import filter_repo_objects
+
+    with patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as snap:
+        r = HF_PLUGIN["resolve"](_WALK_REPO, None, _walk_info())
+        r.download(Path("/tmp/cache"))
+    patterns = snap.call_args.kwargs["allow_patterns"]
+    assert r.allow_patterns == tuple(patterns)
+    kept = set(filter_repo_objects(_WALK_SIBLINGS, allow_patterns=patterns))
+    assert {f for f in kept if f.endswith(".safetensors")} == {_WALK_FINAL}
+
+
+def test_lora_unrelated_weight_names_still_fail():
+    import pytest
+    from muse.core.resolvers import ResolverError
+    info = _walk_info()
+    info.siblings = [
+        MagicMock(rfilename=f)
+        for f in ("walk_v1.safetensors", "run_v1_000002750.safetensors")
+    ]
+    with pytest.raises(ResolverError, match="exactly one"):
+        HF_PLUGIN["resolve"](_WALK_REPO, None, info)

@@ -1,0 +1,41 @@
+# 4x4 walk-sheet cases for scripts/bench/pixel_compare.py.
+# Needs klein-pixel-walk (on flux2-klein-base-4b) and pixel-tools pulled.
+# The card's 4x4 template sentence is prepended by the model's prompt_prefix.
+# grid=4 is the card's 4x downscale (128x128 sheet, 32x32 frames); the second
+# variant lets grid=auto find it (it did, 4/4, in the 2026-10-28 spike).
+- id: walk-knight
+  kind: sprite
+  prompt: A pixel art spritesheet of a medieval knight wearing steel plate armor and a helmet with a blue plume.
+  model: klein-pixel-walk
+  size: 512x512
+  seed: 7
+  pixelize:
+  - {sheet: 4x4, grid: 4, palette: "auto:24"}
+  - {sheet: 4x4, palette: "auto:24"}
+- id: walk-witch
+  kind: sprite
+  prompt: A pixel art spritesheet of a witch with long black hair and green eyes, wearing a pointed black hat and a dark green robe.
+  model: klein-pixel-walk
+  size: 512x512
+  seed: 7
+  pixelize:
+  - {sheet: 4x4, grid: 4, palette: "auto:24"}
+  - {sheet: 4x4, palette: "auto:24"}
+- id: walk-goblin
+  kind: sprite
+  prompt: A pixel art spritesheet of a green-skinned goblin with pointed ears, wearing a brown leather vest and carrying a rusty dagger.
+  model: klein-pixel-walk
+  size: 512x512
+  seed: 7
+  pixelize:
+  - {sheet: 4x4, grid: 4, palette: "auto:24"}
+  - {sheet: 4x4, palette: "auto:24"}
+- id: walk-elf-ranger
+  kind: sprite
+  prompt: A pixel art spritesheet of an elf ranger with long blonde hair and pointed ears, wearing a green hooded cloak and carrying a wooden bow.
+  model: klein-pixel-walk
+  size: 512x512
+  seed: 7
+  pixelize:
+  - {sheet: 4x4, grid: 4, palette: "auto:24"}
+  - {sheet: 4x4, palette: "auto:24"}

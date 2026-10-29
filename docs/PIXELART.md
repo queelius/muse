@@ -82,6 +82,31 @@ Edge options: `edge_width`, `outline`, `highlight`, `roughness`,
 
 To re-cut a block you already have, send it as `a2` instead of `fill`.
 
+## 3b. A 4-direction walk sheet
+
+`klein-pixel-walk` draws a whole character sheet in one 512x512 image: a 4x4
+grid whose rows are walking down, left, right and up (3 frames each), with an
+arms-raised, two jumping and a lying frame in the last column. It is a LoRA
+on the undistilled `flux2-klein-base-4b` (28 steps, guidance 4.0), so pull
+both (about 16 GB of weights). The card's template sentence is prepended for
+you; describe only the character.
+
+```bash
+muse pull flux2-klein-base-4b && muse pull klein-pixel-walk
+curl -s $MUSE/v1/images/generations -H 'content-type: application/json' -d '{
+  "model": "klein-pixel-walk", "seed": 7, "response_format": "b64_json",
+  "prompt": "A pixel art spritesheet of a witch with long black hair, wearing a pointed black hat and a dark green robe."}' \
+  | jq -r '.data[0].b64_json' | base64 -d > witch_sheet_raw.png
+curl -s $MUSE/v1/images/pixelize -F model=pixel-tools -F image=@witch_sheet_raw.png \
+  -F sheet=4x4 -F grid=4 -F palette=auto:24 -F response_format=png -o witch_sheet.png
+```
+
+`grid=4` is the card's 4x downscale: a 128x128 sheet of 32x32 frames, one
+shared palette. This output is on a real grid, so `grid=auto` finds the same
+4 px cell. Each sheet takes about 45 s on a 12 GB RTX 3060 once loaded. Back
+views are the least consistent frames (hair and headwear drift), as the card
+warns. `lora_scale` 0.5 to 1.0 is safe; at 1.5 the sprites smear.
+
 ## 4. Import
 
 - **Godot 4.** Drop `grass.tres` and `grass_blob47.png` into the project, then
@@ -110,3 +135,4 @@ unzip the saved file. Inputs come as `image_path` / `fill_path` / `base_path`
 - `scripts/bench/pixel_compare.py --server $MUSE --cases scripts/bench/pixel_cases.yaml
   --out /tmp/pixel` renders a contact sheet (raw vs pixelized, and a random
   16x12 map painted from the blob tiles) for judging a model or palette.
+  `scripts/bench/pixel_walk_cases.yaml` does the same for four walk sheets.
