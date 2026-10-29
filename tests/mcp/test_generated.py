@@ -608,8 +608,11 @@ def _defaults_docs(defaults: dict, with_schema: bool = True):
     return caps, openapi
 
 
-def test_mcp_defaults_not_in_the_schema_are_dropped_with_one_warning(caplog):
+def test_mcp_defaults_not_in_the_schema_are_dropped_with_one_warning(caplog, monkeypatch):
     import logging
+
+    # The warn-once set is process-global; start empty so earlier tests cannot eat warnings.
+    monkeypatch.setattr("muse.mcp.generated._WARNED_DEFAULTS", set())
 
     caps, openapi = _defaults_docs({"response_format": "zip", "respons_format": "zip",
                                     "n": 2})
