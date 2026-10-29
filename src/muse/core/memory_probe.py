@@ -256,6 +256,24 @@ def resolve_memory_pool(
     return "cpu"
 
 
+def auto_uses_cuda(
+    gpu_free_gb: float | None, cuda_available_fn: Callable[[], Any] | None,
+) -> bool:
+    """Whether a `device: "auto"` model binds to the CUDA pool on this host.
+
+    The one auto-placement predicate (LoadDirector admission, supervisor
+    servability and the sizing ladder's measurement lookup): a live NVML
+    reading, else the injected CUDA-runtime detector (torch, so ROCm too).
+    The detector runs only when NVML has no reading.
+    """
+    if gpu_free_gb is not None:
+        return True
+    return resolve_memory_pool(
+        "auto", gpu_free_gb=None,
+        cuda_available=check_cuda_available(cuda_available_fn),
+    ) == "cuda"
+
+
 def available_capacity_gb(
     *,
     live_free_gb: float | None,

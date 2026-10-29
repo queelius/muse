@@ -2485,6 +2485,88 @@ _REF_RUNTIME = (
 )
 
 
+class TestAutoDeviceMeasurementPool:
+    """`device: auto` picks the measurement for the pool auto resolves to on
+    this host, with the predicate the LoadDirector and servability use
+    (live VRAM reading or a CUDA runtime -> cuda, else cpu): a catalog
+    copied from a GPU box must not size a CPU-only host's load from its
+    cuda VRAM peak. Both the model's own lookup and the base chase."""
+
+    _CUDA = 8 * 1024 ** 3
+    _CPU = 3 * 1024 ** 3
+
+    def _own(self):
+        return {"enabled": True, "measurements": {
+            "cuda": {"peak_bytes": self._CUDA, "device": "cuda"},
+            "cpu": {"peak_bytes": self._CPU, "device": "cpu"},
+        }, "manifest": {"model_id": "m", "modality": "image/generation",
+                        "hf_repo": "o/m", "backend_path": "x:Y",
+                        "capabilities": {"device": "auto"}}}
+
+    @pytest.mark.parametrize("gpu, want, dev", [
+        (False, 3.0, "cpu"), (True, 8.0, "cuda"),
+    ])
+    def test_own_measurement_follows_auto_pool(self, gpu, want, dev):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        has, gb, device = _has_memory_data(self._own(), auto_cuda_available=gpu)
+        assert has and gb == pytest.approx(want) and device == dev
+
+    def test_own_cpu_only_host_with_only_cuda_measurement_still_sizes(self):
+        # A bundled GPU model probed on cuda keeps its cross-device recovery.
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        entry = self._own()
+        del entry["measurements"]["cpu"]
+        has, gb, device = _has_memory_data(entry, auto_cuda_available=False)
+        assert has and gb == pytest.approx(8.0) and device == "cuda"
+
+    @pytest.mark.parametrize("gpu, want", [(False, 3.0), (True, 8.0)])
+    def test_base_chase_follows_auto_pool(self, tmp_path, gpu, want):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        d = tmp_path / "lora"
+        d.mkdir()
+        lora = {"local_dir": str(d), "enabled": True, "manifest": {
+            "model_id": "l", "modality": "image/generation", "hf_repo": "o/l",
+            "backend_path": "x:Y",
+            "capabilities": {"lora_adapter": True, "base_model": "base",
+                             "device": "auto"}}}
+        base = self._own()
+        base["manifest"]["capabilities"]["memory_gb"] = 9.5
+        has, gb, _ = _has_memory_data(
+            lora, catalog={"base": base}, auto_cuda_available=gpu,
+        )
+        assert has and gb == pytest.approx(want)
+
+    @pytest.mark.parametrize("gpu, want", [(False, 3.0), (True, 8.0)])
+    def test_servability_passes_its_auto_verdict(self, gpu, want):
+        from muse.cli_impl.supervisor import _servability_reason
+
+        reason = _servability_reason(
+            self._own(), cpu_available_gb=2.0 if not gpu else 64.0,
+            gpu_available_gb=4.0 if gpu else None, auto_cuda_available=gpu,
+        )
+        assert reason is not None and f"{want:.1f} GB" in reason
+
+    def test_backfill_resolves_auto_with_the_host_predicate(self, tmp_path, monkeypatch):
+        from muse.cli_impl import supervisor
+        from muse.core.catalog import _reset_read_catalog_cache, _write_catalog
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        _write_catalog({"m": self._own()})
+        _reset_read_catalog_cache()
+        manifest = {"model_id": "m", "modality": "image/generation",
+                    "capabilities": {"device": "auto"}}
+        for gpu_free, want in ((None, 3.0), (6.0, 8.0)):
+            probe = MagicMock(spec=["gpu_free_gb", "cuda_available"])
+            probe.gpu_free_gb.return_value = gpu_free
+            probe.cuda_available.return_value = False
+            monkeypatch.setattr(supervisor, "_MemoryProbeAdapter", lambda p=probe: p)
+            out = supervisor.backfill_manifest_memory(manifest, "m")
+            assert out["capabilities"]["memory_gb"] == pytest.approx(want)
+
+
 class TestSizingLadderBaseChase:
     """The sizing ladder itself (`_has_memory_data`, shared by boot
     validation and the request-path re-check) sizes a manifest with

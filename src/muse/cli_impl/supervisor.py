@@ -41,8 +41,8 @@ from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, model_load_blocker
 
 from muse.core.memory_probe import (
+    auto_uses_cuda,
     available_capacity_gb,
-    check_cuda_available,
     declared_device,
     optional_probe_gb,
     probe_method,
@@ -1569,8 +1569,35 @@ def _effective_model_device(
     return measured_device
 
 
+def _host_auto_uses_cuda() -> bool:
+    """`auto_uses_cuda` against this host's live probe (NVML, then torch)."""
+    probe = _MemoryProbeAdapter()
+    return auto_uses_cuda(probe.gpu_free_gb(), probe_method(probe, "cuda_available"))
+
+
+def _measurement_key(device: str, auto_cuda_available: "bool | None") -> str:
+    """The `measurements.<key>` bucket for a model declared on `device`.
+
+    "auto" maps to the pool it resolves to here ("cuda" or "cpu"), with the
+    predicate admission and servability use (`auto_uses_cuda`; None asks
+    the live host), so a catalog copied from a GPU box does not size a
+    CPU-only host's load from a VRAM peak. "gpu" is the legacy cuda alias;
+    "mps" keeps its own bucket, as the probe writes it.
+    """
+    normalized = str(device or "auto").lower()
+    if normalized == "gpu":
+        return "cuda"
+    if normalized in ("auto", ""):
+        if auto_cuda_available is None:
+            auto_cuda_available = _host_auto_uses_cuda()
+        return resolve_memory_pool(
+            "auto", gpu_free_gb=None, cuda_available=auto_cuda_available,
+        )
+    return normalized
+
+
 def _declared_or_measured(
-    catalog_entry: dict,
+    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
 ) -> tuple[bool | None, float, str]:
     """Tier 1 of the sizing ladder: the entry's own estimate.
 
@@ -1592,13 +1619,21 @@ def _declared_or_measured(
     if not isinstance(measurements, dict):
         measurements = {}
     # Probe records key by the resolved device (e.g. "cpu" / "cuda")
-    # so we look up by the same key. "gpu" alias normalizes to "cuda"
-    # to match what the probe writes.
-    measurement_key = "cuda" if device == "gpu" else device
+    # so we look up by the same key; "auto" by the pool it resolves to on
+    # this host (`_measurement_key`), and only when there is a measurement
+    # to pick (no host query for a declared or unmeasured entry).
+    measurement_key = (
+        _measurement_key(device, auto_cuda_available)
+        if measurements and declared is None else device
+    )
     measurement = measurements.get(measurement_key) or {}
     if not isinstance(measurement, dict):
         measurement = {}
     measured = measurement.get("peak_bytes")
+    if measured is not None and device in ("auto", ""):
+        # Report the pool the measurement belongs to, as the cross-device
+        # recovery below does.
+        device = str(measurement.get("device") or measurement_key).lower()
 
     # Bundled models have no persisted manifest in catalog.json, so `device`
     # falls back to "cpu" above even when the probe ran on cuda. If the
@@ -1694,26 +1729,20 @@ def _measurement_gb(record: Any) -> float | None:
     return gb if math.isfinite(gb) and gb > 0.0 else None
 
 
-def _pool_keys(device: str) -> tuple[str, ...]:
-    """Measurement keys for the pool a model on `device` loads into, most
-    likely first ("auto" lands on cuda when a GPU is present)."""
-    device = (device or "auto").lower()
-    if device in ("cuda", "gpu"):
-        return ("cuda",)
-    if device in ("cpu", "mps"):
-        return (device,)
-    return ("cuda", "mps", "cpu")
-
-
-def _base_tier1_gb(base_entry: dict, device: str) -> float | None:
+def _base_tier1_gb(
+    base_entry: dict, device: str, auto_cuda_available: "bool | None" = None,
+) -> float | None:
     """A base entry's estimate for a LoRA loading on `device`: its probe
-    measurement for that pool, else its declared memory_gb, else a
-    measurement from another device. Never its weights on disk."""
+    measurement for that pool (`_measurement_key`), else its declared
+    memory_gb, else a measurement from another device. Never its weights
+    on disk."""
     measurements = base_entry.get("measurements") or {}
     if not isinstance(measurements, dict):
         measurements = {}
-    for key in _pool_keys(device):
-        gb = _measurement_gb(measurements.get(key))
+    if measurements:
+        gb = _measurement_gb(
+            measurements.get(_measurement_key(device, auto_cuda_available)),
+        )
         if gb is not None:
             return gb
     manifest = base_entry.get("manifest") or {}
@@ -1738,6 +1767,7 @@ def _base_model_memory_gb(
     catalog: "dict | None" = None,
     *,
     device: str = "auto",
+    auto_cuda_available: "bool | None" = None,
 ) -> float | None:
     """The estimate of the catalog entry `capabilities.base_model` names.
 
@@ -1764,14 +1794,20 @@ def _base_model_memory_gb(
             return None
     estimates = []
     for base_id, base_entry in _base_entries(base.strip(), catalog):
-        gb = _base_tier1_gb(_entry_with_live_manifest(base_id, base_entry), device)
+        gb = _base_tier1_gb(
+            _entry_with_live_manifest(base_id, base_entry), device,
+            auto_cuda_available,
+        )
         if gb is not None:
             estimates.append(gb)
     return max(estimates) if estimates else None
 
 
 def _has_memory_data(
-    catalog_entry: dict, *, catalog: "dict | None" = None,
+    catalog_entry: dict,
+    *,
+    catalog: "dict | None" = None,
+    auto_cuda_available: "bool | None" = None,
 ) -> tuple[bool, float, str]:
     """Return (has_data, memory_gb, device).
 
@@ -1793,7 +1829,10 @@ def _has_memory_data(
 
     `device` is read from `manifest.capabilities.device` and lowercased.
     Falls back to "auto" when absent, matching the worker's own default
-    (see muse.core.memory_probe.declared_device).
+    (see muse.core.memory_probe.declared_device). An "auto" model's
+    measurements are read from the pool auto resolves to
+    (`auto_cuda_available`, the caller's `auto_uses_cuda` verdict; None
+    asks the live host).
 
     `has_data` is True when ANY source is present; False only when the
     model declares nothing, was never probed, AND has no weights on disk.
@@ -1802,13 +1841,18 @@ def _has_memory_data(
     disk, that 503 path is effectively reserved for pre-worker / removed
     entries.
     """
-    found, gb, device = _declared_or_measured(catalog_entry)
+    found, gb, device = _declared_or_measured(
+        catalog_entry, auto_cuda_available=auto_cuda_available,
+    )
     if found is not None:
         return found, gb, device
 
     manifest = catalog_entry.get("manifest") or {}
     capabilities = manifest.get("capabilities") if isinstance(manifest, dict) else None
-    base_gb = _base_model_memory_gb(capabilities or {}, catalog, device=device)
+    base_gb = _base_model_memory_gb(
+        capabilities or {}, catalog, device=device,
+        auto_cuda_available=auto_cuda_available,
+    )
     if base_gb is not None:
         return True, base_gb, device
 
@@ -1878,8 +1922,8 @@ def _capacity_pools(
         budget_gb=gpu_budget_gb,
         headroom_gb=gpu_headroom_gb,
     )
-    cuda_available = gpu_free is not None or check_cuda_available(
-        probe_method(memory_probe, "cuda_available"),
+    cuda_available = auto_uses_cuda(
+        gpu_free, probe_method(memory_probe, "cuda_available"),
     )
     return cpu_available_gb, gpu_available_gb, cuda_available
 
@@ -1910,7 +1954,13 @@ def _servability_reason(
         working set can only make the director evict everything and 503.
       - None when sizable AND it fits.
     """
-    has_data, sized_gb, measured_device = _has_memory_data(entry, catalog=catalog)
+    # Preserve the private helper's historical standalone behavior when a
+    # caller does not provide the explicit detector verdict.
+    if auto_cuda_available is None:
+        auto_cuda_available = gpu_available_gb is not None
+    has_data, sized_gb, measured_device = _has_memory_data(
+        entry, catalog=catalog, auto_cuda_available=auto_cuda_available,
+    )
     if not has_data:
         if _has_invalid_declared_memory(entry):
             return (
@@ -1926,10 +1976,6 @@ def _servability_reason(
         )
     except RuntimeError as exc:
         return str(exc)
-    # Preserve the private helper's historical standalone behavior when a
-    # caller does not provide the explicit detector verdict.
-    if auto_cuda_available is None:
-        auto_cuda_available = gpu_available_gb is not None
     pool = resolve_memory_pool(
         device,
         gpu_free_gb=None,
