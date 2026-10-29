@@ -91,6 +91,8 @@ def test_autotile_case_paints_map(tmp_path):
     assert b'name="fill"' in seen[2].content and b'name="base"' in seen[2].content
     map_img = Image.open(tmp_path / results[0]["map"])
     assert map_img.size == (16 * 4, 12 * 4)
+    # Unfilled cells show the generated base (red), not a blob-tile crop.
+    assert (200, 40, 40, 255) in set(map_img.convert("RGBA").getdata())
     assert (tmp_path / "grass" / "tileset.tres").read_text() == "[gd_resource]"
     index = write_index(results, tmp_path).read_text()
     assert "grass/map.png" in index and "grass/blob47.png" in index
@@ -151,3 +153,43 @@ def test_shipped_case_file_is_valid():
     assert len(sprites) == 8 and all(
         [v["palette"] for v in c["pixelize"]] == ["db32", "auto:16"] for c in sprites)
     assert sum(c["kind"] == "autotile" for c in cases) == 1
+
+
+def _cells(img, t=4):
+    """{(col, row): set of pixels} for a painted map."""
+    out = {}
+    for r in range(img.height // t):
+        for c in range(img.width // t):
+            out[(c, r)] = {img.getpixel((c * t + dx, r * t + dy))
+                           for dx in range(t) for dy in range(t)}
+    return out
+
+
+def test_paint_map_unfilled_cells_show_the_base_texture():
+    # The isolated (mask 0) tile's corner holds part of the fill blob and its
+    # outline, so tiling it as "base" painted the blob's corner into every
+    # unfilled cell. With the base texture given, unfilled cells are pure base.
+    layout = _layout()
+    sheet = Image.new("RGBA", (8 * 4, 6 * 4), (30, 160, 50, 255))
+    buf = io.BytesIO()
+    sheet.save(buf, "PNG")
+    base = _png(32, 32, (120, 80, 40, 255))
+    img = Image.open(io.BytesIO(paint_map(buf.getvalue(), layout, 4, seed=3,
+                                          base_png=base))).convert("RGBA")
+    cells = _cells(img)
+    base_cells = [k for k, px in cells.items() if px == {(120, 80, 40, 255)}]
+    fill_cells = [k for k, px in cells.items() if px == {(30, 160, 50, 255)}]
+    assert base_cells and fill_cells
+    assert len(base_cells) + len(fill_cells) == len(cells)
+
+
+def test_paint_map_without_base_leaves_unfilled_cells_transparent():
+    layout = _layout()
+    sheet = Image.new("RGBA", (8 * 4, 6 * 4), (30, 160, 50, 255))
+    buf = io.BytesIO()
+    sheet.save(buf, "PNG")
+    img = Image.open(io.BytesIO(paint_map(buf.getvalue(), layout, 4, seed=3))).convert("RGBA")
+    cells = _cells(img)
+    empty = [k for k, px in cells.items() if all(p[3] == 0 for p in px)]
+    assert empty
+    assert all(px == {(30, 160, 50, 255)} for k, px in cells.items() if k not in empty)

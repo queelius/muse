@@ -137,12 +137,35 @@ def _png_size(data: bytes):
     return None
 
 
+def _base_tile(base_png: bytes, t: int):
+    """The base texture fitted to one T x T tile the way the server fits it:
+    the largest centred square that is a whole number of tiles, box-downscaled
+    (a texture smaller than T is wrapped). The server's seamless pass is not
+    repeated, so the last row/column may differ slightly."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(base_png)).convert("RGBA")
+    side = min(img.size)
+    if side >= t:
+        crop = (side // t) * t
+        x0, y0 = (img.width - crop) // 2, (img.height - crop) // 2
+        return img.crop((x0, y0, x0 + crop, y0 + crop)).resize((t, t), Image.Resampling.BOX)
+    tile = Image.new("RGBA", (t, t))
+    for dx in range(0, t, img.width):
+        for dy in range(0, t, img.height):
+            tile.paste(img, (dx, dy))
+    return tile
+
+
 def paint_map(blob_png: bytes, layout: list[dict], tile_size: int, seed: int = 0,
-              cols: int = MAP_COLS, rows: int = MAP_ROWS) -> bytes:
+              cols: int = MAP_COLS, rows: int = MAP_ROWS,
+              base_png: bytes | None = None) -> bytes:
     """Random blobby fill map painted from the blob-47 tiles by neighbour mask.
 
-    Outside the map counts as filled. Unfilled cells show the base texture,
-    taken from the corner quadrant of the isolated (mask 0) tile.
+    Outside the map counts as filled. Unfilled cells show ``base_png`` fitted
+    to one tile, or stay transparent without one. (No blob tile is pure base:
+    even the isolated tile's corner quadrant holds part of the fill and its
+    outline, so cropping it painted that corner into every unfilled cell.)
     """
     from PIL import Image
 
@@ -171,19 +194,13 @@ def paint_map(blob_png: bytes, layout: list[dict], tile_size: int, seed: int = 0
         return m
 
     out = Image.new("RGBA", (cols * t, rows * t))
-    h = max(1, t // 2)
-    x0, y0 = pos.get(0, (0, 0))
-    quad = sheet.crop((x0, y0, x0 + h, y0 + h))
-    base = Image.new("RGBA", (t, t))
-    for dx in range(0, t, h):
-        for dy in range(0, t, h):
-            base.paste(quad, (dx, dy))
+    base = _base_tile(base_png, t) if base_png else None
     for r in range(rows):
         for c in range(cols):
             if grid[r][c]:
                 x, y = pos.get(mask_at(c, r), pos.get(255, (0, 0)))
                 out.paste(sheet.crop((x, y, x + t, y + t)), (c * t, r * t))
-            else:
+            elif base is not None:
                 out.paste(base, (c * t, r * t))
     buf = io.BytesIO()
     out.save(buf, "PNG")
@@ -239,6 +256,7 @@ def _run_autotile(client, base, case, out: _Out) -> list[dict]:
         fill, gen_s = _generate(client, base, case, case["fill_prompt"])
         row["fill"] = out.write(case["id"], "fill.png", fill)
         files = {"fill": ("fill.png", fill, "image/png")}
+        base_png = None
         if case.get("base_prompt"):
             base_png, base_s = _generate(client, base, case, case["base_prompt"])
             gen_s = round(gen_s + base_s, 2)
@@ -264,7 +282,8 @@ def _run_autotile(client, base, case, out: _Out) -> list[dict]:
         row["tile_size"] = body.get("tile_size")
         row["map"] = out.write(case["id"], "map.png", paint_map(
             blob, body["layout"], int(body["tile_size"]),
-            seed=int(hashlib.sha1(str(case["id"]).encode()).hexdigest()[:8], 16)))
+            seed=int(hashlib.sha1(str(case["id"]).encode()).hexdigest()[:8], 16),
+            base_png=base_png))
     except Exception as exc:  # one bad case must not stop the run
         row["error"] = f"{type(exc).__name__}: {exc}"[:200]
     return [row]
