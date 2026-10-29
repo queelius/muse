@@ -76,6 +76,19 @@ def _parse_palette(value: str | None):
         raise _BadParameter(str(e)) from e
 
 
+def _parse_colour_options(background: str, outline: str) -> tuple[str, str]:
+    """Validate ``background`` / ``outline`` before any upload is decoded."""
+    from muse.modalities.image_pixelart.pixelize import check_background, check_outline
+
+    bg, ol = (background or "").strip(), (outline or "").strip()
+    try:
+        check_background(bg)
+        check_outline(ol)
+    except ValueError as e:
+        raise _BadParameter(str(e)) from e
+    return bg, ol
+
+
 async def _decode(upload: UploadFile, field: str):
     """Decode one upload; returns ``(image, None)`` or ``(None, error)``."""
     from muse.modalities.image_generation.image_input import (
@@ -170,6 +183,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 raise _BadParameter("grid and target_size are mutually exclusive")
             sheet_value = _parse_pair(sheet, "sheet", "CxR")
             spec = _parse_palette(palette)
+            background_value, outline_value = _parse_colour_options(background, outline)
         except _BadParameter as e:
             return error_response(400, "invalid_parameter", str(e))
 
@@ -183,9 +197,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         opts = PixelizeOptions(
             grid=grid_value, target_size=target, palette=spec,
-            background=background.strip(), remove_enclosed=remove_enclosed,
+            background=background_value, remove_enclosed=remove_enclosed,
             alpha_threshold=alpha_threshold,
-            cleanup=cleanup, outline=outline.strip(), seamless=seamless,
+            cleanup=cleanup, outline=outline_value, seamless=seamless,
             sheet=sheet_value, preview_scale=preview_scale,
             max_preview_side=_max_input_side(),
         )

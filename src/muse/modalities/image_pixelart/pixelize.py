@@ -159,6 +159,19 @@ def _pair(v, name: str) -> tuple[int, int]:
     return a, b
 
 
+def check_background(bg) -> None:
+    """Raise ValueError unless ``bg`` is a valid ``background`` value (cheap;
+    the route runs it before decoding the upload)."""
+    if not isinstance(bg, str) or (bg not in _BACKGROUND_WORDS and not _HEX_RE.match(bg)):
+        raise ValueError("background must be auto, none, transparent-keep or #rrggbb")
+
+
+def check_outline(ol) -> None:
+    """Raise ValueError unless ``ol`` is a valid ``outline`` value."""
+    if not isinstance(ol, str) or (ol not in _OUTLINE_WORDS and not _HEX_RE.match(ol)):
+        raise ValueError("outline must be none, dark or #rrggbb")
+
+
 def _validate(opts: PixelizeOptions, width: int, height: int) -> None:
     if width < 1 or height < 1:
         raise ValueError("image is empty")
@@ -182,18 +195,14 @@ def _validate(opts: PixelizeOptions, width: int, height: int) -> None:
             raise ValueError("sheet and target_size are mutually exclusive")
         if c > width or r > height:
             raise ValueError("sheet has more cells than the image has pixels")
-    bg = opts.background
-    if not isinstance(bg, str) or (bg not in _BACKGROUND_WORDS and not _HEX_RE.match(bg)):
-        raise ValueError("background must be auto, none, transparent-keep or #rrggbb")
+    check_background(opts.background)
     if opts.cleanup is not None and not isinstance(opts.cleanup, bool):
         raise ValueError("cleanup must be true, false or unset")
     if not isinstance(opts.remove_enclosed, bool):
         raise ValueError("remove_enclosed must be true or false")
     if not _is_int(opts.alpha_threshold) or not 0 <= opts.alpha_threshold <= 255:
         raise ValueError("alpha_threshold must be an integer in 0..255")
-    ol = opts.outline
-    if not isinstance(ol, str) or (ol not in _OUTLINE_WORDS and not _HEX_RE.match(ol)):
-        raise ValueError("outline must be none, dark or #rrggbb")
+    check_outline(opts.outline)
     if not _is_int(opts.preview_scale) or not 1 <= opts.preview_scale <= MAX_PREVIEW_SCALE:
         raise ValueError(f"preview_scale must be an integer in 1..{MAX_PREVIEW_SCALE}")
     cap = opts.max_preview_side

@@ -487,3 +487,35 @@ def test_pixelize_remove_enclosed_in_openapi(client):
     prop = schemas[ref]["properties"]["remove_enclosed"]
     assert prop["type"] == "boolean" and prop["default"] is False
     assert "enclosed" in prop["description"]
+
+
+# ------------------------------------------- option validation before decode
+
+
+@pytest.mark.parametrize("field,value", [("outline", "#12345"), ("outline", "bright"),
+                                         ("background", "purple")])
+def test_pixelize_bad_option_wins_over_undecodable_image(client, field, value):
+    r = client.post("/v1/images/pixelize",
+                    files={"image": ("x.png", b"not an image", "image/png")},
+                    data={field: value})
+    assert r.status_code == 400 and err(r) == "invalid_parameter", r.text
+    assert field in r.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("field,value", [("outline", "#12345"), ("background", "purple")])
+def test_pixelize_bad_option_wins_over_oversized_image(client, monkeypatch, field, value):
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "100")
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(4))},
+                    data={field: value})
+    assert r.status_code == 400 and err(r) == "invalid_parameter", r.text
+    monkeypatch.setenv("MUSE_PIXELART_MAX_INPUT_SIDE", "64")
+    monkeypatch.delenv("MUSE_IMAGE_INPUT_MAX_BYTES")
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(4))},
+                    data={field: value})
+    assert r.status_code == 400 and err(r) == "invalid_parameter", r.text
+
+
+def test_pixelize_hex_options_accepted(client):
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(4))},
+                    data={"outline": "#102030", "background": " #FF00ff "})
+    assert r.status_code == 200, r.text
