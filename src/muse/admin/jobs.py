@@ -31,10 +31,13 @@ from muse.core.owned_process import (
     observe_leader,
     reap_exited_leader,
     signal_isolated_group,
+    signal_live_fallback_leader,
     supports_pinned_leader,
+    uses_exact_handle_fallback,
     validated_isolated_group,
 )
 from muse.core.resource_registry import (
+    ResourceProcessExited,
     ResourceRegistryError,
     register_process,
     unregister_process,
@@ -253,6 +256,14 @@ class JobStore:
                             "resource registration returned an invalid identifier"
                         )
                     job.resource_id = resource_id
+                except ResourceProcessExited as exc:
+                    # A fast child can exit before its identity is read.
+                    # Only when its exit is positively observed through the
+                    # exact owned handle is there nothing left to persist:
+                    # wait_process then drains the group and reports the
+                    # child's own status and output.
+                    if _target_state(_ProcessTarget.for_job(job)) is not False:
+                        registration_error = exc
                 except (ResourceRegistryError, TypeError, ValueError) as exc:
                     registration_error = exc
 
@@ -557,8 +568,19 @@ def _validated_isolated_group(pid: int | None) -> int | None:
 
 
 def _supports_pinned_target(target: _ProcessTarget) -> bool:
-    """Whether WNOWAIT can pin this exact real POSIX PID==PGID leader."""
+    """Whether this exact real POSIX PID==PGID leader can be pinned.
+
+    Pinned means its exit is observable without reaping: ``waitid(WNOWAIT)``,
+    or psutil zombie status where the interpreter lacks waitid.
+    """
     return supports_pinned_leader(
+        target.process, target.pid, target.pgid, os_name=os.name,
+    )
+
+
+def _uses_exact_handle_fallback(target: _ProcessTarget) -> bool:
+    """Whether this unpinnable child is owned through its Popen handle alone."""
+    return uses_exact_handle_fallback(
         target.process, target.pid, target.pgid, os_name=os.name,
     )
 
@@ -575,14 +597,17 @@ def _target_state_locked(target: _ProcessTarget) -> bool | None:
         return None
     if type(getattr(target.process, "returncode", None)) is int:
         return False
-    # Pinned leaders are observed with WNOWAIT; an unpinned real POSIX child
-    # fails closed; an ambiguous poll leaves the registry record for repair.
+    # Pinned leaders are observed without reaping (WNOWAIT, else psutil
+    # zombie status); an unpinned real POSIX child fails closed, except
+    # without WNOWAIT, where its exact handle is polled; an ambiguous poll
+    # leaves the registry record.
     return observe_leader(
         target.process,
         target.pid,
         pinned=_supports_pinned_target(target),
         os_name=os.name,
         label=_PROCESS_LABEL,
+        process_group=target.pgid,
     )
 
 
@@ -642,9 +667,21 @@ def _signal_target(
         if state is not True:
             return False
 
+        if _uses_exact_handle_fallback(target):
+            # Unpinnable without WNOWAIT: the poll() above returned None
+            # under process_lock, so the unreaped leader still holds any
+            # validated PID==PGID and no getpgid revalidation is needed.
+            delivered = signal_live_fallback_leader(
+                target.process, target.pid, target.pgid, sig,
+                label=_PROCESS_LABEL,
+            )
+            if delivered and force:
+                target.final_signal_delivered = True
+            return delivered
+
         if target.pgid is not None and os.name == "posix":
-            # Not WNOWAIT-pinned (test doubles only: a real unpinned POSIX
-            # child is ambiguous above), so revalidate the live group first.
+            # Not pinned (test doubles only: a real unpinned POSIX child is
+            # ambiguous or exact-handle above), so revalidate the group first.
             try:
                 current_pgid = _concrete_safe_id(os.getpgid(target.pid))
             except OSError as e:

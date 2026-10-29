@@ -3,8 +3,10 @@
 `run_owned_command` starts one command in an isolated process group, keeps
 only a bounded tail of its output, and on timeout, error or cancellation
 terminates the whole group within a shared cleanup budget. On POSIX
-platforms with `waitid(WNOWAIT)` the exited leader stays unreaped until the
-group is cleaned, so its PID/PGID cannot be reused underneath the cleanup.
+platforms that can observe exit without reaping (`waitid(WNOWAIT)`, or
+psutil zombie status where waitid is missing, e.g. macOS before Python 3.13)
+the exited leader stays unreaped until the group is cleaned, so its PID/PGID
+cannot be reused underneath the cleanup.
 Venv creation, pip installs and reviewed-source git checkouts all run
 through it. The identity and signalling primitives it builds on live in
 `muse.core.owned_process`.
@@ -60,7 +62,8 @@ _MANAGED_JOB_GROUP_ENV = MANAGED_JOB_GROUP_ENV
 class _OwnedProcess:
     """One exact child plus its positively-validated isolated group.
 
-    On supported POSIX platforms the leader is observed with waitid(WNOWAIT),
+    On supported POSIX platforms the leader is observed without reaping
+    (waitid(WNOWAIT), or psutil zombie status where waitid is missing),
     which deliberately keeps it unreaped while the owned group is cleaned.
     That live/zombie leader pins both its PID and equal PGID against reuse.
     """
@@ -248,7 +251,11 @@ def _target_alive(target: _OwnedProcess) -> bool:
 
 
 def _supports_pinned_leader(target: _OwnedProcess) -> bool:
-    """Whether WNOWAIT can pin this exact real POSIX child identity."""
+    """Whether this exact real POSIX child identity can be pinned.
+
+    Pinned means its exit is observable without reaping:
+    ``waitid(WNOWAIT)``, or psutil zombie status where waitid is missing.
+    """
     return supports_pinned_leader(
         target.process, target.pid, target.process_group, os_name=_OS_NAME,
     )
@@ -263,7 +270,7 @@ def _observe_owned_leader(
     """Observe child exit without reaping, preserving PID/PGID ownership."""
     if not _supports_pinned_leader(target):
         raise _OwnedProcessCleanupError(
-            "WNOWAIT requested for an unsupported installer child"
+            "non-reaping observation requested for an unpinnable installer child"
         )
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
@@ -356,8 +363,9 @@ def _signal_owned(target: _OwnedProcess, sig: signal.Signals, *, force: bool) ->
     process_group = target.process_group
     pinned = _supports_pinned_leader(target) and not target.leader_reaped
     # Mock children retain the legacy double-poll path so safety behavior is
-    # deterministic in unit tests. Real platforms without WNOWAIT deliberately
-    # avoid numeric group signaling and fall back to the exact Popen handle.
+    # deterministic in unit tests. A real child that cannot be pinned (no
+    # WNOWAIT and no psutil, or no validated group) deliberately avoids
+    # numeric group signaling and falls back to the exact Popen handle.
     mocked_group = (
         process_group is not None
         and _OS_NAME == "posix"
@@ -406,7 +414,7 @@ def _wait_until_gone(target: _OwnedProcess, deadline: float) -> bool:
 def _terminate_owned_fallback(
     target: _OwnedProcess, *, deadline: float, term_deadline: float,
 ) -> None:
-    """Bounded exact-handle cleanup when WNOWAIT is unavailable."""
+    """Bounded exact-handle cleanup for a child that cannot be pinned."""
     if _target_alive(target):
         _signal_owned(target, signal.SIGTERM, force=False)
         if not _wait_until_gone(target, term_deadline):
@@ -433,10 +441,13 @@ def _terminate_owned_fallback(
 def _terminate_owned(target: _OwnedProcess, *, timeout: float | None = None) -> None:
     """TERM then KILL an owned install tree within one shared time budget.
 
-    WNOWAIT-capable POSIX systems keep the leader unreaped until both signals
-    have been sent to its validated group, eliminating PID/PGID reuse. Other
-    platforms retain bounded best-effort cleanup through the exact Popen
-    handle; descendant cleanup cannot be guaranteed there.
+    Where the leader can be pinned (``waitid(WNOWAIT)``, or psutil zombie
+    status where waitid is missing), it stays unreaped until both signals
+    have been sent to its validated group,
+    eliminating PID/PGID reuse. A child that cannot be pinned (no WNOWAIT
+    and no psutil, or no validated group) gets bounded best-effort cleanup
+    through the exact Popen handle; descendant cleanup cannot be guaranteed
+    there.
     """
     if timeout is None:
         timeout = _CLEANUP_TIMEOUT
@@ -555,10 +566,12 @@ def run_owned_command(
     """Run a command in an isolated group with bounded ownership-safe cleanup.
 
     This is the ownership-safe analogue of the small subprocess.run subset
-    used by Muse. WNOWAIT-capable POSIX platforms clean the validated group
-    while its leader pins the PID/PGID; unsupported platforms retain a
-    bounded exact-child best-effort fallback. Captured output keeps a bounded
-    tail; check controls whether a non-zero exit is returned or raised.
+    used by Muse. Where the leader can be pinned (``waitid(WNOWAIT)``, or
+    psutil zombie status where waitid is missing), the validated group is
+    cleaned while its leader pins the PID/PGID;
+    otherwise a bounded exact-child best-effort fallback remains. Captured
+    output keeps a bounded tail; check controls whether a non-zero exit is
+    returned or raised.
     """
     return _run_owned(
         cmd,

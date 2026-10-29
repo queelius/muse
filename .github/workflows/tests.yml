@@ -24,8 +24,13 @@ jobs:
         os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
+          # macOS before Python 3.13 has no os.waitid, so it exercises the
+          # owned-process exact-handle fallback; 3.13+ takes the pinned
+          # waitid(WNOWAIT) path, which therefore needs Mac coverage too.
           - os: macos-14
             python-version: "3.12"
+          - os: macos-14
+            python-version: "3.13"
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -55,10 +55,13 @@ from muse.core.owned_process import (
     observe_leader,
     reap_exited_leader,
     signal_isolated_group,
+    signal_live_fallback_leader,
     supports_pinned_leader,
+    uses_exact_handle_fallback,
     validated_isolated_group,
 )
 from muse.core.resource_registry import (
+    ResourceProcessExited,
     ResourceRegistryError,
     register_process,
     unregister_process,
@@ -532,6 +535,7 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             spec.process_group_id = _validated_worker_process_group(proc)
             spec.log_thread = None
         previous_resource_id = spec.resource_id
+        registration_error: Exception | None = None
         try:
             next_resource_id = register_process(
                 kind="worker",
@@ -540,7 +544,19 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
                 port=spec.port,
                 models=spec.models,
             )
+        except ResourceProcessExited as exc:
+            # The worker exited before its identity could be read. Only when
+            # the exact owned handle agrees is there nothing to persist: keep
+            # the generation so readiness reports the exit and teardown
+            # drains and reaps it, instead of a misleading registry failure.
+            if _worker_process_state_locked(spec, proc) is not False:
+                registration_error = exc
+            # No new record supersedes the prior one, so it stays attached
+            # and is released with this generation's teardown.
+            next_resource_id = previous_resource_id
         except (ResourceRegistryError, TypeError, ValueError) as exc:
+            registration_error = exc
+        if registration_error is not None:
             # Never return a child that post-crash repair cannot identify.
             # Detach the previous generation's record before reusing the
             # exact-Popen shutdown helper so rollback cannot unregister it.
@@ -559,7 +575,7 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             raise ResourceRegistryError(
                 f"worker on port {spec.port} could not be persisted; "
                 f"{detail}"
-            ) from exc
+            ) from registration_error
         spec.resource_id = next_resource_id
         if (
             next_resource_id is not None
@@ -582,16 +598,25 @@ class WorkerIdentityError(RuntimeError):
 def _supports_pinned_worker_leader(
     proc: Any, pid: int | None, process_group_id: int | None,
 ) -> bool:
-    """Whether WNOWAIT can preserve this exact real POSIX group identity."""
+    """Whether this exact real POSIX group identity can be pinned.
+
+    Pinned means the leader's exit is observable without reaping it:
+    ``waitid(WNOWAIT)``, or psutil zombie status where waitid is missing.
+    """
     return supports_pinned_leader(proc, pid, process_group_id, os_name=_OS_NAME)
 
 
-def _worker_process_state_locked(spec: WorkerSpec, proc: Any) -> bool | None:
+def _worker_process_state_locked(
+    spec: WorkerSpec, proc: Any, *, may_reap: bool = True,
+) -> bool | None:
     """Return True alive, False exited, or None when identity is ambiguous.
 
-    Real isolated POSIX leaders are observed with WNOWAIT, never ``poll()``;
+    Real isolated POSIX leaders are observed without reaping (WNOWAIT, or
+    psutil zombie status where waitid is missing), never ``poll()``;
     retaining the zombie pins PID==PGID until teardown sends its final group
-    signal. The caller holds ``spec.process_lock``.
+    signal. The caller holds ``spec.process_lock``. ``may_reap=False`` is for
+    callers that own nothing (status routes): an unpinnable real child is
+    then never polled and reads as ambiguous (None).
     """
     if spec.process is not proc:
         return None
@@ -604,12 +629,17 @@ def _worker_process_state_locked(spec: WorkerSpec, proc: Any) -> bool | None:
     # be validated and stored at spawn, polling could reap the leader and
     # make that unknown numeric group reusable before descendants are
     # drained, so observe_leader retains ownership and fails closed instead.
+    # Without WNOWAIT (macOS before Python 3.13) a validated leader is still
+    # pinned, via psutil zombie status; only an unvalidated group (or no
+    # psutil) polls the exact handle under this lock instead.
     return observe_leader(
         proc,
         pid,
         pinned=_supports_pinned_worker_leader(proc, pid, spec.process_group_id),
         os_name=_OS_NAME,
         label="worker",
+        process_group=spec.process_group_id,
+        may_reap=may_reap,
     )
 
 
@@ -948,10 +978,14 @@ def _signal_worker_process(spec: WorkerSpec, proc: Any, sig: signal.Signals) -> 
 
     The caller holds ``spec.process_lock``. Liveness comes from
     ``_worker_process_state_locked``, which never reaps: a real isolated
-    leader is observed with WNOWAIT, so its PID==PGID stays pinned and the
+    leader is observed without reaping (WNOWAIT, or psutil zombie status
+    where waitid is missing), so its PID==PGID stays pinned and the
     later teardown can still signal and drain the group. (``poll()`` here
     used to reap a just-exited leader, after which teardown refused the
     group signal, the spec was retained, and no replacement could spawn.)
+    Without WNOWAIT a validated leader is pinned via psutil zombie status;
+    only an unpinnable child falls back to polling the exact handle under
+    the lock, signalling just a leader that poll has seen unreaped.
     Ambiguous or exited generations fail closed.
 
     Returns whether a signal was sent.
@@ -961,6 +995,11 @@ def _signal_worker_process(spec: WorkerSpec, proc: Any, sig: signal.Signals) -> 
     pid = _concrete_worker_id(getattr(proc, "pid", None))
     if _supports_pinned_worker_leader(proc, pid, spec.process_group_id):
         return signal_isolated_group(pid, spec.process_group_id, sig, label="worker")
+    if uses_exact_handle_fallback(proc, pid, spec.process_group_id, os_name=_OS_NAME):
+        # Unpinnable without WNOWAIT: the poll above saw it unreaped.
+        return signal_live_fallback_leader(
+            proc, pid, spec.process_group_id, sig, label="worker",
+        )
     # No validated group (a test double, or not POSIX): only the exact child.
     proc.terminate()
     return True
@@ -1019,6 +1058,17 @@ def _signal_worker_target(
             return True
         if state is not True:
             return False
+        if uses_exact_handle_fallback(
+            proc, target.pid, target.process_group_id, os_name=_OS_NAME,
+        ):
+            # Unpinnable without WNOWAIT: the poll above saw the leader
+            # unreaped under the lock, so any validated group is still held.
+            delivered = signal_live_fallback_leader(
+                proc, target.pid, target.process_group_id, sig, label="worker",
+            )
+            if delivered and force:
+                target.final_signal_delivered = True
+            return delivered
         try:
             if force:
                 proc.kill()

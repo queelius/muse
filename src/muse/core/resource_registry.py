@@ -45,6 +45,15 @@ class ResourceIdentityUnavailable(ResourceRegistryError):
     """The OS cannot safely verify whether a PID still has its old identity."""
 
 
+class ResourceProcessExited(ResourceRegistryError):
+    """The process to register has already exited (absent or a zombie).
+
+    Nothing is recorded: a dead PID holds nothing a later repair could
+    reclaim. A caller that still owns the unreaped child may proceed to
+    collect its exit status instead of treating this as a registry fault.
+    """
+
+
 @dataclass(frozen=True)
 class ResourceRecord:
     resource_id: str
@@ -402,7 +411,9 @@ def register_process(
         raise ResourceRegistryError("resource models must be a list or tuple of strings")
     create_time = _process_create_time(pid)
     if create_time is None:
-        raise ResourceRegistryError(f"cannot verify process identity for pid {pid}")
+        raise ResourceProcessExited(
+            f"cannot verify process identity for pid {pid}: it has already exited"
+        )
     owner_create_time: float | None = None
     if owner_pid is not None:
         owner_create_time = _process_create_time(owner_pid)
