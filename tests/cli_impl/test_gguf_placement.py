@@ -193,7 +193,9 @@ def test_memory_view_excludes_exited_running_worker(native_entry):
     state = SupervisorState(device="cpu")
     state.workers.append(WorkerSpec(
         models=[MODEL], python_path=sys.executable, port=9001, status="running",
-        process=SimpleNamespace(poll=lambda: 1),
+        # A test double with a concrete pid: the memory view now observes it
+        # through the supervisor's identity-checked state helper.
+        process=SimpleNamespace(pid=4242, returncode=None, poll=lambda: 1),
     ))
     supervisor.set_supervisor_state(state)
     assert _per_model_breakdown("cpu", "cpu") == []
