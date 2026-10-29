@@ -133,6 +133,12 @@ unzip the saved file. Inputs come as `image_path` / `fill_path` / `base_path`
 
 ## Notes
 
+- The pull probe checks that the probe image (and the reference edit, on
+  klein) is neither flat nor noise (std of luminance >= 2, lag-1
+  autocorrelation >= 0.5), so a LoRA that only draws noise at its default
+  `lora_scale` fails the pull and is left disabled. The message reports
+  both numbers; fix the scale (for example `lora_scale_factor`) and run
+  `muse models probe <id>` then `muse models enable <id>`.
 - A non-curated `hf://` klein LoRA pulled with `--no-probe` starts under-sized
   (sized from the adapter weights until probed). Use the curated id or let the
   pull probe run.

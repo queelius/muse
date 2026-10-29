@@ -80,16 +80,25 @@ DISCOVERY = {
 }
 
 # Per-modality probe defaults read by `muse models probe`. Defaults to
-# the model's own default size + steps; backends honor capabilities.
+# the model's own default size + steps; backends honor capabilities. Each
+# output must look like an image (not flat, not noise), else the probe
+# fails and a pull disables the model (probe_check.py).
 def _probe_call(m):
+    from muse.modalities.image_generation.probe_check import check_not_degenerate
+
     result = m.generate("probe scene")
+    check_not_degenerate(result.image, step="generate")
     if getattr(m, "supports_reference_images", False):
-        m.edit("the same scene at night", images=[result.image])
+        edited = m.edit("the same scene at night", images=[result.image])
+        check_not_degenerate(edited.image, step="reference edit")
     return result
 
 
 PROBE_DEFAULTS = {
-    "shape": "default size, 1 image; plus 1 reference edit when supported",
+    "shape": (
+        "default size, 1 image; plus 1 reference edit when supported; "
+        "each checked for flat or noise-like output"
+    ),
     "call": _probe_call,
 }
 
