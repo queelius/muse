@@ -39,8 +39,9 @@ curl -s $MUSE/v1/images/pixelize -F model=pixel-tools -F image=@knight_raw.png \
 
 Palettes: `pico-8`, `db16`, `db32`, `endesga-32`, `nes`, `gameboy`, `auto:N`
 (N colours picked from the image), `none`, or `#rrggbb,#rrggbb,...`. Useful
-extras: `outline=black`, `seamless=true` (tileable), `sheet=4x2` (shared
-palette across several images in one call), `preview_scale=8` (nearest-
+extras: `outline=dark` (or `#rrggbb`), `seamless=true` (tileable), `sheet=4x2`
+(a 4-column by 2-row grid of cells inside ONE image, sharing one grid and one
+palette), `preview_scale=8` (nearest-
 neighbour enlargement for viewing; use 1 for the game asset). With the default
 `response_format=json` the grid, palette and size come back too.
 

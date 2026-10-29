@@ -61,11 +61,11 @@ def _client(seen):
 
 def test_runs_sprite_case_and_writes_outputs(tmp_path):
     cases = [{"id": "knight", "kind": "sprite", "prompt": "a knight", "model": "klein-pixel-art",
-              "pixelize": [{"palette": "db32"}, {"palette": "auto:16", "outline": "black"}]}]
+              "pixelize": [{"palette": "db32"}, {"palette": "auto:16", "outline": "dark"}]}]
     seen = []
     results = run(cases, "http://muse.test", tmp_path, _client(seen))
     assert len(results) == 2
-    assert [r["variant"] for r in results] == ["palette=db32", "palette=auto:16, outline=black"]
+    assert [r["variant"] for r in results] == ["palette=db32", "palette=auto:16, outline=dark"]
     assert all(r["error"] is None and r["grid"]["cell"] == 4 for r in results)
     assert (tmp_path / "knight" / "raw.png").exists()
     assert (tmp_path / results[1]["pixelized"]).exists()
