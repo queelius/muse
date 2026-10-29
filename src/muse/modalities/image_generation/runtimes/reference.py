@@ -28,6 +28,7 @@ from muse.core.runtime_helpers import (
 )
 from muse.modalities._common.offload import place_pipeline
 from muse.modalities.image_generation.protocol import ImageResult
+from muse.modalities.image_generation.runtimes._lora import resolve_lora_base
 
 
 logger = logging.getLogger(__name__)
@@ -115,22 +116,10 @@ class DiffusersReferenceModel:
 
         self._src = local_dir or hf_repo
         if self._lora_adapter:
-            if not base_model:
-                raise RuntimeError(
-                    f"{model_id}: lora_adapter is set but base_model is "
-                    f"missing; re-pull with `muse pull <id> --base "
-                    f"<muse-id-or-hf-repo>`"
-                )
-            load_src = resolve_model_source(base_model)
-            if "/" not in base_model and load_src == base_model:
-                # A muse catalog id that did not resolve to a local_dir
-                # (removed after pull, or never pulled): fail with the fix
-                # rather than a cryptic from_pretrained repo error.
-                raise RuntimeError(
-                    f"{model_id}: LoRA base {base_model!r} is not pulled "
-                    f"(it may have been removed); run `muse pull "
-                    f"{base_model}` and retry"
-                )
+            # Module-level name so tests' patches of resolve_model_source apply.
+            load_src = resolve_lora_base(
+                model_id, base_model, resolve=resolve_model_source,
+            )
         else:
             load_src = self._src
         logger.info(

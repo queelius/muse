@@ -24,6 +24,7 @@ from muse.core.runtime_helpers import (
     select_device,
 )
 from muse.modalities.image_generation.protocol import ImageResult
+from muse.modalities.image_generation.runtimes._lora import resolve_lora_base
 
 
 logger = logging.getLogger(__name__)
@@ -157,28 +158,10 @@ class DiffusersText2ImageModel:
         self._default_lora_scale = float(lora_scale)
 
         if self._lora_adapter:
-            if not base_model:
-                raise RuntimeError(
-                    f"{model_id}: lora_adapter is set but base_model is "
-                    f"missing; re-pull with `muse pull <id> --base "
-                    f"<muse-id-or-hf-repo>`"
-                )
-            # muse catalog id -> that entry's snapshot dir; HF repo id
-            # passes through for from_pretrained to fetch (HF cache).
-            load_src = resolve_model_source(base_model)
-            if "/" not in base_model and load_src == base_model:
-                # base_model looks like a muse catalog id (no "/"), but
-                # resolve_model_source could not map it to a local_dir
-                # (the base was removed after pull, or never pulled) and
-                # echoed it back verbatim. Fail loud with the actionable
-                # fix instead of letting from_pretrained raise a cryptic
-                # HF RepositoryNotFoundError for a bare id it can't
-                # resolve as an HF repo either.
-                raise RuntimeError(
-                    f"{model_id}: LoRA base {base_model!r} is not pulled "
-                    f"(it may have been removed); run `muse pull "
-                    f"{base_model}` and retry"
-                )
+            # Module-level name so tests' patches of resolve_model_source apply.
+            load_src = resolve_lora_base(
+                model_id, base_model, resolve=resolve_model_source,
+            )
         else:
             load_src = self._src
 
