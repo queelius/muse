@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -212,7 +213,51 @@ def test_inaccessible_environment_is_a_model_blocker(entry, tmp_path, monkeypatc
     assert model["unservable_reason"]
 
 
-@pytest.mark.parametrize("invalid", ["backend_path", "capabilities"])
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs POSIX permissions enforced for a non-root user",
+)
+@pytest.mark.parametrize("component", ["weights", "interpreter"])
+def test_permission_denied_environment_is_not_reported_missing(entry, tmp_path, component):
+    """A real EACCES is "inaccessible", not "missing", on every Python.
+
+    Python 3.14's ``Path.is_dir()``/``is_file()`` are ``os.path`` predicates
+    that swallow EACCES as False, which used to turn this into the misleading
+    "model files are missing" diagnosis there (and only there).
+    """
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    if component == "weights":
+        target = locked / "weights"
+        target.mkdir()
+        entry["local_dir"] = str(target)
+    else:
+        target = locked / "python"
+        target.symlink_to(sys.executable)
+        entry["python_path"] = str(target)
+    locked.chmod(0)
+    try:
+        reason = catalog.model_load_blocker(MODEL, entry)
+    finally:
+        locked.chmod(0o700)
+    assert reason is not None
+    assert "inaccessible" in reason
+    assert f"muse pull {MODEL}" in reason
+
+
+@pytest.mark.parametrize("component", ["weights", "interpreter"])
+def test_absent_environment_is_reported_missing(entry, tmp_path, component):
+    if component == "weights":
+        entry["local_dir"] = str(tmp_path / "absent" / "weights")
+        expected = "model files are missing"
+    else:
+        entry["python_path"] = str(tmp_path / "absent" / "python")
+        expected = "worker interpreter is missing"
+    reason = catalog.model_load_blocker(MODEL, entry)
+    assert reason is not None and expected in reason
+
+
+@pytest.mark.parametrize("invalid",["backend_path", "capabilities"])
 def test_invalid_manifest_does_not_break_listing_of_other_models(entry, invalid):
     valid = copy.deepcopy(entry)
     valid["manifest"]["model_id"] = "valid-readiness-test"

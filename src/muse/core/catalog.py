@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -356,6 +357,23 @@ def _validate_model_provenance(
     _validate_bundled_catalog_provenance(model_id, entry, entry_data)
 
 
+def _stat_if_present(path: str) -> os.stat_result | None:
+    """``stat`` a path (following symlinks); None only when it is absent.
+
+    ``Path.is_dir()`` / ``is_file()`` cannot tell "absent" from
+    "inaccessible": since Python 3.14 they are ``os.path.isdir`` /
+    ``isfile``, which swallow every ``OSError`` (EACCES, EIO, ...) as
+    False, whereas 3.10-3.13 re-raised errors other than ENOENT, ENOTDIR,
+    EBADF and ELOOP. Only absence is mapped to None here; any other
+    ``OSError`` propagates so the caller reports an inaccessible
+    environment on every supported Python.
+    """
+    try:
+        return Path(path).stat()
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+
+
 def model_load_blocker(model_id: str, entry_data: dict) -> str | None:
     """Return a local cold-load prerequisite failure without loading a model.
 
@@ -375,11 +393,13 @@ def model_load_blocker(model_id: str, entry_data: dict) -> str | None:
 
     try:
         local_dir = entry_data.get("local_dir")
-        if not local_dir or not Path(local_dir).is_dir():
+        local_stat = _stat_if_present(local_dir) if local_dir else None
+        if local_stat is None or not stat.S_ISDIR(local_stat.st_mode):
             return f"model files are missing; re-run `muse pull {model_id}`"
         python_path = entry_data.get("python_path")
+        python_stat = _stat_if_present(python_path) if python_path else None
         if (
-            not python_path or not Path(python_path).is_file()
+            python_stat is None or not stat.S_ISREG(python_stat.st_mode)
             or not os.access(python_path, os.X_OK)
         ):
             return f"worker interpreter is missing or not executable; re-run `muse pull {model_id}`"
