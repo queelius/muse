@@ -140,9 +140,15 @@ unzip the saved file. Inputs come as `image_path` / `fill_path` / `base_path`
   both numbers; fix the scale (for example `lora_scale_factor`) and run
   `muse models probe <id>` then `muse models enable <id>`.
 - A klein LoRA that has not been probed (for example a non-curated `hf://`
-  pull with `--no-probe`) is sized from its base's estimate (`memory_gb` or
-  probe measurement of `flux2-klein-4b`), not from the 0.33 GB adapter.
-  Probe it anyway for the real base+adapter peak.
+  pull with `--no-probe`) is sized from its base's estimate, not from the
+  0.33 GB adapter: the probe measurement (or `memory_gb`) of the catalog
+  entry its base names, by muse id or, for a raw `hf://` pull, by the
+  base's Hub repo (`flux2-klein-4b` carries
+  `black-forest-labs/FLUX.2-klein-4B`). If that base has no `memory_gb`
+  and no probe measurement, or is not pulled, the LoRA is sized from its
+  own adapter weights and starts under-sized until probed: use the curated
+  id or let the pull probe run, which measures the real base+adapter peak
+  (later loads self-heal the estimate upward).
 - Input side is capped by `limits.pixelart_max_input_side` (default 4096), and
   so is the pixelize preview's long side (art size x `preview_scale`): both are
   413 `input_too_large`, checked before the preview is allocated.

@@ -2599,6 +2599,92 @@ class TestSizingLadderBaseChase:
         _reset_read_catalog_cache()
         assert _has_memory_data(lora)[1] == 9.5
 
+    def _hf_base_lora(self, tmp_path):
+        """The exact shape a raw `muse pull hf://someone/klein-lora` writes:
+        the HF plugin takes base_model from the Hub tag (an HF repo id) and
+        declares no memory_gb (see the curated-overlay test's synthesized
+        manifest)."""
+        from muse.modalities.image_generation.hf import _resolve_lora
+        from tests.modalities.image_generation.test_hf_plugin import (
+            _LIMBIC_REPO, _limbic_info,
+        )
+        caps = _resolve_lora(_LIMBIC_REPO, _limbic_info()).manifest["capabilities"]
+        assert caps["base_model"] == "black-forest-labs/FLUX.2-klein-4B"
+        assert "memory_gb" not in caps
+        lora = self._lora(tmp_path)
+        lora["manifest"]["capabilities"] = dict(caps)
+        return lora
+
+    def _hf_base(self, tmp_path, hf_repo="black-forest-labs/FLUX.2-klein-4B", **kw):
+        base = self._base(tmp_path, **kw)
+        base["hf_repo"] = hf_repo
+        if "manifest" in base:
+            base["manifest"]["hf_repo"] = hf_repo
+        return base
+
+    @pytest.mark.parametrize("stored", [
+        "black-forest-labs/FLUX.2-klein-4B",
+        "Black-Forest-Labs/flux.2-KLEIN-4b",   # Hub ids are case-insensitive
+        "black-forest-labs/FLUX.2-klein-4B@0123abc",  # revision ignored
+    ])
+    def test_hf_repo_base_matches_catalog_entry_by_hf_repo(self, tmp_path, stored):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        catalog = {"some-klein-lora": lora,
+                   "flux2-klein-4b": self._hf_base(tmp_path, hf_repo=stored, memory_gb=9.5)}
+        assert _has_memory_data(lora, catalog=catalog) == (True, 9.5, "cuda")
+
+    def test_hf_repo_base_by_measurement(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        base = self._hf_base(tmp_path, peak_bytes=8 * 1024 ** 3)
+        catalog = {"flux2-klein-4b": base}
+        assert _has_memory_data(lora, catalog=catalog)[1] == pytest.approx(8.0)
+
+    def test_hf_repo_base_not_pulled_keeps_own_weights(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        catalog = {"other": self._hf_base(tmp_path, hf_repo="org/other", memory_gb=9.5)}
+        has, gb, _ = _has_memory_data(lora, catalog=catalog)
+        assert has and gb < 0.01
+
+    def test_hf_repo_match_uses_passed_catalog_only(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        catalog = {"flux2-klein-4b": self._hf_base(tmp_path, memory_gb=9.5)}
+        with patch("muse.cli_impl.supervisor._read_catalog",
+                   side_effect=AssertionError("no extra catalog read")):
+            assert _has_memory_data(lora, catalog=catalog)[1] == 9.5
+
+    def test_base_measurement_prefers_the_loras_device(self, tmp_path):
+        # The LoRA loads on cuda: the base's cuda measurement wins over its
+        # memory_gb and over a cpu measurement.
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)
+        base = self._base(tmp_path, memory_gb=9.5)
+        base["measurements"] = {
+            "cpu": {"peak_bytes": 20 * 1024 ** 3},
+            "cuda": {"peak_bytes": 8 * 1024 ** 3},
+        }
+        assert _has_memory_data(lora, catalog={"flux2-klein-4b": base})[1] == pytest.approx(8.0)
+
+    def test_base_other_device_measurement_is_the_last_resort(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)  # device cuda
+        base = self._base(tmp_path, memory_gb=9.5)
+        base["measurements"] = {"cpu": {"peak_bytes": 20 * 1024 ** 3}}
+        # Declared memory_gb beats a measurement from another pool...
+        assert _has_memory_data(lora, catalog={"flux2-klein-4b": base})[1] == 9.5
+        # ... which is used only when the base declares nothing.
+        del base["manifest"]
+        assert _has_memory_data(lora, catalog={"flux2-klein-4b": base})[1] == pytest.approx(20.0)
+
     def test_servability_uses_base_size(self, tmp_path):
         # Unprobed klein LoRA on an 8 GB card: the 9.5 GB base estimate
         # does not fit, where the 0.33 MB adapter alone would have.

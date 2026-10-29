@@ -1647,36 +1647,127 @@ def _declared_or_measured(
     return None, 0.0, device
 
 
+def _repo_key(repo: Any) -> str | None:
+    """An HF repo id normalized for matching: lowercase, without an
+    `hf://` scheme or an `@revision` suffix. None when it is not a repo id."""
+    if not isinstance(repo, str) or "/" not in repo:
+        return None
+    key = repo.strip().lower()
+    if key.startswith("hf://"):
+        key = key[len("hf://"):]
+    return key.split("@", 1)[0].strip("/") or None
+
+
+def _base_entries(base: str, catalog: dict) -> list[tuple[str, dict]]:
+    """Catalog entries that `base_model` names: the entry under that muse id,
+    or, for an HF repo id (a raw `hf://` LoRA pull takes it from the Hub
+    tag), every entry whose `hf_repo` (top-level or persisted manifest) is
+    that repo, case-insensitively and ignoring any @revision."""
+    if "/" not in base:
+        entry = catalog.get(base)
+        return [(base, entry)] if isinstance(entry, dict) else []
+    want = _repo_key(base)
+    out = []
+    for model_id, entry in sorted(catalog.items()):
+        if not isinstance(entry, dict):
+            continue
+        manifest = entry.get("manifest")
+        repos = {
+            _repo_key(entry.get("hf_repo")),
+            _repo_key(manifest.get("hf_repo") if isinstance(manifest, dict) else None),
+        }
+        if want in repos:
+            out.append((model_id, entry))
+    return out
+
+
+def _measurement_gb(record: Any) -> float | None:
+    if not isinstance(record, dict):
+        return None
+    peak = record.get("peak_bytes")
+    if peak is None or isinstance(peak, bool):
+        return None
+    try:
+        gb = float(peak) / (1024 ** 3)
+    except (TypeError, ValueError):
+        return None
+    return gb if math.isfinite(gb) and gb > 0.0 else None
+
+
+def _pool_keys(device: str) -> tuple[str, ...]:
+    """Measurement keys for the pool a model on `device` loads into, most
+    likely first ("auto" lands on cuda when a GPU is present)."""
+    device = (device or "auto").lower()
+    if device in ("cuda", "gpu"):
+        return ("cuda",)
+    if device in ("cpu", "mps"):
+        return (device,)
+    return ("cuda", "mps", "cpu")
+
+
+def _base_tier1_gb(base_entry: dict, device: str) -> float | None:
+    """A base entry's estimate for a LoRA loading on `device`: its probe
+    measurement for that pool, else its declared memory_gb, else a
+    measurement from another device. Never its weights on disk."""
+    measurements = base_entry.get("measurements") or {}
+    if not isinstance(measurements, dict):
+        measurements = {}
+    for key in _pool_keys(device):
+        gb = _measurement_gb(measurements.get(key))
+        if gb is not None:
+            return gb
+    manifest = base_entry.get("manifest") or {}
+    caps = manifest.get("capabilities") if isinstance(manifest, dict) else None
+    declared = caps.get("memory_gb") if isinstance(caps, dict) else None
+    if declared is not None and not isinstance(declared, bool):
+        try:
+            declared_gb = float(declared)
+        except (TypeError, ValueError):
+            declared_gb = math.nan
+        if math.isfinite(declared_gb) and declared_gb > 0.0:
+            return declared_gb
+    for record in measurements.values():
+        gb = _measurement_gb(record)
+        if gb is not None:
+            return gb
+    return None
+
+
 def _base_model_memory_gb(
-    capabilities: dict, catalog: "dict | None" = None,
+    capabilities: dict,
+    catalog: "dict | None" = None,
+    *,
+    device: str = "auto",
 ) -> float | None:
-    """The tier-1 estimate of `capabilities.base_model`'s catalog entry.
+    """The estimate of the catalog entry `capabilities.base_model` names.
 
     A manifest that layers onto a base (a LoRA adapter's `base_model`)
     loads the base's weights, but its own dir holds only the adapter, so
-    its weights-on-disk fallback undersizes the load. Only a muse catalog
-    id is chased, one level, and only the base's declared memory_gb or
-    probe measurement counts: never the base's weights on disk (a klein
-    snapshot sums to ~24 GB against a ~9.5 GB offloaded peak). None when
-    there is nothing to chase. `catalog` defaults to the live catalog.
+    its weights-on-disk fallback undersizes the load. The base is a muse
+    catalog id or an HF repo id matched against catalog `hf_repo`s
+    (`_base_entries`), chased one level. Only the base's probe measurement
+    (preferring the pool `device` loads into) or declared memory_gb counts
+    (`_base_tier1_gb`): never the base's weights on disk (a klein snapshot
+    sums to ~24 GB against a ~9.5 GB offloaded peak). When several entries
+    carry the base repo, the largest estimate wins. None when there is
+    nothing to chase. `catalog` defaults to the live catalog.
     """
     if not isinstance(capabilities, dict):
         return None
     base = capabilities.get("base_model")
-    if not isinstance(base, str) or not base or "/" in base:
+    if not isinstance(base, str) or not base.strip():
         return None
     if catalog is None:
         try:
             catalog = _read_catalog()
         except CatalogError:
             return None
-    base_entry = catalog.get(base)
-    if not isinstance(base_entry, dict):
-        return None
-    found, gb, _device = _declared_or_measured(
-        _entry_with_live_manifest(base, base_entry),
-    )
-    return gb if found and gb > 0 else None
+    estimates = []
+    for base_id, base_entry in _base_entries(base.strip(), catalog):
+        gb = _base_tier1_gb(_entry_with_live_manifest(base_id, base_entry), device)
+        if gb is not None:
+            estimates.append(gb)
+    return max(estimates) if estimates else None
 
 
 def _has_memory_data(
@@ -1684,15 +1775,21 @@ def _has_memory_data(
 ) -> tuple[bool, float, str]:
     """Return (has_data, memory_gb, device).
 
-    Sizing ladder, in order of preference:
+    Sizing ladder, in order of preference (CLAUDE.md "Lazy load + LRU
+    eviction" uses the same numbering):
       1. `manifest.capabilities.memory_gb` annotation (hand-set or
          from a script's MANIFEST), else
          `measurements.<device>.peak_bytes` from a probe run / self-healed
          lazy-load observation.
-      2. for a manifest with `capabilities.base_model` naming a muse
-         catalog entry (a LoRA adapter), that base's tier-1 estimate
-         (`_base_model_memory_gb`; `catalog` defaults to the live one).
-      3. on-disk weights size summed from the entry's `local_dir`.
+      2. for a manifest with `capabilities.base_model` (a LoRA adapter),
+         the base catalog entry's probe measurement (this entry's pool
+         first) or declared memory_gb, the base found by muse id or by
+         `hf_repo` (`_base_model_memory_gb`; `catalog` defaults to the
+         live one). Never the base's weights on disk.
+      3. on-disk weights size summed from the entry's `local_dir` (for a
+         LoRA whose base has no estimate: the adapter alone, until a
+         probe or load measures the real peak).
+      4. nothing: has_data is False.
 
     `device` is read from `manifest.capabilities.device` and lowercased.
     Falls back to "auto" when absent, matching the worker's own default
@@ -1711,7 +1808,7 @@ def _has_memory_data(
 
     manifest = catalog_entry.get("manifest") or {}
     capabilities = manifest.get("capabilities") if isinstance(manifest, dict) else None
-    base_gb = _base_model_memory_gb(capabilities or {}, catalog)
+    base_gb = _base_model_memory_gb(capabilities or {}, catalog, device=device)
     if base_gb is not None:
         return True, base_gb, device
 
@@ -2059,7 +2156,9 @@ def backfill_manifest_memory(
         # because a bundled entry persists no manifest. A probed LoRA entry
         # measured the real base+adapter peak; prefer that.
         if not (entry.get("measurements") or {}):
-            gb = _base_model_memory_gb(caps, catalog)
+            gb = _base_model_memory_gb(
+                caps, catalog, device=declared_device(caps),
+            )
         if gb is None:
             has_data, gb_own, _device = _has_memory_data(entry, catalog=catalog)
             if has_data and gb_own > 0:
