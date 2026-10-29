@@ -289,7 +289,8 @@ alignment = AudioAlignmentClient().align(
 pngs = GenerationsClient().generate("a cat on mars, cinematic", n=1)
 # LoRA adapters: muse pull hf://nerijs/pixel-art-xl (or curated pixel-art-xl),
 # optional --base <muse-id-or-hf-repo>, per-request lora_scale via extra_body.
-# Pixel-art sprites on FLUX.2 klein: muse pull klein-pixel-art, then POST the result to
+# Pixel-art sprites on FLUX.2 klein: muse pull flux2-klein-4b, then muse pull
+# klein-pixel-art (the LoRA needs its base first), then POST the result to
 # /v1/images/pixelize (see docs/PIXELART.md).
 vectors = EmbeddingsClient().embed(["alpha", "beta"])   # list[list[float]]
 chat = ChatClient().chat(

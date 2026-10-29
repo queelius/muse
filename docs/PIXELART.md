@@ -6,15 +6,16 @@ your own muse server. The pieces are `klein-pixel-art` (image generation),
 `/v1/images/autotile`, CPU only, no weights).
 
 ```bash
-muse pull klein-pixel-art     # FLUX.2 klein 4B + the pixel-art LoRA (needs a GPU)
+muse pull flux2-klein-4b      # the FLUX.2 klein 4B base (needs a GPU); pull it first
+muse pull klein-pixel-art     # the pixel-art LoRA on that base (refused until the base is pulled)
 muse pull pixel-tools         # venv only; nothing to download
 export MUSE=http://localhost:8000
 ```
 
 ## 1. Generate a sprite
 
-The curated model prepends `pixel art sprite, ` to your prompt unless you
-already wrote it. Output is 512x512 and soft: AI "pixel art" is rarely on a
+The curated model prepends `pixel art sprite, ` to your prompt unless the
+prompt already contains `pixel art sprite` anywhere (any case). Output is 512x512 and soft: AI "pixel art" is rarely on a
 true grid.
 
 ```bash
@@ -131,7 +132,9 @@ unzip the saved file. Inputs come as `image_path` / `fill_path` / `base_path`
 - A non-curated `hf://` klein LoRA pulled with `--no-probe` starts under-sized
   (sized from the adapter weights until probed). Use the curated id or let the
   pull probe run.
-- Input side is capped by `limits.pixelart_max_input_side` (default 4096).
+- Input side is capped by `limits.pixelart_max_input_side` (default 4096), and
+  so is the pixelize preview's long side (art size x `preview_scale`): both are
+  413 `input_too_large`, checked before the preview is allocated.
 - `scripts/bench/pixel_compare.py --server $MUSE --cases scripts/bench/pixel_cases.yaml
   --out /tmp/pixel` renders a contact sheet (raw vs pixelized, and a random
   16x12 map painted from the blob tiles) for judging a model or palette.
