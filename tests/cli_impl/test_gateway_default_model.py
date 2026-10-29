@@ -13,6 +13,7 @@ this path is testable without spinning up a LoadDirector.
 """
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -106,3 +107,50 @@ class TestDefaultModelSeam:
         assert r.status_code == 200
         target_url = mock_forward.await_args[0][1]
         assert target_url == "http://127.0.0.1:9011/languages"
+
+
+class TestDefaultModelSeamMultipart:
+    """The seam reads `model` from multipart forms too (pixelize, autotile):
+    curl -F image=@x.png with no -F model resolves the modality's default and
+    the multipart body reaches the worker byte for byte."""
+
+    @pytest.fixture(autouse=True)
+    def _real_paths(self):
+        from muse.core.discovery import _reset_model_optional_paths_cache
+
+        _reset_model_optional_paths_cache()
+        yield
+        _reset_model_optional_paths_cache()
+
+    @pytest.mark.parametrize("path", ["/v1/images/pixelize", "/v1/images/autotile"])
+    def test_multipart_without_model_resolves_default(self, path):
+        routes = [WorkerRoute(model_id="pixel-tools", worker_url="http://127.0.0.1:9020")]
+        app = build_gateway(routes)
+        client = TestClient(app)
+        known = {"pixel-tools": _entry("pixel-tools", "image/pixelart")}
+        bodies = []
+
+        async def fake_forward(request, target_url, timeout):
+            bodies.append(await request.body())
+            return JSONResponse({"ok": True})
+
+        with patch("muse.cli_impl.gateway.known_models", return_value=known), \
+             patch("muse.cli_impl.gateway.is_enabled", return_value=True), \
+             patch("muse.cli_impl.gateway._forward", new=AsyncMock(
+                 side_effect=fake_forward)) as mock_forward:
+            r = client.post(path, files={"image": ("x.png", b"\x89PNG fake", "image/png")},
+                            data={"palette": "db32"})
+
+        assert r.status_code == 200, r.text
+        assert mock_forward.await_args[0][1] == f"http://127.0.0.1:9020{path}"
+        assert b"\x89PNG fake" in bodies[0] and b'name="palette"' in bodies[0]
+
+    def test_multipart_without_model_and_no_enabled_model_returns_503(self):
+        app = build_gateway([])
+        client = TestClient(app)
+        with patch("muse.cli_impl.gateway.known_models", return_value={}), \
+             patch("muse.cli_impl.gateway.is_enabled", return_value=False):
+            r = client.post("/v1/images/pixelize",
+                            files={"image": ("x.png", b"data", "image/png")})
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "no_default_model"

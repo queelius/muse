@@ -74,3 +74,18 @@ def test_probe_defaults_run():
     assert "4x" in PROBE_DEFAULTS["shape"] and "T=16" in PROBE_DEFAULTS["shape"]
     out = PROBE_DEFAULTS["call"](PixelTools(model_id="pixel-tools", hf_repo="", local_dir=None))
     assert out is not None
+
+
+def test_model_optional_paths_declared_and_discovered():
+    import muse.modalities.image_pixelart as pkg
+    from muse.core.discovery import _reset_model_optional_paths_cache, model_optional_paths
+
+    assert pkg.MODEL_OPTIONAL_PATHS == ("/v1/images/pixelize", "/v1/images/autotile")
+    assert "MODEL_OPTIONAL_PATHS" in pkg.__all__
+    _reset_model_optional_paths_cache()
+    try:
+        paths = model_optional_paths()
+    finally:
+        _reset_model_optional_paths_cache()
+    assert paths["/v1/images/pixelize"] == "image/pixelart"
+    assert paths["/v1/images/autotile"] == "image/pixelart"

@@ -49,6 +49,9 @@ curl -s $MUSE/v1/images/pixelize -F model=pixel-tools -F image=@knight_raw.png \
   -F target_size=64x64 -F palette=db32 -F response_format=png -o knight.png
 ```
 
+`-F model=pixel-tools` is optional on both pixel routes: without it the server
+uses its first enabled `image/pixelart` model.
+
 Palettes: `pico-8`, `db16`, `db32`, `endesga-32`, `nes`, `gameboy`, `auto:N`
 (N colours picked from the image), `none`, or `#rrggbb,#rrggbb,...`. Useful
 extras: `outline=dark` (or `#rrggbb`), `seamless=true` (tileable), `sheet=4x2`

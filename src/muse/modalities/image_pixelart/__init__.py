@@ -37,6 +37,11 @@ from muse.modalities.image_pixelart.routes import build_router
 
 MODALITY = "image/pixelart"
 
+# One weightless bundled model serves both routes, so `curl -F image=@x.png`
+# without `-F model=...` reaches it: the gateway resolves the first enabled
+# image/pixelart model for these paths (AST-read; keep it a literal).
+MODEL_OPTIONAL_PATHS = ("/v1/images/pixelize", "/v1/images/autotile")
+
 DISCOVERY = {
     "summary": (
         "Deterministic pixel-art tools (CPU, no weights). Pixelize snaps an image "
@@ -132,6 +137,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "MODEL_OPTIONAL_PATHS",
     "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
