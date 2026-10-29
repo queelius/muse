@@ -43,7 +43,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
-from muse.cli_impl.supervisor import get_supervisor_state
+from muse.cli_impl.supervisor import (
+    _worker_process_state_locked,
+    get_supervisor_state,
+)
 from muse.core.catalog import _read_catalog, known_models
 
 logger = logging.getLogger(__name__)
@@ -112,14 +115,21 @@ def _enabled_loaded_model_ids() -> set[str]:
     Disabled-but-loaded shouldn't happen with the current state model,
     but we err on the side of describing what's actually consuming
     memory rather than what's marked enabled in the catalog.
+
+    This route does not own any worker, so it must never reap one: a
+    reaped leader frees its PID==PGID before the owner's final group
+    signal. Liveness comes from the supervisor's non-reaping,
+    identity-checked observation under each spec's own ``process_lock``,
+    taken after ``state.lock`` is released so the two are never nested.
     """
     state = get_supervisor_state()
     with state.lock:
-        ids = set()
-        for spec in state.workers:
-            if spec.status == "dead" or (
-                spec.process is not None and spec.process.poll() is not None
-            ):
+        specs = [spec for spec in state.workers if spec.status != "dead"]
+    ids = set()
+    for spec in specs:
+        with spec.process_lock:
+            proc = spec.process
+            if proc is not None and _worker_process_state_locked(spec, proc) is False:
                 continue
             ids.update(spec.models)
     return ids
