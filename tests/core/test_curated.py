@@ -460,3 +460,25 @@ def test_load_curated_includes_qwen3_asr():
     }
     assert "prompt" in entry.summary
     assert any("context" in limit and "expected words" in limit for limit in entry.limits)
+
+
+def test_curated_klein_pixel_art_entry():
+    entry = find_curated("klein-pixel-art")
+    assert entry is not None
+    assert entry.uri == "hf://Limbicnation/pixel-art-lora"
+    assert entry.modality == "image/generation"
+    assert entry.quality_tier == "draft"
+    caps = entry.capabilities
+    assert caps["lora_adapter"] is True
+    assert caps["base_model"] == "flux2-klein-4b"
+    assert caps["lora_scale"] == 1.0
+    assert caps["prompt_prefix"] == "pixel art sprite, "
+    assert caps["default_size"] == [512, 512]
+    assert caps["default_steps"] == 4
+    # Sized from its base entry by the supervisor, not declared here.
+    assert "memory_gb" not in caps
+    assert any("/v1/images/pixelize" in s for s in (entry.summary or "",
+               *entry.strengths, *entry.limits))
+    # Listed right after the SDXL pixel LoRA.
+    ids = [e.id for e in load_curated()]
+    assert ids.index("klein-pixel-art") == ids.index("pixel-art-xl") + 1

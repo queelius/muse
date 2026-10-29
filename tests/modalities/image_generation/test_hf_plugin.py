@@ -510,3 +510,172 @@ def test_other_repos_unchanged():
     )
     result = HF_PLUGIN["resolve"]("stabilityai/sdxl-turbo", None, info)
     assert result.backend_path.endswith(":DiffusersText2ImageModel")
+
+
+# ---------------- klein LoRA adapters (Limbicnation/pixel-art-lora) ----------------
+
+_LIMBIC_REPO = "Limbicnation/pixel-art-lora"
+_LIMBIC_SIBLINGS = [
+    ".gitattributes", "LICENSE", "README.md", "comfyui_workflow.json",
+    "config.json", "config.yaml",
+    "pytorch_lora_weights.comfyui.safetensors",
+    "pytorch_lora_weights.safetensors",
+    "samples/01_a_brave_knight_in_shining_armor_holding_.png",
+]
+
+
+def _limbic_info():
+    info = _fake_info(
+        siblings=_LIMBIC_SIBLINGS,
+        tags=[
+            "diffusers", "lora", "flux", "pixel-art", "text-to-image",
+            "FLUX.2-klein-4B",
+            "base_model:black-forest-labs/FLUX.2-klein-4B",
+            "base_model:adapter:black-forest-labs/FLUX.2-klein-4B",
+            "license:apache-2.0",
+        ],
+        pipeline_tag="text-to-image",
+    )
+    info.card_data = MagicMock(license="apache-2.0")
+    return info
+
+
+def test_sniff_true_on_limbicnation_lora():
+    assert HF_PLUGIN["sniff"](_limbic_info()) is True
+
+
+def test_resolve_lora_klein_base_routes_to_reference():
+    from unittest.mock import patch
+    from muse.modalities.image_generation.hf import _resolve_lora
+
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+    ) as est:
+        r = _resolve_lora(_LIMBIC_REPO, _limbic_info())
+    assert r.backend_path.endswith("runtimes.reference:DiffusersReferenceModel")
+    caps = r.manifest["capabilities"]
+    assert caps["lora_adapter"] is True
+    assert caps["lora_scale"] == 1.0
+    assert caps["base_model"] == "black-forest-labs/FLUX.2-klein-4B"
+    assert caps["pipeline_class"] == "Flux2KleinPipeline"
+    assert caps["cpu_offload"] == "model"
+    assert caps["device"] == "cuda"
+    assert caps["size_multiple"] == 16
+    assert caps["max_pixels"] == 4194304
+    assert caps["max_reference_images"] == 4
+    assert caps["supports_reference_images"] is True
+    # The SDXL diffusers paths do not exist on the reference runtime.
+    assert caps["supports_img2img"] is False
+    assert caps["supports_inpainting"] is False
+    assert caps["supports_variations"] is False
+    # A klein base's repo weight sum double-counts its single-file
+    # checkpoint and ignores offload; sizing comes from the base entry.
+    assert "memory_gb" not in caps
+    est.assert_not_called()
+    assert "peft" in r.manifest["pip_extras"]
+    assert "diffusers>=0.37.0" in r.manifest["pip_extras"]
+    assert r.manifest["license"] == "apache-2.0"
+    assert r.manifest["model_id"] == "pixel-art-lora"
+
+
+def test_resolve_lora_klein_via_plugin_resolve():
+    r = HF_PLUGIN["resolve"](_LIMBIC_REPO, None, _limbic_info())
+    assert r.backend_path.endswith(":DiffusersReferenceModel")
+
+
+def test_resolve_lora_klein_base_override_catalog_id():
+    """`--base flux2-klein-4b` (a muse id) routes to the reference runtime,
+    even when the adapter's own tags declare no base."""
+    info = _limbic_info()
+    info.tags = ["text-to-image", "lora"]
+    r = HF_PLUGIN["resolve"](
+        _LIMBIC_REPO, None, info, base_override="flux2-klein-4b",
+    )
+    assert r.backend_path.endswith(":DiffusersReferenceModel")
+    assert r.manifest["capabilities"]["base_model"] == "flux2-klein-4b"
+
+
+def test_resolve_lora_klein_base_named_base_still_reference():
+    """The klein name test ignores the reference family's `base` exclusion."""
+    from unittest.mock import patch
+    info = _limbic_info()
+    info.tags = [
+        "text-to-image", "lora",
+        "base_model:adapter:black-forest-labs/FLUX.2-klein-base-4B",
+    ]
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        r = HF_PLUGIN["resolve"](_LIMBIC_REPO, None, info)
+    assert r.backend_path.endswith(":DiffusersReferenceModel")
+
+
+def test_resolve_lora_sdxl_override_on_klein_tagged_repo_uses_diffusers():
+    """The EFFECTIVE base decides: an SDXL --base keeps the SDXL runtime."""
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=None,
+    ):
+        r = HF_PLUGIN["resolve"](
+            _LIMBIC_REPO, None, _limbic_info(), base_override="sdxl-turbo",
+        )
+    assert r.backend_path.endswith(":DiffusersText2ImageModel")
+
+
+def test_resolve_lora_picks_diffusers_weight_name():
+    from pathlib import Path
+    from unittest.mock import patch
+    from huggingface_hub.utils import filter_repo_objects
+
+    with patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as snap:
+        r = HF_PLUGIN["resolve"](_LIMBIC_REPO, None, _limbic_info())
+        r.download(Path("/tmp/cache"))
+    patterns = snap.call_args.kwargs["allow_patterns"]
+    assert patterns == ["pytorch_lora_weights.safetensors", "*.json"]
+    assert r.allow_patterns == ("pytorch_lora_weights.safetensors", "*.json")
+    kept = set(filter_repo_objects(_LIMBIC_SIBLINGS, allow_patterns=patterns))
+    assert kept == {
+        "pytorch_lora_weights.safetensors", "config.json",
+        "comfyui_workflow.json",
+    }
+
+
+def test_resolve_lora_several_safetensors_without_diffusers_name_fails():
+    import pytest
+    from muse.core.resolvers import ResolverError
+    info = _limbic_info()
+    info.siblings = [
+        MagicMock(rfilename=f)
+        for f in ("a.safetensors", "b.comfyui.safetensors", "README.md")
+    ]
+    with pytest.raises(ResolverError, match="exactly one"):
+        HF_PLUGIN["resolve"](_LIMBIC_REPO, None, info)
+
+
+def test_resolve_lora_sdxl_unchanged():
+    from pathlib import Path
+    from unittest.mock import patch
+    with patch(
+        "muse.modalities.image_generation.hf._estimate_repo_weights_gb",
+        return_value=6.9,
+    ), patch(
+        "muse.modalities.image_generation.hf.snapshot_download",
+        return_value="/tmp/fake",
+    ) as snap:
+        r = HF_PLUGIN["resolve"]("nerijs/pixel-art-xl", None, _lora_info())
+        r.download(Path("/tmp/cache"))
+    assert r.backend_path.endswith(":DiffusersText2ImageModel")
+    caps = r.manifest["capabilities"]
+    assert caps["supports_img2img"] is True
+    assert caps["memory_gb"] == 7.2
+    assert "pipeline_class" not in caps and "cpu_offload" not in caps
+    assert "diffusers>=0.27.0" in r.manifest["pip_extras"]
+    assert snap.call_args.kwargs["allow_patterns"] == [
+        "*.safetensors", "*.json", "*.txt",
+    ]
+    assert r.allow_patterns == ("*.safetensors", "*.json", "*.txt")

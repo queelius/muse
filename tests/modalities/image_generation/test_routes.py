@@ -1290,3 +1290,110 @@ def test_style_listed_as_ignored():
                data={"prompt": "p", "style": "natural"})
     assert r.status_code == 200, r.text
     assert "style" in r.json()["metadata"]["ignored"]
+
+
+# ---------------- prompt_prefix + lora_scale on edits ----------------
+
+
+_PREFIX_CAPS = {**_REF_CAPS, "prompt_prefix": "pixel art sprite, ", "lora_adapter": True}
+
+
+def test_prompt_prefix_applied_and_reported():
+    c, model = _ref_client(_PREFIX_CAPS)
+    r = c.post("/v1/images/generations", json={"prompt": "a knight", "size": "512x512"})
+    assert r.status_code == 200, r.text
+    assert model.calls[0]["prompt"] == "pixel art sprite, a knight"
+    body = r.json()
+    assert body["metadata"]["prompt_prefix_applied"] is True
+    assert body["data"][0]["revised_prompt"] == "pixel art sprite, a knight"
+
+
+def test_prompt_prefix_not_duplicated():
+    c, model = _ref_client(_PREFIX_CAPS)
+    r = c.post(
+        "/v1/images/generations",
+        json={"prompt": "Pixel Art Sprite, knight", "size": "512x512"},
+    )
+    assert r.status_code == 200, r.text
+    assert model.calls[0]["prompt"] == "Pixel Art Sprite, knight"
+    assert r.json()["metadata"]["prompt_prefix_applied"] is False
+
+
+def test_prompt_prefix_metadata_absent_without_capability():
+    c, _ = _ref_client()
+    r = c.post("/v1/images/generations", json={"prompt": "a knight", "size": "512x512"})
+    assert "prompt_prefix_applied" not in r.json()["metadata"]
+    r = c.post("/v1/images/edits", files=[_img_part("image")], data={"prompt": "p"})
+    assert "prompt_prefix_applied" not in r.json()["metadata"]
+
+
+def test_prompt_prefix_applied_on_edits():
+    c, model = _ref_client(_PREFIX_CAPS)
+    r = c.post(
+        "/v1/images/edits", files=[_img_part("image")], data={"prompt": "a mage"},
+    )
+    assert r.status_code == 200, r.text
+    assert model.edit_calls[0]["prompt"] == "pixel art sprite, a mage"
+    assert r.json()["metadata"]["prompt_prefix_applied"] is True
+
+
+def test_lora_scale_reaches_edit():
+    c, model = _ref_client(_PREFIX_CAPS)
+    r = c.post(
+        "/v1/images/edits", files=[_img_part("image")],
+        data={"prompt": "p", "lora_scale": "0.85"},
+    )
+    assert r.status_code == 200, r.text
+    assert model.edit_calls[0]["lora_scale"] == 0.85
+
+
+def test_edit_lora_scale_omitted_passes_none():
+    c, model = _ref_client(_PREFIX_CAPS)
+    c.post("/v1/images/edits", files=[_img_part("image")], data={"prompt": "p"})
+    assert model.edit_calls[0]["lora_scale"] is None
+
+
+def test_edit_lora_scale_on_non_lora_model_400():
+    c, model = _ref_client()
+    r = c.post(
+        "/v1/images/edits", files=[_img_part("image")],
+        data={"prompt": "p", "lora_scale": "0.5"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "lora_not_supported"
+    assert model.edit_calls == []
+
+
+def test_edit_lora_scale_out_of_range_400():
+    c, model = _ref_client(_PREFIX_CAPS)
+    r = c.post(
+        "/v1/images/edits", files=[_img_part("image")],
+        data={"prompt": "p", "lora_scale": "2.5"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert model.edit_calls == []
+
+
+def test_inpaint_lora_scale_reported_ignored():
+    reg = ModalityRegistry()
+    model = RecordingImageModel(model_id="fake-lora-inpaint")
+    reg.register(
+        "image/generation", model,
+        manifest={
+            "model_id": model.model_id, "modality": "image/generation",
+            "capabilities": {"supports_inpainting": True, "lora_adapter": True},
+        },
+    )
+    c = TestClient(create_app(registry=reg, routers={"image/generation": build_router(reg)}))
+    r = c.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={"prompt": "p", "lora_scale": "0.5"},
+    )
+    assert r.status_code == 200, r.text
+    assert "lora_scale" in r.json()["metadata"]["ignored"]
+    assert "lora_scale" not in model.inpaint_calls[0]

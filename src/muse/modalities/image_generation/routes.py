@@ -13,7 +13,11 @@ Follows OpenAI's /v1/images/generations contract:
     AutoPipelineForImage2Image. Requires the selected model to advertise
     `capabilities.supports_img2img: True` in its manifest.
   - LoRA extension: `lora_scale` (0.0 to 2.0). Requires the selected model
-    to advertise `capabilities.lora_adapter: True` in its manifest.
+    to advertise `capabilities.lora_adapter: True` in its manifest. Also a
+    Form field on /v1/images/edits (reference edits; ignored with a mask).
+  - `capabilities.prompt_prefix` (e.g. a LoRA trigger phrase) is prepended
+    to the prompt unless already present; generations and edits report
+    `metadata.prompt_prefix_applied` for models that declare it.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from muse.modalities._native_offload import run_native_offload
 from muse.modalities.image_generation.codec import to_bytes, to_data_url
 from muse.modalities.image_generation.options import (
     OptionError,
+    apply_prompt_prefix,
     check_background,
     check_output,
     ignored_fields,
@@ -92,11 +97,13 @@ def _build_response(
     quality: str,
     background: str,
     ignored: list[str],
+    prompt_prefix_applied: bool | None = None,
 ) -> dict:
     """Shared envelope for generations/edits/variations.
 
     A None `prompt` omits `revised_prompt`. `size` is what the first result
-    actually measured, not what was requested.
+    actually measured, not what was requested. A None
+    `prompt_prefix_applied` (the model declares no prompt_prefix) omits it.
     """
     data = []
     for r in results:
@@ -110,6 +117,9 @@ def _build_response(
                 to_bytes(r.image, fmt=output_format, compression=compression),
             ).decode()
         data.append(entry)
+    metadata: dict = {"ignored": ignored}
+    if prompt_prefix_applied is not None:
+        metadata["prompt_prefix_applied"] = prompt_prefix_applied
     return {
         "created": int(time.time()),
         "data": data,
@@ -117,7 +127,7 @@ def _build_response(
         "quality": quality,
         "output_format": output_format,
         "background": background,
-        "metadata": {"ignored": ignored},
+        "metadata": metadata,
     }
 
 
@@ -235,6 +245,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         width, height = opts["width"], opts["height"]
         steps = opts["steps"]
         output_format = opts["output_format"]
+        prompt, prefix_applied = apply_prompt_prefix(req.prompt, caps)
 
         def _call_one(seed_offset: int):
             kwargs: dict = {
@@ -250,7 +261,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             if req.seed is not None:
                 kwargs["seed"] = req.seed + seed_offset
             with model._inference_lock:
-                return model.generate(req.prompt, **kwargs)
+                return model.generate(prompt, **kwargs)
 
         input_images = [init_image] if init_image is not None else []
         results = []
@@ -283,13 +294,16 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         try:
             return _build_response(
                 results,
-                prompt=req.prompt,
+                prompt=prompt,
                 response_format=req.response_format,
                 output_format=output_format,
                 compression=req.output_compression,
                 quality=opts["quality"],
                 background=opts["background"],
                 ignored=opts["ignored"],
+                prompt_prefix_applied=(
+                    prefix_applied if "prompt_prefix" in caps else None
+                ),
             )
         finally:
             close_decoded_images(
@@ -319,6 +333,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         steps: int | None = Form(None),
         guidance: float | None = Form(None),
         seed: int | None = Form(None),
+        lora_scale: float | None = Form(None),
     ):
         # Validate Form fields by hand. Pydantic's BaseModel can't validate
         # a multipart body directly; we mirror the GenerationRequest range
@@ -345,6 +360,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", "guidance must be in [0, 20]",
             )
+        if lora_scale is not None and not (0.0 <= lora_scale <= 2.0):
+            return error_response(
+                400, "invalid_parameter", "lora_scale must be in [0, 2]",
+            )
 
         # `image` parts first, then `image[]` parts, in arrival order.
         parts = list(image or []) + list(image_list or [])
@@ -367,6 +386,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         backend = registry.get_or_404(MODALITY, model)
         effective_id = getattr(backend, "model_id", None) or (model or "<default>")
         caps = registry.capabilities(MODALITY, effective_id)
+
+        if lora_scale is not None and not caps.get("lora_adapter"):
+            return error_response(
+                400,
+                "lora_not_supported",
+                f"model {effective_id!r} is not a LoRA adapter model; "
+                f"lora_scale only applies to LoRA models",
+            )
 
         if mask is not None:
             if not caps.get("supports_inpainting"):
@@ -408,9 +435,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(400, e.code, e.message)
         width, height = opts["width"], opts["height"]
         if mask is not None:
-            # backend.inpaint takes none of these; report them as ignored.
+            # backend.inpaint takes none of these (a LoRA inpaint uses the
+            # configured default scale); report them as ignored.
             sent = {"steps": steps, "seed": seed, "guidance": guidance,
-                    "negative_prompt": negative_prompt}
+                    "negative_prompt": negative_prompt, "lora_scale": lora_scale}
             opts["ignored"] = sorted(
                 set(opts["ignored"]) | {k for k, v in sent.items() if v is not None}
             )
@@ -445,6 +473,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                         f"at least 64 px and the aspect ratio at most 8:1",
                     )
 
+        prompt, prefix_applied = apply_prompt_prefix(prompt, caps)
+
         def _call_one(seed_offset: int):
             with backend._inference_lock:
                 if mask_image is not None:
@@ -462,6 +492,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     "steps": opts["steps"],
                     "guidance": guidance,
                     "negative_prompt": negative_prompt,
+                    "lora_scale": lora_scale,
                 }
                 if seed is not None:
                     kwargs["seed"] = seed + seed_offset
@@ -502,6 +533,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 quality=opts["quality"],
                 background=opts["background"],
                 ignored=opts["ignored"],
+                prompt_prefix_applied=(
+                    prefix_applied if "prompt_prefix" in caps else None
+                ),
             )
         finally:
             close_decoded_images(

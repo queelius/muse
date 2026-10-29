@@ -58,17 +58,29 @@ _KLEIN_PIP_EXTRAS = (
 )
 
 
-def _reference_family(repo_id: str) -> dict[str, Any] | None:
+def _is_klein_name(ref: str) -> bool:
+    """True when a repo id or muse catalog id names a FLUX.2 klein model.
+
+    Tests the name part (after the last "/"), case-insensitively, so it
+    matches `black-forest-labs/FLUX.2-klein-4B` and `flux2-klein-4b` alike.
+    """
+    name = ref.rsplit("/", 1)[-1].lower()
+    return "flux.2-klein" in name or "flux2-klein" in name
+
+
+def _reference_family(
+    repo_id: str, *, allow_base: bool = False,
+) -> dict[str, Any] | None:
     """Capabilities for repos served by the reference-image runtime, else None.
 
     Matches distilled FLUX.2 klein on the repo name part, case-insensitively. Returns
-    a fresh dict each call so callers may mutate it.
+    a fresh dict each call so callers may mutate it. `allow_base` keeps
+    non-distilled "base" names (used for LoRA bases, whose adapter decides).
     """
-    name = repo_id.rsplit("/", 1)[-1].lower()
-    if "flux.2-klein" not in name and "flux2-klein" not in name:
+    if not _is_klein_name(repo_id):
         return None
     # Non-distilled "base" checkpoints are not tuned for the 4-step schedule.
-    if "base" in name:
+    if not allow_base and "base" in repo_id.rsplit("/", 1)[-1].lower():
         return None
     return {
         "pipeline_class": "Flux2KleinPipeline",
@@ -151,6 +163,11 @@ def _is_lora_adapter(siblings: list[str], tags: list[str]) -> bool:
 
 
 _LORA_PIP_EXTRAS = _PIP_EXTRAS + ("peft",)
+_KLEIN_LORA_PIP_EXTRAS = _KLEIN_PIP_EXTRAS + ("peft",)
+
+# The diffusers-format weight name `load_lora_weights` looks for first.
+# Repos that also ship a ComfyUI-format copy are pulled with only this one.
+_DIFFUSERS_LORA_WEIGHT = "pytorch_lora_weights.safetensors"
 
 # base_model:<qualifier>:<repo> forms that do NOT name a usable base.
 _NON_BASE_QUALIFIERS = (
@@ -214,10 +231,12 @@ def _resolve_lora(
 ) -> ResolvedModel:
     """Synthesize a manifest for an adapter-only repo.
 
-    The manifest reuses the standard diffusers runtime; the runtime's
-    lora_adapter branch loads the BASE pipeline and layers the adapter
-    on top (unfused). base_model may be absent here (tagless repo with
-    no --base override); catalog.pull validates the merged result.
+    The manifest reuses the standard diffusers runtime, or the
+    reference-image runtime when the effective base names a FLUX.2 klein
+    model; either runtime's lora_adapter branch loads the BASE pipeline and
+    layers the adapter on top (unfused). base_model may be absent here
+    (tagless repo with no --base override); catalog.pull validates the
+    merged result.
 
     `base_override` (the operator's `--base` pin, fix I2) wins over the
     tag-declared base when set. Generation defaults (steps/guidance/size)
@@ -231,7 +250,15 @@ def _resolve_lora(
     weights = [
         f for f in siblings if f.endswith(".safetensors") and "/" not in f
     ]
-    if len(weights) != 1:
+    if len(weights) > 1 and _DIFFUSERS_LORA_WEIGHT in weights:
+        # e.g. a diffusers copy next to a ComfyUI copy: fetch only the
+        # diffusers one, which load_lora_weights picks by name.
+        allow_patterns = [_DIFFUSERS_LORA_WEIGHT, "*.json"]
+    elif len(weights) == 1:
+        # Adapter repos are flat: weights + configs at the top level,
+        # tens of MB total. No subfolder pipeline tree to filter.
+        allow_patterns = ["*.safetensors", "*.json", "*.txt"]
+    else:
         raise ResolverError(
             f"LoRA repo {repo_id!r} has {len(weights)} top-level .safetensors "
             f"files ({sorted(weights)}); muse supports exactly one adapter "
@@ -239,25 +266,45 @@ def _resolve_lora(
         )
 
     base = base_override or _lora_base_from_tags(tags)
-    capabilities: dict[str, Any] = {
-        # Generation defaults follow the EFFECTIVE base (override wins
-        # over tag-declared); turbo bases get 1-step/no-guidance
-        # automatically, whether declared by the repo or by --base.
-        **_infer_defaults(base if base else repo_id),
-        "lora_adapter": True,
-        "lora_scale": 1.0,
-        "supports_negative_prompt": True,
-        "supports_seeded_generation": True,
-        "supports_img2img": True,
-        "supports_inpainting": True,
-        "supports_variations": True,
-    }
-    if base:
-        capabilities["base_model"] = base
-        est = _estimate_repo_weights_gb(base)
-        if est:
-            # Adapter + runtime overhead margin on top of base weights.
-            capabilities["memory_gb"] = round(est + 0.3, 1)
+    klein_caps = _reference_family(base, allow_base=True) if base else None
+    if klein_caps is not None:
+        # FLUX.2 klein base: the reference-image runtime (Flux2KleinPipeline,
+        # model CPU offload). Its img2img/inpaint/variations flags stay False.
+        runtime_path = _REFERENCE_RUNTIME_PATH
+        pip_extras = _KLEIN_LORA_PIP_EXTRAS
+        capabilities: dict[str, Any] = {
+            **klein_caps,
+            "lora_adapter": True,
+            "lora_scale": 1.0,
+            "base_model": base,
+        }
+        # No weight-sum memory estimate: a klein repo also ships a
+        # top-level single-file checkpoint (counted twice) and the base
+        # runs offloaded, so the sum (~24 GB) is far above the real peak.
+        # The supervisor sizes an unprobed LoRA from its muse-id base
+        # entry, and the post-pull probe measures the real peak.
+    else:
+        runtime_path = _RUNTIME_PATH
+        pip_extras = _LORA_PIP_EXTRAS
+        capabilities = {
+            # Generation defaults follow the EFFECTIVE base (override wins
+            # over tag-declared); turbo bases get 1-step/no-guidance
+            # automatically, whether declared by the repo or by --base.
+            **_infer_defaults(base if base else repo_id),
+            "lora_adapter": True,
+            "lora_scale": 1.0,
+            "supports_negative_prompt": True,
+            "supports_seeded_generation": True,
+            "supports_img2img": True,
+            "supports_inpainting": True,
+            "supports_variations": True,
+        }
+        if base:
+            capabilities["base_model"] = base
+            est = _estimate_repo_weights_gb(base)
+            if est:
+                # Adapter + runtime overhead margin on top of base weights.
+                capabilities["memory_gb"] = round(est + 0.3, 1)
 
     revision = hf_commit_revision(info)
     manifest = {
@@ -266,7 +313,7 @@ def _resolve_lora(
         "hf_repo": repo_id,
         "description": f"Diffusers LoRA adapter: {repo_id}",
         "license": hf_repo_license(info),
-        "pip_extras": list(_LORA_PIP_EXTRAS),
+        "pip_extras": list(pip_extras),
         "system_packages": [],
         "capabilities": capabilities,
     }
@@ -274,19 +321,18 @@ def _resolve_lora(
         manifest["revision"] = revision
 
     def _download(cache_root: Path) -> Path:
-        # Adapter repos are flat: weights + configs at the top level,
-        # tens of MB total. No subfolder pipeline tree to filter.
         return Path(snapshot_download(
             repo_id=repo_id,
             cache_dir=str(cache_root) if cache_root else None,
-            allow_patterns=["*.safetensors", "*.json", "*.txt"],
+            allow_patterns=list(allow_patterns),
             revision=revision,
         ))
 
     return ResolvedModel(
         manifest=manifest,
-        backend_path=_RUNTIME_PATH,
+        backend_path=runtime_path,
         download=_download,
+        allow_patterns=tuple(allow_patterns),
     )
 
 

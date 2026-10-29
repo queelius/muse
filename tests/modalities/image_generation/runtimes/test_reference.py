@@ -143,3 +143,121 @@ def test_metadata_counts_references():
     md = m.generate("p").metadata
     assert md["reference_images"] == 0
     assert set(md) >= {"prompt", "steps", "guidance", "reference_images"}
+
+
+# ---------------- LoRA adapters on the reference runtime ----------------
+
+
+class LoraPipe(RecordingPipe):
+    """RecordingPipe plus the diffusers LoRA mixin surface, logging call order."""
+
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+        self.lora_loads = []
+        self.adapter_sets = []
+
+    def load_lora_weights(self, src, **kw):
+        self.events.append("load_lora_weights")
+        self.lora_loads.append((src, kw))
+
+    def set_adapters(self, names, adapter_weights=None):
+        self.adapter_sets.append((list(names), list(adapter_weights)))
+
+    def enable_model_cpu_offload(self, device=None):
+        self.events.append("place")
+        super().enable_model_cpu_offload(device=device)
+
+
+def _build_lora(monkeypatch, *, base_dir="/w/klein-base", **kw):
+    events: list = []
+    pipe = LoraPipe(events)
+    monkeypatch.setattr(f"{MOD}.resolve_model_source", lambda ref: base_dir)
+    cls = MagicMock()
+
+    def _from_pretrained(src, **k):
+        events.append(("from_pretrained", src))
+        return pipe
+
+    cls.from_pretrained.side_effect = _from_pretrained
+    fake_diffusers = SimpleNamespace(Flux2KleinPipeline=cls)
+    fake_torch = MagicMock()
+    for name, obj in (("diffusers", fake_diffusers), ("torch", fake_torch)):
+        p = patch(f"{MOD}.{name}", obj)
+        p.start()
+        _patches.append(p)
+    kw.setdefault("device", "cuda")
+    kw.setdefault("cpu_offload", "model")
+    m = DiffusersReferenceModel(
+        hf_repo="Limbicnation/pixel-art-lora", local_dir="/w/lora",
+        model_id="klein-pixel-art", lora_adapter=True,
+        base_model="flux2-klein-4b", **kw,
+    )
+    return m, pipe, events
+
+
+def test_reference_lora_loads_adapter_before_offload(monkeypatch):
+    m, pipe, events = _build_lora(monkeypatch)
+    assert events == [
+        ("from_pretrained", "/w/klein-base"), "load_lora_weights", "place",
+    ]
+    assert pipe.lora_loads == [("/w/lora", {"adapter_name": "lora"})]
+
+
+def test_reference_lora_missing_base_raises(monkeypatch):
+    # resolve_model_source echoes an unpulled muse id back verbatim.
+    with pytest.raises(RuntimeError, match="is not pulled"):
+        _build_lora(monkeypatch, base_dir="flux2-klein-4b")
+
+
+def test_reference_lora_without_base_model_raises(monkeypatch):
+    cls = MagicMock()
+    for name, obj in (
+        ("diffusers", SimpleNamespace(Flux2KleinPipeline=cls)),
+        ("torch", MagicMock()),
+    ):
+        p = patch(f"{MOD}.{name}", obj)
+        p.start()
+        _patches.append(p)
+    with pytest.raises(RuntimeError, match="base_model is missing"):
+        DiffusersReferenceModel(
+            hf_repo="org/lora", model_id="x", lora_adapter=True, device="cuda",
+        )
+    cls.from_pretrained.assert_not_called()
+
+
+def test_reference_lora_hf_repo_base_passes_through(monkeypatch):
+    m, pipe, events = _build_lora(
+        monkeypatch, base_dir="black-forest-labs/FLUX.2-klein-4B",
+    )
+    assert events[0] == ("from_pretrained", "black-forest-labs/FLUX.2-klein-4B")
+
+
+def test_reference_lora_scale_per_request(monkeypatch):
+    m, pipe, _ = _build_lora(monkeypatch)
+    m.generate("a knight", lora_scale=0.5)
+    m.generate("a knight", lora_scale=0.5)
+    assert pipe.adapter_sets == [(["lora"], [0.5])]
+    # Omitted scale falls back to the manifest default (1.0): applied once.
+    m.generate("a knight")
+    m.edit("a knight", images=[Image.new("RGB", (4, 4))])
+    assert pipe.adapter_sets == [(["lora"], [0.5]), (["lora"], [1.0])]
+    m.edit("a knight", images=[Image.new("RGB", (4, 4))], lora_scale=1.3)
+    assert pipe.adapter_sets[-1] == (["lora"], [1.3])
+    assert len(pipe.calls) == 5
+
+
+def test_reference_lora_default_scale_from_manifest(monkeypatch):
+    m, pipe, _ = _build_lora(monkeypatch, lora_scale=0.85)
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [0.85])]
+
+
+def test_reference_without_lora_unchanged():
+    pipe = LoraPipe([])
+    m, _, cls, _ = _build(pipe=pipe, local_dir="/w/klein")
+    assert cls.from_pretrained.call_args.args[0] == "/w/klein"
+    m.generate("x", lora_scale=0.5)
+    m.edit("x", images=[Image.new("RGB", (4, 4))], lora_scale=0.5)
+    assert pipe.lora_loads == []
+    assert pipe.adapter_sets == []

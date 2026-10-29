@@ -25,6 +25,7 @@ PUBLIC_KEYS: frozenset[str] = frozenset({
     "calibrated", "lora_adapter", "base_model", "supported_scales", "supported_tile_sizes",
     "safe_labels", "languages", "multi_label", "num_labels", "output_format",
     "output_mime_type", "static_svg_only", "voice_cloning", "pronunciation_kinds",
+    "prompt_prefix",
 })
 
 HIDDEN_KEYS: frozenset[str] = frozenset({

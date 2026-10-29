@@ -6,6 +6,11 @@ by the manifest (`pipeline_class`) and looked up on the diffusers module, so
 a sibling pipeline needs no new code. Text-to-image and multi-reference
 edits share one pipeline object; there is no img2img/inpaint path.
 
+LoRA adapters (``lora_adapter``) follow ``runtimes/diffusers.py``: the
+pipeline loads from the resolved ``base_model`` and the adapter is layered
+on unfused, before offload placement, so a per-request ``lora_scale`` can be
+applied with ``set_adapters``.
+
 Heavy imports (torch, diffusers) are lazy sentinels populated by
 `_ensure_deps()`; tests patch `torch` and `diffusers` on this module.
 """
@@ -18,6 +23,7 @@ from typing import Any
 from muse.core.runtime_helpers import (
     LoadTimer,
     dtype_for_name,
+    resolve_model_source,
     select_device,
 )
 from muse.modalities._common.offload import place_pipeline
@@ -57,7 +63,14 @@ class DiffusersReferenceModel:
         placement, via the shared helper; the video-only global override
         does not apply here
       - max_reference_images: advertised cap enforced by the route
+      - lora_adapter: True when hf_repo/local_dir hold a LoRA adapter;
+        the pipeline then loads from base_model (a muse catalog id or an
+        HF repo id), with the same errors as the SDXL diffusers runtime
+      - lora_scale: default adapter weight, overridable per request on
+        both generate() and edit()
     """
+
+    _ADAPTER = "lora"
 
     supports_reference_images = True
 
@@ -76,6 +89,9 @@ class DiffusersReferenceModel:
         cpu_offload: Any = None,
         vae_tiling: bool = False,
         max_reference_images: int = 4,
+        lora_adapter: bool = False,
+        base_model: str | None = None,
+        lora_scale: float = 1.0,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -91,14 +107,48 @@ class DiffusersReferenceModel:
         self._default_steps = default_steps
         self._default_guidance = default_guidance
         self._device = select_device(device, torch_module=torch)
+        self._lora_adapter = bool(lora_adapter)
+        self._default_lora_scale = float(lora_scale)
+        # The adapter weight last handed to set_adapters; None forces the
+        # first LoRA request to set it explicitly.
+        self._applied_lora_scale: float | None = None
 
-        src = local_dir or hf_repo
+        self._src = local_dir or hf_repo
+        if self._lora_adapter:
+            if not base_model:
+                raise RuntimeError(
+                    f"{model_id}: lora_adapter is set but base_model is "
+                    f"missing; re-pull with `muse pull <id> --base "
+                    f"<muse-id-or-hf-repo>`"
+                )
+            load_src = resolve_model_source(base_model)
+            if "/" not in base_model and load_src == base_model:
+                # A muse catalog id that did not resolve to a local_dir
+                # (removed after pull, or never pulled): fail with the fix
+                # rather than a cryptic from_pretrained repo error.
+                raise RuntimeError(
+                    f"{model_id}: LoRA base {base_model!r} is not pulled "
+                    f"(it may have been removed); run `muse pull "
+                    f"{base_model}` and retry"
+                )
+        else:
+            load_src = self._src
         logger.info(
             "loading %s from %s (model_id=%s, device=%s, dtype=%s)",
-            pipeline_class, src, model_id, self._device, dtype,
+            pipeline_class, load_src, model_id, self._device, dtype,
         )
         with LoadTimer(model_id, logger):
-            pipe = cls.from_pretrained(src, torch_dtype=dtype_for_name(dtype, torch))
+            pipe = cls.from_pretrained(
+                load_src, torch_dtype=dtype_for_name(dtype, torch),
+            )
+            if self._lora_adapter:
+                # Unfused, and before placement: offload hooks then wrap
+                # the LoRA-injected modules, and set_adapters can still
+                # change the weight per request.
+                logger.info(
+                    "loading LoRA adapter %s onto base %s", self._src, base_model,
+                )
+                pipe.load_lora_weights(self._src, adapter_name=self._ADAPTER)
             self._pipe = place_pipeline(
                 pipe, self._device,
                 cpu_offload=cpu_offload, vae_tiling=vae_tiling,
@@ -121,7 +171,9 @@ class DiffusersReferenceModel:
         steps: int | None,
         guidance: float | None,
         seed: int | None,
+        lora_scale: float | None,
     ) -> ImageResult:
+        lora_weight = self._apply_lora_scale(lora_scale)
         w = width or self.default_size[0]
         h = height or self.default_size[1]
         n_steps = steps if steps is not None else self._default_steps
@@ -151,8 +203,24 @@ class DiffusersReferenceModel:
                 "steps": n_steps,
                 "guidance": cfg,
                 "reference_images": len(images or []),
+                **({"lora_scale": lora_weight} if lora_weight is not None else {}),
             },
         )
+
+    def _apply_lora_scale(self, lora_scale: float | None) -> float | None:
+        """Set the adapter weight for this call; returns it (None without LoRA).
+
+        Callers hold the route's inference lock, so the weight cannot change
+        under a running call. set_adapters only rewrites the PEFT layers'
+        scaling factors, so it is skipped when the weight is unchanged.
+        """
+        if not self._lora_adapter:
+            return None
+        scale = float(lora_scale if lora_scale is not None else self._default_lora_scale)
+        if scale != self._applied_lora_scale:
+            self._pipe.set_adapters([self._ADAPTER], adapter_weights=[scale])
+            self._applied_lora_scale = scale
+        return scale
 
     def generate(
         self,
@@ -166,6 +234,7 @@ class DiffusersReferenceModel:
         seed: int | None = None,
         init_image: Any = None,
         strength: float | None = None,
+        lora_scale: float | None = None,
         **_: Any,
     ) -> ImageResult:
         if init_image is not None:
@@ -176,7 +245,7 @@ class DiffusersReferenceModel:
         return self._run(
             prompt, images=None, negative_prompt=negative_prompt,
             width=width, height=height, steps=steps, guidance=guidance,
-            seed=seed,
+            seed=seed, lora_scale=lora_scale,
         )
 
     def edit(
@@ -190,10 +259,11 @@ class DiffusersReferenceModel:
         guidance: float | None = None,
         seed: int | None = None,
         negative_prompt: str | None = None,
+        lora_scale: float | None = None,
         **_: Any,
     ) -> ImageResult:
         return self._run(
             prompt, images=list(images), negative_prompt=negative_prompt,
             width=width, height=height, steps=steps, guidance=guidance,
-            seed=seed,
+            seed=seed, lora_scale=lora_scale,
         )

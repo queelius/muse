@@ -117,3 +117,20 @@ def ignored_fields(sent: Mapping[str, Any], caps: Mapping) -> list[str]:
     if "output_compression" in given and (sent.get("output_format") or "png") == "png":
         out.add("output_compression")
     return sorted(out)
+
+
+def apply_prompt_prefix(prompt: str, capabilities: Mapping) -> tuple[str, bool]:
+    """Prepend `capabilities["prompt_prefix"]` (e.g. a LoRA trigger phrase).
+
+    Skipped when the prompt already contains the prefix's phrase,
+    case-insensitively; the phrase is the prefix without its trailing
+    separator, so "a pixel art sprite of a mage" counts as containing
+    "pixel art sprite, ". Returns (prompt, applied).
+    """
+    prefix = capabilities.get("prompt_prefix")
+    if not isinstance(prefix, str):
+        return prompt, False
+    phrase = prefix.strip().rstrip(",;:").strip()
+    if not phrase or phrase.casefold() in prompt.casefold():
+        return prompt, False
+    return prefix + prompt, True

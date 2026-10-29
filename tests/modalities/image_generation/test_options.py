@@ -112,3 +112,31 @@ def test_ignored_fields():
         ["guidance", "moderation", "negative_prompt", "output_compression", "quality"]
     assert ignored_fields({"moderation": None}, caps) == []
     assert ignored_fields({"output_format": "webp", "output_compression": 80, "quality": "low"}, caps) == []
+
+
+# ---------------- prompt_prefix ----------------
+
+
+def test_apply_prompt_prefix_prepends():
+    from muse.modalities.image_generation.options import apply_prompt_prefix
+    caps = {"prompt_prefix": "pixel art sprite, "}
+    assert apply_prompt_prefix("a knight", caps) == ("pixel art sprite, a knight", True)
+
+
+def test_apply_prompt_prefix_case_insensitive_contains():
+    from muse.modalities.image_generation.options import apply_prompt_prefix
+    caps = {"prompt_prefix": "pixel art sprite, "}
+    assert apply_prompt_prefix("Pixel Art Sprite, knight", caps) == (
+        "Pixel Art Sprite, knight", False,
+    )
+    # The trigger phrase anywhere counts, without the prefix's separator.
+    assert apply_prompt_prefix("a PIXEL ART SPRITE of a mage", caps) == (
+        "a PIXEL ART SPRITE of a mage", False,
+    )
+
+
+def test_apply_prompt_prefix_absent_or_empty_is_noop():
+    from muse.modalities.image_generation.options import apply_prompt_prefix
+    assert apply_prompt_prefix("a knight", {}) == ("a knight", False)
+    assert apply_prompt_prefix("a knight", {"prompt_prefix": ""}) == ("a knight", False)
+    assert apply_prompt_prefix("a knight", {"prompt_prefix": None}) == ("a knight", False)

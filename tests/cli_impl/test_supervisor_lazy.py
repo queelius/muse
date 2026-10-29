@@ -2434,6 +2434,51 @@ class TestBackfillLoraChase:
         gb = out["capabilities"].get("memory_gb")
         assert gb is None or gb < 0.01
 
+    def test_klein_reference_lora_sizes_from_base_annotation(
+        self, tmp_path, monkeypatch,
+    ):
+        """klein-pixel-art: a lora_adapter entry served by the REFERENCE
+        runtime (not the SDXL diffusers one) still chases its muse-id base;
+        the base's declared memory_gb (offloaded klein) sizes it, not the
+        325 MB adapter on disk."""
+        from muse.cli_impl.supervisor import backfill_manifest_memory
+        from muse.core.catalog import _reset_read_catalog_cache
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        (tmp_path / "pytorch_lora_weights.safetensors").write_bytes(b"x" * 1024)
+        self._write(tmp_path, {
+            "klein-pixel-art": {"local_dir": str(tmp_path), "enabled": True},
+            "flux2-klein-4b": {
+                "local_dir": "/w/klein", "enabled": True,
+                "manifest": {
+                    "model_id": "flux2-klein-4b",
+                    "modality": "image/generation",
+                    "hf_repo": "black-forest-labs/FLUX.2-klein-4B",
+                    "backend_path": (
+                        "muse.modalities.image_generation.runtimes.reference"
+                        ":DiffusersReferenceModel"
+                    ),
+                    "capabilities": {"memory_gb": 9.5, "device": "cuda"},
+                },
+            },
+        })
+        _reset_read_catalog_cache()
+        manifest = {
+            "model_id": "klein-pixel-art",
+            "modality": "image/generation",
+            "backend_path": (
+                "muse.modalities.image_generation.runtimes.reference"
+                ":DiffusersReferenceModel"
+            ),
+            "capabilities": {
+                "lora_adapter": True, "base_model": "flux2-klein-4b",
+                "pipeline_class": "Flux2KleinPipeline", "cpu_offload": "model",
+                "device": "cuda",
+            },
+        }
+        out = backfill_manifest_memory(manifest, "klein-pixel-art")
+        assert out["capabilities"]["memory_gb"] == pytest.approx(9.5)
+
 
 # ---------------------------------------------------------------------------
 # v0.47.3 Fix A: on-disk weights-size fallback. A never-probed model is
