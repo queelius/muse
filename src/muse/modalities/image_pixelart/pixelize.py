@@ -14,7 +14,10 @@ Pillow + numpy only. The fixed operation order is:
 8. nearest-neighbour preview scale
 
 Sheets (``sheet=(C, R)``) share one grid and one palette; cleanup, outline and
-seamless run per sheet cell, so nothing bleeds between cells.
+seamless run per sheet cell, so nothing bleeds between cells. Every sheet cell
+is trimmed to the smallest cell's art size (3 columns of 64 px are 21 / 22 /
+21 px, so the art is 63 wide); ``metadata.cropped = {"from": [w, h], "to":
+[w2, h2]}`` reports such a trim and is absent when nothing was trimmed.
 
 Never pass ``mode=`` to ``Image.fromarray`` here: Pillow 13 removed it.
 """
@@ -1031,6 +1034,11 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
     }
     if bg_meta.get("removed"):
         metadata["background_color"] = bg_meta.get("color")
+    # A sheet trims every cell to the smallest one's art-pixel count; report
+    # the art size before (every span) and after that trim.
+    full = [sum(len(sp) for sp in x_spans), sum(len(sp) for sp in y_spans)]
+    if full != [gw, gh]:
+        metadata["cropped"] = {"from": full, "to": [gw, gh]}
     return PixelizeResult(
         image=image,
         grid=grid,

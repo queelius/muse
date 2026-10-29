@@ -775,3 +775,29 @@ def test_package_init_imports_only_the_light_modules():
         "muse.modalities.image_pixelart.protocol",
         "muse.modalities.image_pixelart.routes",
     }
+
+
+def test_sheet_crop_is_reported():
+    """3 columns of 64 px are 21 / 22 / 21 px; every cell is trimmed to 21."""
+    img = Image.fromarray(_ring_on())
+    r = pixelize(img, opts(grid=1, palette=parse_palette("none"), sheet=(3, 3)))
+    assert r.size == (63, 63)
+    assert r.metadata["cropped"] == {"from": [64, 64], "to": [63, 63]}
+    r = pixelize(img, opts(grid=1, palette=parse_palette("none"), sheet=(3, 1)))
+    assert r.metadata["cropped"] == {"from": [64, 64], "to": [63, 64]}
+
+
+def test_sheet_crop_absent_when_cells_divide_evenly():
+    img = Image.fromarray(_ring_on())
+    for sheet in ((2, 2), (4, 1), None):
+        r = pixelize(img, opts(grid=1, palette=parse_palette("none"), sheet=sheet))
+        assert "cropped" not in r.metadata, sheet
+
+
+def test_sheet_crop_counts_art_pixels_after_the_grid():
+    a = np.repeat(np.repeat(_ring_on(size=34), 4, axis=0), 4, axis=1)  # 136 px, 34 art px
+    r = pixelize(Image.fromarray(a), opts(grid=4, palette=parse_palette("none"),
+                                          sheet=(3, 1)))
+    # 136 px in 3 columns (45 / 46 / 45 px) hold 11 / 12 / 11 cells -> 3 x 11.
+    assert r.size == (33, 34)
+    assert r.metadata["cropped"] == {"from": [34, 34], "to": [33, 34]}

@@ -572,3 +572,12 @@ def test_autotile_decodes_and_computes_off_the_event_loop(client, loop_spy):
     assert r.status_code == 200, r.text
     assert loop_spy["decode"] == [False, False]
     assert loop_spy["autotile"] == [False]
+
+
+def test_pixelize_sheet_crop_reported_in_json(client):
+    r = client.post("/v1/images/pixelize", files={"image": png(sprite(64, 64))},
+                    data={"grid": "1", "sheet": "3x3", "palette": "none"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["size"] == [63, 63]
+    assert body["metadata"]["cropped"] == {"from": [64, 64], "to": [63, 63]}
