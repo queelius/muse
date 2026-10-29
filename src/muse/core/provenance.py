@@ -5,7 +5,11 @@ at. Models that combine several artifacts (a LoRA over a base model,
 multi-repo pulls, pinned code) also carry a component list and a short
 digest over it, so a downstream pipeline can pin the full weight set.
 A weightless model (`weights: "none"`) has no revision; its one `code`
-component's digest is the first 16 hex characters of its script SHA-256.
+component carries `revision="muse-<running version>"` and the digest is the
+first 16 hex characters of sha256(f"{script sha256}:{running muse version}"),
+so a muse upgrade that changes the library code the alias script imports
+also changes the digest. The version recorded in the pull receipt is not
+enforced at load.
 
 Stdlib only. `lookup_revision` never raises: unknown or broken metadata
 yields a revision of None.
@@ -81,8 +85,18 @@ def _base_component(entry, manifest, catalog) -> ArtifactComponent | None:
     return ArtifactComponent("base", base, None)
 
 
+def _running_muse_version() -> str:
+    try:
+        import muse
+        return str(muse.__version__)
+    except Exception:  # noqa: BLE001
+        return "0.0.0+unknown"
+
+
 def _weightless_revision(model_id: str, entry: Mapping) -> ModelRevision:
-    """A weightless model: no HF revision, one code component."""
+    """A weightless model: no HF revision, one code component whose digest
+    folds the running muse version into the script's SHA-256."""
+    version = _running_muse_version()
     digest = None
     prov = entry.get("artifact_provenance")
     if isinstance(prov, list):
@@ -90,9 +104,10 @@ def _weightless_revision(model_id: str, entry: Mapping) -> ModelRevision:
             if (isinstance(item, Mapping) and item.get("kind") == "code"
                     and isinstance(item.get("source_sha256"), str)
                     and _SHA256.match(item["source_sha256"])):
-                digest = item["source_sha256"][:16]
+                payload = f"{item['source_sha256']}:{version}"
+                digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
                 break
-    component = ArtifactComponent("code", f"muse/{model_id}", None)
+    component = ArtifactComponent("code", f"muse/{model_id}", f"muse-{version}")
     return ModelRevision(model_id, None, (component,), digest)
 
 

@@ -183,16 +183,39 @@ def test_weightless_missing_receipt_blocks_load(pulled):
     assert blocker is not None and "re-run `muse pull toy-tools`" in blocker
 
 
-def test_weightless_revision_headers(pulled):
+def test_weightless_revision_headers(pulled, monkeypatch):
+    import muse
+
+    monkeypatch.setattr(muse, "__version__", "1.2.3")
     row = _read_catalog()["toy-tools"]
     rev = model_revision("toy-tools", row, get_manifest("toy-tools"))
     assert rev.revision is None
-    assert rev.components == (ArtifactComponent("code", "muse/toy-tools", None),)
+    assert rev.components == (
+        ArtifactComponent("code", "muse/toy-tools", "muse-1.2.3"),)
     sha = row["artifact_provenance"][0]["source_sha256"]
-    assert rev.artifacts_digest == sha[:16]
+    expected = hashlib.sha256(f"{sha}:1.2.3".encode()).hexdigest()[:16]
+    assert rev.artifacts_digest == expected
     headers = dict(revision_headers(rev))
     assert b"x-muse-model-revision" not in headers
-    assert headers[b"x-muse-model-artifacts"] == sha[:16].encode()
+    assert headers[b"x-muse-model-artifacts"] == expected.encode()
+
+
+def test_weightless_digest_follows_running_muse_version(pulled, monkeypatch):
+    # A muse upgrade can change the library code a weightless alias script
+    # imports without changing the script, so the running version is folded
+    # into the digest; the recorded receipt version is not enforced.
+    import muse
+
+    row = _read_catalog()["toy-tools"]
+    manifest = get_manifest("toy-tools")
+    monkeypatch.setattr(muse, "__version__", "1.2.3")
+    old = model_revision("toy-tools", row, manifest)
+    monkeypatch.setattr(muse, "__version__", "1.2.4")
+    new = model_revision("toy-tools", row, manifest)
+    assert old.artifacts_digest != new.artifacts_digest
+    assert new.components[0].revision == "muse-1.2.4"
+    assert new.revision is None
+    assert b"x-muse-model-revision" not in dict(revision_headers(new))
 
 
 def test_load_backend_constructs_weightless_model(pulled):

@@ -52,7 +52,7 @@ Every inference response carries:
 |---|---|
 | `X-Muse-Model` | Catalog model id that served the request. |
 | `X-Muse-Model-Revision` | 40-hex Hugging Face commit of the weights. Omitted when unknown. |
-| `X-Muse-Model-Artifacts` | Short digest over all components (weights plus, for example, a LoRA base) when a model has more than one. Omitted for single-component models. |
+| `X-Muse-Model-Artifacts` | Short digest over all components (weights plus, for example, a LoRA base) when a model has more than one. Omitted for other single-component models. A weightless model (no weights, such as `pixel-tools`) always sends it: the first 16 hex of `sha256("<script sha256>:<running muse version>")`, so it changes when either the script or muse changes. |
 
 Chat completions also set `system_fingerprint` to `<model_id>@<revision[:12]>`
 (omitted when the revision is unknown). The revision is recovered from the

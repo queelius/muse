@@ -71,9 +71,13 @@ positive `capabilities.memory_gb`, since there is nothing on disk to size.
 `muse pull` installs the venv only and creates an empty
 `<catalog>/local/<model_id>` as the model's `local_dir`; provenance is a code
 receipt (`muse_version`, `source_sha256` of the script) rather than a weights
-revision, so `/v1/models` reports `revision: null` and
-`X-Muse-Model-Artifacts` carries the source digest. `pixel-tools` is the
-first example.
+revision, so `/v1/models` reports `revision: null` and there is no
+`X-Muse-Model-Revision`. Its one `code` component has revision
+`muse-<running version>`, and `X-Muse-Model-Artifacts` is the first 16 hex
+characters of `sha256("<source_sha256>:<running muse version>")`: the script
+SHA alone would not change when a muse upgrade changes the library code the
+script imports. The receipt's `muse_version` is recorded, not enforced at
+load. `pixel-tools` is the first example.
 
 Recommended capability keys by modality:
 
