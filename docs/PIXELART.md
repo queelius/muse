@@ -139,9 +139,10 @@ unzip the saved file. Inputs come as `image_path` / `fill_path` / `base_path`
   `lora_scale` fails the pull and is left disabled. The message reports
   both numbers; fix the scale (for example `lora_scale_factor`) and run
   `muse models probe <id>` then `muse models enable <id>`.
-- A non-curated `hf://` klein LoRA pulled with `--no-probe` starts under-sized
-  (sized from the adapter weights until probed). Use the curated id or let the
-  pull probe run.
+- A klein LoRA that has not been probed (for example a non-curated `hf://`
+  pull with `--no-probe`) is sized from its base's estimate (`memory_gb` or
+  probe measurement of `flux2-klein-4b`), not from the 0.33 GB adapter.
+  Probe it anyway for the real base+adapter peak.
 - Input side is capped by `limits.pixelart_max_input_side` (default 4096), and
   so is the pixelize preview's long side (art size x `preview_scale`): both are
   413 `input_too_large`, checked before the preview is allocated.
