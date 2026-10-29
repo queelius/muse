@@ -25,7 +25,12 @@ curl -s $MUSE/v1/images/generations -H 'content-type: application/json' -d '{
   | jq -r '.data[0].b64_json' | base64 -d > knight_raw.png
 ```
 
-`lora_scale` (extra field) turns the style up or down per request.
+`lora_scale` (extra field, 0 to 2, default 1.0) turns the style up or down per
+request. It matches the LoRA card's ComfyUI strength (tested 0.85-1.4): the
+curated entry's `lora_scale_factor` maps it to diffusers' adapter weight,
+because diffusers applies the adapter's rsLoRA scaling (16x) and weights of
+0.25 or more destroy the image. `lora_scale: 0` is plain klein, which with the
+trigger phrase already draws clean sprites.
 
 ## 2. Pixelize with a hard palette
 

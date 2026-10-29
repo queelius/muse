@@ -67,8 +67,12 @@ class DiffusersReferenceModel:
       - lora_adapter: True when hf_repo/local_dir hold a LoRA adapter;
         the pipeline then loads from base_model (a muse catalog id or an
         HF repo id), with the same errors as the SDXL diffusers runtime
-      - lora_scale: default adapter weight, overridable per request on
+      - lora_scale: default adapter strength, overridable per request on
         both generate() and edit()
+      - lora_scale_factor: multiplier from lora_scale to the weight handed
+        to set_adapters (default 1.0). An rsLoRA adapter whose metadata
+        makes diffusers scale by alpha/sqrt(r) can set 1/that scale so
+        lora_scale 1.0 means what its card (and ComfyUI) mean by 1.0
     """
 
     _ADAPTER = "lora"
@@ -93,6 +97,7 @@ class DiffusersReferenceModel:
         lora_adapter: bool = False,
         base_model: str | None = None,
         lora_scale: float = 1.0,
+        lora_scale_factor: float = 1.0,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -110,9 +115,10 @@ class DiffusersReferenceModel:
         self._device = select_device(device, torch_module=torch)
         self._lora_adapter = bool(lora_adapter)
         self._default_lora_scale = float(lora_scale)
+        self._lora_scale_factor = float(lora_scale_factor)
         # The adapter weight last handed to set_adapters; None forces the
         # first LoRA request to set it explicitly.
-        self._applied_lora_scale: float | None = None
+        self._applied_lora_weight: float | None = None
 
         self._src = local_dir or hf_repo
         if self._lora_adapter:
@@ -197,7 +203,8 @@ class DiffusersReferenceModel:
         )
 
     def _apply_lora_scale(self, lora_scale: float | None) -> float | None:
-        """Set the adapter weight for this call; returns it (None without LoRA).
+        """Set the adapter weight for this call; returns the requested scale
+        (None without LoRA). The weight set is scale * lora_scale_factor.
 
         Callers hold the route's inference lock, so the weight cannot change
         under a running call. set_adapters only rewrites the PEFT layers'
@@ -206,9 +213,10 @@ class DiffusersReferenceModel:
         if not self._lora_adapter:
             return None
         scale = float(lora_scale if lora_scale is not None else self._default_lora_scale)
-        if scale != self._applied_lora_scale:
-            self._pipe.set_adapters([self._ADAPTER], adapter_weights=[scale])
-            self._applied_lora_scale = scale
+        weight = scale * self._lora_scale_factor
+        if weight != self._applied_lora_weight:
+            self._pipe.set_adapters([self._ADAPTER], adapter_weights=[weight])
+            self._applied_lora_weight = weight
         return scale
 
     def generate(

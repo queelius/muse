@@ -472,6 +472,10 @@ def test_curated_klein_pixel_art_entry():
     assert caps["lora_adapter"] is True
     assert caps["base_model"] == "flux2-klein-4b"
     assert caps["lora_scale"] == 1.0
+    # rsLoRA metadata (r=64, alpha=128) makes diffusers scale by 16; the
+    # card's strengths (ComfyUI, 0.85-1.4) assume 1. Live on the 3060,
+    # weight 0.25+ destroyed the image, so lora_scale 1.0 maps to 1/16.
+    assert caps["lora_scale_factor"] == 0.0625
     assert caps["prompt_prefix"] == "pixel art sprite, "
     assert caps["default_size"] == [512, 512]
     assert caps["default_steps"] == 4

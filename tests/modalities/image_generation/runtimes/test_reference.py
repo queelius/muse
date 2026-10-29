@@ -253,6 +253,21 @@ def test_reference_lora_default_scale_from_manifest(monkeypatch):
     assert pipe.adapter_sets == [(["lora"], [0.85])]
 
 
+def test_reference_lora_scale_factor_scales_adapter_weight(monkeypatch):
+    # An rsLoRA adapter whose metadata makes diffusers apply alpha/sqrt(r)
+    # (16 for r=64, alpha=128) needs lora_scale 1.0 to mean adapter weight
+    # 1/16; the factor maps the user scale onto the set_adapters weight.
+    m, pipe, _ = _build_lora(monkeypatch, lora_scale_factor=0.0625)
+    md = m.generate("x").metadata
+    assert pipe.adapter_sets == [(["lora"], [0.0625])]
+    assert md["lora_scale"] == 1.0
+    md = m.edit("x", images=[Image.new("RGB", (4, 4))], lora_scale=1.4).metadata
+    assert pipe.adapter_sets[-1] == (["lora"], [pytest.approx(0.0875)])
+    assert md["lora_scale"] == 1.4
+    m.generate("x", lora_scale=0.0)
+    assert pipe.adapter_sets[-1] == (["lora"], [0.0])
+
+
 def test_reference_without_lora_unchanged():
     pipe = LoraPipe([])
     m, _, cls, _ = _build(pipe=pipe, local_dir="/w/klein")

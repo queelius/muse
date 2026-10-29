@@ -414,7 +414,7 @@
   strengths:
     - "Character and item sprites in a pixel-art style, 4 steps at 512x512 (its training size)"
     - "Trigger phrase 'pixel art sprite, ' is prepended unless the prompt already has it"
-    - "Apache 2.0; per-request lora_scale on generations and reference edits (the card tested 0.85-1.4)"
+    - "Apache 2.0; per-request lora_scale on generations and reference edits (1.0 = the card's ComfyUI strength 1.0; it tested 0.85-1.4)"
   limits:
     - "Requires flux2-klein-4b pulled first; same 12 GB CPU-offload load and host-RAM cost"
     - "Output only looks like pixel art: the grid is soft and colours are unconstrained, so run /v1/images/pixelize (for example palette=db32) before using it as a game asset"
@@ -424,6 +424,12 @@
     lora_adapter: true
     base_model: flux2-klein-4b
     lora_scale: 1.0
+    # The adapter's metadata says rsLoRA (r=64, alpha=128), so diffusers
+    # scales it by alpha/sqrt(r) = 16; the card's ComfyUI strengths assume 1.
+    # Live on the 3060 an adapter weight of 0.25 or more destroyed the image
+    # (docs/benchmarks/2026-10-28-pixel-assets-acceptance.md), so lora_scale
+    # 1.0 maps to adapter weight 1/16.
+    lora_scale_factor: 0.0625
     prompt_prefix: "pixel art sprite, "
     default_size: [512, 512]
     default_steps: 4
