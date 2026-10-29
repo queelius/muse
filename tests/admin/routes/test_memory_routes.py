@@ -626,7 +626,9 @@ def test_memory_listing_never_reaps_a_worker_leader(platform, monkeypatch):
         for port, proc, model in ((9101, exited, "gone"), (9102, alive, "live")):
             spec = WorkerSpec(models=[model], python_path=sys.executable, port=port)
             spec.process = proc
-            spec.process_group_id = supervisor._validated_worker_process_group(proc)
+            spec.process_group_id = supervisor._validated_worker_process_group(
+                proc, new_session=True,
+            )
             spec.status = "running"
             state.workers.append(spec)
         set_supervisor_state(state)
@@ -673,7 +675,9 @@ def test_memory_listing_never_reaps_an_unpinnable_leader(unpinnable, monkeypatch
         spec.process = exited
         spec.process_group_id = (
             None if unpinnable == "unvalidated-group"
-            else supervisor._validated_worker_process_group(exited)
+            else supervisor._validated_worker_process_group(
+                exited, new_session=True,
+            )
         )
         spec.status = "running"
         state.workers.append(spec)

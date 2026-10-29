@@ -118,6 +118,35 @@ def _pinned_exited_leader(pid: int) -> bool:
         return False
 
 
+# macOS getpgid is ESRCH from the moment exit begins (P_REF_DEAD), slightly
+# before the child is a waitable zombie, so the exit observation gets a few
+# short attempts (at most ~80 ms of sleep) before the group is given up.
+_EXIT_SETTLE_ATTEMPTS = 5
+_EXIT_SETTLE_DELAY = 0.02
+
+
+def _settled_pinned_zombie(pid: int) -> bool:
+    """:func:`_pinned_exited_leader`, retried briefly while exit settles.
+
+    Only "not exited yet" is retried; an observation error (reaped
+    elsewhere, not our child, no observer) gives up at once.
+    """
+    for attempt in range(_EXIT_SETTLE_ATTEMPTS):
+        try:
+            if leader_exited_nowait(pid):
+                return True
+        except InterruptedError:
+            pass
+        except (ChildProcessError, OSError) as exc:
+            logger.warning(
+                "could not prove leader %r is a pinned zombie: %s", pid, exc,
+            )
+            return False
+        if attempt + 1 < _EXIT_SETTLE_ATTEMPTS:
+            time.sleep(_EXIT_SETTLE_DELAY)
+    return False
+
+
 def _leader_group(pid: int, *, new_session: bool) -> int | None:
     """``getpgid(pid)``, or ``pid`` for a pinned zombie started in a new session.
 
@@ -129,12 +158,14 @@ def _leader_group(pid: int, *, new_session: bool) -> int | None:
     leader with PGID == PID, and a session leader can never change its group
     (``setpgid`` is EPERM). While that child is our pinned zombie its PID
     cannot be reused, so PGID == PID still holds. ``new_session`` is the
-    caller's statement that it passed ``start_new_session=True``.
+    caller's statement that it passed ``start_new_session=True``. A child
+    that is exiting but not yet waitable is waited for briefly
+    (:func:`_settled_pinned_zombie`).
     """
     try:
         return concrete_safe_id(os.getpgid(pid))
     except ProcessLookupError:
-        if new_session and _pinned_exited_leader(pid):
+        if new_session and _settled_pinned_zombie(pid):
             return pid
         raise
 
@@ -432,11 +463,19 @@ def signal_isolated_group(
       group cannot be missing (ESRCH) while its zombie leader is unreaped,
       because a process leaves its group only when reaped
       (``reap_child_locked``, ``bsd/kern/kern_exit.c``).
-    * Linux never fails here: ``__kill_pgrp_info`` (``kernel/signal.c``)
-      succeeds once any member, the zombie leader included, accepts the
-      signal. So a live member this process may not signal (a descendant
-      that became another user) is not detected on Linux either; treating
-      EPERM as delivered gives macOS exactly Linux's guarantee.
+    * Linux usually succeeds here: ``__kill_pgrp_info`` (``kernel/signal.c``)
+      returns 0 once any member, the zombie leader included, accepts the
+      signal, so a live member this process may not signal (a descendant
+      that became another user) goes undetected there. Linux returns EPERM
+      only when no member accepts it, e.g. a zombie leader that had itself
+      dropped our credentials (a setuid program that called ``setuid(0)``)
+      with no signalable member left. That EPERM, in this same pinned
+      exited state, now also counts as delivered on Linux.
+
+    Either way the guarantee is the one Linux has always given: every
+    member this process may signal was signalled. Treating EPERM as
+    delivered gives macOS exactly that guarantee and does not weaken it on
+    Linux.
 
     A live leader, a leader that cannot be observed, or one reaped
     elsewhere keeps the failure fail-closed, as does ESRCH/EPERM whenever

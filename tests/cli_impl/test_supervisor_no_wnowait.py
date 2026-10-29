@@ -206,7 +206,10 @@ def test_admin_restart_signal_reaches_a_live_worker_group(platform, spec, monkey
     assert proc.returncode == -signal.SIGTERM
 
 
-def test_monitor_detects_worker_death_only_after_exit(platform, spec, monkeypatch):
+@pytest.mark.parametrize("health_delay", [0.0, 0.05], ids=["prompt", "slow-health"])
+def test_monitor_detects_worker_death_only_after_exit(
+    platform, spec, monkeypatch, health_delay,
+):
     monkeypatch.setenv("FAKE_WORKER_MODE", "exit_soon")
     supervisor.spawn_worker(spec, device="cpu")
     proc = spec.process
@@ -219,13 +222,31 @@ def test_monitor_detects_worker_death_only_after_exit(platform, spec, monkeypatc
         restarts.append(_state(target, proc))
         stop.set()
 
+    # The monitor's own liveness verdicts, in order. Re-observing inside the
+    # fake health check would race: the monitor releases process_lock
+    # before probing health, so the worker can exit in between.
+    verdicts: list[bool | None] = []
+    real_state_locked = supervisor._worker_process_state_locked
+
+    def recording_state_locked(target, observed, **kwargs):
+        state = real_state_locked(target, observed, **kwargs)
+        if threading.current_thread() is monitor:
+            verdicts.append(state)
+        return state
+
     health_checks: list[bool | None] = []
 
     def healthy_while_alive(**_kwargs):
-        # Only reached while the monitor judges the process alive.
-        health_checks.append(_state(spec, proc))
+        # Only reached while the monitor judges the process alive; record
+        # that verdict rather than observing again.
+        health_checks.append(verdicts[-1] if verdicts else None)
+        # A slow probe widens the window in which the worker exits.
+        time.sleep(health_delay)
         return True
 
+    monkeypatch.setattr(
+        supervisor, "_worker_process_state_locked", recording_state_locked,
+    )
     monkeypatch.setattr(supervisor, "check_worker_health", healthy_while_alive)
     monkeypatch.setattr(supervisor, "_attempt_restart", fake_restart)
     monitor = threading.Thread(
@@ -239,8 +260,14 @@ def test_monitor_detects_worker_death_only_after_exit(platform, spec, monkeypatc
     stop.set()
     assert not monitor.is_alive()
     assert restarts == [False]
-    # Alive ticks first (health-checked), then death from the exact process.
-    assert health_checks and set(health_checks) == {True}
+    # Alive ticks first (each health-checked), then a death verdict that
+    # came from the exited process, never from ambiguity.
+    first_death = next(
+        index for index, state in enumerate(verdicts) if state is not True
+    )
+    assert first_death >= 1
+    assert verdicts[first_death] is False
+    assert health_checks == [True] * first_death
     assert supervisor._shutdown_workers([spec], grace=1.0).complete
     _assert_released(spec, proc)
 
@@ -252,7 +279,7 @@ def test_wnowait_platform_still_fails_closed_for_an_unvalidated_group(
     spec, monkeypatch,
 ):
     monkeypatch.setenv("FAKE_WORKER_MODE", "sleep")
-    monkeypatch.setattr(supervisor, "_validated_worker_process_group", lambda proc: None)
+    monkeypatch.setattr(supervisor, "_validated_worker_process_group", lambda proc, **_: None)
     supervisor.spawn_worker(spec, device="cpu")
     proc = spec.process
     with pytest.raises(supervisor.WorkerIdentityError):

@@ -358,14 +358,19 @@ def clear_supervisor_state() -> None:
 _concrete_worker_id = concrete_safe_id
 
 
-def _validated_worker_process_group(proc: Any) -> int | None:
-    """Capture the child's isolated POSIX group immediately after spawn."""
-    # Workers are always spawned with start_new_session on POSIX.
+def _validated_worker_process_group(
+    proc: Any, *, new_session: bool = False,
+) -> int | None:
+    """Capture the child's isolated POSIX group immediately after spawn.
+
+    ``new_session`` states that ``proc`` was started with
+    ``start_new_session=True`` (see ``validated_isolated_group``).
+    """
     return validated_isolated_group(
         _concrete_worker_id(getattr(proc, "pid", None)),
         os_name=_OS_NAME,
         label="worker",
-        new_session=True,
+        new_session=new_session,
     )
 
 
@@ -515,7 +520,9 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             spec.process = proc
             spec.worker_nonce = worker_nonce
             spec.process_group_released = False
-            spec.process_group_id = _validated_worker_process_group(proc)
+            spec.process_group_id = _validated_worker_process_group(
+                proc, new_session=popen_kwargs["start_new_session"] is True,
+            )
             model_id = spec.models[0] if spec.models else "worker"
             log_thread = threading.Thread(
                 target=_pump_worker_logs, args=(proc, model_id, log_hub),
@@ -534,7 +541,9 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             spec.process = proc
             spec.worker_nonce = worker_nonce
             spec.process_group_released = False
-            spec.process_group_id = _validated_worker_process_group(proc)
+            spec.process_group_id = _validated_worker_process_group(
+                proc, new_session=popen_kwargs["start_new_session"] is True,
+            )
             spec.log_thread = None
         previous_resource_id = spec.resource_id
         registration_error: Exception | None = None

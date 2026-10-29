@@ -273,6 +273,60 @@ class TestDarwinZombieSemantics:
         ) is None
 
 
+    def test_exiting_leader_is_validated_once_it_becomes_waitable(
+        self, platform, monkeypatch,
+    ):
+        """macOS getpgid is ESRCH as soon as exit starts (P_REF_DEAD), before
+        the child is a waitable zombie; a short bounded retry closes that."""
+        process = self._zombie()
+        try:
+            real = op.leader_exited_nowait
+            calls = []
+
+            def not_yet_waitable(pid):
+                calls.append(pid)
+                return False if len(calls) <= 2 else real(pid)
+
+            monkeypatch.setattr(op, "leader_exited_nowait", not_yet_waitable)
+            assert op.validated_isolated_group(
+                process.pid, os_name="posix", label="t", new_session=True,
+            ) == process.pid
+            assert len(calls) == 3
+        finally:
+            process.wait(timeout=10.0)
+
+    def test_exit_retry_is_bounded_and_stops_on_errors(self, platform, monkeypatch):
+        process = self._zombie()
+        try:
+            calls = []
+
+            def never_waitable(pid):
+                calls.append(pid)
+                return False
+
+            monkeypatch.setattr(op, "leader_exited_nowait", never_waitable)
+            started = time.monotonic()
+            assert op.validated_isolated_group(
+                process.pid, os_name="posix", label="t", new_session=True,
+            ) is None
+            assert time.monotonic() - started < 0.2
+            assert 1 < len(calls) <= 5
+
+            calls.clear()
+
+            def reaped_elsewhere(pid):
+                calls.append(pid)
+                raise ChildProcessError(pid)
+
+            monkeypatch.setattr(op, "leader_exited_nowait", reaped_elsewhere)
+            assert op.validated_isolated_group(
+                process.pid, os_name="posix", label="t", new_session=True,
+            ) is None
+            assert len(calls) == 1
+        finally:
+            process.wait(timeout=10.0)
+
+
 class TestObserveAndReap:
     def test_already_reaped_is_exited(self):
         process = MagicMock(returncode=0)
@@ -580,3 +634,19 @@ class TestBoundedTail:
         broken.read.side_effect = OSError("gone")
         with pytest.raises(OSError):
             op.drain_stream_into(broken, op.BoundedTail(5), read_bytes=3)
+
+
+def test_suite_wide_darwin_emulation_refuses_an_unsupported_host(monkeypatch):
+    """MUSE_TEST_DARWIN_PROCESS_SEMANTICS=1 where /proc is missing must stop
+    the run with a usage error, not silently skip every test."""
+    from tests import conftest
+
+    monkeypatch.setenv(darwin_process_semantics.ENV_VAR, "1")
+    monkeypatch.setattr(darwin_process_semantics, "supported", lambda: False)
+    with pytest.raises(pytest.UsageError, match=darwin_process_semantics.ENV_VAR):
+        conftest.pytest_configure(MagicMock())
+    monkeypatch.setattr(darwin_process_semantics, "supported", lambda: True)
+    conftest.pytest_configure(MagicMock())
+    monkeypatch.delenv(darwin_process_semantics.ENV_VAR)
+    monkeypatch.setattr(darwin_process_semantics, "supported", lambda: False)
+    conftest.pytest_configure(MagicMock())

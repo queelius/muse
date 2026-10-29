@@ -628,6 +628,23 @@ class TestVenvTransaction:
         assert list(tmp_path.glob(".model.transaction-*")) == []
 
 
+@pytest.fixture
+def short_socket_dir():
+    """A directory short enough for an AF_UNIX socket path, removed on teardown.
+
+    AF_UNIX paths are capped at 104 bytes on macOS (108 on Linux), and the
+    macOS CI tmp_path alone is 114 bytes, so a socket under tmp_path failed
+    to bind there.
+    """
+    path = Path(tempfile.mkdtemp(
+        prefix="muse-sock-", dir="/tmp" if os.path.isdir("/tmp") else None,
+    ))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 class TestInstallIntoVenv:
     def test_uses_venvs_pip_not_system_pip(self, tmp_path):
         process = _mock_process()
@@ -889,19 +906,13 @@ class TestInstallIntoVenv:
     )
     @pytest.mark.parametrize("platform", darwin_process_semantics.PLATFORMS)
     def test_completed_leader_cleans_term_ignoring_descendant(
-        self, tmp_path, platform, monkeypatch,
+        self, tmp_path, platform, monkeypatch, short_socket_dir,
     ):
         """A child-held file lock proves the exact descendant released state."""
         darwin_process_semantics.apply_platform(platform, monkeypatch)
         ready_path = tmp_path / "owned-child.ready"
         lock_path = tmp_path / "owned-child.lock"
-        # AF_UNIX paths are capped at 104 bytes on macOS (108 on Linux), and
-        # the macOS CI tmp_path alone is 114 bytes, so the descendant's bind()
-        # failed there and the group was left with only its zombie leader.
-        socket_dir = Path(tempfile.mkdtemp(
-            prefix="muse-sock-", dir="/tmp" if os.path.isdir("/tmp") else None,
-        ))
-        control_path = socket_dir / "c.sock"
+        control_path = short_socket_dir / "c.sock"
         assert len(os.fsencode(control_path)) < 104
         script = (
             "import fcntl, os, signal, socket, sys, time\n"
@@ -980,7 +991,6 @@ class TestInstallIntoVenv:
                     pass
             probe.close()
             runner.join(timeout=2.0)
-            shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 class TestFindFreePort:

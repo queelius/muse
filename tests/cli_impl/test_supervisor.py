@@ -119,6 +119,27 @@ class TestSpawnWorker:
         assert [spec.worker_nonce for spec in specs] == ["nonce-a", "nonce-b"]
         assert "MUSE_WORKER_NONCE" not in os.environ
 
+    @pytest.mark.parametrize("log_hub", [None, MagicMock()], ids=["plain", "log-hub"])
+    @patch("muse.cli_impl.supervisor.subprocess.Popen")
+    def test_spawn_worker_validates_the_group_with_its_own_session_flag(
+        self, mock_popen, log_hub,
+    ):
+        """The zombie-group proof needs start_new_session; it must come from
+        the spawn's own Popen kwargs, not be assumed."""
+        from muse.cli_impl.supervisor import spawn_worker
+
+        mock_popen.return_value = MagicMock(pid=12345)
+        spec = WorkerSpec(models=["m"], python_path="/p", port=9001)
+        with patch(
+            "muse.cli_impl.supervisor._validated_worker_process_group",
+            return_value=None,
+        ) as validate, patch("muse.cli_impl.supervisor.threading.Thread"):
+            spawn_worker(spec, device="cpu", log_hub=log_hub)
+        spawned_new_session = mock_popen.call_args.kwargs["start_new_session"]
+        validate.assert_called_once_with(
+            mock_popen.return_value, new_session=spawned_new_session,
+        )
+
     @patch("muse.cli_impl.supervisor.subprocess.Popen")
     def test_spawn_worker_passes_all_models_in_group(self, mock_popen):
         spec = WorkerSpec(
