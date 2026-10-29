@@ -268,6 +268,26 @@ def test_reference_lora_scale_factor_scales_adapter_weight(monkeypatch):
     assert pipe.adapter_sets[-1] == (["lora"], [0.0])
 
 
+@pytest.mark.parametrize("factor", [0, -0.0625, float("nan"), float("inf"), "x", None])
+def test_reference_lora_scale_factor_must_be_finite_and_positive(monkeypatch, factor):
+    events: list = []
+    monkeypatch.setattr(f"{MOD}.resolve_model_source", lambda ref: "/w/klein-base")
+    cls = MagicMock()
+    for name, obj in (
+        ("diffusers", SimpleNamespace(Flux2KleinPipeline=cls)),
+        ("torch", MagicMock()),
+    ):
+        p = patch(f"{MOD}.{name}", obj)
+        p.start()
+        _patches.append(p)
+    with pytest.raises(ValueError, match="lora_scale_factor"):
+        DiffusersReferenceModel(
+            hf_repo="org/lora", model_id="x", lora_adapter=True,
+            base_model="flux2-klein-4b", device="cuda", lora_scale_factor=factor,
+        )
+    cls.from_pretrained.assert_not_called()
+
+
 def test_reference_without_lora_unchanged():
     pipe = LoraPipe([])
     m, _, cls, _ = _build(pipe=pipe, local_dir="/w/klein")

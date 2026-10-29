@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 from typing import Any
 
 from muse.core.runtime_helpers import (
@@ -52,6 +53,20 @@ def _ensure_deps() -> None:
             diffusers = _d
         except Exception as e:  # noqa: BLE001
             logger.debug("reference runtime: diffusers unavailable: %s", e)
+
+
+def _positive_factor(value: Any) -> float:
+    """lora_scale_factor as a finite float > 0, else ValueError (checked
+    before any weights load)."""
+    try:
+        factor = float(value)
+    except (TypeError, ValueError):
+        factor = math.nan
+    if not math.isfinite(factor) or factor <= 0:
+        raise ValueError(
+            f"lora_scale_factor must be a finite number > 0, got {value!r}"
+        )
+    return factor
 
 
 class DiffusersReferenceModel:
@@ -100,6 +115,7 @@ class DiffusersReferenceModel:
         lora_scale_factor: float = 1.0,
         **_: Any,
     ) -> None:
+        self._lora_scale_factor = _positive_factor(lora_scale_factor)
         _ensure_deps()
         cls = getattr(diffusers, pipeline_class, None) if diffusers is not None else None
         if cls is None:
@@ -115,7 +131,6 @@ class DiffusersReferenceModel:
         self._device = select_device(device, torch_module=torch)
         self._lora_adapter = bool(lora_adapter)
         self._default_lora_scale = float(lora_scale)
-        self._lora_scale_factor = float(lora_scale_factor)
         # The adapter weight last handed to set_adapters; None forces the
         # first LoRA request to set it explicitly.
         self._applied_lora_weight: float | None = None

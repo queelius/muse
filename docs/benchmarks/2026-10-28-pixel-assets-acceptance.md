@@ -16,9 +16,9 @@ the CC0 A2 maps). Run 1, with the overdriven LoRA, is kept in
 
 | # | Criterion | Result |
 |---|---|---|
-| 1 | Unit tests, offline | Pass: fast lane 6326 passed, 77 skipped (including 3 new tests and 2 updated) |
+| 1 | Unit tests, offline | Pass: fast lane 6326 passed, 77 skipped (including 3 new tests and 3 updated) |
 | 2 | klein-pixel-art: 8 sprite prompts | Pass only after fix 1. At the shipped default every image was near-black noise |
-| 2 | pixelize db32 / auto:16 gives grid-clean sprites | **Miss with `grid=auto`**: 0/8 grids detected in run 3. Pass with `target_size=64x64` (8/8). The recipe now uses target_size (fix 3) |
+| 2 | pixelize db32 / auto:16 gives grid-clean sprites | **Miss with `grid=auto`**: 0/8 grids detected in run 3. Pass with `target_size=64x64` (8/8, by construction). The recipe now uses target_size (fix 3) |
 | 2 | Palette and alpha | Pass: 56/56 outputs use only palette colours (db32 subset, or at most 16 for auto:16), and alpha is in {0, 255} |
 | 3 | Generated grass over dirt: A2, blob-47, `.tres`, `.tsx` | Pass |
 | 3 | Godot 4 loads the TileSet headless | Pass: Godot 4.7.2, 47/47 tiles with matching peering bits, 368/368 terrain-connect cells correct |

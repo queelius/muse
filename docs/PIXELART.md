@@ -29,8 +29,10 @@ curl -s $MUSE/v1/images/generations -H 'content-type: application/json' -d '{
 request. It matches the LoRA card's ComfyUI strength (tested 0.85-1.4): the
 curated entry's `lora_scale_factor` maps it to diffusers' adapter weight,
 because diffusers applies the adapter's rsLoRA scaling (16x) and weights of
-0.25 or more destroy the image. `lora_scale: 0` is plain klein, which with the
-trigger phrase already draws clean sprites.
+0.25 or more destroy the image. Even the top of the allowed range is too much:
+at `lora_scale` 2 (adapter weight 0.125) sprites already look soft, with the
+background bleeding into them, so stay near 1. `lora_scale: 0` is plain klein,
+which with the trigger phrase already draws clean sprites.
 
 ## 2. Pixelize with a hard palette
 
