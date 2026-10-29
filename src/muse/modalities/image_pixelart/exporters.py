@@ -29,7 +29,7 @@ from xml.sax.saxutils import quoteattr
 
 from muse.modalities.image_pixelart.autotile import SHEET_COLUMNS, SHEET_ROWS, BlobTile
 
-_NAME_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
+_NAME_RE = re.compile(r"[a-z0-9_-]{1,40}")  # used with fullmatch: no "\n" slips past $
 
 # Mask bit -> Godot square-tile peering bit, in Godot's CellNeighbor enum
 # order (the order its saved files list them in).
@@ -51,7 +51,7 @@ _ZIP_TIME = (1980, 1, 1, 0, 0, 0)  # fixed, so the bundle bytes are reproducible
 
 def safe_name(name: str) -> str:
     """Return ``name`` if it is a slug of ``[a-z0-9_-]{1,40}``; else ValueError."""
-    if not isinstance(name, str) or not _NAME_RE.match(name):
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
         raise ValueError("name must be 1-40 characters of a-z, 0-9, '_' or '-'")
     return name
 

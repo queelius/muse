@@ -161,7 +161,7 @@ def test_safe_name_ok(name):
 
 
 @pytest.mark.parametrize("name", ["Grass Path!", "", "x" * 41, "../x", "Grass", "a.b",
-                                  "a/b", None, 3])
+                                  "a/b", None, 3, "grass\n", "grass\r", "\ngrass"])
 def test_safe_name_rejects(name):
     with pytest.raises(ValueError):
         safe_name(name)
