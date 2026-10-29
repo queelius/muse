@@ -37,6 +37,15 @@ def test_autotile_mcp_tool_defaults_to_zip():
     assert "zip" in disc["summary"]
 
 
+def test_discovery_steers_generated_sprites_to_target_size():
+    """Live on the 3060, grid=auto found no grid on 8/8 klein sprites (their
+    pixels drift between about 6 and 10 px), so agents are told to size them."""
+    disc = modality_discovery()["image/pixelart"]
+    assert "target_size" in disc["summary"]
+    assert "upscaled" in disc["summary"]
+    assert _routes()["/v1/images/pixelize"]["example"]["target_size"] == "64x64"
+
+
 def test_modality_constant_and_exports():
     import muse.modalities.image_pixelart as pkg
 

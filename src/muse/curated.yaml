@@ -410,14 +410,14 @@
   modality: image/generation
   size_gb: 0.33
   description: "Pixel-art sprite LoRA for FLUX.2 klein 4B (trigger 'pixel art sprite', prepended automatically); pre-paired with flux2-klein-4b (pull it first)"
-  summary: "Pixel-art game sprites from a LoRA on FLUX.2 klein; send the output through /v1/images/pixelize for a clean grid and palette"
+  summary: "Pixel-art game sprites from a LoRA on FLUX.2 klein; send the output through /v1/images/pixelize with target_size (64x64 items, 96x96 characters) for a clean grid and palette"
   strengths:
     - "Character and item sprites in a pixel-art style, 4 steps at 512x512 (its training size)"
     - "Trigger phrase 'pixel art sprite, ' is prepended unless the prompt already has it"
     - "Apache 2.0; per-request lora_scale on generations and reference edits (1.0 = the card's ComfyUI strength 1.0; it tested 0.85-1.4)"
   limits:
     - "Requires flux2-klein-4b pulled first; same 12 GB CPU-offload load and host-RAM cost"
-    - "Output only looks like pixel art: the grid is soft and colours are unconstrained, so run /v1/images/pixelize (for example palette=db32) before using it as a game asset"
+    - "Output only looks like pixel art: the grid is soft and colours are unconstrained, and grid=auto finds none, so run /v1/images/pixelize with target_size (64x64 items and tiles, 96x96 characters; for example palette=db32) before using it as a game asset"
     - "Trained on characters; tiles and scenes are weaker"
   quality_tier: draft
   capabilities:

@@ -39,9 +39,12 @@ MODALITY = "image/pixelart"
 
 DISCOVERY = {
     "summary": (
-        "Deterministic pixel-art tools (CPU, no weights). Pixelize snaps a soft "
-        "or AI-made 'pixel art' image onto its true grid with a hard palette and "
-        "binary alpha. Autotile turns a fill texture (or an RPG Maker A2 block) "
+        "Deterministic pixel-art tools (CPU, no weights). Pixelize snaps an image "
+        "onto a pixel grid with a hard palette and binary alpha. For generated "
+        "sprites pass target_size (64x64 for items and tiles, 96x96 for "
+        "characters): AI 'pixel art' has no consistent grid, so grid=auto "
+        "usually finds none and keeps every pixel. grid=auto is for real pixel "
+        "art that was upscaled. Autotile turns a fill texture (or an RPG Maker A2 block) "
         "into an A2 block, a 47-tile blob sheet and Godot 4 / Tiled tilesets; "
         "the MCP tool defaults to the zip bundle so the tileset files keep "
         "pointing at <name>_blob47.png once unzipped."
@@ -67,7 +70,7 @@ DISCOVERY = {
             "mcp_tool": "muse_pixelize_image",
             "file_fields": ["image"],
             "media_fields": ["data[].b64_json"],
-            "example": {"model": "<model>", "palette": "db32", "preview_scale": 4},
+            "example": {"model": "<model>", "target_size": "64x64", "palette": "db32"},
         },
         {
             "method": "POST",

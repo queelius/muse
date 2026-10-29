@@ -481,6 +481,9 @@ def test_curated_klein_pixel_art_entry():
     assert caps["default_steps"] == 4
     # Sized from its base entry by the supervisor, not declared here.
     assert "memory_gb" not in caps
+    # Generated sprites have no consistent grid: point agents at target_size.
+    assert "target_size" in entry.summary
+    assert any("target_size" in limit for limit in entry.limits)
     assert any("/v1/images/pixelize" in s for s in (entry.summary or "",
                *entry.strengths, *entry.limits))
     # Listed right after the SDXL pixel LoRA.
