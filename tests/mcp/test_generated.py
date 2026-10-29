@@ -586,3 +586,62 @@ def test_speech_identity_headers_stay_strings(caps_doc, openapi_doc, media_env, 
                                out_path=None, preview=False, model="kokoro-82m"))
     assert data["response"] == dict(voice=value, audio_sha256=value,
                                     pronunciations_digest=value, speed=1.25)
+
+
+# ---- mcp_defaults are checked against the route's request schema ----
+
+
+def _defaults_docs(defaults: dict, with_schema: bool = True):
+    route = {"method": "POST", "path": "/v1/x/run", "mcp_tool": "muse_x_run",
+             "request_content_type": "application/json",
+             "response_content_type": "application/json",
+             "example": {"model": "<model>", "prompt": "hi"},
+             "mcp_defaults": defaults}
+    caps = {"modalities": [{"modality": "x/run", "summary": "x", "models": ["m"],
+                            "routes": [route]}],
+            "models": [{"id": "m", "modality": "x/run"}]}
+    schema = {"type": "object", "properties": {
+        "model": {"type": "string"}, "prompt": {"type": "string"},
+        "response_format": {"type": "string", "default": "json"}}}
+    openapi = {"paths": {"/v1/x/run": {"post": {"requestBody": {"content": {
+        "application/json": {"schema": schema}}}}}}} if with_schema else {"paths": {}}
+    return caps, openapi
+
+
+def test_mcp_defaults_not_in_the_schema_are_dropped_with_one_warning(caplog):
+    import logging
+
+    caps, openapi = _defaults_docs({"response_format": "zip", "respons_format": "zip",
+                                    "n": 2})
+    with caplog.at_level(logging.WARNING, logger="muse.mcp.generated"):
+        [gen] = generate_tools(caps, openapi)
+        [again] = generate_tools(caps, openapi)
+    assert gen.defaults == {"response_format": "zip"} == again.defaults
+    props = gen.tool.inputSchema["properties"]
+    assert props["response_format"]["default"] == "zip"
+    assert "respons_format" not in props and "n" not in props
+    assert "respons_format" not in gen.tool.description
+    warned = [r.getMessage() for r in caplog.records if "mcp_defaults" in r.getMessage()]
+    assert len(warned) == 2  # one per bad key, not one per generation
+    assert any("respons_format" in m and "muse_x_run" in m for m in warned)
+
+
+def test_valid_mcp_defaults_are_sent(fake_http):
+    caps, openapi = _defaults_docs({"response_format": "zip", "bogus": True})
+    [gen] = generate_tools(caps, openapi)
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.read()))
+        return httpx.Response(200, json={"ok": True})
+
+    call_generated(fake_http(handler), gen, {"model": "m", "prompt": "p"})
+    assert seen[0]["response_format"] == "zip" and "bogus" not in seen[0]
+
+
+def test_mcp_defaults_kept_when_the_route_publishes_no_schema():
+    """Without a request schema the example is a guess and extra fields pass
+    through, so the declared defaults are kept."""
+    caps, openapi = _defaults_docs({"response_format": "zip"}, with_schema=False)
+    [gen] = generate_tools(caps, openapi)
+    assert gen.defaults == {"response_format": "zip"}

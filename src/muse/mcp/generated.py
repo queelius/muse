@@ -19,7 +19,10 @@ Input changes against the route's own schema:
   - optional ``out_path``, and ``preview`` on image-producing routes;
   - a DISCOVERY ``mcp_defaults`` entry ({wire field: value}) becomes that
     property's ``default`` and is sent when the caller omits the field (e.g.
-    a zip ``response_format`` whose bundle keeps file names consistent).
+    a zip ``response_format`` whose bundle keeps file names consistent). A
+    key that is not a field of the route's published request schema is
+    dropped (logged once per tool and field); without a published schema
+    every key is kept, since extra fields pass through.
 
 Outputs never come back inline: binary bodies and every base64 (or data:
 URL) string at a DISCOVERY ``media_fields`` path, or in a sibling ``url``,
@@ -42,6 +45,7 @@ import base64
 import binascii
 import copy
 import json
+import logging
 import os
 import pathlib
 import re
@@ -52,6 +56,8 @@ from typing import Any
 import mcp.types as types
 
 from muse.mcp import files
+
+logger = logging.getLogger(__name__)
 
 DESCRIBE = "muse_describe"
 LARGE_JSON_CHARS = 20_000
@@ -209,6 +215,18 @@ def _description(mod: dict, route: dict, models: list[dict], from_openapi: bool,
     return "\n".join(lines)
 
 
+_WARNED_DEFAULTS: set[tuple[str, str]] = set()
+
+
+def _warn_bad_default(tool: str, field_name: str) -> None:
+    """Log once per (tool, field): tools are regenerated every cache cycle."""
+    if (tool, field_name) in _WARNED_DEFAULTS:
+        return
+    _WARNED_DEFAULTS.add((tool, field_name))
+    logger.warning("ignoring mcp_defaults[%r] for %s: not a field of the route's "
+                   "request schema", field_name, tool)
+
+
 def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> GeneratedTool:
     base, from_openapi = _request_schema(route, openapi)
     props = {k: {kk: vv for kk, vv in (v if isinstance(v, dict) else {}).items()
@@ -234,11 +252,15 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
         props.update(_file_props(name, many, was_required))
         if was_required:
             required_files.append(name)
-    defaults = dict(route.get("mcp_defaults") or {})
-    for wire, value in defaults.items():
+    defaults = {}
+    for wire, value in dict(route.get("mcp_defaults") or {}).items():
         name = next((n for n, w in aliases.items() if w == wire), wire)
         if isinstance(props.get(name), dict):
             props[name]["default"] = value
+        elif from_openapi:  # the published schema says the route has no such field
+            _warn_bad_default(route["mcp_tool"], wire)
+            continue
+        defaults[wire] = value
     fixed = {}
     if "stream" in props:
         props.pop("stream")
