@@ -7,32 +7,17 @@ it as ``Model``. CPU only; ``device`` is accepted and ignored.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
-from PIL import Image
-
-from muse.modalities.image_pixelart.autotile import (
-    DROPPED_SHAPE,
-    SHEET_COLUMNS,
-    SHEET_ROWS,
-    EdgeStyle,
-    _hard_alpha,
-    build_a2,
-    expand_blob47,
-    validate_a2,
-)
-from muse.modalities.image_pixelart.exporters import (
-    godot_tileset_tres,
-    safe_name,
-    tiled_tileset_tsx,
-)
-from muse.modalities.image_pixelart.pixelize import (
-    PixelizeOptions,
-    PixelizeResult,
-    pixelize,
-)
 from muse.modalities.image_pixelart.protocol import AutotileRequest, AutotileResult
+
+if TYPE_CHECKING:  # pragma: no cover
+    from muse.modalities.image_pixelart.pixelize import PixelizeOptions, PixelizeResult
+
+# numpy, Pillow and the pixel library are imported inside the methods, never
+# at module load: Pillow is not a base muse dependency, so script discovery
+# (and `muse pull pixel-tools`) must work on a host without it.
+
 
 # The blob mask's bit order (clockwise from north), as documented in
 # ``autotile.BlobTile``; returned with every autotile result.
@@ -60,10 +45,32 @@ class PixelTools:
         self.local_dir = local_dir
         self.device = "cpu"
 
-    def pixelize(self, image: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
+    def pixelize(self, image: Any, opts: "PixelizeOptions") -> "PixelizeResult":
+        from muse.modalities.image_pixelart.pixelize import pixelize
+
         return pixelize(image, opts)
 
     def autotile(self, request: AutotileRequest) -> AutotileResult:
+        import numpy as np
+        from PIL import Image
+
+        from muse.modalities.image_pixelart.autotile import (
+            DROPPED_SHAPE,
+            SHEET_COLUMNS,
+            SHEET_ROWS,
+            EdgeStyle,
+            _hard_alpha,
+            build_a2,
+            expand_blob47,
+            validate_a2,
+        )
+        from muse.modalities.image_pixelart.exporters import (
+            godot_tileset_tres,
+            safe_name,
+            tiled_tileset_tsx,
+        )
+        from muse.modalities.image_pixelart.pixelize import PixelizeOptions, pixelize
+
         name = safe_name(request.name)
         t = int(request.tile_size)
         if (request.a2 is None) == (request.fill is None):

@@ -1,6 +1,9 @@
 """pixel-tools: the weightless, CPU-only bundled model for image/pixelart."""
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,8 +24,44 @@ def test_pixel_tools_manifest():
     # Ruling F: measured peak ~1.3 GB at the 4096 px input cap.
     assert caps["memory_gb"] == 1.5
     assert {"Pillow", "numpy"} <= {e.split(">")[0].split("=")[0] for e in MANIFEST["pip_extras"]}
+    assert "Pillow>=10.0" in MANIFEST["pip_extras"]
     for key in ("summary", "strengths", "limits", "quality_tier", "license", "description"):
         assert MANIFEST.get(key), key
+
+
+_BLOCK_PIL = """
+import importlib.abc, sys
+
+class _NoPIL(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("PIL blocked for this test")
+        return None
+
+sys.meta_path.insert(0, _NoPIL())
+"""
+
+
+def test_discovered_and_importable_without_pillow(tmp_path):
+    """Pillow is not a base muse dependency: on a host without it, script
+    discovery must still find pixel-tools (else `muse pull pixel-tools`
+    fails), and importing the script must not import PIL."""
+    code = _BLOCK_PIL + (
+        "import muse.models.pixel_tools as m\n"
+        "assert m.MANIFEST['model_id'] == 'pixel-tools'\n"
+        "from muse.core.catalog import known_models\n"
+        "assert 'pixel-tools' in known_models(), sorted(known_models())\n"
+        "import muse.modalities.image_pixelart\n"
+        "assert 'PIL' not in sys.modules, 'PIL was imported'\n"
+        "print('ok')\n"
+    )
+    env = {**os.environ, "MUSE_CATALOG_DIR": str(tmp_path / "catalog")}
+    env.pop("MUSE_MODELS_DIR", None)
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env=env, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.strip().endswith("ok")
+    assert "pixel_tools.py: import failed" not in proc.stderr
 
 
 def test_model_is_the_runtime():

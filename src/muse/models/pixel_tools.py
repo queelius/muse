@@ -33,7 +33,7 @@ MANIFEST = {
     "quality_tier": "good",
     "license": "MIT",
     "pip_extras": (
-        "Pillow>=9.1.0",
+        "Pillow>=10.0",
         "numpy",
     ),
     "system_packages": (),
