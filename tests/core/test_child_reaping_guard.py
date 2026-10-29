@@ -1,11 +1,20 @@
 """Guard: only reviewed owners may reap (or poll) a child process.
 
 ``poll()``, ``wait()``, ``communicate()`` and ``os.wait*`` reap a POSIX
-child. Once an owned leader is reaped, its PID and PID==PGID group can be
-reused, so a reap outside the owner's locked lifecycle breaks the
-invariant every group signal relies on ("only the owner reaps, under its
-owning lock"). This AST walk fails on any such call in ``src/muse`` that is
-not on the reviewed allow-list below.
+child, and CPython's ``Popen.terminate()`` / ``kill()`` / ``send_signal()``
+call ``self.poll()`` first, so they can reap too. Once an owned leader is
+reaped, its PID and PID==PGID group can be reused, so a reap outside the
+owner's locked lifecycle breaks the invariant every group signal relies on
+("only the owner reaps, under its owning lock"). This AST walk fails on any
+such call in ``src/muse`` that is not on the reviewed allow-list below.
+
+Known bypasses (a syntactic check cannot see them; review for them):
+aliasing a method or module (``reap = proc.poll``, ``import os as o``),
+``getattr(proc, "poll")()``, ``from os import waitpid``, calls through
+other helper names, and ``.terminate()``/``.kill()``/``.send_signal()`` on
+a receiver whose name does not look like a process (``process``, ``proc``,
+``child``, ``popen``, or ``*process``/``*proc``). ``subprocess.run`` and
+friends reap only the child they created themselves and are not flagged.
 """
 from __future__ import annotations
 
@@ -17,6 +26,8 @@ import muse
 SRC = Path(muse.__file__).resolve().parent
 
 _REAPING_METHODS = {"poll", "communicate"}
+# Popen methods that may reap (wait) or poll() internally (signalling).
+_PROCESS_METHODS = {"wait", "terminate", "kill", "send_signal"}
 _PROCESS_WAIT_RECEIVERS = {"process", "proc", "child", "popen"}
 
 # (module path relative to src/muse, enclosing function) -> why it may reap.
@@ -26,7 +37,15 @@ _ALLOWED: dict[tuple[str, str], str] = {
         "child, only where WNOWAIT is missing, under the caller's owning lock",
     ("core/owned_process.py", "leader_exited_nowait"): "waitid(WNOWAIT) never reaps",
     ("core/owned_process.py", "reap_exited_leader"): "the owner's final reap",
+    ("core/owned_process.py", "signal_live_fallback_leader"): "send_signal on "
+        "an unpinnable child the caller just saw unreaped under its lock",
+    # Exact-child signals by the owners, each under its owning lock.
+    ("admin/jobs.py", "_signal_target"): "under target.process_lock",
+    ("cli_impl/supervisor.py", "_signal_worker_process"): "caller holds "
+        "spec.process_lock",
+    ("cli_impl/supervisor.py", "_signal_worker_target"): "under spec.process_lock",
     # The installer runner: one thread owns its child end to end.
+    ("core/owned_command.py", "_signal_exact_process"): "single-owner fallback",
     ("core/owned_command.py", "_target_alive"): "unsupported-platform fallback",
     ("core/owned_command.py", "_wait_owned_leader"): "unsupported-platform fallback",
     ("core/owned_command.py", "_reap_owned_leader"): "final reap after group signal",
@@ -58,11 +77,11 @@ def _reaping_calls(tree: ast.AST):
                 hit = f".{attr}()"
             elif attr.startswith("wait") and receiver == "os":
                 hit = f"os.{attr}()"
-            elif attr == "wait" and receiver is not None and (
+            elif attr in _PROCESS_METHODS and receiver is not None and (
                 receiver.lower() in _PROCESS_WAIT_RECEIVERS
                 or receiver.lower().endswith(("process", "proc"))
             ):
-                hit = f"{receiver}.wait()"
+                hit = f"{receiver}.{attr}()"
             if hit is not None:
                 yield (stack[-1] if stack else "<module>", node.lineno, hit)
         for child in ast.iter_child_nodes(node):
@@ -102,6 +121,13 @@ def test_guard_detects_the_patterns_it_forbids():
         "    os.waitpid(-1, 0)\n"
         "    p.communicate()\n"
         "    stop_event.wait(1)\n"
+        "    spec.process.terminate()\n"
+        "    target.process.kill()\n"
+        "    proc.send_signal(9)\n"
+        "    os.kill(1, 0)\n"
     )
     hits = [hit for _fn, _line, hit in _reaping_calls(sample)]
-    assert hits == [".poll()", "proc.wait()", "os.waitpid()", ".communicate()"]
+    assert hits == [
+        ".poll()", "proc.wait()", "os.waitpid()", ".communicate()",
+        "process.terminate()", "process.kill()", "proc.send_signal()",
+    ]
