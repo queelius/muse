@@ -42,6 +42,7 @@ import yaml
 TIMEOUT = httpx.Timeout(900.0, connect=10.0)
 KINDS = ("sprite", "autotile")
 MAP_COLS, MAP_ROWS = 16, 12
+DEFAULT_NEAREST_SCALE = 4  # the nearest column's scale when a variant sets no preview_scale
 # 8-neighbour bitmask, clockwise from north (matches the server's layout masks).
 _N, _NE, _E, _SE, _S, _SW, _W, _NW = 1, 2, 4, 8, 16, 32, 64, 128
 
@@ -98,6 +99,15 @@ def _form(fields: dict) -> dict[str, str]:
 
 def _label(fields: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in fields.items()) or "defaults"
+
+
+def _preview_scale(fields: dict) -> int:
+    """The variant's preview_scale, else ``DEFAULT_NEAREST_SCALE``."""
+    try:
+        scale = int(fields.get("preview_scale"))
+    except (TypeError, ValueError):
+        return DEFAULT_NEAREST_SCALE
+    return scale if scale >= 1 else DEFAULT_NEAREST_SCALE
 
 
 def _generate(client, base, case, prompt) -> tuple[bytes, float]:
@@ -219,7 +229,7 @@ def _run_sprite(client, base, case, out: _Out) -> list[dict]:
         row = {"case": case["id"], "kind": "sprite", "variant": _label(fields),
                "raw": raw_rel, "pixelized": None, "grid": None, "palette": None,
                "size": None, "seconds_generate": gen_s, "seconds_pixelize": None,
-               "error": None}
+               "preview_scale": _preview_scale(fields), "error": None}
         start = time.perf_counter()
         try:
             data = {"model": tool, "response_format": "json", **_form(fields)}
@@ -327,7 +337,7 @@ def write_index(results: list[dict], out_dir) -> Path:
     parts = []
     if sprites:
         rows = ["<tr><th>case</th><th>variant</th><th>raw</th><th>1x</th>"
-                "<th>nearest 4x</th><th>grid / palette</th><th>timings</th></tr>"]
+                "<th>nearest (preview scale)</th><th>grid / palette</th><th>timings</th></tr>"]
         for r in sprites:
             err = f"<div class='err'>{html.escape(r['error'])}</div>" if r["error"] else ""
             g = r.get("grid") or {}
@@ -339,13 +349,15 @@ def write_index(results: list[dict], out_dir) -> Path:
             if size:
                 info += f"{size[0]}x{size[1]}, {len(r.get('palette') or [])} colours<br>"
             info += _swatches(r.get("palette"))
-            w = (size[0] * 4) if size else None
+            scale = r.get("preview_scale") or DEFAULT_NEAREST_SCALE
+            w = (size[0] * scale) if size else None
             rows.append(
                 f"<tr><th>{html.escape(r['case'])}</th>"
                 f"<td>{html.escape(str(r['variant']))}{err}</td>"
                 f"<td>{_img(r['raw'], 192, r['case'])}</td>"
                 f"<td>{_img(r['pixelized'], None, r['case'])}</td>"
-                f"<td>{_img(r['pixelized'], w, r['case'])}</td>"
+                f"<td>{_img(r['pixelized'], w, r['case'])}"
+                f"<div class='cap'>{scale}x</div></td>"
                 f"<td class='cap'>{info}</td>"
                 f"<td class='cap'>gen {r['seconds_generate']}s<br>"
                 f"pixelize {r['seconds_pixelize']}s</td></tr>")

@@ -213,3 +213,22 @@ def test_paint_map_without_base_leaves_unfilled_cells_transparent():
     empty = [k for k, px in cells.items() if all(p[3] == 0 for p in px)]
     assert empty
     assert all(px == {(30, 160, 50, 255)} for k, px in cells.items() if k not in empty)
+
+
+def _nearest_widths(index: str) -> list[int]:
+    import re
+
+    return [int(w) for w in re.findall(r"style='width:(\d+)px'", index)
+            if int(w) not in (192, 384)]
+
+
+def test_nearest_column_uses_the_variant_preview_scale(tmp_path):
+    """The nearest column shows the art at the variant's preview_scale, so a
+    preview_scale 8 variant is 8 x its art width; 4x when it sets none."""
+    cases = [{"id": "knight", "kind": "sprite", "prompt": "a knight", "model": "m",
+              "pixelize": [{"palette": "db32"}, {"palette": "db32", "preview_scale": 8},
+                           {"palette": "db32", "preview_scale": 2}]}]
+    results = run(cases, "http://muse.test", tmp_path, _client([]))
+    assert [r.get("preview_scale") for r in results] == [4, 8, 2]
+    index = write_index(results, tmp_path).read_text()
+    assert _nearest_widths(index) == [8 * 4, 8 * 8, 8 * 2]  # art is 8 px wide
