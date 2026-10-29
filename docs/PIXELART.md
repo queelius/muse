@@ -28,9 +28,13 @@ curl -s $MUSE/v1/images/generations -H 'content-type: application/json' -d '{
 
 `lora_scale` (extra field, 0 to 2, default 1.0) turns the style up or down per
 request. It matches the LoRA card's ComfyUI strength (tested 0.85-1.4): the
-curated entry's `lora_scale_factor` maps it to diffusers' adapter weight,
-because diffusers applies the adapter's rsLoRA scaling (16x) and weights of
-0.25 or more destroy the image. Even the top of the allowed range is too much:
+curated entry's `lora_scale_factor` (0.0625) maps it to diffusers' adapter
+weight, because diffusers applies the adapter's rsLoRA scaling (16x) and
+weights of 0.25 or more destroy the image. A LoRA pulled by raw `hf://` URI
+gets the same correction automatically: without an explicit
+`lora_scale_factor`, muse reads the adapter's safetensors header at load and
+uses sqrt(r)/alpha when its `lora_adapter_metadata` declares `use_rslora` and
+there are no `.alpha` tensors (1.0 otherwise; the worker log names the factor). Even the top of the allowed range is too much:
 at `lora_scale` 2 (adapter weight 0.125) sprites already look soft, with the
 background bleeding into them, so stay near 1. `lora_scale: 0` is plain klein,
 which with the trigger phrase already draws clean sprites.

@@ -169,7 +169,7 @@ class LoraPipe(RecordingPipe):
         super().enable_model_cpu_offload(device=device)
 
 
-def _build_lora(monkeypatch, *, base_dir="/w/klein-base", **kw):
+def _build_lora(monkeypatch, *, base_dir="/w/klein-base", local_dir="/w/lora", **kw):
     events: list = []
     pipe = LoraPipe(events)
     monkeypatch.setattr(f"{MOD}.resolve_model_source", lambda ref: base_dir)
@@ -189,7 +189,7 @@ def _build_lora(monkeypatch, *, base_dir="/w/klein-base", **kw):
     kw.setdefault("device", "cuda")
     kw.setdefault("cpu_offload", "model")
     m = DiffusersReferenceModel(
-        hf_repo="Limbicnation/pixel-art-lora", local_dir="/w/lora",
+        hf_repo="Limbicnation/pixel-art-lora", local_dir=local_dir,
         model_id="klein-pixel-art", lora_adapter=True,
         base_model="flux2-klein-4b", **kw,
     )
@@ -268,7 +268,7 @@ def test_reference_lora_scale_factor_scales_adapter_weight(monkeypatch):
     assert pipe.adapter_sets[-1] == (["lora"], [0.0])
 
 
-@pytest.mark.parametrize("factor", [0, -0.0625, float("nan"), float("inf"), "x", None])
+@pytest.mark.parametrize("factor", [0, -0.0625, float("nan"), float("inf"), "x", True])
 def test_reference_lora_scale_factor_must_be_finite_and_positive(monkeypatch, factor):
     events: list = []
     monkeypatch.setattr(f"{MOD}.resolve_model_source", lambda ref: "/w/klein-base")
@@ -296,3 +296,58 @@ def test_reference_without_lora_unchanged():
     m.edit("x", images=[Image.new("RGB", (4, 4))], lora_scale=0.5)
     assert pipe.lora_loads == []
     assert pipe.adapter_sets == []
+
+
+# ---------------- derived lora_scale_factor (rsLoRA header) ----------------
+
+from tests.modalities.image_generation.runtimes.test_lora import (  # noqa: E402
+    _KLEIN_PIXEL_ART_CFG, _LORA_KEYS, _adapter_md, _write_safetensors,
+)
+
+
+def _rslora_dir(tmp_path):
+    _write_safetensors(tmp_path / "pytorch_lora_weights.safetensors",
+                       _LORA_KEYS, _adapter_md(**_KLEIN_PIXEL_ART_CFG))
+    return str(tmp_path)
+
+
+def test_reference_lora_derives_factor_from_rslora_header(monkeypatch, tmp_path):
+    # No lora_scale_factor capability (a raw hf:// klein LoRA): r=64,
+    # alpha=128 rsLoRA metadata gives 1/16, so lora_scale 1.0 is not 16x.
+    m, pipe, _ = _build_lora(monkeypatch, local_dir=_rslora_dir(tmp_path))
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [0.0625])]
+    m.edit("x", images=[Image.new("RGB", (4, 4))], lora_scale=2.0)
+    assert pipe.adapter_sets[-1] == (["lora"], [0.125])
+
+
+def test_reference_lora_explicit_factor_wins_over_header(monkeypatch, tmp_path):
+    m, pipe, _ = _build_lora(
+        monkeypatch, local_dir=_rslora_dir(tmp_path), lora_scale_factor=0.5,
+    )
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [0.5])]
+
+
+def test_reference_lora_plain_adapter_keeps_factor_1(monkeypatch, tmp_path):
+    _write_safetensors(tmp_path / "lora.safetensors", _LORA_KEYS)
+    m, pipe, _ = _build_lora(monkeypatch, local_dir=str(tmp_path))
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [1.0])]
+
+
+def test_reference_lora_corrupt_header_keeps_factor_1(monkeypatch, tmp_path):
+    (tmp_path / "pytorch_lora_weights.safetensors").write_bytes(b"garbage")
+    m, pipe, _ = _build_lora(monkeypatch, local_dir=str(tmp_path))
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [1.0])]
+
+
+def test_reference_without_lora_never_reads_a_header(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        f"{MOD}.resolve_lora_scale_factor",
+        lambda *a, **k: calls.append(a) or 1.0,
+    )
+    _build(local_dir=_rslora_dir(tmp_path))
+    assert calls == []
