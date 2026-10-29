@@ -143,23 +143,54 @@ class TestObserveAndReap:
         monkeypatch.delattr(os, "waitid", raising=False)
         assert op.platform_supports_pinned_leaders() is False
         process = MagicMock(spec=subprocess.Popen, returncode=None)
-        assert op.uses_exact_handle_fallback(process, 4242, os_name="posix")
-        assert not op.uses_exact_handle_fallback(process, None, os_name="posix")
-        assert not op.uses_exact_handle_fallback(MagicMock(), 4242, os_name="posix")
-        assert not op.uses_exact_handle_fallback(process, 4242, os_name="nt")
+        # Only an unpinnable child (here: no validated group) may be polled.
+        assert op.uses_exact_handle_fallback(process, 4242, None, os_name="posix")
+        assert not op.uses_exact_handle_fallback(process, 4242, 4242, os_name="posix")
+        assert not op.uses_exact_handle_fallback(process, None, None, os_name="posix")
+        assert not op.uses_exact_handle_fallback(MagicMock(), 4242, None, os_name="posix")
+        assert not op.uses_exact_handle_fallback(process, 4242, None, os_name="nt")
         process.poll.return_value = None
         assert op.observe_leader(
             process, 4242, pinned=False, os_name="posix", label="t",
+            process_group=None,
         ) is True
         process.poll.return_value = 3
         assert op.observe_leader(
             process, 4242, pinned=False, os_name="posix", label="t",
+            process_group=None,
         ) is False
         # Without a concrete pid the real child still fails closed.
         assert op.observe_leader(
             MagicMock(spec=subprocess.Popen, returncode=None), None,
-            pinned=False, os_name="posix", label="t",
+            pinned=False, os_name="posix", label="t", process_group=None,
         ) is None
+
+    def test_fallback_never_polls_a_pinnable_or_unknown_group_leader(self, monkeypatch):
+        monkeypatch.delattr(os, "waitid", raising=False)
+        process = MagicMock(spec=subprocess.Popen, returncode=None)
+        # A caller that wrongly passes pinned=False for a pinnable leader, or
+        # does not say which group it owns, never gets a reaping poll.
+        for kwargs in ({"process_group": 4242}, {}):
+            assert op.observe_leader(
+                process, 4242, pinned=False, os_name="posix", label="t", **kwargs,
+            ) is None
+        process.poll.assert_not_called()
+
+    def test_non_reaping_observation_never_polls_a_real_child(self, monkeypatch):
+        monkeypatch.delattr(os, "waitid", raising=False)
+        monkeypatch.setattr(op, "_psutil_zombie_observer_available", lambda: False)
+        process = MagicMock(spec=subprocess.Popen, returncode=None)
+        assert op.observe_leader(
+            process, 4242, pinned=False, os_name="posix", label="t",
+            process_group=None, may_reap=False,
+        ) is None
+        process.poll.assert_not_called()
+        # Test doubles cannot be reaped, so they are still polled.
+        double = MagicMock(returncode=None)
+        double.poll.return_value = 1
+        assert op.observe_leader(
+            double, 4242, pinned=False, os_name="posix", label="t", may_reap=False,
+        ) is False
 
     def test_no_wnowait_observes_exit_by_psutil_zombie_status(self, monkeypatch):
         import psutil
@@ -169,8 +200,9 @@ class TestObserveAndReap:
         assert op.supports_pinned_leader(real, 4242, 4242, os_name="posix")
         assert not op.supports_pinned_leader(real, 4242, None, os_name="posix")
 
-        def proc_with(status=None, error=None):
+        def proc_with(status=None, error=None, ppid=None):
             handle = MagicMock()
+            handle.ppid.return_value = os.getpid() if ppid is None else ppid
             if error is not None:
                 handle.status.side_effect = error
             else:
@@ -180,11 +212,26 @@ class TestObserveAndReap:
         cases = [
             (proc_with(psutil.STATUS_ZOMBIE), True),
             (proc_with(psutil.STATUS_SLEEPING), False),
-            (proc_with(error=psutil.ZombieProcess(4242)), True),
+            (proc_with(error=psutil.ZombieProcess(4242, ppid=os.getpid())), True),
         ]
         for handle, expected in cases:
             with patch("psutil.Process", return_value=handle):
                 assert op.leader_exited_nowait(4242) is expected
+        # psutil reports on whoever holds the PID now: a process that is not
+        # our child is a foreign reap (like waitid's ECHILD), never "ours".
+        not_ours = [
+            proc_with(psutil.STATUS_ZOMBIE, ppid=1),
+            proc_with(psutil.STATUS_SLEEPING, ppid=1),
+            proc_with(error=psutil.ZombieProcess(4242, ppid=1)),
+            proc_with(error=psutil.ZombieProcess(4242)),
+        ]
+        for handle in not_ours:
+            with patch("psutil.Process", return_value=handle):
+                with pytest.raises(ChildProcessError):
+                    op.leader_exited_nowait(4242)
+                assert op.observe_leader(
+                    real, 4242, pinned=True, os_name="posix", label="t",
+                ) is None
         with patch("psutil.Process", side_effect=psutil.NoSuchProcess(4242)):
             with pytest.raises(ChildProcessError):
                 op.leader_exited_nowait(4242)
@@ -205,7 +252,7 @@ class TestObserveAndReap:
         monkeypatch.setattr(op, "_psutil_zombie_observer_available", lambda: False)
         real = MagicMock(spec=subprocess.Popen, returncode=None)
         assert not op.supports_pinned_leader(real, 4242, 4242, os_name="posix")
-        assert op.uses_exact_handle_fallback(real, 4242, os_name="posix")
+        assert op.uses_exact_handle_fallback(real, 4242, 4242, os_name="posix")
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX zombie")
     def test_real_zombie_stays_pinned_without_waitid(self, monkeypatch):
@@ -226,7 +273,33 @@ class TestObserveAndReap:
     def test_wnowait_platform_never_uses_the_fallback(self, monkeypatch):
         monkeypatch.setattr(op, "platform_supports_pinned_leaders", lambda: True)
         process = MagicMock(spec=subprocess.Popen, returncode=None)
-        assert not op.uses_exact_handle_fallback(process, 4242, os_name="posix")
+        for group in (None, 4242):
+            assert not op.uses_exact_handle_fallback(process, 4242, group, os_name="posix")
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process tree")
+    def test_psutil_observer_rejects_a_pid_that_is_not_our_child(self, monkeypatch):
+        """A real non-child (our child's child) is never observed as ours."""
+        monkeypatch.delattr(os, "waitid", raising=False)
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import subprocess, sys, time\n"
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                "print(g.pid, flush=True)\n"
+                "time.sleep(30)\n",
+            ],
+            stdout=subprocess.PIPE, text=True,
+            **op.new_process_group_kwargs("posix"),
+        )
+        try:
+            grandchild = int(process.stdout.readline())
+            with pytest.raises(ChildProcessError):
+                op.leader_exited_nowait(grandchild)
+            assert op.leader_exited_nowait(process.pid) is False
+        finally:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10.0)
+            process.stdout.close()
 
     def test_live_fallback_signal_targets_group_else_exact_child(self):
         process = MagicMock()

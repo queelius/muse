@@ -118,9 +118,12 @@ def _enabled_loaded_model_ids() -> set[str]:
 
     This route does not own any worker, so it must never reap one: a
     reaped leader frees its PID==PGID before the owner's final group
-    signal. Liveness comes from the supervisor's non-reaping,
-    identity-checked observation under each spec's own ``process_lock``,
-    taken after ``state.lock`` is released so the two are never nested.
+    signal. Liveness comes from the supervisor's identity-checked
+    observation in its non-reaping mode, under each spec's own
+    ``process_lock`` (taken after ``state.lock`` is released, so the two are
+    never nested). A leader that cannot be observed without reaping (no
+    WNOWAIT and no psutil, or an unvalidated group) is never polled; its
+    unknown state counts as loaded.
     """
     state = get_supervisor_state()
     with state.lock:
@@ -129,7 +132,10 @@ def _enabled_loaded_model_ids() -> set[str]:
     for spec in specs:
         with spec.process_lock:
             proc = spec.process
-            if proc is not None and _worker_process_state_locked(spec, proc) is False:
+            # may_reap=False: never poll; an unknown state counts as loaded.
+            if proc is not None and _worker_process_state_locked(
+                spec, proc, may_reap=False,
+            ) is False:
                 continue
             ids.update(spec.models)
     return ids

@@ -568,7 +568,11 @@ def _validated_isolated_group(pid: int | None) -> int | None:
 
 
 def _supports_pinned_target(target: _ProcessTarget) -> bool:
-    """Whether WNOWAIT can pin this exact real POSIX PID==PGID leader."""
+    """Whether this exact real POSIX PID==PGID leader can be pinned.
+
+    Pinned means its exit is observable without reaping: ``waitid(WNOWAIT)``,
+    or psutil zombie status where the interpreter lacks waitid.
+    """
     return supports_pinned_leader(
         target.process, target.pid, target.pgid, os_name=os.name,
     )
@@ -576,7 +580,9 @@ def _supports_pinned_target(target: _ProcessTarget) -> bool:
 
 def _uses_exact_handle_fallback(target: _ProcessTarget) -> bool:
     """Whether this unpinnable child is owned through its Popen handle alone."""
-    return uses_exact_handle_fallback(target.process, target.pid, os_name=os.name)
+    return uses_exact_handle_fallback(
+        target.process, target.pid, target.pgid, os_name=os.name,
+    )
 
 
 def _target_state_locked(target: _ProcessTarget) -> bool | None:
@@ -601,6 +607,7 @@ def _target_state_locked(target: _ProcessTarget) -> bool | None:
         pinned=_supports_pinned_target(target),
         os_name=os.name,
         label=_PROCESS_LABEL,
+        process_group=target.pgid,
     )
 
 
@@ -673,8 +680,8 @@ def _signal_target(
             return delivered
 
         if target.pgid is not None and os.name == "posix":
-            # Not WNOWAIT-pinned (test doubles only: a real unpinned POSIX
-            # child is ambiguous above), so revalidate the live group first.
+            # Not pinned (test doubles only: a real unpinned POSIX child is
+            # ambiguous or exact-handle above), so revalidate the group first.
             try:
                 current_pgid = _concrete_safe_id(os.getpgid(target.pid))
             except OSError as e:

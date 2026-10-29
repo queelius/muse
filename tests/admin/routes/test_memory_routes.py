@@ -628,3 +628,49 @@ def test_memory_listing_never_reaps_a_worker_leader(wnowait, monkeypatch):
         alive.kill()
         alive.wait(timeout=10.0)
         exited.wait(timeout=10.0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX zombie")
+@pytest.mark.parametrize("unpinnable", ["no-psutil", "unvalidated-group"])
+def test_memory_listing_never_reaps_an_unpinnable_leader(unpinnable, monkeypatch):
+    """Without a non-reaping observer the route cannot tell; it must still
+    not poll (reap) and conservatively counts the worker as loaded."""
+    import os
+    import subprocess
+    import time
+
+    import psutil
+
+    from muse.admin.routes import memory
+    from muse.cli_impl import supervisor
+    from muse.core import owned_process
+    from muse.core.owned_process import new_process_group_kwargs
+
+    monkeypatch.delattr(os, "waitid", raising=False)
+    exited = subprocess.Popen(
+        [sys.executable, "-c", "pass"], **new_process_group_kwargs(os.name),
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        while psutil.Process(exited.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        if unpinnable == "no-psutil":
+            monkeypatch.setattr(
+                owned_process, "_psutil_zombie_observer_available", lambda: False,
+            )
+        state = SupervisorState()
+        spec = WorkerSpec(models=["gone"], python_path=sys.executable, port=9101)
+        spec.process = exited
+        spec.process_group_id = (
+            None if unpinnable == "unvalidated-group"
+            else supervisor._validated_worker_process_group(exited)
+        )
+        spec.status = "running"
+        state.workers.append(spec)
+        set_supervisor_state(state)
+
+        assert memory._enabled_loaded_model_ids() == {"gone"}
+        assert exited.returncode is None  # never polled, never reaped
+    finally:
+        exited.wait(timeout=10.0)
