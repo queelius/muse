@@ -142,6 +142,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         target_size: str | None = Form(None),
         palette: str = Form("auto:32"),
         background: str = Form("auto"),
+        remove_enclosed: bool = Form(False, description=(
+            "Also key background-coloured regions enclosed by the sprite (with "
+            "background=auto) of at least max(4 cells, 0.05% of the grid); can "
+            "remove sprite pixels that match the background.")),
         alpha_threshold: int = Form(128),
         cleanup: bool | None = Form(None),
         outline: str = Form("none"),
@@ -179,7 +183,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         opts = PixelizeOptions(
             grid=grid_value, target_size=target, palette=spec,
-            background=background.strip(), alpha_threshold=alpha_threshold,
+            background=background.strip(), remove_enclosed=remove_enclosed,
+            alpha_threshold=alpha_threshold,
             cleanup=cleanup, outline=outline.strip(), seamless=seamless,
             sheet=sheet_value, preview_scale=preview_scale,
             max_preview_side=_max_input_side(),

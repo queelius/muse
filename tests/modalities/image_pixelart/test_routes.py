@@ -438,3 +438,52 @@ def test_autotile_seeded_deterministic(client):
         return r.content
 
     assert run() == run()
+
+
+# ------------------------------------------------------------- remove_enclosed
+
+
+def ring_sprite() -> Image.Image:
+    """Grey ring on magenta; the 16x16 hole is magenta enclosed by the ring,
+    plus a single magenta highlight pixel inside the ring band."""
+    a = np.zeros((64, 64, 4), dtype=np.uint8)
+    a[..., :3] = (255, 0, 255)
+    a[..., 3] = 255
+    a[16:48, 16:48, :3] = (120, 120, 130)
+    a[24:40, 24:40, :3] = (255, 0, 255)
+    a[18, 18, :3] = (255, 0, 255)
+    return Image.fromarray(a)
+
+
+@pytest.mark.parametrize("flag,hole_alpha", [("true", 0), ("false", 255), (None, 255)])
+def test_pixelize_remove_enclosed(client, flag, hole_alpha):
+    data = {"grid": "1", "palette": "none", "response_format": "json"}
+    if flag is not None:
+        data["remove_enclosed"] = flag
+    r = client.post("/v1/images/pixelize", files={"image": png(ring_sprite())}, data=data)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    out = np.asarray(decode(body["data"][0]["b64_json"]).convert("RGBA"))
+    assert np.all(out[24:40, 24:40, 3] == hole_alpha)
+    assert out[18, 18, 3] == 255  # a 1-cell highlight is never punched out
+    assert np.all(out[:16, :, 3] == 0)
+    assert body["metadata"]["remove_enclosed"] is (flag == "true")
+
+
+def test_pixelize_remove_enclosed_bad_type_rejected_like_other_bools(client):
+    def code(field):
+        r = client.post("/v1/images/pixelize", files={"image": png(ring_sprite())},
+                        data={field: "maybe"})
+        return r.status_code
+    assert code("remove_enclosed") == code("seamless")
+    assert code("remove_enclosed") in (400, 422)
+
+
+def test_pixelize_remove_enclosed_in_openapi(client):
+    spec = client.get("/openapi.json").json()
+    schemas = spec["components"]["schemas"]
+    ref = spec["paths"]["/v1/images/pixelize"]["post"]["requestBody"]["content"][
+        "multipart/form-data"]["schema"]["$ref"].rsplit("/", 1)[-1]
+    prop = schemas[ref]["properties"]["remove_enclosed"]
+    assert prop["type"] == "boolean" and prop["default"] is False
+    assert "enclosed" in prop["description"]

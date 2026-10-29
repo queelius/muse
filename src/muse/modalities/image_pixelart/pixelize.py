@@ -3,7 +3,9 @@
 Pillow + numpy only. The fixed operation order is:
 
 1. background removal (full resolution)
-2. grid snap (detect or take the grid, majority-vote each cell)
+2. grid snap (detect or take the grid, majority-vote each cell); with
+   ``remove_enclosed``, enclosed background pockets are cleared between
+   finding the grid and the vote (see ``PixelizeOptions``)
 3. palette mapping (nearest colour in OKLab)
 4. alpha binarize (output alpha is only ever 0 or 255)
 5. cleanup (orphan pixels; by default only when the grid was snapped)
@@ -81,6 +83,17 @@ class PixelizeOptions:
       is a global chroma key; ``none`` and ``transparent-keep`` are synonyms:
       nothing is keyed and the existing alpha is kept (binarized at
       ``alpha_threshold``).
+    - ``remove_enclosed`` (default False): with ``background="auto"``, also
+      key background-coloured regions the border flood cannot reach (the gap
+      between a character's legs, the hole in a ring). A region is cleared
+      when every pixel is within the same delta-E tolerance as the border
+      keying and its area is at least ``max(4, 0.05% of the art grid)``
+      snapped cells, so a single background-coloured highlight survives. It
+      runs at full resolution after the grid is known (cell area in source
+      pixels comes from the grid or ``target_size``), before the per-cell
+      vote. An explicit ``#rrggbb`` background is already a global key, and
+      ``none`` keys nothing, so for those it changes nothing. Off by default:
+      it can punch holes in sprites whose own colours match the background.
     - ``cleanup``: None (default) cleans orphan pixels only when the grid was
       snapped (``grid.cell > 1``), so deliberate 1 px detail in true 1:1 art
       survives; True / False force it on / off.
@@ -102,6 +115,11 @@ class PixelizeOptions:
     sheet: tuple[int, int] | None = None  # (columns, rows)
     preview_scale: int = 1
     max_preview_side: int | None = None
+    remove_enclosed: bool = False
+
+
+ENCLOSED_MIN_CELLS = 4
+ENCLOSED_MIN_FRACTION = 0.0005  # of the art grid's cells
 
 
 class PreviewTooLargeError(ValueError):
@@ -169,6 +187,8 @@ def _validate(opts: PixelizeOptions, width: int, height: int) -> None:
         raise ValueError("background must be auto, none, transparent-keep or #rrggbb")
     if opts.cleanup is not None and not isinstance(opts.cleanup, bool):
         raise ValueError("cleanup must be true, false or unset")
+    if not isinstance(opts.remove_enclosed, bool):
+        raise ValueError("remove_enclosed must be true or false")
     if not _is_int(opts.alpha_threshold) or not 0 <= opts.alpha_threshold <= 255:
         raise ValueError("alpha_threshold must be an integer in 0..255")
     ol = opts.outline
@@ -429,9 +449,16 @@ def _flood_with_rounds(seed: np.ndarray, cand: np.ndarray) -> tuple[np.ndarray, 
     n_runs = int(ids.max())
     if n_runs == 0:
         return np.zeros(cand.shape, dtype=bool), 0
-    a, b = _run_edges(ids, cand)
     label = np.arange(n_runs + 1, dtype=np.int64)
     label[np.unique(ids[seed & cand])] = 0
+    label, rounds = _merge_runs(label, *_run_edges(ids, cand))
+    filled = (label[ids] == 0) & cand
+    return filled, rounds
+
+
+def _merge_runs(label: np.ndarray, a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, int]:
+    """Hook-and-jump until every pair of touching runs ``(a[i], b[i])`` shares
+    the smallest label of its component. Returns (labels, rounds)."""
     rounds = 0
     while True:
         la, lb = label[a], label[b]
@@ -448,8 +475,18 @@ def _flood_with_rounds(seed: np.ndarray, cand: np.ndarray) -> tuple[np.ndarray, 
             if np.array_equal(nxt, label):
                 break
             label = nxt
-    filled = (label[ids] == 0) & cand
-    return filled, rounds
+    return label, rounds
+
+
+def _components(cand: np.ndarray) -> np.ndarray:
+    """4-connected components of ``cand``: one positive label per component
+    (0 = not a candidate), from the same run-graph labelling as ``_flood``."""
+    ids = _row_runs(cand)
+    n_runs = int(ids.max())
+    if n_runs == 0:
+        return np.zeros(cand.shape, dtype=np.int64)
+    label, _ = _merge_runs(np.arange(n_runs + 1, dtype=np.int64), *_run_edges(ids, cand))
+    return label[ids]
 
 
 def _flood(seed: np.ndarray, cand: np.ndarray) -> np.ndarray:
@@ -496,7 +533,30 @@ def _remove_background(rgba: np.ndarray, regions, opts: PixelizeOptions) -> dict
     mask = _flood(inl, cand)
     color = rgb_to_hex(np.rint(rgba[inl][:, :3].mean(axis=0)))
     rgba[mask] = 0
-    return {"removed": bool(mask.any()), "mode": "border", "color": color}
+    meta = {"removed": bool(mask.any()), "mode": "border", "color": color}
+    if opts.remove_enclosed:
+        # Same colour, same tolerance, but out of the flood's reach.
+        meta["pockets"] = cand & ~mask
+    return meta
+
+
+def _remove_enclosed(rgba: np.ndarray, pockets: np.ndarray, cell_area: float,
+                     n_cells: int) -> int:
+    """In place: clear every 4-connected region of ``pockets`` covering at
+    least ``max(ENCLOSED_MIN_CELLS, ENCLOSED_MIN_FRACTION * n_cells)`` cells of
+    ``cell_area`` source pixels. Returns the number of regions cleared."""
+    if not pockets.any():
+        return 0
+    lab = _components(pockets)
+    sizes = np.bincount(lab.ravel())
+    sizes[0] = 0
+    min_px = max(ENCLOSED_MIN_CELLS, ENCLOSED_MIN_FRACTION * n_cells) * cell_area
+    big = sizes >= min_px - 1e-9
+    big[0] = False
+    if not big.any():
+        return 0
+    rgba[big[lab]] = 0
+    return int(big.sum())
 
 
 # ------------------------------------------------------------------- grid snap
@@ -879,6 +939,13 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
     gw, gh = cw * len(x_spans), ch * len(y_spans)
     _check_preview(gw, gh, opts)  # before the vote and the preview allocate
 
+    # 2b. enclosed background pockets, measured in snapped cells
+    enclosed = 0
+    pockets = bg_meta.pop("pockets", None)
+    if pockets is not None:
+        cell_area = (np.count_nonzero(xmap >= 0) / gw) * (np.count_nonzero(ymap >= 0) / gh)
+        enclosed = _remove_enclosed(rgba, pockets, cell_area, gw * gh)
+
     # 2 + 3. vote per cell, then map to the palette (nearest in OKLab)
     spec = opts.palette
     pal = _palette_array(spec)
@@ -940,6 +1007,8 @@ def pixelize(img: Image.Image, opts: PixelizeOptions) -> PixelizeResult:
         "colors_used": int(len(used)),
         "palette_truncated": truncated,
         "background": opts.background,
+        "remove_enclosed": bool(opts.remove_enclosed),
+        "enclosed_regions_removed": enclosed,
         "alpha_threshold": int(opts.alpha_threshold),
         "cleanup_applied": bool(do_cleanup),
         "cleanup_changed": changed,

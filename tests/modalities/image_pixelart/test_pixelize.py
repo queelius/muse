@@ -406,6 +406,133 @@ def test_background_flood_matches_bfs_reference():
         assert np.array_equal(P._flood(seed, cand), ref)
 
 
+def _ring_on(bg=(255, 0, 255), size=64, k=1) -> np.ndarray:
+    """A grey square ring (outer 16..48, hole 24..40) on ``bg``, upscaled k x:
+    the hole is background colour fully enclosed by the sprite."""
+    a = np.zeros((size, size, 4), dtype=np.uint8)
+    a[..., :3] = bg
+    a[..., 3] = 255
+    a[16:48, 16:48, :3] = (120, 120, 130)
+    a[24:40, 24:40, :3] = bg
+    if k > 1:
+        a = np.repeat(np.repeat(a, k, axis=0), k, axis=1)
+    return a
+
+
+def test_remove_enclosed_defaults_to_false():
+    assert PixelizeOptions(grid=None, target_size=None, palette=parse_palette("db32"),
+                           background="auto").remove_enclosed is False
+
+
+def test_remove_enclosed_clears_a_background_pocket():
+    img = Image.fromarray(_ring_on())
+    kept = np.asarray(pixelize(img, opts(grid=1, palette=parse_palette("none"))).image)
+    assert np.all(kept[24:40, 24:40, 3] == 255)  # default: the pocket stays
+    r = pixelize(img, opts(grid=1, palette=parse_palette("none"), remove_enclosed=True))
+    out = np.asarray(r.image)
+    assert np.all(out[24:40, 24:40, 3] == 0)
+    assert np.all(out[16:24, 16:48, 3] == 255)  # the ring itself is untouched
+    assert np.all(out[:16, :, 3] == 0)
+    assert r.metadata["remove_enclosed"] is True
+    assert r.metadata["enclosed_regions_removed"] == 1
+
+
+def test_remove_enclosed_uses_the_border_tolerance():
+    a = _ring_on()
+    a[24:40, 24:40, :3] = (250, 6, 250)  # within delta-E 6 of the magenta border
+    r = pixelize(jitter(Image.fromarray(a), noise=2),
+                 opts(grid=1, palette=parse_palette("none"), remove_enclosed=True))
+    assert np.all(np.asarray(r.image)[26:38, 26:38, 3] == 0)
+    a[24:40, 24:40, :3] = (200, 0, 120)  # clearly another colour: kept
+    r = pixelize(Image.fromarray(a), opts(grid=1, palette=parse_palette("none"),
+                                          remove_enclosed=True))
+    assert np.all(np.asarray(r.image)[24:40, 24:40, 3] == 255)
+
+
+def test_remove_enclosed_keeps_a_one_cell_highlight():
+    """Area counts in snapped cells: a 1-cell background-coloured highlight in
+    grey armour survives, the 16x16-cell hole does not."""
+    a = _ring_on()
+    a[18, 18, :3] = (255, 0, 255)  # one art pixel inside the ring band
+    for k in (1, 4):
+        big = a if k == 1 else np.repeat(np.repeat(a, k, axis=0), k, axis=1)
+        r = pixelize(Image.fromarray(big), opts(grid=k, palette=parse_palette("none"),
+                                                remove_enclosed=True))
+        out = np.asarray(r.image)
+        assert r.size == (64, 64), k
+        assert out[18, 18, 3] == 255, k
+        assert np.all(out[24:40, 24:40, 3] == 0), k
+        assert r.metadata["enclosed_regions_removed"] == 1, k
+
+
+def test_remove_enclosed_threshold_is_four_cells():
+    a = _ring_on()
+    a[17:19, 17:19, :3] = (255, 0, 255)  # 2x2 = 4 cells: removed
+    a[17:20, 44, :3] = (255, 0, 255)  # 3 cells: kept
+    r = pixelize(Image.fromarray(a), opts(grid=1, palette=parse_palette("none"),
+                                          remove_enclosed=True))
+    out = np.asarray(r.image)
+    assert np.all(out[17:19, 17:19, 3] == 0)
+    assert np.all(out[17:20, 44, 3] == 255)
+    assert r.metadata["enclosed_regions_removed"] == 2
+
+
+def test_remove_enclosed_threshold_scales_with_the_image():
+    """0.05% of a 200x200 art grid is 20 cells: a 4x4 pocket is kept."""
+    a = np.zeros((200, 200, 4), dtype=np.uint8)
+    a[..., :3] = (255, 0, 255)
+    a[..., 3] = 255
+    a[40:160, 40:160, :3] = (120, 120, 130)
+    a[60:64, 60:64, :3] = (255, 0, 255)  # 16 cells < 20: kept
+    a[100:105, 100:105, :3] = (255, 0, 255)  # 25 cells: removed
+    r = pixelize(Image.fromarray(a), opts(grid=1, palette=parse_palette("none"),
+                                          remove_enclosed=True))
+    out = np.asarray(r.image)
+    assert np.all(out[60:64, 60:64, 3] == 255)
+    assert np.all(out[100:105, 100:105, 3] == 0)
+
+
+def test_remove_enclosed_with_target_size_counts_target_cells():
+    a = _ring_on(k=8)  # 512x512, the hole is 128x128 source px = 16x16 cells
+    a[18 * 8:18 * 8 + 8, 18 * 8:18 * 8 + 8, :3] = (255, 0, 255)  # one cell
+    r = pixelize(Image.fromarray(a), opts(target_size=(64, 64), palette=parse_palette("none"),
+                                          remove_enclosed=True))
+    out = np.asarray(r.image)
+    assert out[18, 18, 3] == 255
+    assert np.all(out[25:39, 25:39, 3] == 0)
+
+
+def test_remove_enclosed_needs_a_keyed_background():
+    img = Image.fromarray(_ring_on())
+    r = pixelize(img, opts(grid=1, palette=parse_palette("none"), background="none",
+                           remove_enclosed=True))
+    assert np.all(np.asarray(r.image)[..., 3] == 255)
+    assert r.metadata["enclosed_regions_removed"] == 0
+    # An explicit colour is a global chroma key: the pocket is keyed anyway.
+    r = pixelize(img, opts(grid=1, palette=parse_palette("none"), background="#ff00ff",
+                           remove_enclosed=True))
+    assert np.all(np.asarray(r.image)[24:40, 24:40, 3] == 0)
+
+
+def test_remove_enclosed_type_is_checked():
+    with pytest.raises(ValueError, match="remove_enclosed"):
+        pixelize(SMALL, opts(remove_enclosed="yes"))
+
+
+def test_components_label_each_region_once():
+    from muse.modalities.image_pixelart import pixelize as P
+
+    cand = np.zeros((6, 8), dtype=bool)
+    cand[0:2, 0:2] = True  # region A (4 px)
+    cand[4, 1:7] = True    # region B, joined to C by a column
+    cand[1:4, 6] = True
+    cand[0, 4] = True      # region D (1 px)
+    lab = P._components(cand)
+    assert np.all((lab > 0) == cand)
+    assert len(np.unique(lab[cand])) == 3
+    assert lab[0, 0] == lab[1, 1] and lab[4, 1] == lab[1, 6]
+
+
 def test_background_chroma_key_is_global():
     a = _sprite_on((0, 255, 0))
     a[30:34, 30:34, :3] = (0, 255, 0)

@@ -57,6 +57,17 @@ palette), `preview_scale=8` (nearest-
 neighbour enlargement for viewing; use 1 for the game asset). With the default
 `response_format=json` the grid, palette and size come back too.
 
+Background keying floods inward from the image border, so background that the
+sprite encloses (between a character's legs, inside the crook of an arm,
+beside a staff) stays opaque. For characters add `-F remove_enclosed=true`: it
+also keys regions of the background colour (same tolerance) that the flood
+cannot reach, but only regions of at least 4 art pixels (or 0.05% of the
+grid, whichever is larger), so a single background-coloured highlight
+survives. Leave it off when the sprite itself has larger areas close to the
+background colour (grey armour on a grey backdrop): they would be punched
+out. It applies to `background=auto`; an explicit `background=#rrggbb` is
+already a global key.
+
 ## 3. Autotile a grass fill over dirt
 
 Generate two seamless textures, then hand them to autotile. `base` is what
