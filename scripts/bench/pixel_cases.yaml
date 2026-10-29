@@ -1,0 +1,75 @@
+# Sprite and autotile cases for scripts/bench/pixel_compare.py.
+# Needs klein-pixel-art and pixel-tools pulled on the server.
+- id: knight
+  kind: sprite
+  prompt: pixel art sprite, a knight in plate armor, full body, facing front, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: mage
+  kind: sprite
+  prompt: pixel art sprite, a wizard with a pointed hat and staff, full body, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: slime
+  kind: sprite
+  prompt: pixel art sprite, a green slime monster, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: goblin
+  kind: sprite
+  prompt: pixel art sprite, a goblin warrior with a rusty dagger, full body, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: chest
+  kind: sprite
+  prompt: pixel art sprite, a wooden treasure chest with gold trim, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: potion
+  kind: sprite
+  prompt: pixel art sprite, a red health potion in a glass bottle, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: sword-icon
+  kind: sprite
+  prompt: pixel art sprite, a steel longsword icon, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: tavern-sign
+  kind: sprite
+  prompt: pixel art sprite, a hanging wooden tavern sign with a beer mug, plain background
+  model: klein-pixel-art
+  size: 512x512
+  pixelize:
+  - palette: db32
+  - palette: auto:16
+- id: grass-over-dirt
+  kind: autotile
+  fill_prompt: seamless grass texture, top-down, pixel art
+  base_prompt: dirt path texture, top-down, pixel art
+  model: klein-pixel-art
+  size: 512x512
+  autotile:
+    tile_size: 48
+    name: grass

@@ -55,7 +55,7 @@ Required:
 
 - `model_id: str` - unique, kebab-case by convention
 - `modality: str` - MIME-style tag (e.g. `"audio/speech"`, `"embedding/text"`, `"image/generation"`); must match a discovered modality
-- `hf_repo: str` - HuggingFace repo in `"namespace/name"` form
+- `hf_repo: str` - HuggingFace repo in `"namespace/name"` form (not for weightless models, below)
 
 Optional (recommended):
 
@@ -64,6 +64,16 @@ Optional (recommended):
 - `pip_extras: tuple[str, ...]` - packages installed into the model's venv on `muse pull`
 - `system_packages: tuple[str, ...]` - warned about at pull time if missing from `PATH`
 - `capabilities: dict[str, Any]` - free-form metadata; splatted into `/v1/models` entries
+
+Weightless models: a bundled script with no weights to download sets
+`"weights": "none"` and omits `hf_repo` and `revision`. It must declare a
+positive `capabilities.memory_gb`, since there is nothing on disk to size.
+`muse pull` installs the venv only and creates an empty
+`<catalog>/local/<model_id>` as the model's `local_dir`; provenance is a code
+receipt (`muse_version`, `source_sha256` of the script) rather than a weights
+revision, so `/v1/models` reports `revision: null` and
+`X-Muse-Model-Artifacts` carries the source digest. `pixel-tools` is the
+first example.
 
 Recommended capability keys by modality:
 

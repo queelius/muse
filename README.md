@@ -12,6 +12,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - speech naturalness and production-quality scoring on `/v1/audio/quality`
 - reference-transcript word alignment on `/v1/audio/alignments`
 - text-to-music on `/v1/audio/music` and text-to-sound-effects on `/v1/audio/sfx`
+- pixel-art cleanup (grid snap, palettes, hard alpha) on `/v1/images/pixelize` and RPG Maker / Godot / Tiled autotiles on `/v1/images/autotile` (recipe: `docs/PIXELART.md`)
 - text-to-image on `/v1/images/generations`, multi-reference edits (consistent characters) and inpainting on `/v1/images/edits`, image variations on `/v1/images/variations`
 - image-to-image super-resolution on `/v1/images/upscale`
 - raster-to-editable-SVG vectorization on `/v1/images/vectorize`
@@ -31,7 +32,7 @@ Model-agnostic multi-modality generation server. OpenAI-compatible HTTP is the c
 - typed decisions (Choice / Score / Noul, a text subset of TypeSafe's System One) on `/v1/systemone`; see [docs/DECISIONS.md](docs/DECISIONS.md)
 - image-to-3D and text-to-3D on `/v1/3d/from-image` and `/v1/3d/generations`
 
-Modality tags are MIME-style (`3d/generation`, `audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `decision/evaluation`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/segmentation`, `image/upscale`, `image/vectorization`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
+Modality tags are MIME-style (`3d/generation`, `audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation`, `audio/quality`, `audio/speech`, `audio/transcription`, `chat/completion`, `decision/evaluation`, `embedding/text`, `image/animation`, `image/cv`, `image/embedding`, `image/generation`, `image/ocr`, `image/pixelart`, `image/segmentation`, `image/upscale`, `image/vectorization`, `text/classification`, `text/rerank`, `text/summarization`, `text/translation`, `video/generation`).
 
 Three ways to add a model, in order of how often you'll reach for them:
 
@@ -288,6 +289,8 @@ alignment = AudioAlignmentClient().align(
 pngs = GenerationsClient().generate("a cat on mars, cinematic", n=1)
 # LoRA adapters: muse pull hf://nerijs/pixel-art-xl (or curated pixel-art-xl),
 # optional --base <muse-id-or-hf-repo>, per-request lora_scale via extra_body.
+# Pixel-art sprites on FLUX.2 klein: muse pull klein-pixel-art, then POST the result to
+# /v1/images/pixelize (see docs/PIXELART.md).
 vectors = EmbeddingsClient().embed(["alpha", "beta"])   # list[list[float]]
 chat = ChatClient().chat(
     model="qwen3-8b-gguf-q4-k-m",
@@ -556,6 +559,8 @@ settings inventory and precedence rules.
 | `POST /v1/images/generations` | generate images (OpenAI-compatible; supports img2img via `image` + `strength`) |
 | `POST /v1/images/edits` | multi-reference edits (`image[]`, no mask) or inpainting (image+mask); OpenAI-compatible multipart |
 | `POST /v1/images/variations` | generate alternates of one image (OpenAI-compatible; multipart, no prompt) |
+| `POST /v1/images/pixelize` | snap an image onto its pixel grid with a retro palette and hard alpha (multipart; JSON or image/png) |
+| `POST /v1/images/autotile` | RPG Maker A2 + blob-47 autotiles with Godot 4 / Tiled tilesets (multipart; JSON or zip) |
 | `POST /v1/images/vectorize` | convert a raster icon/diagram to validated static SVG (multipart; JSON or image/svg+xml) |
 | `POST /v1/embeddings` | text embeddings (OpenAI-compatible) |
 | `POST /v1/images/embeddings` | image embeddings (OpenAI-shape envelope mirroring /v1/embeddings) |
@@ -752,6 +757,7 @@ See the "Federation" section of `CLAUDE.md` for the full design.
   - `embedding_text/` (MODALITY `"embedding/text"`; includes `runtimes/sentence_transformers.py`)
   - `image_embedding/` (MODALITY `"image/embedding"`; includes `runtimes/transformers_image.py`)
   - `image_generation/` (MODALITY `"image/generation"`)
+  - `image_pixelart/` (MODALITY `"image/pixelart"`; pixelize + autotile on the weightless CPU `pixel-tools`)
   - `text_classification/` (MODALITY `"text/classification"`; OpenAI `/v1/moderations` wire shape)
   - `text_rerank/` (MODALITY `"text/rerank"`; Cohere `/v1/rerank` wire shape)
   - `text_summarization/` (MODALITY `"text/summarization"`; Cohere `/v1/summarize` wire shape)

@@ -121,6 +121,14 @@ models, not an enum, so a model enabled mid-session is accepted. Behaviour:
   timings and is surfaced as `response.alignment`.
 - Tool descriptions come from the capabilities document, so they carry the
   model notes.
+- A route's `DISCOVERY` entry may declare `mcp_defaults`, a mapping of
+  default arguments for its generated tool. A user-supplied argument always
+  wins. `muse_autotile` defaults `response_format` to `zip`: MCP saves each
+  output under a content-hash name, which would break the Godot `.tres` /
+  Tiled `.tsx` references to `<name>_blob47.png`, whereas the zip keeps the
+  five bundle names intact.
+- Pixel-art tools: `muse_pixelize_image` and `muse_autotile` (modality
+  `image/pixelart`, see `docs/PIXELART.md`).
 
 ## Federation
 
