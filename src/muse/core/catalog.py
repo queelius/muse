@@ -366,7 +366,9 @@ def _stat_if_present(path: str) -> os.stat_result | None:
     False, whereas 3.10-3.13 re-raised errors other than ENOENT, ENOTDIR,
     EBADF and ELOOP. Only absence is mapped to None here; any other
     ``OSError`` propagates so the caller reports an inaccessible
-    environment on every supported Python.
+    environment on every supported Python. That deliberately includes a
+    symlink loop (ELOOP), which ``is_dir()`` used to report as missing: a
+    loop is a broken environment to inspect, not an absent download.
     """
     try:
         return Path(path).stat()

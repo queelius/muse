@@ -245,6 +245,16 @@ def test_permission_denied_environment_is_not_reported_missing(entry, tmp_path, 
     assert f"muse pull {MODEL}" in reason
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+@pytest.mark.parametrize("component", ["weights", "interpreter"])
+def test_symlink_loop_environment_is_reported_inaccessible(entry, tmp_path, component):
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    entry["local_dir" if component == "weights" else "python_path"] = str(loop)
+    reason = catalog.model_load_blocker(MODEL, entry)
+    assert reason is not None and "inaccessible" in reason
+
+
 @pytest.mark.parametrize("component", ["weights", "interpreter"])
 def test_absent_environment_is_reported_missing(entry, tmp_path, component):
     if component == "weights":
@@ -257,7 +267,7 @@ def test_absent_environment_is_reported_missing(entry, tmp_path, component):
     assert reason is not None and expected in reason
 
 
-@pytest.mark.parametrize("invalid",["backend_path", "capabilities"])
+@pytest.mark.parametrize("invalid", ["backend_path", "capabilities"])
 def test_invalid_manifest_does_not_break_listing_of_other_models(entry, invalid):
     valid = copy.deepcopy(entry)
     valid["manifest"]["model_id"] = "valid-readiness-test"
