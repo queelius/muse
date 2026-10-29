@@ -34,12 +34,16 @@ trigger phrase already draws clean sprites.
 
 ## 2. Pixelize with a hard palette
 
-Pixelize finds the true grid (or use `target_size=64x64`), snaps to it, maps to
-a palette and makes alpha binary.
+Pixelize snaps the image to a grid, maps it to a palette and makes alpha
+binary. Generated sprites have no consistent grid (their "pixels" drift between
+about 6 and 10 px), so `grid=auto` usually finds none and keeps all 512x512
+pixels. Give the size instead: `target_size=64x64` (about 8 px cells at 512) or
+`96x96` for more detail. `grid=auto` is for art that really is on a grid, such
+as an upscaled sprite.
 
 ```bash
 curl -s $MUSE/v1/images/pixelize -F model=pixel-tools -F image=@knight_raw.png \
-  -F palette=db32 -F response_format=png -o knight.png
+  -F target_size=64x64 -F palette=db32 -F response_format=png -o knight.png
 ```
 
 Palettes: `pico-8`, `db16`, `db32`, `endesga-32`, `nes`, `gameboy`, `auto:N`
@@ -56,11 +60,11 @@ Generate two seamless textures, then hand them to autotile. `base` is what
 shows where there is no grass.
 
 ```bash
-for n in "grass" "dirt path"; do
+for n in "grass" "dirt"; do
   curl -s $MUSE/v1/images/generations -H 'content-type: application/json' -d "{
     \"model\": \"klein-pixel-art\", \"size\": \"512x512\", \"response_format\": \"b64_json\",
     \"prompt\": \"seamless $n texture, top-down, pixel art\"}" \
-    | jq -r '.data[0].b64_json' | base64 -d > "${n%% *}.png"
+    | jq -r '.data[0].b64_json' | base64 -d > "$n.png"
 done
 curl -s $MUSE/v1/images/autotile -F model=pixel-tools \
   -F fill=@grass.png -F base=@dirt.png -F tile_size=48 -F name=grass \

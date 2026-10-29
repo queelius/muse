@@ -150,9 +150,15 @@ def test_shipped_case_file_is_valid():
     from pathlib import Path
     cases = load_cases(Path(__file__).resolve().parents[2] / "scripts/bench/pixel_cases.yaml")
     sprites = [c for c in cases if c["kind"] == "sprite"]
+    # Generated sprites have no consistent grid, so each also gets a sized
+    # variant (grid=auto keeps 512x512 on most of them).
     assert len(sprites) == 8 and all(
-        [v["palette"] for v in c["pixelize"]] == ["db32", "auto:16"] for c in sprites)
-    assert sum(c["kind"] == "autotile" for c in cases) == 1
+        [(v["palette"], v.get("target_size")) for v in c["pixelize"]]
+        == [("db32", None), ("auto:16", None), ("db32", "64x64")] for c in sprites)
+    tiles = [c for c in cases if c["kind"] == "autotile"]
+    assert len(tiles) == 1
+    # Without "seamless" klein drew a dirt clearing ringed by trees, not a texture.
+    assert all("seamless" in c[k] for c in tiles for k in ("fill_prompt", "base_prompt"))
 
 
 def _cells(img, t=4):

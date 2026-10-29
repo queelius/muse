@@ -8,6 +8,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: mage
   kind: sprite
   prompt: pixel art sprite, a wizard with a pointed hat and staff, full body, plain background
@@ -16,6 +18,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: slime
   kind: sprite
   prompt: pixel art sprite, a green slime monster, plain background
@@ -24,6 +28,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: goblin
   kind: sprite
   prompt: pixel art sprite, a goblin warrior with a rusty dagger, full body, plain background
@@ -32,6 +38,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: chest
   kind: sprite
   prompt: pixel art sprite, a wooden treasure chest with gold trim, plain background
@@ -40,6 +48,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: potion
   kind: sprite
   prompt: pixel art sprite, a red health potion in a glass bottle, plain background
@@ -48,6 +58,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: sword-icon
   kind: sprite
   prompt: pixel art sprite, a steel longsword icon, plain background
@@ -56,6 +68,8 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: tavern-sign
   kind: sprite
   prompt: pixel art sprite, a hanging wooden tavern sign with a beer mug, plain background
@@ -64,10 +78,12 @@
   pixelize:
   - palette: db32
   - palette: auto:16
+  - palette: db32
+    target_size: 64x64
 - id: grass-over-dirt
   kind: autotile
   fill_prompt: seamless grass texture, top-down, pixel art
-  base_prompt: dirt path texture, top-down, pixel art
+  base_prompt: seamless dirt texture, top-down, pixel art
   model: klein-pixel-art
   size: 512x512
   autotile:
