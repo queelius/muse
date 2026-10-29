@@ -177,10 +177,24 @@ def test_build_a2_without_base_has_transparent_outside():
 
 def test_build_a2_with_base_is_opaque():
     T = 24
+    half = T // 2
     a = arr(build_a2(fill_tex(T), base_tex(T), T, EdgeStyle(), None))
     assert (a[..., 3] == 255).all()
-    # Outside the terrain the base shows: the preview corner is base-coloured.
-    assert tuple(a[0, 0, :3]) != (0, 0, 0)
+    # The ground block is the decoration block (no base) composed over the
+    # prepared base: wherever the decoration is transparent the base shows,
+    # pixel for pixel, at the same tile-local position.
+    deco = arr(build_a2(fill_tex(T), None, T, EdgeStyle(), None))
+    under = autotile._flatten_base(autotile._prepare_texture(base_tex(T), T, "base"))
+    preview, deco_preview = a[:T, :T], deco[:T, :T]
+    expected = np.where(deco_preview[..., 3:] == 255, deco_preview, under)
+    for qy in (0, 1):  # every corner quadrant of the isolated preview shape
+        for qx in (0, 1):
+            ys, xs = slice(qy * half, (qy + 1) * half), slice(qx * half, (qx + 1) * half)
+            assert (preview[ys, xs, 3] == 255).all(), (qx, qy)
+            assert np.array_equal(preview[ys, xs], expected[ys, xs]), (qx, qy)
+            # Each corner really shows base outside the terrain.
+            assert (deco_preview[ys, xs, 3] == 0).any(), (qx, qy)
+    assert np.array_equal(a[0, 0], under[0, 0])
 
 
 def test_build_a2_base_with_holes_is_still_opaque():

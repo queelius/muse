@@ -73,7 +73,7 @@ def test_probe_defaults_run():
 
     assert "4x" in PROBE_DEFAULTS["shape"] and "T=16" in PROBE_DEFAULTS["shape"]
     out = PROBE_DEFAULTS["call"](PixelTools(model_id="pixel-tools", hf_repo="", local_dir=None))
-    assert out is not None
+    assert out == {"grid": 4, "tiles": 47}
 
 
 def test_model_optional_paths_declared_and_discovered():
