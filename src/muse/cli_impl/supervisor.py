@@ -41,8 +41,8 @@ from muse.core import config
 from muse.core.catalog import CatalogError, _read_catalog, get_manifest, model_load_blocker
 
 from muse.core.memory_probe import (
+    auto_uses_cuda,
     available_capacity_gb,
-    check_cuda_available,
     declared_device,
     optional_probe_gb,
     probe_method,
@@ -1569,26 +1569,42 @@ def _effective_model_device(
     return measured_device
 
 
-def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
-    """Return (has_data, memory_gb, device).
+def _host_auto_uses_cuda() -> bool:
+    """`auto_uses_cuda` against this host's live probe (NVML, then torch)."""
+    probe = _MemoryProbeAdapter()
+    return auto_uses_cuda(probe.gpu_free_gb(), probe_method(probe, "cuda_available"))
 
-    Sizing ladder, in order of preference:
-      1. `manifest.capabilities.memory_gb` annotation (hand-set or
-         from a script's MANIFEST).
-      2. `measurements.<device>.peak_bytes` from a probe run / self-healed
-         lazy-load observation.
-      3. on-disk weights size summed from the entry's `local_dir`.
 
-    `device` is read from `manifest.capabilities.device` and lowercased.
-    Falls back to "auto" when absent, matching the worker's own default
-    (see muse.core.memory_probe.declared_device).
+def _measurement_key(device: str, auto_cuda_available: "bool | None") -> str:
+    """The `measurements.<key>` bucket for a model declared on `device`.
 
-    `has_data` is True when ANY source is present; False only when the
-    model declares nothing, was never probed, AND has no weights on disk.
-    The boot validation flags False entries as unservable with the
-    probe-prompt reason. Because pulled models always have weights on
-    disk, that 503 path is effectively reserved for pre-worker / removed
-    entries.
+    "auto" maps to the pool it resolves to here ("cuda" or "cpu"), with the
+    predicate admission and servability use (`auto_uses_cuda`; None asks
+    the live host), so a catalog copied from a GPU box does not size a
+    CPU-only host's load from a VRAM peak. "gpu" is the legacy cuda alias;
+    "mps" keeps its own bucket, as the probe writes it.
+    """
+    normalized = str(device or "auto").lower()
+    if normalized == "gpu":
+        return "cuda"
+    if normalized in ("auto", ""):
+        if auto_cuda_available is None:
+            auto_cuda_available = _host_auto_uses_cuda()
+        return resolve_memory_pool(
+            "auto", gpu_free_gb=None, cuda_available=auto_cuda_available,
+        )
+    return normalized
+
+
+def _declared_or_measured(
+    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
+) -> tuple[bool | None, float, str]:
+    """Tier 1 of the sizing ladder: the entry's own estimate.
+
+    Returns (True, gb, device) for a usable `capabilities.memory_gb` or
+    probe measurement, (False, 0.0, device) for a malformed declaration
+    (which must not be replaced by a fallback), and (None, 0.0, device)
+    when the entry has neither.
     """
     manifest = catalog_entry.get("manifest", {}) or {}
     if not isinstance(manifest, dict):
@@ -1603,13 +1619,21 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
     if not isinstance(measurements, dict):
         measurements = {}
     # Probe records key by the resolved device (e.g. "cpu" / "cuda")
-    # so we look up by the same key. "gpu" alias normalizes to "cuda"
-    # to match what the probe writes.
-    measurement_key = "cuda" if device == "gpu" else device
+    # so we look up by the same key; "auto" by the pool it resolves to on
+    # this host (`_measurement_key`), and only when there is a measurement
+    # to pick (no host query for a declared or unmeasured entry).
+    measurement_key = (
+        _measurement_key(device, auto_cuda_available)
+        if measurements and declared is None else device
+    )
     measurement = measurements.get(measurement_key) or {}
     if not isinstance(measurement, dict):
         measurement = {}
     measured = measurement.get("peak_bytes")
+    if measured is not None and device in ("auto", ""):
+        # Report the pool the measurement belongs to, as the cross-device
+        # recovery below does.
+        device = str(measurement.get("device") or measurement_key).lower()
 
     # Bundled models have no persisted manifest in catalog.json, so `device`
     # falls back to "cpu" above even when the probe ran on cuda. If the
@@ -1655,6 +1679,182 @@ def _has_memory_data(catalog_entry: dict) -> tuple[bool, float, str]:
             measured_gb = math.nan
         if math.isfinite(measured_gb) and measured_gb > 0.0:
             return True, measured_gb, device
+    return None, 0.0, device
+
+
+def _repo_key(repo: Any) -> str | None:
+    """An HF repo id normalized for matching: lowercase, without an
+    `hf://` scheme or an `@revision` suffix. None when it is not a repo id."""
+    if not isinstance(repo, str) or "/" not in repo:
+        return None
+    key = repo.strip().lower()
+    if key.startswith("hf://"):
+        key = key[len("hf://"):]
+    return key.split("@", 1)[0].strip("/") or None
+
+
+def _base_entries(base: str, catalog: dict) -> list[tuple[str, dict]]:
+    """Catalog entries that `base_model` names: the entry under that muse id,
+    or, for an HF repo id (a raw `hf://` LoRA pull takes it from the Hub
+    tag), every entry whose `hf_repo` (top-level or persisted manifest) is
+    that repo, case-insensitively and ignoring any @revision."""
+    if "/" not in base:
+        entry = catalog.get(base)
+        return [(base, entry)] if isinstance(entry, dict) else []
+    want = _repo_key(base)
+    out = []
+    for model_id, entry in sorted(catalog.items()):
+        if not isinstance(entry, dict):
+            continue
+        manifest = entry.get("manifest")
+        repos = {
+            _repo_key(entry.get("hf_repo")),
+            _repo_key(manifest.get("hf_repo") if isinstance(manifest, dict) else None),
+        }
+        if want in repos:
+            out.append((model_id, entry))
+    return out
+
+
+def _measurement_gb(record: Any) -> float | None:
+    if not isinstance(record, dict):
+        return None
+    peak = record.get("peak_bytes")
+    if peak is None or isinstance(peak, bool):
+        return None
+    try:
+        gb = float(peak) / (1024 ** 3)
+    except (TypeError, ValueError):
+        return None
+    return gb if math.isfinite(gb) and gb > 0.0 else None
+
+
+def _base_tier1_gb(
+    base_entry: dict, device: str, auto_cuda_available: "bool | None" = None,
+) -> float | None:
+    """A base entry's estimate for a LoRA loading on `device`: its probe
+    measurement for that pool (`_measurement_key`), else its declared
+    memory_gb, else a measurement from another device. Never its weights
+    on disk."""
+    measurements = base_entry.get("measurements") or {}
+    if not isinstance(measurements, dict):
+        measurements = {}
+    if measurements:
+        gb = _measurement_gb(
+            measurements.get(_measurement_key(device, auto_cuda_available)),
+        )
+        if gb is not None:
+            return gb
+    manifest = base_entry.get("manifest") or {}
+    caps = manifest.get("capabilities") if isinstance(manifest, dict) else None
+    declared = caps.get("memory_gb") if isinstance(caps, dict) else None
+    if declared is not None and not isinstance(declared, bool):
+        try:
+            declared_gb = float(declared)
+        except (TypeError, ValueError):
+            declared_gb = math.nan
+        if math.isfinite(declared_gb) and declared_gb > 0.0:
+            return declared_gb
+    for record in measurements.values():
+        gb = _measurement_gb(record)
+        if gb is not None:
+            return gb
+    return None
+
+
+def _base_model_memory_gb(
+    capabilities: dict,
+    catalog: "dict | None" = None,
+    *,
+    device: str = "auto",
+    auto_cuda_available: "bool | None" = None,
+) -> float | None:
+    """The estimate of the catalog entry `capabilities.base_model` names.
+
+    A manifest that layers onto a base (a LoRA adapter's `base_model`)
+    loads the base's weights, but its own dir holds only the adapter, so
+    its weights-on-disk fallback undersizes the load. The base is a muse
+    catalog id or an HF repo id matched against catalog `hf_repo`s
+    (`_base_entries`), chased one level. Only the base's probe measurement
+    (preferring the pool `device` loads into) or declared memory_gb counts
+    (`_base_tier1_gb`): never the base's weights on disk (a klein snapshot
+    sums to ~24 GB against a ~9.5 GB offloaded peak). When several entries
+    carry the base repo, the largest estimate wins. None when there is
+    nothing to chase. `catalog` defaults to the live catalog.
+    """
+    if not isinstance(capabilities, dict):
+        return None
+    base = capabilities.get("base_model")
+    if not isinstance(base, str) or not base.strip():
+        return None
+    if catalog is None:
+        try:
+            catalog = _read_catalog()
+        except CatalogError:
+            return None
+    estimates = []
+    for base_id, base_entry in _base_entries(base.strip(), catalog):
+        gb = _base_tier1_gb(
+            _entry_with_live_manifest(base_id, base_entry), device,
+            auto_cuda_available,
+        )
+        if gb is not None:
+            estimates.append(gb)
+    return max(estimates) if estimates else None
+
+
+def _has_memory_data(
+    catalog_entry: dict,
+    *,
+    catalog: "dict | None" = None,
+    auto_cuda_available: "bool | None" = None,
+) -> tuple[bool, float, str]:
+    """Return (has_data, memory_gb, device).
+
+    Sizing ladder, in order of preference (CLAUDE.md "Lazy load + LRU
+    eviction" uses the same numbering):
+      1. `manifest.capabilities.memory_gb` annotation (hand-set or
+         from a script's MANIFEST), else
+         `measurements.<device>.peak_bytes` from a probe run / self-healed
+         lazy-load observation.
+      2. for a manifest with `capabilities.base_model` (a LoRA adapter),
+         the base catalog entry's probe measurement (this entry's pool
+         first) or declared memory_gb, the base found by muse id or by
+         `hf_repo` (`_base_model_memory_gb`; `catalog` defaults to the
+         live one). Never the base's weights on disk.
+      3. on-disk weights size summed from the entry's `local_dir` (for a
+         LoRA whose base has no estimate: the adapter alone, until a
+         probe or load measures the real peak).
+      4. nothing: has_data is False.
+
+    `device` is read from `manifest.capabilities.device` and lowercased.
+    Falls back to "auto" when absent, matching the worker's own default
+    (see muse.core.memory_probe.declared_device). An "auto" model's
+    measurements are read from the pool auto resolves to
+    (`auto_cuda_available`, the caller's `auto_uses_cuda` verdict; None
+    asks the live host).
+
+    `has_data` is True when ANY source is present; False only when the
+    model declares nothing, was never probed, AND has no weights on disk.
+    The boot validation flags False entries as unservable with the
+    probe-prompt reason. Because pulled models always have weights on
+    disk, that 503 path is effectively reserved for pre-worker / removed
+    entries.
+    """
+    found, gb, device = _declared_or_measured(
+        catalog_entry, auto_cuda_available=auto_cuda_available,
+    )
+    if found is not None:
+        return found, gb, device
+
+    manifest = catalog_entry.get("manifest") or {}
+    capabilities = manifest.get("capabilities") if isinstance(manifest, dict) else None
+    base_gb = _base_model_memory_gb(
+        capabilities or {}, catalog, device=device,
+        auto_cuda_available=auto_cuda_available,
+    )
+    if base_gb is not None:
+        return True, base_gb, device
 
     # Last resort: size the model from the bytes already on disk so a
     # never-probed model still loads on demand instead of 503'ing.
@@ -1722,8 +1922,8 @@ def _capacity_pools(
         budget_gb=gpu_budget_gb,
         headroom_gb=gpu_headroom_gb,
     )
-    cuda_available = gpu_free is not None or check_cuda_available(
-        probe_method(memory_probe, "cuda_available"),
+    cuda_available = auto_uses_cuda(
+        gpu_free, probe_method(memory_probe, "cuda_available"),
     )
     return cpu_available_gb, gpu_available_gb, cuda_available
 
@@ -1735,6 +1935,7 @@ def _servability_reason(
     gpu_available_gb: "float | None",
     auto_cuda_available: "bool | None" = None,
     supervisor_device: str = "auto",
+    catalog: "dict | None" = None,
 ) -> "str | None":
     """The unservable reason for one catalog entry, or None if servable.
 
@@ -1753,7 +1954,13 @@ def _servability_reason(
         working set can only make the director evict everything and 503.
       - None when sizable AND it fits.
     """
-    has_data, sized_gb, measured_device = _has_memory_data(entry)
+    # Preserve the private helper's historical standalone behavior when a
+    # caller does not provide the explicit detector verdict.
+    if auto_cuda_available is None:
+        auto_cuda_available = gpu_available_gb is not None
+    has_data, sized_gb, measured_device = _has_memory_data(
+        entry, catalog=catalog, auto_cuda_available=auto_cuda_available,
+    )
     if not has_data:
         if _has_invalid_declared_memory(entry):
             return (
@@ -1769,10 +1976,6 @@ def _servability_reason(
         )
     except RuntimeError as exc:
         return str(exc)
-    # Preserve the private helper's historical standalone behavior when a
-    # caller does not provide the explicit detector verdict.
-    if auto_cuda_available is None:
-        auto_cuda_available = gpu_available_gb is not None
     pool = resolve_memory_pool(
         device,
         gpu_free_gb=None,
@@ -1884,6 +2087,7 @@ def validate_catalog_at_boot(
             gpu_available_gb=gpu_available_gb,
             auto_cuda_available=cuda_available,
             supervisor_device=state.device,
+            catalog=catalog,
         )
         if reason is not None:
             state.unservable_reasons[model_id] = reason
@@ -1940,6 +2144,7 @@ def revalidate_servability(
         gpu_available_gb=gpu_available_gb,
         auto_cuda_available=cuda_available,
         supervisor_device=state.device,
+        catalog=catalog,
     )
     with state.lock:
         if reason is None:
@@ -1964,8 +2169,9 @@ def backfill_manifest_memory(
        from `capabilities.memory_gb`. A probed-only or never-probed model
        declares none, so without this the director would treat it as 0 GB
        ("fits anywhere", never evicting). We fill it from the sizing ladder
-       (`_has_memory_data`: probe measurement, else on-disk weights size). An
-       explicit declared `memory_gb` always wins.
+       (`_has_memory_data`: probe measurement, else the muse-id base's
+       estimate for a manifest with base_model, else on-disk weights size).
+       An explicit declared `memory_gb` always wins.
 
     2. **device** -- An operator `set-device` pin (catalog `device_override`)
        decides where the worker actually loads, mirroring load_backend's
@@ -1990,22 +2196,17 @@ def backfill_manifest_memory(
 
     if entry is not None and caps.get("memory_gb") is None:
         gb: float | None = None
-        # A LoRA entry's own dir holds only the adapter (tens of MB), so
-        # the weights-on-disk fallback would grossly undersize the load.
-        # When it has no probe measurement of its own, size it from its
-        # muse-id base entry instead. A probed LoRA entry measured the
-        # real base+adapter peak; prefer that.
-        if caps.get("lora_adapter") and not (entry.get("measurements") or {}):
-            base = caps.get("base_model")
-            base_entry = (
-                catalog.get(base) if base and "/" not in base else None
+        # A manifest layered on a base (a LoRA adapter) is sized from its
+        # muse-id base's estimate when it has no probe measurement of its
+        # own, as in the ladder; the passed manifest's base_model is used
+        # because a bundled entry persists no manifest. A probed LoRA entry
+        # measured the real base+adapter peak; prefer that.
+        if not (entry.get("measurements") or {}):
+            gb = _base_model_memory_gb(
+                caps, catalog, device=declared_device(caps),
             )
-            if base_entry is not None:
-                has_b, gb_b, _d = _has_memory_data(base_entry)
-                if has_b and gb_b > 0:
-                    gb = gb_b
         if gb is None:
-            has_data, gb_own, _device = _has_memory_data(entry)
+            has_data, gb_own, _device = _has_memory_data(entry, catalog=catalog)
             if has_data and gb_own > 0:
                 gb = gb_own
         if gb is not None:

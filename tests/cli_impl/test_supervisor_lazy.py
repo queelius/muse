@@ -2480,6 +2480,327 @@ class TestBackfillLoraChase:
         assert out["capabilities"]["memory_gb"] == pytest.approx(9.5)
 
 
+_REF_RUNTIME = (
+    "muse.modalities.image_generation.runtimes.reference:DiffusersReferenceModel"
+)
+
+
+class TestAutoDeviceMeasurementPool:
+    """`device: auto` picks the measurement for the pool auto resolves to on
+    this host, with the predicate the LoadDirector and servability use
+    (live VRAM reading or a CUDA runtime -> cuda, else cpu): a catalog
+    copied from a GPU box must not size a CPU-only host's load from its
+    cuda VRAM peak. Both the model's own lookup and the base chase."""
+
+    _CUDA = 8 * 1024 ** 3
+    _CPU = 3 * 1024 ** 3
+
+    def _own(self):
+        return {"enabled": True, "measurements": {
+            "cuda": {"peak_bytes": self._CUDA, "device": "cuda"},
+            "cpu": {"peak_bytes": self._CPU, "device": "cpu"},
+        }, "manifest": {"model_id": "m", "modality": "image/generation",
+                        "hf_repo": "o/m", "backend_path": "x:Y",
+                        "capabilities": {"device": "auto"}}}
+
+    @pytest.mark.parametrize("gpu, want, dev", [
+        (False, 3.0, "cpu"), (True, 8.0, "cuda"),
+    ])
+    def test_own_measurement_follows_auto_pool(self, gpu, want, dev):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        has, gb, device = _has_memory_data(self._own(), auto_cuda_available=gpu)
+        assert has and gb == pytest.approx(want) and device == dev
+
+    def test_own_cpu_only_host_with_only_cuda_measurement_still_sizes(self):
+        # A bundled GPU model probed on cuda keeps its cross-device recovery.
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        entry = self._own()
+        del entry["measurements"]["cpu"]
+        has, gb, device = _has_memory_data(entry, auto_cuda_available=False)
+        assert has and gb == pytest.approx(8.0) and device == "cuda"
+
+    @pytest.mark.parametrize("gpu, want", [(False, 3.0), (True, 8.0)])
+    def test_base_chase_follows_auto_pool(self, tmp_path, gpu, want):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        d = tmp_path / "lora"
+        d.mkdir()
+        lora = {"local_dir": str(d), "enabled": True, "manifest": {
+            "model_id": "l", "modality": "image/generation", "hf_repo": "o/l",
+            "backend_path": "x:Y",
+            "capabilities": {"lora_adapter": True, "base_model": "base",
+                             "device": "auto"}}}
+        base = self._own()
+        base["manifest"]["capabilities"]["memory_gb"] = 9.5
+        has, gb, _ = _has_memory_data(
+            lora, catalog={"base": base}, auto_cuda_available=gpu,
+        )
+        assert has and gb == pytest.approx(want)
+
+    @pytest.mark.parametrize("gpu, want", [(False, 3.0), (True, 8.0)])
+    def test_servability_passes_its_auto_verdict(self, gpu, want):
+        from muse.cli_impl.supervisor import _servability_reason
+
+        reason = _servability_reason(
+            self._own(), cpu_available_gb=2.0 if not gpu else 64.0,
+            gpu_available_gb=4.0 if gpu else None, auto_cuda_available=gpu,
+        )
+        assert reason is not None and f"{want:.1f} GB" in reason
+
+    def test_backfill_resolves_auto_with_the_host_predicate(self, tmp_path, monkeypatch):
+        from muse.cli_impl import supervisor
+        from muse.core.catalog import _reset_read_catalog_cache, _write_catalog
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        _write_catalog({"m": self._own()})
+        _reset_read_catalog_cache()
+        manifest = {"model_id": "m", "modality": "image/generation",
+                    "capabilities": {"device": "auto"}}
+        for gpu_free, want in ((None, 3.0), (6.0, 8.0)):
+            probe = MagicMock(spec=["gpu_free_gb", "cuda_available"])
+            probe.gpu_free_gb.return_value = gpu_free
+            probe.cuda_available.return_value = False
+            monkeypatch.setattr(supervisor, "_MemoryProbeAdapter", lambda p=probe: p)
+            out = supervisor.backfill_manifest_memory(manifest, "m")
+            assert out["capabilities"]["memory_gb"] == pytest.approx(want)
+
+
+class TestSizingLadderBaseChase:
+    """The sizing ladder itself (`_has_memory_data`, shared by boot
+    validation and the request-path re-check) sizes a manifest with
+    capabilities.base_model from that muse-id base's declared memory_gb or
+    probe measurement when the entry has neither of its own, before the
+    weights-on-disk fallback: a LoRA dir holds only the adapter. It never
+    falls back to summing the BASE's weights (a klein snapshot sums to
+    ~24 GB, which would make the LoRA unservable)."""
+
+    def _lora(self, tmp_path, base="flux2-klein-4b", **entry_extra):
+        d = tmp_path / "lora"
+        d.mkdir(exist_ok=True)
+        (d / "pytorch_lora_weights.safetensors").write_bytes(b"x" * 330_000)
+        return {
+            "local_dir": str(d), "enabled": True,
+            "manifest": {
+                "model_id": "my-klein-lora", "modality": "image/generation",
+                "hf_repo": "someone/klein-lora", "backend_path": _REF_RUNTIME,
+                "capabilities": {
+                    "lora_adapter": True, "base_model": base, "device": "cuda",
+                    **entry_extra.pop("caps", {}),
+                },
+            },
+            **entry_extra,
+        }
+
+    def _base(self, tmp_path, **caps_or_meas):
+        d = tmp_path / "base"
+        d.mkdir(exist_ok=True)
+        (d / "model.safetensors").write_bytes(b"\0" * 4096)
+        entry = {"local_dir": str(d), "enabled": True}
+        if "memory_gb" in caps_or_meas:
+            entry["manifest"] = {
+                "model_id": "flux2-klein-4b", "modality": "image/generation",
+                "hf_repo": "black-forest-labs/FLUX.2-klein-4B",
+                "backend_path": _REF_RUNTIME,
+                "capabilities": {
+                    "memory_gb": caps_or_meas["memory_gb"], "device": "cuda"},
+            }
+        if "peak_bytes" in caps_or_meas:
+            entry["measurements"] = {"cuda": {"peak_bytes": caps_or_meas["peak_bytes"]}}
+        return entry
+
+    def test_base_declared_memory_sizes_unprobed_lora(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)
+        catalog = {"my-klein-lora": lora, "flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)}
+        assert _has_memory_data(lora, catalog=catalog) == (True, 9.5, "cuda")
+
+    def test_base_measurement_sizes_unprobed_lora(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)
+        catalog = {"flux2-klein-4b": self._base(tmp_path, peak_bytes=8 * 1024 ** 3)}
+        has, gb, dev = _has_memory_data(lora, catalog=catalog)
+        assert has and gb == pytest.approx(8.0) and dev == "cuda"
+
+    def test_own_measurement_beats_base(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path, measurements={"cuda": {"peak_bytes": 9 * 1024 ** 3}})
+        catalog = {"flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)}
+        assert _has_memory_data(lora, catalog=catalog)[1] == pytest.approx(9.0)
+
+    def test_own_declared_memory_beats_base(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path, caps={"memory_gb": 7.0})
+        catalog = {"flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)}
+        assert _has_memory_data(lora, catalog=catalog)[1] == 7.0
+
+    def test_base_without_estimate_does_not_sum_base_weights(self, tmp_path):
+        # The base has only weights on disk: the LoRA keeps its own
+        # (adapter) weights fallback, never the base's weight sum.
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)
+        catalog = {"flux2-klein-4b": self._base(tmp_path)}
+        has, gb, _ = _has_memory_data(lora, catalog=catalog)
+        assert has and gb == pytest.approx(330_000 / 1024 ** 3, rel=0.01)
+
+    @pytest.mark.parametrize("base", [
+        "black-forest-labs/FLUX.2-klein-4B",  # HF repo base: nothing to chase
+        "not-pulled",                         # muse id missing from the catalog
+        "my-klein-lora",                      # names itself: no loop
+    ])
+    def test_unchaseable_base_keeps_own_ladder(self, tmp_path, base):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path, base=base)
+        catalog = {"my-klein-lora": lora}
+        has, gb, _ = _has_memory_data(lora, catalog=catalog)
+        assert has and gb < 0.01
+
+    def test_generic_base_model_without_lora_flag(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        entry = self._lora(tmp_path)
+        del entry["manifest"]["capabilities"]["lora_adapter"]
+        catalog = {"flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)}
+        assert _has_memory_data(entry, catalog=catalog)[1] == 9.5
+
+    def test_reads_live_catalog_when_none_given(self, tmp_path, monkeypatch):
+        from muse.cli_impl.supervisor import _has_memory_data
+        from muse.core.catalog import _reset_read_catalog_cache, _write_catalog
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        lora = self._lora(tmp_path)
+        _write_catalog({"my-klein-lora": lora,
+                        "flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)})
+        _reset_read_catalog_cache()
+        assert _has_memory_data(lora)[1] == 9.5
+
+    def _hf_base_lora(self, tmp_path):
+        """The exact shape a raw `muse pull hf://someone/klein-lora` writes:
+        the HF plugin takes base_model from the Hub tag (an HF repo id) and
+        declares no memory_gb (see the curated-overlay test's synthesized
+        manifest)."""
+        from muse.modalities.image_generation.hf import _resolve_lora
+        from tests.modalities.image_generation.test_hf_plugin import (
+            _LIMBIC_REPO, _limbic_info,
+        )
+        caps = _resolve_lora(_LIMBIC_REPO, _limbic_info()).manifest["capabilities"]
+        assert caps["base_model"] == "black-forest-labs/FLUX.2-klein-4B"
+        assert "memory_gb" not in caps
+        lora = self._lora(tmp_path)
+        lora["manifest"]["capabilities"] = dict(caps)
+        return lora
+
+    def _hf_base(self, tmp_path, hf_repo="black-forest-labs/FLUX.2-klein-4B", **kw):
+        base = self._base(tmp_path, **kw)
+        base["hf_repo"] = hf_repo
+        if "manifest" in base:
+            base["manifest"]["hf_repo"] = hf_repo
+        return base
+
+    @pytest.mark.parametrize("stored", [
+        "black-forest-labs/FLUX.2-klein-4B",
+        "Black-Forest-Labs/flux.2-KLEIN-4b",   # Hub ids are case-insensitive
+        "black-forest-labs/FLUX.2-klein-4B@0123abc",  # revision ignored
+    ])
+    def test_hf_repo_base_matches_catalog_entry_by_hf_repo(self, tmp_path, stored):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        catalog = {"some-klein-lora": lora,
+                   "flux2-klein-4b": self._hf_base(tmp_path, hf_repo=stored, memory_gb=9.5)}
+        assert _has_memory_data(lora, catalog=catalog) == (True, 9.5, "cuda")
+
+    def test_hf_repo_base_by_measurement(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        base = self._hf_base(tmp_path, peak_bytes=8 * 1024 ** 3)
+        catalog = {"flux2-klein-4b": base}
+        assert _has_memory_data(lora, catalog=catalog)[1] == pytest.approx(8.0)
+
+    def test_hf_repo_base_not_pulled_keeps_own_weights(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        catalog = {"other": self._hf_base(tmp_path, hf_repo="org/other", memory_gb=9.5)}
+        has, gb, _ = _has_memory_data(lora, catalog=catalog)
+        assert has and gb < 0.01
+
+    def test_hf_repo_match_uses_passed_catalog_only(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._hf_base_lora(tmp_path)
+        catalog = {"flux2-klein-4b": self._hf_base(tmp_path, memory_gb=9.5)}
+        with patch("muse.cli_impl.supervisor._read_catalog",
+                   side_effect=AssertionError("no extra catalog read")):
+            assert _has_memory_data(lora, catalog=catalog)[1] == 9.5
+
+    def test_base_measurement_prefers_the_loras_device(self, tmp_path):
+        # The LoRA loads on cuda: the base's cuda measurement wins over its
+        # memory_gb and over a cpu measurement.
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)
+        base = self._base(tmp_path, memory_gb=9.5)
+        base["measurements"] = {
+            "cpu": {"peak_bytes": 20 * 1024 ** 3},
+            "cuda": {"peak_bytes": 8 * 1024 ** 3},
+        }
+        assert _has_memory_data(lora, catalog={"flux2-klein-4b": base})[1] == pytest.approx(8.0)
+
+    def test_base_other_device_measurement_is_the_last_resort(self, tmp_path):
+        from muse.cli_impl.supervisor import _has_memory_data
+
+        lora = self._lora(tmp_path)  # device cuda
+        base = self._base(tmp_path, memory_gb=9.5)
+        base["measurements"] = {"cpu": {"peak_bytes": 20 * 1024 ** 3}}
+        # Declared memory_gb beats a measurement from another pool...
+        assert _has_memory_data(lora, catalog={"flux2-klein-4b": base})[1] == 9.5
+        # ... which is used only when the base declares nothing.
+        del base["manifest"]
+        assert _has_memory_data(lora, catalog={"flux2-klein-4b": base})[1] == pytest.approx(20.0)
+
+    def test_servability_uses_base_size(self, tmp_path):
+        # Unprobed klein LoRA on an 8 GB card: the 9.5 GB base estimate
+        # does not fit, where the 0.33 MB adapter alone would have.
+        from muse.cli_impl.supervisor import _servability_reason
+
+        lora = self._lora(tmp_path)
+        catalog = {"flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)}
+        reason = _servability_reason(
+            lora, cpu_available_gb=64.0, gpu_available_gb=8.0, catalog=catalog,
+        )
+        assert reason is not None and "9.5 GB > 8.0 GB" in reason
+        assert _servability_reason(
+            lora, cpu_available_gb=64.0, gpu_available_gb=11.0, catalog=catalog,
+        ) is None
+
+    def test_boot_validation_stamps_from_base_size(self, tmp_path, monkeypatch):
+        from muse.cli_impl.supervisor import validate_catalog_at_boot
+        from muse.core.catalog import _reset_read_catalog_cache, _write_catalog
+
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        _write_catalog({"my-klein-lora": self._lora(tmp_path),
+                        "flux2-klein-4b": self._base(tmp_path, memory_gb=9.5)})
+        _reset_read_catalog_cache()
+        state = SupervisorState(workers=[], device="auto")
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = 8.0
+        probe.gpu_total_gb.return_value = 8.0
+        probe.cpu_free_gb.return_value = 64.0
+        probe.cpu_total_gb.return_value = 64.0
+        with patch("muse.cli_impl.supervisor.model_load_blocker", return_value=None):
+            validate_catalog_at_boot(state, memory_probe=probe)
+        assert "9.5 GB" in state.unservable_reasons.get("my-klein-lora", "")
+
+
 # ---------------------------------------------------------------------------
 # v0.47.3 Fix A: on-disk weights-size fallback. A never-probed model is
 # still sizable from its downloaded weights (catalog local_dir), so it

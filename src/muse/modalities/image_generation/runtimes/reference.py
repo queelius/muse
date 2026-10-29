@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import math
 from typing import Any
 
 from muse.core.runtime_helpers import (
@@ -29,7 +28,11 @@ from muse.core.runtime_helpers import (
 )
 from muse.modalities._common.offload import place_pipeline
 from muse.modalities.image_generation.protocol import ImageResult
-from muse.modalities.image_generation.runtimes._lora import resolve_lora_base
+from muse.modalities.image_generation.runtimes._lora import (
+    positive_factor,
+    resolve_lora_base,
+    resolve_lora_scale_factor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -55,20 +58,6 @@ def _ensure_deps() -> None:
             logger.debug("reference runtime: diffusers unavailable: %s", e)
 
 
-def _positive_factor(value: Any) -> float:
-    """lora_scale_factor as a finite float > 0, else ValueError (checked
-    before any weights load)."""
-    try:
-        factor = float(value)
-    except (TypeError, ValueError):
-        factor = math.nan
-    if not math.isfinite(factor) or factor <= 0:
-        raise ValueError(
-            f"lora_scale_factor must be a finite number > 0, got {value!r}"
-        )
-    return factor
-
-
 class DiffusersReferenceModel:
     """Text-to-image plus multi-reference editing over one diffusers pipeline.
 
@@ -85,9 +74,11 @@ class DiffusersReferenceModel:
       - lora_scale: default adapter strength, overridable per request on
         both generate() and edit()
       - lora_scale_factor: multiplier from lora_scale to the weight handed
-        to set_adapters (default 1.0). An rsLoRA adapter whose metadata
-        makes diffusers scale by alpha/sqrt(r) can set 1/that scale so
-        lora_scale 1.0 means what its card (and ComfyUI) mean by 1.0
+        to set_adapters. When not set it is derived from the adapter's
+        safetensors header (runtimes/_lora.py): sqrt(r)/alpha for an
+        rsLoRA adapter without .alpha tensors, which diffusers would scale
+        by alpha/sqrt(r), so lora_scale 1.0 means what its card (and
+        ComfyUI) mean by 1.0; else 1.0. An explicit value always wins
     """
 
     _ADAPTER = "lora"
@@ -112,10 +103,12 @@ class DiffusersReferenceModel:
         lora_adapter: bool = False,
         base_model: str | None = None,
         lora_scale: float = 1.0,
-        lora_scale_factor: float = 1.0,
+        lora_scale_factor: float | None = None,
         **_: Any,
     ) -> None:
-        self._lora_scale_factor = _positive_factor(lora_scale_factor)
+        # An explicit factor is validated before any weights load.
+        if lora_scale_factor is not None:
+            positive_factor(lora_scale_factor)
         _ensure_deps()
         cls = getattr(diffusers, pipeline_class, None) if diffusers is not None else None
         if cls is None:
@@ -136,10 +129,14 @@ class DiffusersReferenceModel:
         self._applied_lora_weight: float | None = None
 
         self._src = local_dir or hf_repo
+        self._lora_scale_factor = 1.0
         if self._lora_adapter:
             # Module-level name so tests' patches of resolve_model_source apply.
             load_src = resolve_lora_base(
                 model_id, base_model, resolve=resolve_model_source,
+            )
+            self._lora_scale_factor = resolve_lora_scale_factor(
+                model_id, self._src, explicit=lora_scale_factor,
             )
         else:
             load_src = self._src

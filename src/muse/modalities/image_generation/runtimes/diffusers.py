@@ -24,7 +24,11 @@ from muse.core.runtime_helpers import (
     select_device,
 )
 from muse.modalities.image_generation.protocol import ImageResult
-from muse.modalities.image_generation.runtimes._lora import resolve_lora_base
+from muse.modalities.image_generation.runtimes._lora import (
+    positive_factor,
+    resolve_lora_base,
+    resolve_lora_scale_factor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -111,6 +115,11 @@ class DiffusersText2ImageModel:
         with or without init_image); edits (inpaint) and variations
         (vary) have no per-request scale channel and always use this
         configured default.
+      - lora_scale_factor: multiplier from lora_scale to the scale handed
+        to diffusers. When not set it is derived from the adapter's
+        safetensors header (runtimes/_lora.py): sqrt(r)/alpha for an
+        rsLoRA adapter without .alpha tensors, else 1.0. An explicit
+        value always wins
     """
 
     def __init__(
@@ -127,8 +136,12 @@ class DiffusersText2ImageModel:
         lora_adapter: bool = False,
         base_model: str | None = None,
         lora_scale: float = 1.0,
+        lora_scale_factor: float | None = None,
         **_: Any,
     ) -> None:
+        # An explicit factor is validated before any weights load.
+        if lora_scale_factor is not None:
+            positive_factor(lora_scale_factor)
         _ensure_deps()
         if AutoPipelineForText2Image is None:
             raise RuntimeError(
@@ -156,11 +169,15 @@ class DiffusersText2ImageModel:
         self._inp_lock = threading.Lock()
         self._lora_adapter = bool(lora_adapter)
         self._default_lora_scale = float(lora_scale)
+        self._lora_scale_factor = 1.0
 
         if self._lora_adapter:
             # Module-level name so tests' patches of resolve_model_source apply.
             load_src = resolve_lora_base(
                 model_id, base_model, resolve=resolve_model_source,
+            )
+            self._lora_scale_factor = resolve_lora_scale_factor(
+                model_id, self._src, explicit=lora_scale_factor,
             )
         else:
             load_src = self._src
@@ -197,6 +214,12 @@ class DiffusersText2ImageModel:
             # above rather than trusting a fluent return value; wrappers and
             # test doubles need not return ``self`` from ``to()``.
             self._pipe.to(self._device)
+
+    def _lora_weight(self, lora_scale: float | None) -> float:
+        """The scale handed to diffusers: the request's lora_scale (else the
+        configured default) times lora_scale_factor."""
+        scale = lora_scale if lora_scale is not None else self._default_lora_scale
+        return float(scale) * self._lora_scale_factor
 
     def _call_pipe(self, pipe: Any, call_kwargs: dict) -> Any:
         """Run one pipeline call, restoring the VAE dtype if it raises.
@@ -273,11 +296,9 @@ class DiffusersText2ImageModel:
         if gen is not None:
             call_kwargs["generator"] = gen
         if self._lora_adapter:
-            s_lora = (
-                lora_scale if lora_scale is not None
-                else self._default_lora_scale
-            )
-            call_kwargs["cross_attention_kwargs"] = {"scale": s_lora}
+            call_kwargs["cross_attention_kwargs"] = {
+                "scale": self._lora_weight(lora_scale),
+            }
 
         out = self._call_pipe(self._pipe, call_kwargs)
         img = out.images[0]
@@ -369,11 +390,9 @@ class DiffusersText2ImageModel:
         if gen is not None:
             call_kwargs["generator"] = gen
         if self._lora_adapter:
-            s_lora = (
-                lora_scale if lora_scale is not None
-                else self._default_lora_scale
-            )
-            call_kwargs["cross_attention_kwargs"] = {"scale": s_lora}
+            call_kwargs["cross_attention_kwargs"] = {
+                "scale": self._lora_weight(lora_scale),
+            }
 
         out = self._call_pipe(self._i2i_pipe, call_kwargs)
         img = out.images[0]
@@ -485,7 +504,7 @@ class DiffusersText2ImageModel:
             call_kwargs["generator"] = gen
         if self._lora_adapter:
             call_kwargs["cross_attention_kwargs"] = {
-                "scale": self._default_lora_scale,
+                "scale": self._lora_weight(None),
             }
 
         out = self._call_pipe(self._inp_pipe, call_kwargs)

@@ -1186,3 +1186,79 @@ def test_successful_call_leaves_vae_alone():
     ):
         m.generate("p")
     assert pipe.vae.to_calls == []
+
+
+class TestLoraScaleFactor:
+    """The SDXL LoRA path multiplies the cross-attention scale by the
+    adapter's scale factor: explicit capability, else derived from the
+    adapter's rsLoRA safetensors header (shared helper in runtimes/_lora)."""
+
+    def _rslora(self, tmp_path):
+        from tests.modalities.image_generation.runtimes.test_lora import (
+            _adapter_md, _write_safetensors,
+        )
+        keys = ["unet.down_blocks.0.attn.to_q.lora_A.weight",
+                "unet.down_blocks.0.attn.to_q.lora_B.weight"]
+        _write_safetensors(
+            tmp_path / "pytorch_lora_weights.safetensors", keys,
+            _adapter_md(prefix="unet", r=64, lora_alpha=128, use_rslora=True),
+        )
+
+    def test_derived_factor_scales_t2i_img2img_and_inpaint(self, tmp_path, monkeypatch):
+        from PIL import Image
+
+        self._rslora(tmp_path)
+        i2i, inp = _patched_pipe(), _patched_pipe()
+        i2i_cls, inp_cls = MagicMock(), MagicMock()
+        i2i_cls.from_pipe.return_value = i2i
+        inp_cls.from_pipe.return_value = inp
+        mod = "muse.modalities.image_generation.runtimes.diffusers"
+        monkeypatch.setattr(f"{mod}.AutoPipelineForImage2Image", i2i_cls)
+        monkeypatch.setattr(f"{mod}.AutoPipelineForInpainting", inp_cls)
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        m = _lora_model(fake_class, tmp_path, monkeypatch)
+        m.generate("a knight")
+        assert pipe.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.0625}
+        m.generate("a knight", lora_scale=2.0)
+        assert pipe.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.125}
+        img = Image.new("RGB", (64, 64))
+        m.generate("a knight", init_image=img, lora_scale=0.5)
+        assert i2i.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.03125}
+        m.inpaint("a knight", init_image=img, mask_image=img)
+        assert inp.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.0625}
+
+    def test_explicit_factor_wins(self, tmp_path, monkeypatch):
+        self._rslora(tmp_path)
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        m = _lora_model(fake_class, tmp_path, monkeypatch, lora_scale_factor=0.5)
+        m.generate("a knight")
+        assert pipe.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.5}
+
+    def test_invalid_explicit_factor_raises_before_load(self, tmp_path, monkeypatch):
+        fake_class = MagicMock()
+        fake_class.from_pretrained.return_value = _patched_pipe()
+        with pytest.raises(ValueError, match="lora_scale_factor"):
+            _lora_model(fake_class, tmp_path, monkeypatch, lora_scale_factor=0)
+        fake_class.from_pretrained.assert_not_called()
+
+    def test_kohya_alpha_adapter_keeps_factor_1(self, tmp_path, monkeypatch):
+        # pixel-art-xl's shape: kohya keys with .alpha tensors.
+        from tests.modalities.image_generation.runtimes.test_lora import (
+            _write_safetensors,
+        )
+        _write_safetensors(
+            tmp_path / "pixel-art-xl.safetensors",
+            ["lora_unet_x.alpha", "lora_unet_x.lora_down.weight",
+             "lora_unet_x.lora_up.weight"],
+            {"ss_network_dim": "64", "ss_network_alpha": "32"},
+        )
+        fake_class = MagicMock()
+        pipe = _patched_pipe()
+        fake_class.from_pretrained.return_value = pipe
+        m = _lora_model(fake_class, tmp_path, monkeypatch, lora_scale=0.7)
+        m.generate("a knight")
+        assert pipe.call_args.kwargs["cross_attention_kwargs"] == {"scale": 0.7}

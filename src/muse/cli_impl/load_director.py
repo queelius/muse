@@ -88,8 +88,8 @@ from muse.core.catalog import _CATALOG_WRITE_LOCK, _read_catalog, _write_catalog
 _INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
 
 from muse.core.memory_probe import (
+    auto_uses_cuda,
     available_capacity_gb,
-    check_cuda_available,
     declared_device,
     optional_probe_gb,
     resolve_memory_pool,
@@ -1999,14 +1999,9 @@ class LoadDirector:
         availability. The latter includes ROCm, whose torch API is CUDA-
         shaped even though NVML is unavailable.
         """
-        gpu_free = self.memory_probe.gpu_free_gb()
-        if gpu_free is not None:
-            return True
-        return resolve_memory_pool(
-            "auto",
-            gpu_free_gb=gpu_free,
-            cuda_available=check_cuda_available(self.cuda_available_fn),
-        ) == "cuda"
+        return auto_uses_cuda(
+            self.memory_probe.gpu_free_gb(), self.cuda_available_fn,
+        )
 
     def _resolve_pool_device(self, device: str) -> str:
         """Map a declared device to the concrete memory POOL it draws from.

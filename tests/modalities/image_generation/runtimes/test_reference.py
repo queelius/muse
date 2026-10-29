@@ -40,8 +40,18 @@ class RecordingPipe:
 
 
 class NoNegPipe(RecordingPipe):
+    """A pipeline without a negative_prompt parameter. `**extra` records any
+    other keyword the runtime sends, so a dropped field is visibly absent
+    (not passed as None)."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = []
+
     def __call__(self, prompt, image=None, width=None, height=None,
-                 num_inference_steps=None, guidance_scale=None, generator=None):
+                 num_inference_steps=None, guidance_scale=None, generator=None,
+                 **extra):
+        self.extra.append(extra)
         return super().__call__(
             prompt, image=image, width=width, height=height,
             num_inference_steps=num_inference_steps,
@@ -130,10 +140,58 @@ def test_generate_rejects_init_image():
 def test_negative_prompt_dropped_when_pipeline_lacks_it():
     m, pipe, _, _ = _build(pipe=NoNegPipe())
     m.generate("x", negative_prompt="bad")
-    assert "negative_prompt" not in pipe.calls[0] or pipe.calls[0]["negative_prompt"] is None
+    m.edit("x", images=[Image.new("RGB", (4, 4))], negative_prompt="bad")
+    # Not passed at all (neither as a value nor as None).
+    assert pipe.extra == [{}, {}]
     m2, pipe2, _, _ = _build()
     m2.generate("x", negative_prompt="bad")
     assert pipe2.calls[0]["negative_prompt"] == "bad"
+
+
+def test_negative_prompt_reported_ignored_through_the_route():
+    """Behind the real route, with the klein capabilities the HF plugin
+    synthesizes (supports_negative_prompt False): the pipeline never sees
+    negative_prompt and the response lists it in metadata.ignored."""
+    from fastapi.testclient import TestClient
+
+    from muse.core.registry import ModalityRegistry
+    from muse.core.server import create_app
+    from muse.modalities.image_generation.hf import _klein_capabilities
+    from muse.modalities.image_generation.routes import build_router
+
+    m, pipe, _, _ = _build(pipe=NoNegPipe(), default_size=(256, 256))
+    caps = _klein_capabilities()
+    reg = ModalityRegistry()
+    reg.register("image/generation", m, manifest={
+        "model_id": "klein", "modality": "image/generation", "capabilities": caps,
+    })
+    app = create_app(registry=reg, routers={"image/generation": build_router(reg)})
+    r = TestClient(app).post("/v1/images/generations", json={
+        "model": "klein", "prompt": "a fox", "negative_prompt": "blurry",
+        "size": "256x256",
+    })
+    assert r.status_code == 200, r.text
+    assert "negative_prompt" in r.json()["metadata"]["ignored"]
+    assert pipe.extra == [{}]
+    assert pipe.calls[0]["prompt"] == "a fox"
+
+
+def test_explicit_device_kwarg_is_used(monkeypatch):
+    # An explicit device (e.g. a set-device pin) goes through select_device
+    # verbatim and reaches placement; "auto" would consult torch instead.
+    seen = []
+    monkeypatch.setattr(
+        f"{MOD}.select_device",
+        lambda device, torch_module=None: seen.append(device) or device,
+    )
+    monkeypatch.setenv("MUSE_VIDEO_CPU_OFFLOAD", "off")
+    m, pipe, _, _ = _build(device="cpu")
+    assert seen == ["cpu"]
+    assert m._device == "cpu"
+    assert pipe.to_calls == [] and pipe.model_offload == []
+    m2, pipe2, _, _ = _build(device="cuda", cpu_offload="model")
+    assert seen[-1] == "cuda"
+    assert pipe2.model_offload == ["cuda"]
 
 
 def test_metadata_counts_references():
@@ -169,7 +227,7 @@ class LoraPipe(RecordingPipe):
         super().enable_model_cpu_offload(device=device)
 
 
-def _build_lora(monkeypatch, *, base_dir="/w/klein-base", **kw):
+def _build_lora(monkeypatch, *, base_dir="/w/klein-base", local_dir="/w/lora", **kw):
     events: list = []
     pipe = LoraPipe(events)
     monkeypatch.setattr(f"{MOD}.resolve_model_source", lambda ref: base_dir)
@@ -189,7 +247,7 @@ def _build_lora(monkeypatch, *, base_dir="/w/klein-base", **kw):
     kw.setdefault("device", "cuda")
     kw.setdefault("cpu_offload", "model")
     m = DiffusersReferenceModel(
-        hf_repo="Limbicnation/pixel-art-lora", local_dir="/w/lora",
+        hf_repo="Limbicnation/pixel-art-lora", local_dir=local_dir,
         model_id="klein-pixel-art", lora_adapter=True,
         base_model="flux2-klein-4b", **kw,
     )
@@ -268,7 +326,7 @@ def test_reference_lora_scale_factor_scales_adapter_weight(monkeypatch):
     assert pipe.adapter_sets[-1] == (["lora"], [0.0])
 
 
-@pytest.mark.parametrize("factor", [0, -0.0625, float("nan"), float("inf"), "x", None])
+@pytest.mark.parametrize("factor", [0, -0.0625, float("nan"), float("inf"), "x", True])
 def test_reference_lora_scale_factor_must_be_finite_and_positive(monkeypatch, factor):
     events: list = []
     monkeypatch.setattr(f"{MOD}.resolve_model_source", lambda ref: "/w/klein-base")
@@ -296,3 +354,58 @@ def test_reference_without_lora_unchanged():
     m.edit("x", images=[Image.new("RGB", (4, 4))], lora_scale=0.5)
     assert pipe.lora_loads == []
     assert pipe.adapter_sets == []
+
+
+# ---------------- derived lora_scale_factor (rsLoRA header) ----------------
+
+from tests.modalities.image_generation.runtimes.test_lora import (  # noqa: E402
+    _KLEIN_PIXEL_ART_CFG, _LORA_KEYS, _adapter_md, _write_safetensors,
+)
+
+
+def _rslora_dir(tmp_path):
+    _write_safetensors(tmp_path / "pytorch_lora_weights.safetensors",
+                       _LORA_KEYS, _adapter_md(**_KLEIN_PIXEL_ART_CFG))
+    return str(tmp_path)
+
+
+def test_reference_lora_derives_factor_from_rslora_header(monkeypatch, tmp_path):
+    # No lora_scale_factor capability (a raw hf:// klein LoRA): r=64,
+    # alpha=128 rsLoRA metadata gives 1/16, so lora_scale 1.0 is not 16x.
+    m, pipe, _ = _build_lora(monkeypatch, local_dir=_rslora_dir(tmp_path))
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [0.0625])]
+    m.edit("x", images=[Image.new("RGB", (4, 4))], lora_scale=2.0)
+    assert pipe.adapter_sets[-1] == (["lora"], [0.125])
+
+
+def test_reference_lora_explicit_factor_wins_over_header(monkeypatch, tmp_path):
+    m, pipe, _ = _build_lora(
+        monkeypatch, local_dir=_rslora_dir(tmp_path), lora_scale_factor=0.5,
+    )
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [0.5])]
+
+
+def test_reference_lora_plain_adapter_keeps_factor_1(monkeypatch, tmp_path):
+    _write_safetensors(tmp_path / "lora.safetensors", _LORA_KEYS)
+    m, pipe, _ = _build_lora(monkeypatch, local_dir=str(tmp_path))
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [1.0])]
+
+
+def test_reference_lora_corrupt_header_keeps_factor_1(monkeypatch, tmp_path):
+    (tmp_path / "pytorch_lora_weights.safetensors").write_bytes(b"garbage")
+    m, pipe, _ = _build_lora(monkeypatch, local_dir=str(tmp_path))
+    m.generate("x")
+    assert pipe.adapter_sets == [(["lora"], [1.0])]
+
+
+def test_reference_without_lora_never_reads_a_header(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        f"{MOD}.resolve_lora_scale_factor",
+        lambda *a, **k: calls.append(a) or 1.0,
+    )
+    _build(local_dir=_rslora_dir(tmp_path))
+    assert calls == []

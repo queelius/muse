@@ -28,9 +28,13 @@ curl -s $MUSE/v1/images/generations -H 'content-type: application/json' -d '{
 
 `lora_scale` (extra field, 0 to 2, default 1.0) turns the style up or down per
 request. It matches the LoRA card's ComfyUI strength (tested 0.85-1.4): the
-curated entry's `lora_scale_factor` maps it to diffusers' adapter weight,
-because diffusers applies the adapter's rsLoRA scaling (16x) and weights of
-0.25 or more destroy the image. Even the top of the allowed range is too much:
+curated entry's `lora_scale_factor` (0.0625) maps it to diffusers' adapter
+weight, because diffusers applies the adapter's rsLoRA scaling (16x) and
+weights of 0.25 or more destroy the image. A LoRA pulled by raw `hf://` URI
+gets the same correction automatically: without an explicit
+`lora_scale_factor`, muse reads the adapter's safetensors header at load and
+uses sqrt(r)/alpha when its `lora_adapter_metadata` declares `use_rslora` and
+there are no `.alpha` tensors (1.0 otherwise; the worker log names the factor). Even the top of the allowed range is too much:
 at `lora_scale` 2 (adapter weight 0.125) sprites already look soft, with the
 background bleeding into them, so stay near 1. `lora_scale: 0` is plain klein,
 which with the trigger phrase already draws clean sprites.
@@ -144,9 +148,22 @@ unzip the saved file. Inputs come as `image_path` / `fill_path` / `base_path`
 
 ## Notes
 
-- A non-curated `hf://` klein LoRA pulled with `--no-probe` starts under-sized
-  (sized from the adapter weights until probed). Use the curated id or let the
-  pull probe run.
+- The pull probe checks that the probe image (and the reference edit, on
+  klein) is neither flat nor noise (std of luminance >= 2, lag-1
+  autocorrelation >= 0.5), so a LoRA that only draws noise at its default
+  `lora_scale` fails the pull and is left disabled. The message reports
+  both numbers; fix the scale (for example `lora_scale_factor`) and run
+  `muse models probe <id>` then `muse models enable <id>`.
+- A klein LoRA that has not been probed (for example a non-curated `hf://`
+  pull with `--no-probe`) is sized from its base's estimate, not from the
+  0.33 GB adapter: the probe measurement (or `memory_gb`) of the catalog
+  entry its base names, by muse id or, for a raw `hf://` pull, by the
+  base's Hub repo (`flux2-klein-4b` carries
+  `black-forest-labs/FLUX.2-klein-4B`). If that base has no `memory_gb`
+  and no probe measurement, or is not pulled, the LoRA is sized from its
+  own adapter weights and starts under-sized until probed: use the curated
+  id or let the pull probe run, which measures the real base+adapter peak
+  (later loads self-heal the estimate upward).
 - Input side is capped by `limits.pixelart_max_input_side` (default 4096), and
   so is the pixelize preview's long side (art size x `preview_scale`): both are
   413 `input_too_large`, checked before the preview is allocated.
