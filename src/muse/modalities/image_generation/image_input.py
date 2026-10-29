@@ -154,7 +154,19 @@ async def decode_image_file(
     When `max_side` is set, declared dimensions are checked before pixel
     decoding so an oversized image is rejected without allocating its
     full raster.
+
+    The pixel decode runs on the calling thread. A route that must keep it
+    off the event loop calls ``read_image_file`` and then
+    ``decode_image_bytes`` in a worker thread.
     """
+    raw = await read_image_file(file, max_bytes=max_bytes)
+    return _bytes_to_pil(raw, max_side=max_side, max_pixels=max_pixels)
+
+
+async def read_image_file(file: Any, *, max_bytes: int | None = None) -> bytes:
+    """The bounded read half of ``decode_image_file``: read at most
+    ``max_bytes + 1`` bytes, close the upload, and reject empty (ValueError)
+    or oversized (ImageTooLargeError) input. No pixel decoding."""
     cap = max_bytes if max_bytes is not None else _default_max_bytes()
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         raise ValueError("max_bytes must be a positive integer")
@@ -179,6 +191,18 @@ async def decode_image_file(
         raise ImageTooLargeError(
             f"image bytes exceeds max ({len(raw)} > {cap})"
         )
+    return raw
+
+
+def decode_image_bytes(
+    raw: bytes,
+    *,
+    max_side: int | None = None,
+    max_pixels: int | None = None,
+) -> Any:
+    """The decode half of ``decode_image_file`` (synchronous, so it can run
+    in a worker thread): dimension caps first, then a full decode. Raises
+    ValueError for undecodable or oversized images."""
     return _bytes_to_pil(raw, max_side=max_side, max_pixels=max_pixels)
 
 

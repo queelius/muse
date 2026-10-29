@@ -8,9 +8,10 @@ pixelize previews whose long side (art size x ``preview_scale``) would exceed
 it, are 413 ``input_too_large``; oversize bytes are 413 ``payload_too_large``. Any
 ValueError from the library is a client error (400), never a 500.
 
-The CPU work runs off the event loop through ``run_native_offload`` and
-under the backend's inference lock, so concurrent requests cannot stack
-their working memory past the model's declared ``memory_gb``.
+Image decoding and the CPU work run off the event loop through
+``run_native_offload``; the work also runs under the backend's inference
+lock, so concurrent requests cannot stack their working memory past the
+model's declared ``memory_gb``.
 
 The pixel library (numpy + Pillow) is imported inside the handlers so
 importing the modality package stays light.
@@ -90,15 +91,25 @@ def _parse_colour_options(background: str, outline: str) -> tuple[str, str]:
 
 
 async def _decode(upload: UploadFile, field: str):
-    """Decode one upload; returns ``(image, None)`` or ``(None, error)``."""
+    """Decode one upload; returns ``(image, None)`` or ``(None, error)``.
+
+    The bounded read stays on the event loop (async I/O); the pixel decode
+    runs in a worker thread, and an image decoded after its request was
+    cancelled is closed there."""
     from muse.modalities.image_generation.image_input import (
         ImageTooLargeError,
-        decode_image_file,
+        decode_image_bytes,
+        read_image_file,
     )
 
     max_side = _max_input_side()
     try:
-        return await decode_image_file(upload, max_side=max_side), None
+        raw = await read_image_file(upload)
+        image = await run_native_offload(
+            lambda: decode_image_bytes(raw, max_side=max_side),
+            cleanup_abandoned=lambda img: _close([img]),
+        )
+        return image, None
     except ImageTooLargeError as e:
         return None, error_response(
             413, "payload_too_large",
@@ -288,7 +299,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         for field, upload in (("a2", a2), ("fill", fill), ("base", base)):
             if upload is None:
                 continue
-            img, error = await _decode(upload, field)
+            try:
+                img, error = await _decode(upload, field)
+            except BaseException:  # cancelled mid-way: close what is decoded
+                _close(images.values())
+                raise
             if error is not None:
                 _close(images.values())
                 return error

@@ -519,3 +519,56 @@ def test_pixelize_hex_options_accepted(client):
     r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(4))},
                     data={"outline": "#102030", "background": " #FF00ff "})
     assert r.status_code == 200, r.text
+
+
+# ----------------------------------------------------------- off the event loop
+
+
+def _on_event_loop() -> bool:
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+@pytest.fixture
+def loop_spy(monkeypatch):
+    """Record, per call, whether image decoding and the pixel work ran on a
+    thread with a running event loop (the handler's) or in a worker thread."""
+    import muse.modalities.image_generation.image_input as image_input
+
+    seen: dict[str, list[bool]] = {"decode": [], "pixelize": [], "autotile": []}
+    real_decode = image_input._bytes_to_pil
+
+    def decode(*a, **k):
+        seen["decode"].append(_on_event_loop())
+        return real_decode(*a, **k)
+
+    monkeypatch.setattr(image_input, "_bytes_to_pil", decode)
+    for name in ("pixelize", "autotile"):
+        real = getattr(PixelTools, name)
+
+        def spy(self, *a, _real=real, _name=name, **k):
+            seen[_name].append(_on_event_loop())
+            return _real(self, *a, **k)
+
+        monkeypatch.setattr(PixelTools, name, spy)
+    return seen
+
+
+def test_pixelize_decodes_and_computes_off_the_event_loop(client, loop_spy):
+    r = client.post("/v1/images/pixelize", files={"image": png(upscaled_sprite(4))})
+    assert r.status_code == 200, r.text
+    assert loop_spy["decode"] == [False]
+    assert loop_spy["pixelize"] == [False]
+
+
+def test_autotile_decodes_and_computes_off_the_event_loop(client, loop_spy):
+    r = client.post("/v1/images/autotile", data={"tile_size": "16"},
+                    files={"fill": png(texture(32)), "base": png(texture(32, (140, 100, 60)))})
+    assert r.status_code == 200, r.text
+    assert loop_spy["decode"] == [False, False]
+    assert loop_spy["autotile"] == [False]
