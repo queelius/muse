@@ -161,7 +161,10 @@ def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
     if "text-to-video" not in tags:
         return False
-    name = _repo_name(getattr(info, "id", "") or "")
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return False
+    name = _repo_name(repo_id)
     return _is_wan(name) or any(p in name for p in _KNOWN_PATTERNS)
 
 

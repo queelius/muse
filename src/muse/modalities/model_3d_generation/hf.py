@@ -266,6 +266,8 @@ _TAG_HINTS = ("image-to-3d", "text-to-3d")
 
 
 def _is_known_family(repo_id: str) -> bool:
+    if not isinstance(repo_id, str):
+        return False
     name = repo_id.rsplit("/", 1)[-1].lower()
     return any(_matches_hint(name, hint) for hint in _NAME_HINTS)
 

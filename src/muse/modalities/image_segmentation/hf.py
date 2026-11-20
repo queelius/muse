@@ -106,7 +106,10 @@ def _sniff(info) -> bool:
         return True
     if "image-segmentation" not in tags:
         return False
-    name = (getattr(info, "id", "") or "").rsplit("/", 1)[-1].lower()
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return False
+    name = repo_id.rsplit("/", 1)[-1].lower()
     return _SAM_NAME_RE.search(name) is not None
 
 

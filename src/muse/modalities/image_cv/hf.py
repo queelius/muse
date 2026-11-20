@@ -94,7 +94,10 @@ _DETECTION_NAME_HINTS = ("detr", "yolos", "rtdetr", "rt-detr")
 
 
 def _repo_name(info) -> str:
-    return (getattr(info, "id", "") or "").rsplit("/", 1)[-1].lower()
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return ""
+    return repo_id.rsplit("/", 1)[-1].lower()
 
 
 def _is_depth(info) -> bool:
