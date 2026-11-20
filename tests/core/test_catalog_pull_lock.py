@@ -239,3 +239,24 @@ def test_remove_waits_for_same_model_pull_lock(tmp_path, monkeypatch):
             remover.join(2)
     remove_locked.assert_called_once_with("same-model", purge=True)
     config.reset_config()
+
+
+def test_pull_and_storage_locks_are_not_reentrant(tmp_path, monkeypatch):
+    """A same-thread nested acquire never succeeds: each acquire opens its own
+    flock handle, so the thread locks are plain Locks, not RLocks."""
+    import threading
+
+    import pytest
+    from muse.core import catalog_locks
+    from muse.core.catalog_store import ModelInUseError, StorageBusyError
+
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    with catalog_locks._model_pull_lock("m"):
+        with pytest.raises(ModelInUseError):
+            with catalog_locks._model_pull_lock("m", wait=False):
+                pass
+    with catalog_locks._storage_cache_lock():
+        with pytest.raises(StorageBusyError):
+            with catalog_locks._storage_cache_lock(wait=False):
+                pass
+    assert type(catalog_locks._STORAGE_THREAD_LOCK) is type(threading.Lock())

@@ -28,11 +28,16 @@ from muse.core.catalog_store import (
 # writes catalog.json. Pair a per-identity thread lock with an advisory file
 # lock that spans the complete pull helper call. Resolver URIs are digested so
 # untrusted identifier text never becomes part of a filesystem path.
+#
+# None of these locks is reentrant: each acquire opens its own file handle,
+# and flock() conflicts between two open file descriptions even in one
+# process, so a nested acquire on the same thread fails (wait=False) or
+# deadlocks (wait=True). Plain Locks make that explicit.
 _PULL_LOCKS_GUARD = threading.Lock()
-_PULL_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_PULL_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _RESOURCE_LOCKS_GUARD = threading.Lock()
 _RESOURCE_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_STORAGE_THREAD_LOCK = threading.RLock()
+_STORAGE_THREAD_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -64,7 +69,7 @@ def _model_pull_lock(identity: str, *, wait: bool = True):
     """Thread/process lock covering one model's complete pull transaction."""
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     with _PULL_LOCKS_GUARD:
-        thread_lock = _PULL_THREAD_LOCKS.setdefault(digest, threading.RLock())
+        thread_lock = _PULL_THREAD_LOCKS.setdefault(digest, threading.Lock())
     return _advisory_lock(
         _catalog_dir() / "locks" / f"pull-{digest}.lock",
         thread_lock,
