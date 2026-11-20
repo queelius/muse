@@ -85,3 +85,38 @@ def test_pipeline_modalities_declare_discovery():
                       ("audio/transcription", "muse_translate_audio"),
                       ("audio/quality", "muse_assess_audio_quality")]:
         assert tool in {r["mcp_tool"] for r in d[tag]["routes"]}
+
+
+def test_routes_report_whether_model_is_optional(tmp_path):
+    """A route listed in the package's MODEL_OPTIONAL_PATHS says so, so the
+    capabilities document, llms.txt and MCP schemas can drop `model`."""
+    other = ROUTE.replace('"/v1/x"', '"/v1/y"').replace("muse_x", "muse_y")
+    _pkg(tmp_path, 'MODEL_OPTIONAL_PATHS = ("/v1/x",)\n'
+         f'DISCOVERY = {{"summary": "s", "use_for": [], "not_for": [], '
+         f'"routes": [{ROUTE}, {other}]}}\n')
+    routes = modality_discovery([tmp_path])["audio/x"]["routes"]
+    assert [r["model_optional"] for r in routes] == [True, False]
+
+
+def test_default_scan_returns_copies_of_the_cached_declarations():
+    """dirs=None reads the memoized declarations: annotating or mutating the
+    result must never reach the cache."""
+    from muse.core import discovery
+
+    first = modality_discovery()
+    route = first["image/pixelart"]["routes"][0]
+    assert route["model_optional"] is True
+    route["path"] = "/mutated"
+    first["image/pixelart"]["routes"].clear()
+    again = modality_discovery()
+    assert again["image/pixelart"]["routes"][0]["path"] == "/v1/images/pixelize"
+    cached = dict(discovery._declarations("DISCOVERY", None))["image/pixelart"]
+    assert all("model_optional" not in r for r in cached["routes"])
+
+
+def test_bundled_model_optional_routes_are_marked():
+    d = modality_discovery()
+    flags = {r["path"]: r["model_optional"] for m in d.values() for r in m["routes"]}
+    assert flags["/v1/images/pixelize"] and flags["/v1/images/autotile"]
+    assert flags["/v1/translate"] and flags["/languages"]
+    assert not flags["/v1/images/generations"] and not flags["/v1/systemone"]

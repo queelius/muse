@@ -89,3 +89,9 @@ def test_model_optional_paths_declared_and_discovered():
         _reset_model_optional_paths_cache()
     assert paths["/v1/images/pixelize"] == "image/pixelart"
     assert paths["/v1/images/autotile"] == "image/pixelart"
+
+
+def test_discovery_carries_the_walk_sheet_recipe():
+    summary = modality_discovery()["image/pixelart"]["summary"]
+    assert "klein-pixel-art" in summary and "klein-pixel-walk" in summary
+    assert "sheet=4x4 grid=4 palette=auto:24" in summary

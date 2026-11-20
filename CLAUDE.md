@@ -538,6 +538,16 @@ read-only, never triggers a model load, computed off the event loop:
 - Federation: the coordinator serves the merged `/v1/capabilities`, `/`,
   `/llms.txt` and the first reachable node's `/openapi.json`; its `/docs` and
   `/redoc` are disabled.
+- `modality_discovery()` adds `model_optional` to every route (true when the
+  package lists the path in `MODEL_OPTIONAL_PATHS`), returning copies so the
+  cached declarations are never mutated. The coordinator's merged document
+  sets every `model_optional` to false (its proxy has no default-model seam).
+- `/llms.txt` follows llmstxt.org (H1, blockquote, workflow paragraph,
+  relative links, MCP section, only modalities with an enabled model, at most
+  8 models each, an `Optional` section for the rest); the exact shape is in
+  docs/AGENT_DISCOVERY.md. `server.mcp.install` pins
+  `museq[mcp]>=<major>.<minor>` for a release version and leaves dev or local
+  builds unpinned, so uvx does not reuse an older cached client.
 
 ## MCP server (Using muse from Claude Desktop / Claude Code)
 
@@ -545,7 +555,7 @@ read-only, never triggers a model load, computed off the event loop:
 light extra (`mcp = httpx, mcp>=1.19,<2, pillow`; the `server` extra pins the
 same `mcp`):
 
-    claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp
+    claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]>=0.70" muse mcp
 
 It lists `muse_describe` (the server's capabilities document), the inference
 tools generated from the server's `/openapi.json` and `/v1/capabilities`
@@ -569,13 +579,28 @@ src/muse/mcp/
   generated.py  tools generated from the discovery document; request building and result rendering
   files.py      local file inputs (allowed prefixes) and hardened content-named outputs
   tools/admin.py   the 11 admin tools
-src/muse/cli_impl/mcp_server.py  CLI entry (stdio or HTTP+SSE transport)
+src/muse/cli_impl/mcp_server.py  CLI entry (stdio or Streamable HTTP transport)
 ```
 
 Transports: stdio (default) and `muse mcp --http --port 8088` (Starlette,
 `/mcp` mount via `StreamableHTTPSessionManager`). `--filter all|admin|inference`
 pins the surface. `--admin-token` / `$MUSE_ADMIN_TOKEN` is the admin bearer.
 Long-running ops (pull, probe, enable) return a `job_id`; poll `muse_get_jobs`.
+
+The server sends `instructions` at initialize (`muse.mcp.server.INSTRUCTIONS`):
+the describe, pick a model, call, read files workflow; the path-input rules
+and the `_paths` / `_urls` list forms; that admin tools need the token except
+`muse_list_models` and `muse_search_models`, and that long jobs return a
+job_id to poll. An admin-only or inference-only filter sends just its half.
+Every tool has a `title` and `ToolAnnotations`. Generated inference tools are
+never `readOnlyHint` (any can write a local file) nor `destructiveHint` (a
+cold load evicting idle models is load management), are `openWorldHint` only
+with `*_url` / `*_urls` inputs, and are idempotent on GET routes.
+`muse_describe` and the admin read tools are read-only; `muse_remove_model`,
+`muse_disable_model` and `muse_pull_model` are destructive (a re-pull
+replaces weights; a failed probe disables the model); `muse_search_models`
+and `muse_pull_model` are open-world. The generated `model` argument has
+`minLength: 1` and is not required on a `model_optional` route.
 
 I/O conventions:
 - Media outputs are written to files and returned as path, sha256, model and
@@ -615,7 +640,7 @@ Claude Desktop config:
   "mcpServers": {
     "muse": {
       "command": "uvx",
-      "args": ["--from", "museq[mcp]", "muse", "mcp"],
+      "args": ["--from", "museq[mcp]>=0.70", "muse", "mcp"],
       "env": {
         "MUSE_SERVER": "http://localhost:8000",
         "MUSE_MCP_OUTPUT_DIR": "/Users/you/muse-output",
@@ -696,7 +721,7 @@ muse models refresh <id> --no-extras           # skip the model's pip_extras (on
 muse models refresh --all --json               # machine-readable output
 muse serve --device cuda
 muse mcp                                       # MCP server for LLM clients (stdio mode)
-muse mcp --http --port 8088                    # MCP server in HTTP+SSE mode
+muse mcp --http --port 8088                    # MCP server in Streamable HTTP mode
 muse mcp --filter admin                        # only the admin tools
 muse mcp --filter inference                    # only muse_describe + generated tools
 

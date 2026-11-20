@@ -1,7 +1,7 @@
 """CLI entry for ``muse mcp``.
 
 Probes the muse server at startup, builds an MCPServer, runs in stdio
-(default) or HTTP+SSE mode. The argparse handler in ``muse.cli`` routes
+(default) or Streamable HTTP mode. The argparse handler in ``muse.cli`` routes
 here.
 
 Heavy imports live inside the function so ``muse --help`` stays cheap.
@@ -70,7 +70,7 @@ def run_mcp_server(
     try:
         if http:
             print(
-                f"muse mcp HTTP+SSE on http://127.0.0.1:{port}/mcp "
+                f"muse mcp Streamable HTTP on http://127.0.0.1:{port}/mcp "
                 f"({len(server.tools)} tools, filter={filter_kind})",
                 file=sys.stderr,
             )

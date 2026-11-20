@@ -270,18 +270,24 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     # Ids go in the description, never an `enum`: MCP SDKs validate calls
     # against the client's cached schema, so an enum would reject a model
     # enabled mid-session. The server is the authority on unknown ids.
-    model_prop = {"type": "string", "description": (
+    optional_model = bool(route.get("model_optional"))
+    model_prop = {"type": "string", "minLength": 1, "description": (
         "Model id. Serving now: " + ", ".join(ids) + " (see the list above; "
         "a model enabled later works too)." if ids else
         "Model id; no enabled model serves this route right now.")}
-    if ids:
+    if optional_model:
+        model_prop["description"] = (
+            "Optional: omit it and muse uses the first enabled model of this "
+            "modality. " + model_prop["description"])
+    if ids and not optional_model:
         required.append("model")
     else:
         required = [r for r in required if r != "model"]
     props["model"] = model_prop
     has_media = _has_media(route)
     props["out_path"] = {"type": "string", "description": (
-        "File for the media output (later outputs get -1, -2... suffixes)."
+        "File for the media output, replaced if it exists (later outputs get "
+        "-1, -2... suffixes). Omit it for a content-named file in the output dir."
         if has_media else "File for the JSON result when it is too large to "
         "return inline (over 20,000 characters).")}
     image_output = _is_image_output(mod["modality"], route)
@@ -291,13 +297,38 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     schema = {"type": "object", "properties": props,
               "required": sorted(set(required)),
               "additionalProperties": bool(base.get("additionalProperties", not from_openapi))}
-    tool = types.Tool(name=route["mcp_tool"],
+    tool = types.Tool(name=route["mcp_tool"], title=tool_title(route["mcp_tool"]),
                       description=_description(mod, route, models, from_openapi, defaults),
-                      inputSchema=schema, outputSchema=OUTPUT_SCHEMA)
+                      inputSchema=schema, outputSchema=OUTPUT_SCHEMA,
+                      annotations=_annotations(route, props))
     return GeneratedTool(name=route["mcp_tool"], tool=tool, route=copy.deepcopy(route),
                          modality=mod["modality"], required_files=tuple(required_files),
                          fixed=fixed, image_output=image_output, aliases=aliases,
                          defaults=defaults)
+
+
+def tool_title(name: str) -> str:
+    """A display title from a tool name: ``muse_pixelize_image`` ->
+    ``Pixelize image``."""
+    words = name.removeprefix("muse_").replace("_", " ").strip()
+    return words[:1].upper() + words[1:]
+
+
+def _annotations(route: dict, props: dict) -> types.ToolAnnotations:
+    """Hints for clients deciding whether to confirm a call.
+
+    No generated tool is read-only: any of them can write a local file (a
+    media output, a non-JSON body, or a spilled large result). None is
+    destructive: they change no muse state and write only new or explicitly
+    named (``out_path``) files. A call can still cold-load its model, which
+    may evict other idle models from memory; that is load management, not a
+    destructive update. A tool taking ``*_url`` / ``*_urls`` inputs reaches
+    URLs outside the muse server (``openWorldHint``). A GET is idempotent.
+    """
+    takes_url = any(k.endswith(("_url", "_urls")) for k in props)
+    return types.ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False,
+        idempotentHint=route["method"].upper() == "GET", openWorldHint=takes_url)
 
 
 def generate_tools(capabilities: dict, openapi: dict) -> list[GeneratedTool]:
@@ -319,6 +350,9 @@ def generate_tools(capabilities: dict, openapi: dict) -> list[GeneratedTool]:
 def describe_tool() -> types.Tool:
     return types.Tool(
         name=DESCRIBE,
+        title="Describe muse",
+        annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                          idempotentHint=True, openWorldHint=False),
         description=(
             "Call this before choosing a muse model or tool. Returns the muse "
             "server's capabilities document: every modality (what it is for and "

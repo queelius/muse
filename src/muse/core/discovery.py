@@ -17,6 +17,7 @@ a warning log.
 """
 from __future__ import annotations
 
+import copy
 import ast
 import functools
 import importlib.util
@@ -201,8 +202,8 @@ def _memoize_default_scan(fn):
     """Memoize a declaration seam's validated result for the default scan
     (dirs=None), so a malformed declaration is warned about once per process
     rather than on every request-path call. Explicit `dirs` always rescan.
-    A dict result is returned as a shallow copy so callers cannot edit the
-    cached one."""
+    A dict result is returned as a deep copy so callers cannot edit the
+    cached one (modality_discovery's values are nested route dicts)."""
     @functools.wraps(fn)
     def wrapper(dirs: list[Path] | None = None):
         if dirs is not None:
@@ -210,7 +211,7 @@ def _memoize_default_scan(fn):
         if fn.__name__ not in _SEAM_RESULT_CACHE:
             _SEAM_RESULT_CACHE[fn.__name__] = fn(None)
         result = _SEAM_RESULT_CACHE[fn.__name__]
-        return dict(result) if isinstance(result, dict) else result
+        return copy.deepcopy(result) if isinstance(result, dict) else result
     return wrapper
 
 
@@ -386,10 +387,22 @@ def modality_discovery(dirs: list[Path] | None = None) -> dict[str, dict]:
     a well-formed DISCOVERY literal (what the capabilities document, OpenAPI
     descriptions and generated MCP tools are built from). Malformed
     declarations are logged and skipped.
+
+    Each returned route gains ``model_optional``: true when the same package
+    lists its path in MODEL_OPTIONAL_PATHS (the gateway then picks the
+    modality's first enabled model for a request without ``model``). The
+    result is a copy; the cached declarations are never mutated.
     """
+    optional: dict[str, set[str]] = {}
+    for tag, value in _declarations("MODEL_OPTIONAL_PATHS", dirs):
+        if isinstance(value, (tuple, list)):
+            optional.setdefault(tag, {p for p in value if isinstance(p, str)})
     out: dict[str, dict] = {}
     for tag, value in _declarations("DISCOVERY", dirs):
         if _valid_discovery(value):
+            value = copy.deepcopy(value)
+            for route in value["routes"]:
+                route["model_optional"] = route["path"] in optional.get(tag, set())
             out[tag] = value
         else:
             logger.warning("ignoring malformed DISCOVERY for %s", tag)

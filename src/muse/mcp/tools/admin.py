@@ -25,7 +25,7 @@ unauthenticated; it falls through to MuseClient.list_models().
 """
 from __future__ import annotations
 
-from mcp.types import Tool
+from mcp.types import Tool, ToolAnnotations
 
 from muse.mcp.client import MuseClient
 from muse.mcp.tools import ADMIN_TOOLS, ToolEntry
@@ -128,15 +128,37 @@ def _handle_get_jobs(client: MuseClient, args: dict) -> list[dict]:
 
 # ---- tool definitions ----
 
+# Hints for clients deciding whether to confirm a call. Reads never change
+# muse; enable and probe load or measure something and are safe to repeat.
+# Remove deletes catalog state (and a venv with purge), disable takes a model
+# out of service, and pull is destructive too: a re-pull replaces weights and
+# a failed probe leaves a working model disabled. Only the Hub-facing tools
+# (search, pull) reach outside the local muse server.
+_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                        idempotentHint=True, openWorldHint=False)
+_READ_WEB = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                            idempotentHint=True, openWorldHint=True)
+_PULL = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                        idempotentHint=True, openWorldHint=True)
+_ENABLE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                          idempotentHint=True, openWorldHint=False)
+_DISABLE = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                           idempotentHint=True, openWorldHint=False)
+_REMOVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                          idempotentHint=True, openWorldHint=False)
+
 ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_list_models",
+            title="List enabled models",
+            annotations=_READ,
             description=(
-                "List all models in muse's catalog. Use this to discover "
-                "what's available before pulling, or to check what's "
-                "currently loaded. Returns a list with id, modality, "
-                "and capabilities."
+                "List the enabled models (the public /v1/models list) with "
+                "id, modality, capabilities and `loaded` (resident now; a "
+                "cold model loads on its first request). Disabled and "
+                "not-yet-pulled models are not listed: use "
+                "muse_search_models for those. No admin token needed."
             ),
             inputSchema={
                 "type": "object",
@@ -165,10 +187,13 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_get_model_info",
+            title="Get model status",
+            annotations=_READ,
             description=(
                 "Get detailed live status for one model: catalog "
                 "metadata, capabilities, measured memory, plus worker "
-                "status (pid, port, uptime, restart count) when loaded."
+                "status (pid, port, uptime, restart count) when loaded. "
+                "Requires admin token."
             ),
             inputSchema={
                 "type": "object",
@@ -186,11 +211,14 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_search_models",
+            title="Search pullable models",
+            annotations=_READ_WEB,
             description=(
                 "Search HuggingFace for muse-pullable models matching a "
                 "query. Use this to discover candidate models before "
                 "calling muse_pull_model. Filter by modality and "
-                "max size to narrow the result set."
+                "max size to narrow the result set. Runs in this MCP "
+                "process against the Hugging Face Hub; no admin token needed."
             ),
             inputSchema={
                 "type": "object",
@@ -222,12 +250,16 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_pull_model",
+            title="Pull a model",
+            annotations=_PULL,
             description=(
                 "Download model weights and install per-model "
                 "dependencies. Long-running: returns a job_id; poll "
                 "muse_get_jobs to track progress. Accepts a curated "
                 "alias (e.g. 'kokoro-82m') or resolver URI (e.g. "
-                "'hf://Qwen/Qwen3-9B-GGUF@q4_k_m'). Requires admin token."
+                "'hf://Qwen/Qwen3-9B-GGUF@q4_k_m'). The pull ends with a "
+                "probe; if the probe fails the job fails and the model is "
+                "left disabled. Requires admin token."
             ),
             inputSchema={
                 "type": "object",
@@ -247,6 +279,8 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_remove_model",
+            title="Remove a model",
+            annotations=_REMOVE,
             description=(
                 "Remove a model from muse's catalog. Pass purge=true "
                 "to also delete its per-model venv. Refuses to remove "
@@ -273,10 +307,13 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_enable_model",
+            title="Enable a model",
+            annotations=_ENABLE,
             description=(
                 "Enable a pulled model: marks it enabled in the catalog "
-                "and loads it into a worker. Long-running: returns "
-                "job_id; poll muse_get_jobs. Requires admin token."
+                "and loads it into a worker. Not needed to use an enabled "
+                "model: inference calls load it on demand. Long-running: "
+                "returns job_id; poll muse_get_jobs. Requires admin token."
             ),
             inputSchema={
                 "type": "object",
@@ -291,10 +328,12 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_disable_model",
+            title="Disable a model",
+            annotations=_DISABLE,
             description=(
                 "Disable a model: marks it disabled in the catalog and "
-                "unloads it from its worker. Synchronous (returns "
-                "immediately). Requires admin token."
+                "unloads it from its worker, so requests for it fail until "
+                "it is enabled again. Synchronous. Requires admin token."
             ),
             inputSchema={
                 "type": "object",
@@ -309,6 +348,8 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_probe_model",
+            title="Probe model memory",
+            annotations=_ENABLE,
             description=(
                 "Measure a model's VRAM/RAM by loading + running "
                 "representative inference. Long-running: returns "
@@ -340,6 +381,8 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_get_memory_status",
+            title="Get memory status",
+            annotations=_READ,
             description=(
                 "Aggregate memory across all loaded models, by device "
                 "(GPU/CPU). Includes per-model breakdowns. Useful "
@@ -353,6 +396,8 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_get_workers",
+            title="List workers",
+            annotations=_READ,
             description=(
                 "List all workers, the models each hosts, plus pid, "
                 "port, uptime, and restart count. Useful for live "
@@ -365,6 +410,8 @@ ADMIN_TOOLS.extend([
     ToolEntry(
         tool=Tool(
             name="muse_get_jobs",
+            title="Get admin jobs",
+            annotations=_READ,
             description=(
                 "Poll a long-running admin job by id, or list recent "
                 "jobs when called without job_id. State machine: "

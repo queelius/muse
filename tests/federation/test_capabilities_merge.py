@@ -36,3 +36,16 @@ def test_disagreeing_revisions_both_shown():
 def test_garbage_entries_ignored():
     d = {"models": [1, {"id": 3}], "modalities": ["x"]}
     assert merge_capabilities([("a", d)])["models"] == []
+
+
+def test_coordinator_never_claims_model_optional():
+    """The coordinator's proxy routes by `model` and 400s without one, so its
+    merged document must not advertise model-optional routes."""
+    route = {"method": "POST", "path": "/v1/images/pixelize", "model_optional": True}
+    node = {"modalities": [{"modality": "image/pixelart", "routes": [dict(route)],
+                            "models": ["pixel-tools"]}],
+            "models": [{"id": "pixel-tools", "modality": "image/pixelart"}]}
+    merged = merge_capabilities([("a", node), ("b", node)])
+    [mod] = merged["modalities"]
+    assert [r["model_optional"] for r in mod["routes"]] == [False]
+    assert node["modalities"][0]["routes"][0]["model_optional"] is True  # input untouched

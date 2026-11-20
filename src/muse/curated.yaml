@@ -461,7 +461,7 @@
   modality: image/generation
   size_gb: 0.09
   description: "4-direction walk-cycle spritesheet LoRA for FLUX.2 klein base 4B (4x4 sheet of 32x32 characters, card template prepended automatically); pre-paired with flux2-klein-base-4b (pull it first)"
-  summary: "4x4 walk-cycle spritesheets of small characters; send the output through /v1/images/pixelize with sheet=4x4 grid=4 for 32x32 frames"
+  summary: "4x4 walk-cycle spritesheets of small characters; send the output through /v1/images/pixelize with sheet=4x4 grid=4 palette=auto:24 for 32x32 frames"
   strengths:
     - "One 512x512 image holds walk frames facing down, left, right and up, plus arms-raised, jump and lying frames"
     - "The card's spritesheet template sentence is prepended unless the prompt already has it; describe only the character"
