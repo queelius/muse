@@ -16,6 +16,46 @@ from muse.cli_impl.gateway import (
     build_gateway,
     WorkerRoute,
 )
+from muse.cli_impl.supervisor import SupervisorState, WorkerSpec
+
+
+# Models served by the most recent `_gateway`; the autouse fixture below
+# resolves their manifests.
+_ROUTED: dict[str, int] = {}
+
+
+def _gateway(routes, **kwargs):
+    """A gateway whose running workers serve `routes`.
+
+    Each route becomes a running WorkerSpec (aggregation fans out to it)
+    and a director that hands out its port, so requests take the real
+    director path (`_route_via_director`).
+    """
+    state = SupervisorState(workers=[], device="cpu")
+    _ROUTED.clear()
+    for route in routes:
+        port = int(route.worker_url.rsplit(":", 1)[1])
+        spec = WorkerSpec(models=[route.model_id], python_path="/p", port=port)
+        spec.status = "running"
+        state.workers.append(spec)
+        _ROUTED[route.model_id] = port
+    ports = dict(_ROUTED)
+    director = MagicMock()
+    director.acquire.side_effect = lambda model_id, *, manifest: ports[model_id]
+    state.director = director
+    return build_gateway(state=state, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _manifests_for_routed_models(monkeypatch):
+    def get_manifest(model_id):
+        if model_id not in _ROUTED:
+            raise KeyError(model_id)
+        return {"model_id": model_id, "modality": "audio/speech", "capabilities": {}}
+
+    monkeypatch.setattr("muse.cli_impl.gateway.get_manifest", get_manifest)
+    yield
+    _ROUTED.clear()
 
 
 class _RawResponse:
@@ -379,22 +419,17 @@ class TestBoundedRequestBody:
 class TestBuildGateway:
     def test_returns_fastapi_app(self):
         from fastapi import FastAPI
-        app = build_gateway([])
+        app = _gateway([])
         assert isinstance(app, FastAPI)
 
-    def test_gateway_info_endpoint_exposes_routes(self):
-        from fastapi.testclient import TestClient
-        routes = [
-            WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
-            WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
-        ]
-        app = build_gateway(routes)
-        client = TestClient(app)
-        r = client.get("/_gateway-info")
-        assert r.status_code == 200
-        data = r.json()
-        model_ids = {entry["model_id"] for entry in data["routes"]}
-        assert model_ids == {"soprano-80m", "sd-turbo"}
+    def test_worker_ports_are_not_exposed(self):
+        """R16: /_gateway-info (unauthenticated, listed internal worker
+        ports) is gone; the path is an ordinary proxy request now."""
+        routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
+        r = TestClient(_gateway(routes)).get("/_gateway-info")
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "model_required"
+        assert "9001" not in r.text
 
 
 class TestProxy:
@@ -404,7 +439,7 @@ class TestProxy:
                 model_id="soprano-80m", worker_url="http://127.0.0.1:9001",
             )
         ]
-        app = build_gateway(routes, max_request_body_bytes=48)
+        app = _gateway(routes, max_request_body_bytes=48)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -418,7 +453,7 @@ class TestProxy:
         mock_client_cls.assert_not_called()
 
     def test_explicit_route_is_also_protected_by_global_body_limit(self):
-        app = build_gateway([], max_request_body_bytes=8)
+        app = _gateway([], max_request_body_bytes=8)
         client = TestClient(app)
 
         response = client.request("GET", "/v1/models", content=b"x" * 9)
@@ -428,7 +463,7 @@ class TestProxy:
 
     @pytest.mark.parametrize("model", [[], {}, 1, True, "", " " * 3])
     def test_non_string_or_empty_model_returns_invalid_model(self, model):
-        app = build_gateway([
+        app = _gateway([
             WorkerRoute(
                 model_id="soprano-80m",
                 worker_url="http://127.0.0.1:9001",
@@ -447,7 +482,7 @@ class TestProxy:
         outbound.assert_not_called()
 
     def test_overlong_model_returns_invalid_model(self):
-        app = build_gateway([])
+        app = _gateway([])
         response = TestClient(app).post(
             "/v1/audio/speech",
             json={"model": "m" * 513, "input": "hi"},
@@ -457,7 +492,7 @@ class TestProxy:
 
     def test_proxy_forwards_post_to_matching_worker(self):
         routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -494,7 +529,7 @@ class TestProxy:
 
     def test_proxy_returns_404_openai_envelope_for_unknown_model(self):
         routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         r = client.post("/v1/audio/speech", json={
@@ -516,7 +551,7 @@ class TestProxy:
         Saw this live on v0.13.1 against /v1/audio/transcriptions.
         """
         routes = [WorkerRoute(model_id="whisper-tiny", worker_url="http://127.0.0.1:9099")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         captured_body = {}
@@ -567,7 +602,7 @@ class TestProxy:
     def test_proxy_returns_400_when_model_not_specified(self):
         """POST without a model field: 400 (client must provide routing info)."""
         routes = [WorkerRoute(model_id="soprano-80m", worker_url="http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         r = client.post("/v1/audio/speech", json={"input": "hi"})
@@ -583,7 +618,7 @@ class TestAggregation:
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
         ]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -623,7 +658,7 @@ class TestAggregation:
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9999"),  # down
         ]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -653,7 +688,7 @@ class TestAggregation:
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
         ]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -698,7 +733,7 @@ class TestAggregation:
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
         ]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -732,7 +767,7 @@ class TestAggregation:
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
         ]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -767,7 +802,7 @@ class TestAggregation:
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
         ]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -797,7 +832,7 @@ class TestStreaming:
     def test_sse_stream_is_relayed_chunk_by_chunk(self):
         """A `stream: true` response (text/event-stream) must pass through."""
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         chunks = [b"data: chunk1\n\n", b"data: chunk2\n\n", b"event: done\ndata: \n\n"]
@@ -850,7 +885,7 @@ class TestAsyncClientLifecycle:
         from muse.cli_impl import gateway as gateway_mod
 
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app, raise_server_exceptions=False)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -880,7 +915,7 @@ class TestAsyncClientLifecycle:
 
     def test_stream_open_timeout_maps_504(self):
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app, raise_server_exceptions=False)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -904,7 +939,7 @@ class TestAsyncClientLifecycle:
 
     def test_cleanup_failure_does_not_mask_transport_error(self):
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app, raise_server_exceptions=False)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -937,7 +972,7 @@ class TestAdminMount:
         monkeypatch.setenv("MUSE_CONFIG", str(tmp_path / "absent-config.yaml"))
         config.reset_config()
         try:
-            app = build_gateway([])
+            app = _gateway([])
             client = TestClient(app, raise_server_exceptions=False)
             r = client.get("/v1/admin/workers")
             assert r.status_code == 503
@@ -960,7 +995,7 @@ class TestAdminMount:
         clear_supervisor_state()
         set_supervisor_state(SupervisorState(workers=[], device="cpu"))
         try:
-            app = build_gateway([])
+            app = _gateway([])
             client = TestClient(app, raise_server_exceptions=False)
             r = client.get(
                 "/v1/admin/workers",
@@ -974,7 +1009,7 @@ class TestAdminMount:
     def test_admin_path_with_wrong_token_returns_403(self, monkeypatch):
         from muse.admin.auth import ADMIN_TOKEN_ENV
         monkeypatch.setenv(ADMIN_TOKEN_ENV, "tok")
-        app = build_gateway([])
+        app = _gateway([])
         client = TestClient(app, raise_server_exceptions=False)
         r = client.get(
             "/v1/admin/workers",
@@ -986,7 +1021,7 @@ class TestAdminMount:
         """Regression: /v1/* with body['model'] still hits the proxy."""
         # Use the proxy with no actual workers; it should return 404
         # model_not_found, NOT some admin-route shadow.
-        app = build_gateway([])
+        app = _gateway([])
         client = TestClient(app, raise_server_exceptions=False)
         r = client.post(
             "/v1/audio/speech",
@@ -1010,7 +1045,7 @@ class TestAggregationTimeout:
         """Unchanged default: no aggregation_timeout given -> 5.0s, same
         as before this fix."""
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -1032,7 +1067,7 @@ class TestAggregationTimeout:
 
     def test_v1_models_uses_configured_aggregation_timeout(self):
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes, aggregation_timeout=12.5)
+        app = _gateway(routes, aggregation_timeout=12.5)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -1054,7 +1089,7 @@ class TestAggregationTimeout:
 
     def test_health_uses_configured_aggregation_timeout(self):
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes, aggregation_timeout=12.5)
+        app = _gateway(routes, aggregation_timeout=12.5)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:
@@ -1081,7 +1116,7 @@ class TestAggregationTimeout:
         muse.core.config, so MUSE_AGGREGATION_TIMEOUT_SECONDS works too."""
         monkeypatch.setenv("MUSE_AGGREGATION_TIMEOUT_SECONDS", "9.0")
         routes = [WorkerRoute("soprano-80m", "http://127.0.0.1:9001")]
-        app = build_gateway(routes)
+        app = _gateway(routes)
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:

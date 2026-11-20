@@ -11,11 +11,10 @@ live on internal ports (9001+). The gateway:
   4. Aggregates /v1/models and /health across all workers
   5. Mounts /v1/admin/* with bearer-token auth
 
-The legacy static-routes path (build_gateway(routes=...)) survives for
-tests that pre-date the lazy-load wiring. When `state.director` is set,
-the proxy skips the static map entirely and calls director.acquire on
-every request; release fires on completion in a finally clause that
-spans both buffered and streaming responses.
+Every inference request calls `state.director.acquire` for its worker
+port; release fires exactly once on completion, for buffered and
+streaming responses alike. `/v1/models` and `/health` fan out to the
+running workers in `state.workers`.
 
 Proxy routing is modality-agnostic: any request with a `model` field
 routes to the worker hosting that model, regardless of URL path. This
@@ -523,25 +522,18 @@ def _resolve_default_model(modality: str) -> str | None:
 
 
 def build_gateway(
-    routes: list[WorkerRoute] | None = None,
     timeout: float = 300.0,
     *,
-    state: "object | None" = None,
+    state: "object",
     aggregation_timeout: float | None = None,
     max_request_body_bytes: int | None = None,
 ) -> FastAPI:
-    """Build the gateway FastAPI app.
+    """Build the gateway FastAPI app over a SupervisorState.
 
-    Two routing modes:
-
-      - state-driven (preferred for `muse serve`): pass `state`, a
-        SupervisorState. Routes are re-derived per request from
-        state.workers, filtered to status=='running'. Late-promoting
-        workers join the routing table without an app rebuild and
-        pending workers don't surface in /v1/models. The
-        SupervisorState's lock guards each snapshot.
-      - static: pass `routes`, a fixed list of WorkerRoute. Used by
-        tests that want a frozen routing table.
+    Inference requests route through `state.director` (lazy load, LRU
+    eviction, admission). The aggregated endpoints re-derive the worker
+    set per request from `state.workers`, filtered to status=='running',
+    under the state's lock.
 
     `aggregation_timeout` bounds the per-worker httpx client used by the
     /v1/models and /health fan-out (NOT the per-request forward timeout,
@@ -574,8 +566,7 @@ def build_gateway(
             # waits consume this event and unwind before asyncio joins that
             # executor. Without this early signal, Ctrl+C can appear to finish
             # Uvicorn while the supervisor stays hidden for a whole readiness wait.
-            if state is not None:
-                state.stop_event.set()
+            state.stop_event.set()
             try:
                 from muse.admin.jobs import get_default_store
                 get_default_store().shutdown(timeout=5.0)
@@ -584,9 +575,6 @@ def build_gateway(
 
     app = FastAPI(title="Muse Gateway", lifespan=_lifespan)
     app.state.routes_state = state
-    app.state.static_routes = (
-        {r.model_id: r for r in routes} if routes is not None else {}
-    )
     app.state.timeout = timeout
     app.state.max_request_body_bytes = (
         max_request_body_bytes
@@ -603,7 +591,7 @@ def build_gateway(
         RequestBodyLimitMiddleware,
         limit=app.state.max_request_body_bytes,
     )
-    stop_event = getattr(state, "stop_event", None) if state is not None else None
+    stop_event = getattr(state, "stop_event", None)
     if callable(getattr(stop_event, "is_set", None)):
         # Added after the body limiter so it is the outermost user middleware
         # and covers body reads, queue waits, route dispatch, and response-body
@@ -620,37 +608,22 @@ def build_gateway(
     )
 
     def _routes_now() -> dict[str, WorkerRoute]:
-        """Return the current routing table.
+        """The running workers, by model id, built fresh from state.workers.
 
-        State-driven: filter state.workers to status=='running' and build
-        the table fresh; this means a worker that promotes after gateway
-        boot becomes routable on the next request.
-        Static: return the frozen dict captured at build_gateway time.
+        A worker that becomes ready after gateway boot is aggregated on the
+        next request.
         """
-        if app.state.routes_state is not None:
-            out: dict[str, WorkerRoute] = {}
-            s = app.state.routes_state
-            with s.lock:
-                for spec in s.workers:
-                    if getattr(spec, "status", None) != "running":
-                        continue
-                    url = f"http://127.0.0.1:{spec.port}"
-                    for m in spec.models:
-                        out[m] = WorkerRoute(model_id=m, worker_url=url)
-            return out
-        return dict(app.state.static_routes)
+        out: dict[str, WorkerRoute] = {}
+        with state.lock:
+            for spec in state.workers:
+                if getattr(spec, "status", None) != "running":
+                    continue
+                url = f"http://127.0.0.1:{spec.port}"
+                for m in spec.models:
+                    out[m] = WorkerRoute(model_id=m, worker_url=url)
+        return out
 
     app.state.routes_now = _routes_now
-
-    @app.get("/_gateway-info")
-    def info():
-        cur = app.state.routes_now()
-        return {
-            "routes": [
-                {"model_id": r.model_id, "worker_url": r.worker_url}
-                for r in cur.values()
-            ],
-        }
 
     @app.get("/v1/models")
     async def list_models():
@@ -833,12 +806,10 @@ def build_gateway(
     install_admin_error_handler(app)
 
     # Dashboard router (/dashboard shell + gated /v1/telemetry/* JSON+SSE
-    # endpoints). Gated on BOTH: telemetry.enabled (a global off-switch)
-    # AND state is not None (the legacy static-routes test path passes no
-    # SupervisorState, so there is no state.telemetry_store/log_hub for
-    # the data endpoints to read). The /dashboard HTML shell itself never
-    # touches state; only the gated data endpoints do.
-    if config.get("telemetry.enabled") and state is not None:
+    # endpoints), gated on telemetry.enabled (a global off-switch). The
+    # /dashboard HTML shell itself never touches state; only the gated data
+    # endpoints do.
+    if config.get("telemetry.enabled"):
         app.include_router(build_dashboard_router(state))
 
     from muse.cli_impl.agent_routes import install_agent_routes
@@ -912,44 +883,14 @@ def build_gateway(
             )
             model_id = default_id
 
-        # Director-driven path (lazy load). When the SupervisorState
-        # carries a LoadDirector, every request acquires the worker port
-        # via director.acquire and releases on completion. The director
-        # transparently handles cold load, LRU eviction, and singleton-
-        # load coordination. Static-routes mode (build_gateway(routes=...)
-        # with no state.director) still works for the legacy test path.
-        s = app.state.routes_state
-        if s is not None and getattr(s, "director", None) is not None:
-            return await _route_via_director(
-                request, full_path, model_id, s, app.state.timeout,
-                cancellable_paths=app.state.disconnect_cancellable_paths,
-            )
-
-        # Legacy static-routes path: look up the worker URL in a frozen
-        # dict and forward. No acquire/release. Used by tests that build
-        # the gateway with build_gateway(routes=...).
-        cur = app.state.routes_now()
-        route = cur.get(model_id)
-        if route is None:
-            return error_response(
-                404, "model_not_found",
-                f"model {model_id!r} is not registered with any worker; "
-                f"known: {sorted(cur)}",
-            )
-
-        target_url = f"{route.worker_url}/{full_path}"
-        try:
-            return await _forward(request, target_url, app.state.timeout)
-        except httpx.TimeoutException:
-            return error_response(
-                504, "worker_timeout",
-                f"worker for model {model_id!r} timed out",
-            )
-        except httpx.TransportError:
-            return error_response(
-                502, "worker_unavailable",
-                f"worker for model {model_id!r} is unavailable",
-            )
+        # Lazy load: director.acquire returns the worker port (cold load,
+        # LRU eviction and singleton-load coordination included) and the
+        # forward releases it on completion.
+        return await _route_via_director(
+            request, full_path, model_id, app.state.routes_state,
+            app.state.timeout,
+            cancellable_paths=app.state.disconnect_cancellable_paths,
+        )
 
     return app
 
@@ -1849,7 +1790,7 @@ async def _forward(
     chunks dispatch as the worker produces them.
 
     `release` (the director refcount + concurrency-gate slot, from
-    `_route_via_director`; None for federation and the static-routes path)
+    `_route_via_director`; None for federation)
     runs exactly once, from one idempotent cleanup that also exits the
     upstream stream and closes the client, in that order. Release goes first
     and is synchronous, so neither a failing close step nor a second

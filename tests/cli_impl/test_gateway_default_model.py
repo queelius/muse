@@ -7,18 +7,37 @@ catalog model of the matching modality instead of 400ing model_required.
 No enabled model of that modality -> 503 no_default_model. Any other
 path with no model keeps today's 400 model_required, byte-identical.
 
-Uses the legacy static-routes gateway (build_gateway(routes=...)): the
-model_id-is-None check runs BEFORE the director-vs-legacy branch, so
-this path is testable without spinning up a LoadDirector.
+The resolved default is routed through a stub director that hands out
+each routed model's port.
 """
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from muse.cli_impl.gateway import WorkerRoute, build_gateway
+from muse.cli_impl import gateway as gateway_mod
+from muse.cli_impl.gateway import WorkerRoute
+from muse.cli_impl.supervisor import SupervisorState
 from muse.core.catalog import CatalogEntry
+
+
+def build_gateway(routes):
+    """A director-mode gateway serving `routes` (model id -> worker port)."""
+    ports = {r.model_id: int(r.worker_url.rsplit(":", 1)[1]) for r in routes}
+    state = SupervisorState(workers=[], device="cpu")
+    director = MagicMock()
+    director.acquire.side_effect = lambda model_id, *, manifest: ports[model_id]
+    state.director = director
+    return gateway_mod.build_gateway(state=state)
+
+
+@pytest.fixture(autouse=True)
+def _any_manifest(monkeypatch):
+    monkeypatch.setattr(
+        "muse.cli_impl.gateway.get_manifest",
+        lambda model_id: {"model_id": model_id, "capabilities": {}},
+    )
 
 
 def _entry(model_id: str, modality: str) -> CatalogEntry:
@@ -130,7 +149,9 @@ class TestDefaultModelSeamMultipart:
         known = {"pixel-tools": _entry("pixel-tools", "image/pixelart")}
         bodies = []
 
-        async def fake_forward(request, target_url, timeout):
+        async def fake_forward(request, target_url, timeout, *, release=None, **_kw):
+            if release is not None:
+                release()
             bodies.append(await request.body())
             return JSONResponse({"ok": True})
 

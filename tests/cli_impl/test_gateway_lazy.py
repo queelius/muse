@@ -1493,35 +1493,6 @@ class TestHealthReflectsCatalog:
         assert "image/generation" not in body["modalities"]
 
 
-class TestLegacyStaticRoutesStillWork:
-    """The build_gateway(routes=...) signature used by tests must keep
-    working for tests that pre-date Task F. The static-routes path is the
-    fallback when state is None or state.director is None.
-    """
-
-    def test_static_routes_path_does_not_call_get_manifest(self):
-        from muse.cli_impl.gateway import WorkerRoute
-
-        routes = [WorkerRoute(model_id="fake-model", worker_url="http://127.0.0.1:9001")]
-        app = build_gateway(routes)
-        client = TestClient(app)
-
-        # If get_manifest were called on the static-routes path, this
-        # patch would break the request. The static path predates Task F
-        # and must keep working untouched.
-        with patch(
-            "muse.cli_impl.gateway.get_manifest",
-            side_effect=AssertionError("static path should not call get_manifest"),
-        ), patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
-            _wire_async_client_json(mock_cls)
-            r = client.post(
-                "/v1/audio/speech",
-                json={"input": "hi", "model": "fake-model"},
-            )
-
-        assert r.status_code == 200
-
-
 # =============================================================================
 # v0.50.x: acquire runs OFF the event loop (asyncio.to_thread) so a cold load
 # no longer blocks the single gateway loop, plus cancellation-safe release.

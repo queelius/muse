@@ -147,16 +147,3 @@ class TestDashboardMount:
             assert r.json()["error"]["code"] == "model_required"
         finally:
             config.reset_config()
-
-    def test_dashboard_absent_in_legacy_static_routes_mode(self):
-        """state=None (legacy static-routes mode) has no supervisor to
-        serve telemetry from, so the dashboard router is not mounted
-        even though telemetry.enabled defaults to true. Falls through to
-        the catch-all proxy's 400 model_required, same signal as above."""
-        config.reset_config()
-        app = build_gateway([])
-        client = TestClient(app, raise_server_exceptions=False)
-
-        r = client.get("/dashboard")
-        assert r.status_code == 400
-        assert r.json()["error"]["code"] == "model_required"

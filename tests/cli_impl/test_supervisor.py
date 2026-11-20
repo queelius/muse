@@ -1290,13 +1290,3 @@ class TestGatewayStateRoutes:
         with state.lock:
             slow.status = "running"
         assert "slow" in app.state.routes_now()
-
-    def test_static_routes_still_supported(self):
-        """When state= isn't passed, build_gateway uses the legacy routes list."""
-        from muse.cli_impl.gateway import build_gateway, WorkerRoute
-
-        routes = [WorkerRoute(model_id="m", worker_url="http://127.0.0.1:9001")]
-        app = build_gateway(routes=routes)
-        cur = app.state.routes_now()
-        assert "m" in cur
-        assert cur["m"].worker_url == "http://127.0.0.1:9001"
