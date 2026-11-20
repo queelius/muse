@@ -304,9 +304,8 @@ def _seeded(seed: Any, device: str) -> Any:
 
     @contextlib.contextmanager
     def _ctx():
-        devices = []
-        if str(device).startswith("cuda") and torch.cuda.is_available():
-            devices = [torch.cuda.current_device()]
+        # `device` is already resolved, so "cuda" means CUDA is present.
+        devices = [torch.cuda.current_device()] if str(device).startswith("cuda") else []
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(int(seed))
             yield
