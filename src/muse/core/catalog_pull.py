@@ -162,7 +162,7 @@ def _muse_server_install_args() -> list[str]:
     From a source checkout: ``-e <root>[server]`` (editable, tracks the
     working tree). From a wheel/PyPI install, pin the exact invoking release
     so the worker cannot silently run newer protocol/catalog code than its
-    host. Mirrors cli_impl.refresh._pip_target_args.
+    host. `muse models refresh` installs the same args.
     """
     root = _muse_repo_root()
     if root is not None:

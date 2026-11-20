@@ -503,7 +503,7 @@ for diagnosis. A null reason is not a dependency or inference smoke test.
 | `muse models enable <model-id>` | mark a pulled model active in the catalog (allowed to lazy-load) |
 | `muse models disable <model-id>` | mark a pulled model inactive in the catalog (refuses to lazy-load) |
 | `muse models warmup <model-id>` | pre-load a model into a worker without serving traffic; first real request is hot |
-| `muse models refresh <id> \| --all \| --enabled` | re-install museq[server,extras] into per-model venv(s) (after `pip install -U museq`) |
+| `muse models refresh <id> \| --all \| --enabled` | re-install exactly what `muse pull` installs (museq[server] plus the model's pip_extras) into per-model venv(s) (after `pip install -U museq`) |
 | `muse config generate \| show \| path \| get \| set \| unset` | manage `~/.muse/config.yaml` (see Configuration below) |
 | `muse doctor resources [--repair]` | inspect Muse's owned-resource registry; optionally clean verified stale/orphan records after an unclean exit |
 | `muse doctor storage [--json]` | report Muse-owned storage, shared caches, broken references, and reclaimable space without changing files |

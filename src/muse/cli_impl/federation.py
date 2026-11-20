@@ -72,6 +72,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from muse.cli_impl.gateway import (
+    _MAX_MODEL_ID_CHARS,
     RequestBodyLimitMiddleware,
     _forward,
     _valid_model_id,
@@ -360,7 +361,7 @@ def build_coordinator(
             return error_response(
                 400, "invalid_model",
                 "`model` must be a non-empty string of at most "
-                "512 characters without control characters",
+                f"{_MAX_MODEL_ID_CHARS} characters without control characters",
             )
 
         states: list[NodeState] = registry.snapshot()
