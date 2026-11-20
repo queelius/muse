@@ -13,6 +13,9 @@ from muse.modalities.audio_speech.protocol import (
     AudioResult,
     TTSModel,
     TimestampsUnavailableError,
+    UnknownVoiceError,
+    VoiceError,
+    VoiceUnreadableError,
 )
 from muse.modalities.audio_speech.routes import build_router
 
