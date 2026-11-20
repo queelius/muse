@@ -514,3 +514,36 @@ def test_moderations_runtime_exception_returns_500():
     # Finding 1 (v0.58.1 review): the backend exception text must NOT
     # reach the client body; only a generic message does.
     assert "simulated" not in body["error"]["message"]
+
+
+def test_moderations_rejects_zero_shot_only_model_with_400():
+    """I5: a zero-shot pipeline has no classify(); moderations must say so
+    with a 400 instead of failing with an opaque 500."""
+    backend = _fake_zs_backend("zs-only")
+    del backend.classify
+    client = _make_client(backend, manifest={
+        "model_id": "zs-only",
+        "capabilities": {
+            "supports_classification": False, "supports_zero_shot": True,
+        },
+    })
+    r = client.post("/v1/moderations", json={"input": "hi", "model": "zs-only"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "classification_not_supported"
+
+
+def test_classifications_bounds_inputs_times_labels():
+    from muse.modalities.text_classification import routes as routes_mod
+    backend = _fake_zs_backend()
+    client = _make_client(backend, manifest={
+        "model_id": "zs-fake",
+        "capabilities": {"supports_zero_shot": True},
+    })
+    labels = [f"l{i}" for i in range(100)]
+    n = routes_mod.MAX_ZERO_SHOT_PAIRS // len(labels) + 1
+    r = client.post("/v1/text/classifications", json={
+        "input": ["x"] * n, "model": "zs-fake", "candidate_labels": labels,
+    })
+    assert r.status_code == 400
+    assert "zero-shot work limit" in r.json()["error"]["message"]
+    backend.classify_zero_shot.assert_not_called()

@@ -13,16 +13,15 @@ ModelNotFoundError; 400 returns error_response() so the bare
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.inference import cap, run_locked
 from muse.modalities.text_summarization.codec import (
     encode_summarization_response,
 )
@@ -36,14 +35,9 @@ MODALITY = "text/summarization"
 logger = logging.getLogger(__name__)
 
 
-# Defaults are conservative. A request with text=10MB can OOM the worker
-# trying to tokenize it; cap is tunable via env so power users with big
-# GPUs can lift it.
-#
-# Read per-request via muse.core.config so changes take effect without
-# a restart (matches the text_classification / text_translation pattern).
-def _max_text_chars() -> int:
-    return config.get("limits.summarize_max_text_chars")
+# Finite cap: a 10 MB text could OOM the worker in the tokenizer. Tunable
+# via env / config.yaml; read per request with config.get_positive.
+_MAX_TEXT_CHARS_KEY = "limits.summarize_max_text_chars"
 
 
 _VALID_LENGTHS = ("short", "medium", "long")
@@ -66,7 +60,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", "text must not be empty",
             )
-        max_text_chars = _max_text_chars()
+        max_text_chars = cap(_MAX_TEXT_CHARS_KEY)
         if len(req.text) > max_text_chars:
             return error_response(
                 400, "invalid_parameter",
@@ -85,26 +79,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         backend = registry.get_or_404(MODALITY, req.model)
 
-        # backend.summarize is sync (transformers generate); offload so a
-        # slow inference doesn't block sibling /health, /v1/models, or
-        # other in-flight requests on the same worker. Per-backend lock
-        # serializes calls into one model without blocking siblings on
-        # the same worker (H2 fix, v0.45.7).
-        def _summarize():
-            with backend._inference_lock:
-                return backend.summarize(req.text, req.length, req.format)
-
-        try:
-            result = await asyncio.to_thread(_summarize)
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("summarize failed")
-            return error_response(
-                500, "internal_error",
-                "summarization backend failed; see server logs",
-            )
+        result = await run_locked(
+            backend, lambda: backend.summarize(req.text, req.length, req.format),
+            label="summarize",
+            message="summarization backend failed; see server logs",
+        )
+        if isinstance(result, JSONResponse):
+            return result
         body = encode_summarization_response(result)
         return JSONResponse(content=body)
 

@@ -132,6 +132,16 @@ runs on one backend.
 PROBE_DEFAULTS runs one Choice, Score and Noul question. No per-model
 inference authorization exists in muse, so there is no 403 path.
 
+Text routes (`/v1/moderations`, `/v1/text/classifications`, `/v1/embeddings`,
+`/v1/rerank`, `/v1/summarize`, `/v1/translate`) share
+`muse.modalities._common.inference`: `run_locked` runs the backend call
+off-loop under its `_inference_lock` and turns a failure into an opaque 500,
+and `check_text_batch` applies the batch and per-item caps. Every cap is read
+per request with `config.get_positive`, so 0 or a bad value falls back to
+the setting's default rather than rejecting every request (the same holds
+for `MUSE_ASR_MAX_MB`). Zero-shot classification also bounds inputs x
+`candidate_labels` at 16,384 NLI pairs per request (400 `invalid_parameter`).
+
 `text/rerank` is muse's first Cohere-compat modality (rather than
 OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is
 the de-facto standard that downstream tooling (LangChain, LlamaIndex,

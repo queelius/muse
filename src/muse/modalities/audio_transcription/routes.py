@@ -51,7 +51,7 @@ VALID_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
 
 
 def _max_upload_bytes() -> int:
-    mb = config.get("limits.asr_max_mb")
+    mb = config.get_positive("limits.asr_max_mb")
     return mb * 1024 * 1024
 
 

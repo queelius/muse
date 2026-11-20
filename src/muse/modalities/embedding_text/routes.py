@@ -20,7 +20,6 @@ Response shape:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from typing import Union
@@ -29,9 +28,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from muse.core import config
-from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.inference import check_text_batch, run_locked
 from muse.modalities.embedding_text.codec import encode_embedding_list
 
 logger = logging.getLogger(__name__)
@@ -39,19 +37,11 @@ logger = logging.getLogger(__name__)
 MODALITY = "embedding/text"
 
 
-# See text_classification/routes for the rationale (finite caps to
-# prevent worker OOM on giant batches). Embedding caps are higher
-# because RAG ingestion legitimately wants thousands at a time, but
-# they're still finite.
-#
-# Read per-request via muse.core.config so changes take effect without
-# a restart (matches the text_classification / text_translation pattern).
-def _max_batch() -> int:
-    return config.get("limits.embeddings_max_batch")
-
-
-def _max_chars_per_item() -> int:
-    return config.get("limits.embeddings_max_chars_per_item")
+# Finite caps (see text_classification/routes); higher because RAG
+# ingestion legitimately sends thousands of inputs at a time. Read per
+# request with config.get_positive.
+_MAX_BATCH_KEY = "limits.embeddings_max_batch"
+_MAX_CHARS_KEY = "limits.embeddings_max_chars_per_item"
 
 
 class EmbeddingsRequest(BaseModel):
@@ -83,42 +73,19 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.post("/embeddings")
     async def embeddings(req: EmbeddingsRequest):
         items = [req.input] if isinstance(req.input, str) else req.input
-        max_batch = _max_batch()
-        if len(items) > max_batch:
-            return error_response(
-                400, "invalid_parameter",
-                f"input batch size {len(items)} exceeds "
-                f"MUSE_EMBEDDINGS_MAX_BATCH={max_batch}",
-            )
-        max_chars_per_item = _max_chars_per_item()
-        too_long = next(
-            (i for i, s in enumerate(items) if len(s) > max_chars_per_item),
-            None,
+        invalid = check_text_batch(
+            items, max_batch_key=_MAX_BATCH_KEY, max_chars_key=_MAX_CHARS_KEY,
         )
-        if too_long is not None:
-            return error_response(
-                400, "invalid_parameter",
-                f"input[{too_long}] exceeds "
-                f"MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM={max_chars_per_item}",
-            )
+        if invalid is not None:
+            return invalid
 
         model = registry.get_or_404(MODALITY, req.model)
-
-        def _call():
-            with model._inference_lock:
-                return model.embed(req.input, dimensions=req.dimensions)
-
-        try:
-            result = await asyncio.to_thread(_call)
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("embed failed")
-            return error_response(
-                500, "internal_error",
-                "embedding backend failed; see server logs",
-            )
+        result = await run_locked(
+            model, lambda: model.embed(req.input, dimensions=req.dimensions),
+            label="embed", message="embedding backend failed; see server logs",
+        )
+        if isinstance(result, JSONResponse):
+            return result
 
         return encode_embedding_list(
             result.embeddings, model_id=result.model_id,
