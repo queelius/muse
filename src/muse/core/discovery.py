@@ -303,7 +303,7 @@ def concurrency_ceilings(dirs: list[Path] | None = None) -> dict[str, dict[str, 
 
 
 _DISCOVERY_ROUTE_KEYS = {
-    "method": str, "path": str, "response_content_type": str, "mcp_tool": str,
+    "method": str, "path": str, "response_content_type": str,
     "file_fields": list, "media_fields": list, "example": dict,
 }
 
@@ -338,7 +338,9 @@ _OPTIONAL_ROUTE_KEYS = {"text_media_fields", "mcp_defaults"}
 def _valid_discovery_route(route: Any) -> bool:
     if not isinstance(route, dict):
         return False
-    required = set(_DISCOVERY_ROUTE_KEYS) | {"request_content_type", "compat"}
+    required = set(_DISCOVERY_ROUTE_KEYS) | {
+        "request_content_type", "compat", "mcp_tool",
+    }
     if set(route) - _OPTIONAL_ROUTE_KEYS != required:
         return False
     if "text_media_fields" in route and not _valid_text_media(route["text_media_fields"]):
@@ -347,12 +349,15 @@ def _valid_discovery_route(route: Any) -> bool:
         return False
     if not all(isinstance(route[k], t) for k, t in _DISCOVERY_ROUTE_KEYS.items()):
         return False
-    if route["method"] not in ("GET", "POST"):
+    # `mcp_tool` is a tool name, or None for a route with no MCP tool.
+    if route["mcp_tool"] is not None and not isinstance(route["mcp_tool"], str):
         return False
-    # A GET has no body, so its content type is None and `example` holds
-    # query parameters; a POST declares what it accepts.
+    if route["method"] not in ("GET", "POST", "DELETE"):
+        return False
+    # A GET or DELETE has no body, so its content type is None and `example`
+    # holds query parameters; a POST declares what it accepts.
     if route["request_content_type"] is None:
-        if route["method"] != "GET":
+        if route["method"] not in ("GET", "DELETE"):
             return False
     elif route["request_content_type"] not in (
         "application/json", "multipart/form-data",

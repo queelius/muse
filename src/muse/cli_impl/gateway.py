@@ -407,13 +407,13 @@ async def extract_model_from_request(request: Any) -> Any:
     - POST with multipart/form-data body: form["model"]
       (used by /v1/audio/transcriptions, /v1/audio/translations, and
       future multipart endpoints like /v1/images/edits.)
-    - GET: query_params["model"]
+    - GET / DELETE: query_params["model"]
     - Anything else: None
 
     Returns None (not raises) on missing/invalid. The caller decides
     what "no model specified" means (400, or fall back to default).
     """
-    if request.method == "GET":
+    if request.method in ("GET", "DELETE"):
         return request.query_params.get("model")
 
     if request.method == "POST":

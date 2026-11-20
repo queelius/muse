@@ -32,7 +32,8 @@ def test_every_mounted_route_is_declared(tag):
 
 
 def test_mcp_tool_names_unique_across_modalities():
-    names = [r["mcp_tool"] for d in DECL.values() for r in d["routes"]]
+    names = [r["mcp_tool"] for d in DECL.values() for r in d["routes"]
+             if r["mcp_tool"] is not None]
     assert len(names) == len(set(names))
     assert all(n.startswith("muse_") for n in names)
 
@@ -86,7 +87,7 @@ def test_examples_match_route_request_models(tag):
             required = {p.alias for p in route.dependant.body_params if p.field_info.is_required()}
             assert required <= set(example) | set(decl["file_fields"])
         else:
-            assert ctype is None and decl["method"] == "GET"
+            assert ctype is None and decl["method"] in ("GET", "DELETE")
             names = {p.alias for p in route.dependant.query_params}
             assert set(example) <= names
 

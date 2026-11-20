@@ -58,7 +58,7 @@ def test_generates_one_tool_per_declared_route(caps_doc, openapi_doc):
     assert {"muse_speak", "muse_align", "muse_transcribe",
             "muse_assess_audio_quality"} <= names
     declared = {r["mcp_tool"] for d in modality_discovery().values()
-                for r in d["routes"]}
+                for r in d["routes"] if r["mcp_tool"]}
     assert names == declared
 
 

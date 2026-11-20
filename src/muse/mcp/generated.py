@@ -678,7 +678,8 @@ def call_describe(client: Any, args: dict) -> list[dict]:
                     "or `model` for full entries.",
             "server": doc.get("server"),
             "modalities": [{"modality": m.get("modality"), "summary": m.get("summary"),
-                            "tools": [r.get("mcp_tool") for r in m.get("routes") or []],
+                            "tools": [r["mcp_tool"] for r in m.get("routes") or []
+                                      if r.get("mcp_tool")],
                             "models": m.get("models")} for m in doc.get("modalities") or []],
             "models": [{k: m.get(k) for k in ("id", "modality", "license", "quality_tier",
                                               "summary", "loaded")}

@@ -13,7 +13,8 @@ import json
 import logging
 import math
 
-from fastapi import APIRouter, Response
+import numpy as np
+from fastapi import APIRouter, File, Form, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, SkipValidation
 from sse_starlette.sse import EventSourceResponse
@@ -29,10 +30,20 @@ from muse.modalities.audio_speech.pronunciations import (
     pronunciations_digest, render_spoken,
 )
 from muse.modalities.audio_speech.protocol import (
-    TimestampsUnavailableError, UnknownVoiceError, VoiceUnreadableError,
+    TimestampsUnavailableError, UnknownVoiceError, VoiceError,
+    VoiceUnreadableError,
 )
 from muse.modalities.audio_speech.word_timing import TimedSpan, assemble_words
+from muse.core import config
 from muse.core.errors import error_response
+from muse.modalities._common.audio_decode import (
+    AudioDecodeError, AudioDecoderUnavailableError, AudioDurationExceededError,
+    decode_audio,
+)
+from muse.modalities._common.uploads import (
+    read_upload, run_on_spooled_upload, upload_suffix,
+)
+from muse.modalities.audio_speech.voices import MAX_SECONDS, VOICE_SAMPLE_RATE
 from muse.modalities._common.streaming import threaded_sse_response
 from muse.core.registry import ModalityRegistry
 
@@ -98,6 +109,95 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         m = registry.get_or_404(MODALITY, model)
         voices = getattr(m, "voices", [])
         return {"model": m.model_id, "voices": voices}
+
+    @router.post("/speech/voices")
+    async def save_voice(
+        audio: UploadFile = File(...),
+        name: str = Form(...),
+        transcript: str = Form(...),
+        overwrite: bool = Form(False),
+        model: str | None = Form(None),
+    ):
+        backend = registry.get_or_404(MODALITY, model)
+        if not _supports_saved_voices(registry, backend):
+            return _saving_not_supported()
+        cap = int(config.get_positive("limits.voice_reference_max_bytes"))
+        raw = await read_upload(
+            audio, max_bytes=cap,
+            limit=f"MUSE_VOICE_REFERENCE_MAX_BYTES={cap}",
+            label="reference audio",
+        )
+        if isinstance(raw, JSONResponse):
+            return raw
+
+        def _call(path: str):
+            decoded = decode_audio(
+                path, sample_rate=VOICE_SAMPLE_RATE,
+                max_duration_seconds=MAX_SECONDS,
+            )
+            wave = decoded.waveform
+            if hasattr(wave, "numpy"):
+                wave = wave.numpy()
+            wave = np.asarray(wave, dtype=np.float32).reshape(-1)
+            return backend.save_voice(
+                name, wave, VOICE_SAMPLE_RATE, transcript,
+                overwrite=overwrite, source_filename=audio.filename,
+            )
+
+        try:
+            stored = await run_on_spooled_upload(
+                raw, _call, suffix=upload_suffix(audio.filename),
+            )
+        except AudioDurationExceededError as exc:
+            return error_response(400, "invalid_reference_audio", str(exc))
+        except AudioDecodeError:
+            logger.warning("reference audio decode failed", exc_info=True)
+            return error_response(
+                415, "unsupported_media_type",
+                "audio decode failed; provide a supported audio file",
+            )
+        except VoiceError as exc:
+            return error_response(exc.status, exc.code, str(exc))
+        except VoiceUnreadableError as exc:
+            return _voice_error_response(exc)
+        except AudioDecoderUnavailableError:
+            logger.exception("audio decoder unavailable")
+            return error_response(
+                500, "internal_error",
+                "audio decoder unavailable; see server logs",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("saving voice failed")
+            return error_response(
+                500, "internal_error", "saving the voice failed; see server logs",
+            )
+        return {
+            "object": "audio.voice", "model": backend.model_id,
+            "name": stored.name,
+            "duration_seconds": stored.duration_seconds,
+            "sha256": stored.sha256,
+        }
+
+    @router.delete("/speech/voices/{name}")
+    async def delete_voice(name: str, model: str | None = None):
+        backend = registry.get_or_404(MODALITY, model)
+        if not _supports_saved_voices(registry, backend):
+            return _saving_not_supported()
+        try:
+            await asyncio.to_thread(backend.delete_voice, name)
+        except VoiceError as exc:
+            return error_response(exc.status, exc.code, str(exc))
+        except VoiceUnreadableError as exc:
+            return _voice_error_response(exc)
+        except Exception:  # noqa: BLE001
+            logger.exception("deleting voice failed")
+            return error_response(
+                500, "internal_error", "deleting the voice failed; see server logs",
+            )
+        return {
+            "object": "audio.voice.deleted", "model": backend.model_id,
+            "name": name, "deleted": True,
+        }
 
     @router.post("/speech")
     async def speech(req: SpeechRequest):
@@ -180,6 +280,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         return await _non_stream(model, req, spoken, pronunciations)
 
     return router
+
+
+def _supports_saved_voices(registry: ModalityRegistry, backend) -> bool:
+    caps = registry.capabilities(MODALITY, backend.model_id)
+    return bool(caps.get("supports_saved_voices"))
+
+
+def _saving_not_supported() -> Response:
+    return error_response(
+        400, "voice_saving_not_supported",
+        "This model does not support saved voices",
+    )
 
 
 def _timestamps_not_supported() -> Response:

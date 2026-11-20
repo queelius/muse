@@ -64,6 +64,31 @@ DISCOVERY = {
             "media_fields": [],
             "example": {"model": "<model>"},
         },
+        {
+            "method": "POST",
+            "path": "/v1/audio/speech/voices",
+            "request_content_type": "multipart/form-data",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_save_voice",
+            "file_fields": ["audio"],
+            "media_fields": [],
+            "example": {
+                "model": "<model>", "name": "grimbold",
+                "transcript": "Welcome, traveler.",
+            },
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/audio/speech/voices/{name}",
+            "request_content_type": None,
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": None,
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>"},
+        },
     ],
 }
 

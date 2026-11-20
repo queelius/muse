@@ -216,6 +216,14 @@ class TestExtractModel:
         assert model == "kokoro-82m"
 
     @pytest.mark.asyncio
+    async def test_extract_model_reads_delete_query(self):
+        request = MagicMock()
+        request.method = "DELETE"
+        request.query_params = {"model": "qwen3-tts-0.6b-base"}
+        model = await extract_model_from_request(request)
+        assert model == "qwen3-tts-0.6b-base"
+
+    @pytest.mark.asyncio
     async def test_returns_none_when_get_has_no_query_model(self):
         request = MagicMock()
         request.method = "GET"
