@@ -32,12 +32,24 @@ from muse.cli_impl.supervisor import (
 from muse.core.errors import error_response
 
 
-def _restart_response(port: int, *, signalled: bool) -> dict:
+def _restart_response(
+    port: int, *, signalled: bool, revived: bool = False, retired: bool = False,
+) -> dict:
+    """The restart reply. ``revived`` is true for a spec handed back to the
+    monitor (always, when nothing was signalled). ``retired`` marks a
+    signalled spec that ``revive_worker`` refused (retained dead): nothing
+    will respawn it."""
+    message = (
+        "worker was signalled but was retired by a disable, eviction or "
+        "failed load, so it will not be restarted; re-enable or warm up "
+        "the model instead"
+        if retired else "auto-restart monitor will respawn the worker"
+    )
     return {
         "port": port,
         "signal": "SIGTERM" if signalled else None,
-        "revived": not signalled,
-        "message": "auto-restart monitor will respawn the worker",
+        "revived": revived or not signalled,
+        "message": message,
         "restart_count_reset": True,
     }
 
@@ -108,8 +120,13 @@ def build_workers_router() -> APIRouter:
                 if was_dead:
                     # The monitor skips dead specs; revive one it gave up
                     # on. A False here (a retained-dead spec) is not an
-                    # error: the signal was still sent.
-                    revive_worker(state, spec)
+                    # error: the signal was still sent, but nothing will
+                    # respawn it, and the reply says so.
+                    revived = revive_worker(state, spec)
+                    return _restart_response(
+                        port, signalled=True, revived=revived,
+                        retired=not revived,
+                    )
                 return _restart_response(port, signalled=True)
             if spec.job_id is not None:
                 # No live process and an admin/director transition owns

@@ -159,6 +159,7 @@ class TestRestartWorker:
         r = client.post("/v1/admin/workers/9001/restart", headers=headers)
         assert r.status_code == 200
         assert r.json()["signal"] == "SIGTERM"
+        assert r.json()["revived"] is True
         assert spec.status == "unhealthy"
 
     def test_terminate_called_and_200_returned(self, client, headers):
@@ -289,3 +290,36 @@ class TestReviveOnlyMonitorExhaustedSpecs:
         r = client.post("/v1/admin/workers/9001/restart", headers=headers)
         assert r.status_code == 200
         assert r.json()["signal"] == "SIGTERM"
+
+
+def test_signalled_retained_dead_spec_is_not_reported_as_respawning(monkeypatch):
+    """A retained-dead spec with a live process is signalled, but
+    revive_worker refuses it, so the monitor will NOT respawn it: the reply
+    must say so instead of promising a respawn."""
+    import threading
+    from types import SimpleNamespace
+
+    monkeypatch.setenv(ADMIN_TOKEN_ENV, "test-token")
+    app = FastAPI()
+    app.include_router(
+        build_workers_router(), prefix="/v1/admin",
+        dependencies=[Depends(verify_admin_token)],
+    )
+    spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+    spec.process = MagicMock(pid=4242)
+    spec.process.poll.return_value = None
+    spec.status = "dead"  # retained: not restart_exhausted
+    state = SupervisorState(workers=[spec], device="cpu")
+    state.director = SimpleNamespace(lock=threading.RLock(), loaded={})
+    set_supervisor_state(state)
+    r = TestClient(app).post(
+        "/v1/admin/workers/9001/restart",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["signal"] == "SIGTERM"
+    assert body["revived"] is False
+    assert "respawn" not in body["message"]
+    assert "re-enable or warm up" in body["message"]
+    assert spec.status == "dead"
