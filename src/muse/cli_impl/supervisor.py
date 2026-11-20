@@ -865,6 +865,78 @@ def _attempt_restart(
         spec.status = "unhealthy"
 
 
+def _reconcile_dead_worker(state: "SupervisorState", spec: WorkerSpec) -> None:
+    """Tell the director a worker is gone for good (the monitor gave up).
+
+    Without this the director keeps the dead worker's LoadEntry and every
+    request is forwarded to a closed port (502) indefinitely.
+    """
+    director = getattr(state, "director", None)
+    forget = getattr(director, "forget_worker", None)
+    if forget is None:
+        return
+    with spec.process_lock:
+        released = spec.process is None
+    try:
+        forget(list(spec.models), worker_port=spec.port, process_released=released)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "could not reconcile dead worker on port %d with the director",
+            spec.port, exc_info=True,
+        )
+
+
+def _adopt_restarted_worker(state: "SupervisorState", spec: WorkerSpec) -> None:
+    """Account a restarted worker whose models the director no longer tracks.
+
+    Normally a no-op (the director kept its entries through the restart);
+    it matters for a worker revived after being declared dead.
+    """
+    director = getattr(state, "director", None)
+    adopt = getattr(director, "adopt_worker", None)
+    loaded = getattr(director, "loaded", None)
+    if adopt is None or not isinstance(loaded, dict):
+        return
+    for model_id in list(spec.models):
+        with director.lock:
+            if model_id in loaded:
+                continue
+        try:
+            manifest = backfill_manifest_memory(
+                get_manifest(model_id), model_id, supervisor_device=state.device,
+            )
+            adopt(model_id, worker_port=spec.port, manifest=manifest)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "could not account restarted worker %r on port %d",
+                model_id, spec.port, exc_info=True,
+            )
+
+
+def revive_worker(state: "SupervisorState", spec: WorkerSpec) -> bool:
+    """Give a dead or process-less spec a fresh restart budget.
+
+    For the admin restart route: the spec goes back to "unhealthy" with
+    ``restart_count`` reset, and the monitor respawns it on its next tick
+    (its director entry is re-created once it is ready). Returns False,
+    changing nothing, when the spec is no longer tracked, an operation
+    owns it, or it still has a live process (signal that one instead).
+    """
+    with state.lock:
+        if not any(item is spec for item in state.workers):
+            return False
+        if spec.job_id is not None:
+            return False
+        with spec.process_lock:
+            has_process = spec.process is not None
+        if spec.status != "dead" and has_process:
+            return False
+        spec.status = "unhealthy"
+        spec.restart_count = 0
+        spec.failure_count = _FAILURE_THRESHOLD
+        return True
+
+
 def _monitor_workers(
     specs: list[WorkerSpec],
     stop_event: "threading.Event",
@@ -997,6 +1069,11 @@ def _monitor_workers(
                         max_restarts=max_restarts,
                         log_hub=getattr(state, "log_hub", None),
                     )
+                    if state is not None and not stop_event.is_set():
+                        if spec.status == "dead":
+                            _reconcile_dead_worker(state, spec)
+                        elif spec.status == "running":
+                            _adopt_restarted_worker(state, spec)
                 finally:
                     if operation is not None:
                         with state.lock:

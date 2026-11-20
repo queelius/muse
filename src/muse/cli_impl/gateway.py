@@ -755,10 +755,19 @@ def build_gateway(
                 models.update(
                     value for value in raw_models if isinstance(value, str)
                 )
+        # A worker the monitor is restarting or has given up on is down
+        # too; it is not in the routing table, so nothing above polled it.
+        state = app.state.routes_state
+        if state is not None:
+            with state.lock:
+                if any(
+                    getattr(spec, "status", None) in ("dead", "unhealthy")
+                    for spec in state.workers
+                ):
+                    any_down = True
         # Also report enabled-but-unloaded catalog models so the
         # serviceable surface matches /v1/models: a request naming one of
         # these triggers an on-demand load.
-        state = app.state.routes_state
         if state is not None:
             already = [{"id": m} for m in models]
             for entry in _unloaded_catalog_entries(state, already):

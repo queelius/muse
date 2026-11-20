@@ -948,6 +948,88 @@ class LoadDirector:
             self._fire_capacity_listener()
         return True
 
+    def forget_worker(
+        self, model_ids: list[str], *, worker_port: int, process_released: bool,
+    ) -> list[str]:
+        """Stop routing to a worker the supervisor monitor gave up on.
+
+        Only entries that still point at ``worker_port`` are touched; a
+        model already moved to another worker, or one an eviction or worker
+        transition currently owns, is left to that owner. When the dead
+        worker's process was released, each entry is settled through the
+        normal eviction claim (decision log, telemetry, capacity wake) so
+        the next request cold-loads a replacement. When the process could
+        not be released it may still hold memory: the entry stays
+        accounted but is blocked as a failed rollback until a cleanup
+        teardown succeeds. Returns the model ids that were changed.
+        """
+        claims: list[ModelEviction] = []
+        blocked: list[str] = []
+        with self.lock:
+            for model_id in model_ids:
+                entry = self.loaded.get(model_id)
+                if (
+                    entry is None
+                    or entry.worker_port != worker_port
+                    or model_id in self._eviction_claims
+                    or model_id in self._worker_transitions
+                ):
+                    continue
+                if process_released:
+                    claims.append(self._begin_eviction_locked(
+                        model_id,
+                        entry=entry,
+                        reason="worker_dead",
+                        keep_blocked=True,
+                        was_blocked=model_id in self._blocked_models,
+                    ))
+                else:
+                    entry.refcount = 0
+                    self._blocked_models.add(model_id)
+                    self._failed_rollbacks.add(model_id)
+                    blocked.append(model_id)
+        for claim in claims:
+            self.finish_eviction(claim, success=True)
+        if blocked:
+            self._fire_capacity_listener()
+        return [claim.model_id for claim in claims] + blocked
+
+    def adopt_worker(self, model_id: str, *, worker_port: int, manifest: dict) -> bool:
+        """Account a worker the supervisor restarted outside a director load.
+
+        A revived dead worker comes back through the monitor, not through
+        ``acquire``; without an entry its memory would be invisible to
+        admission and the idle sweeper. The entry starts idle (refcount 0).
+        Returns False when the model already has an entry or another owner
+        (load, eviction, transition, block) is in charge of it.
+        """
+        memory_gb = self._memory_requirement_gb(manifest, model_id)
+        pool = self._resolve_pool_device(
+            declared_device((manifest or {}).get("capabilities")),
+        )
+        with self.lock:
+            if (
+                model_id in self.loaded
+                or model_id in self.in_flight_loads
+                or model_id in self._evicting
+                or model_id in self._eviction_claims
+                or model_id in self._worker_transitions
+                or model_id in self._blocked_models
+            ):
+                return False
+            now = time.monotonic()
+            self.loaded[model_id] = LoadEntry(
+                model_id=model_id,
+                worker_port=worker_port,
+                memory_gb=memory_gb,
+                refcount=0,
+                last_touched_at=now,
+                loaded_at=now,
+                pool=pool,
+            )
+            self._inflight_epoch += 1
+            return True
+
     def _fire_capacity_listener(self) -> None:
         """Fire capacity_listener, if set, swallowing any exception.
 
@@ -1210,6 +1292,15 @@ class LoadDirector:
         (failure). _commit and _abort cover both cases.
         """
         with self.lock:
+            if model_id in self._failed_rollbacks:
+                from muse.admin.operations import OperationError
+                raise OperationError(
+                    "model_cleanup_required",
+                    f"model {model_id!r} has a worker that could not be "
+                    "cleanly stopped; disable it to retry the cleanup",
+                    status=503,
+                    retryable=False,
+                )
             if model_id in self._blocked_models:
                 from muse.admin.operations import OperationError
                 raise OperationError(

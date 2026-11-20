@@ -1176,7 +1176,7 @@ class TestEnableFnException:
 
         with pytest.raises(OperationError) as caught:
             director.acquire("fake-model", manifest=_manifest(memory_gb=2.0))
-        assert caught.value.code == "model_disabled"
+        assert caught.value.code == "model_cleanup_required"
         with pytest.raises(OperationError) as caught:
             director.allow_model("fake-model")
         assert caught.value.code == "model_cleanup_required"
