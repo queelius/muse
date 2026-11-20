@@ -141,8 +141,8 @@ def test_embeddings_400_on_bad_data_url():
     })
     assert r.status_code == 400
     body = r.json()
-    assert body["error"]["code"] == "invalid_parameter"
-    assert "image decode failed" in body["error"]["message"].lower()
+    assert body["error"]["code"] == "invalid_image"
+    assert "base64 decode failed" in body["error"]["message"].lower()
 
 
 def test_embeddings_400_on_unsupported_input_format():
@@ -153,7 +153,7 @@ def test_embeddings_400_on_unsupported_input_format():
         "input": "just-a-plain-string",
     })
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert r.json()["error"]["code"] == "invalid_image"
 
 
 def test_batch_decode_closes_prior_images_on_unexpected_error(monkeypatch):
@@ -298,15 +298,16 @@ def test_embeddings_400_on_oversized_batch(monkeypatch):
         importlib.reload(rmod)
 
 
-def test_embeddings_returns_model_id_from_backend_result():
-    """Response 'model' field is the result.model_id, not the request body."""
+def test_embeddings_reports_registry_id_not_runtime_id():
+    """Response 'model' is the registry id even if the runtime reports
+    another (e.g. its upstream repo id), like ocr / vectorize / cv."""
     backend = _fake_backend(_fake_result(model_id="custom-id"))
     client = _make_client(backend)
     r = client.post("/v1/images/embeddings", json={
         "input": _png_data_url(),
     })
     body = r.json()
-    assert body["model"] == "custom-id"
+    assert body["model"] == backend.model_id
 
 
 def test_embeddings_usage_zero_for_image_inputs():
@@ -376,7 +377,8 @@ def test_embeddings_rejects_aggregate_decoded_pixel_budget(monkeypatch):
         response = client.post("/v1/images/embeddings", json={
             "input": [_png_data_url(8, 8), _png_data_url(8, 8)],
         })
-        assert response.status_code == 400
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "input_too_large"
         assert "aggregate limit 100" in response.json()["error"]["message"]
         backend.embed.assert_not_called()
     finally:
@@ -443,3 +445,56 @@ def test_backend_error_returns_openai_envelope():
     assert "detail" not in body
     assert body["error"]["code"] == "internal_error"
     assert "secret /internal/weights/path" not in r.text
+
+
+def test_url_inputs_are_decoded_concurrently(monkeypatch):
+    """Up to 64 URLs at a 30 s timeout each used to be fetched serially."""
+    import asyncio
+
+    from muse.modalities.image_embedding import routes
+
+    running = 0
+    peak = 0
+
+    async def slow_decode(_value):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        img = MagicMock()
+        img.size = (4, 4)
+        return img
+
+    monkeypatch.setattr(routes, "decode_image_input", slow_decode)
+    backend = _fake_backend(_fake_result(n_images=4))
+    r = _make_client(backend).post("/v1/images/embeddings", json={
+        "input": [f"https://example.com/{i}.png" for i in range(4)],
+    })
+    assert r.status_code == 200, r.text
+    assert peak == 4
+
+
+def test_url_batch_deadline_is_400_and_closes_decoded(monkeypatch):
+    import asyncio
+
+    from muse.modalities.image_embedding import routes
+
+    fast = MagicMock()
+    fast.size = (4, 4)
+
+    async def decode(value):
+        if value.endswith("slow"):
+            await asyncio.sleep(10)
+        return fast
+
+    monkeypatch.setattr(routes, "decode_image_input", decode)
+    monkeypatch.setattr(routes, "_DECODE_DEADLINE_SECONDS", 0.1)
+    backend = _fake_backend(_fake_result(n_images=2))
+    r = _make_client(backend).post("/v1/images/embeddings", json={
+        "input": ["https://example.com/fast", "https://example.com/slow"],
+    })
+    assert r.status_code == 400
+    assert "deadline" in r.json()["error"]["message"]
+    fast.close.assert_called_once_with()
+    backend.embed.assert_not_called()

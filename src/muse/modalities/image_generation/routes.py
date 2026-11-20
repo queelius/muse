@@ -21,9 +21,8 @@ Follows OpenAI's /v1/images/generations contract:
 """
 from __future__ import annotations
 
-import asyncio
 import base64
-import logging
+import threading
 import time
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -31,7 +30,21 @@ from pydantic import BaseModel, Field, field_validator
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
+from muse.modalities._common.fields import (
+    FieldError,
+    check_choice,
+    check_length,
+    check_range,
+    field_error_response,
+)
+from muse.modalities._common.images import (
+    ImageInputError,
+    close_decoded_images,
+    decode_image_input,
+    image_error_response,
+    read_and_decode_uploads,
+)
+from muse.modalities._common.inference import offload_call, produce_each
 from muse.modalities.image_generation.codec import to_bytes, to_data_url
 from muse.modalities.image_generation.options import (
     OptionError,
@@ -42,33 +55,36 @@ from muse.modalities.image_generation.options import (
     parse_size,
     resolve_quality,
     snap_size,
-    snaps,
 )
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
-    decode_image_file,
-    decode_image_input,
-    validate_total_image_pixels,
-)
-
-logger = logging.getLogger(__name__)
 
 MODALITY = "image/generation"
 
+# Field ranges shared by the JSON route (Pydantic) and the multipart twins.
+MAX_PROMPT_CHARS = 4000
+MAX_N = 10
+STEPS_RANGE = (1, 100)
+GUIDANCE_RANGE = (0.0, 20.0)
+LORA_SCALE_RANGE = (0.0, 2.0)
+RESPONSE_FORMATS = ("b64_json", "url")
+
 
 class GenerationRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=4000)
+    prompt: str = Field(..., min_length=1, max_length=MAX_PROMPT_CHARS)
     model: str | None = None
-    n: int = Field(default=1, ge=1, le=10)
+    n: int = Field(default=1, ge=1, le=MAX_N)
     size: str | None = Field(default=None, pattern=r"^(\d+x\d+|auto)$")
     response_format: str = Field(default="b64_json", pattern="^(b64_json|url)$")
     negative_prompt: str | None = None
-    steps: int | None = Field(default=None, ge=1, le=100)
-    guidance: float | None = Field(default=None, ge=0.0, le=20.0)
+    steps: int | None = Field(default=None, ge=STEPS_RANGE[0], le=STEPS_RANGE[1])
+    guidance: float | None = Field(
+        default=None, ge=GUIDANCE_RANGE[0], le=GUIDANCE_RANGE[1],
+    )
     seed: int | None = None
     image: str | None = None
     strength: float | None = Field(default=None, ge=0.0, le=1.0)
-    lora_scale: float | None = Field(default=None, ge=0.0, le=2.0)
+    lora_scale: float | None = Field(
+        default=None, ge=LORA_SCALE_RANGE[0], le=LORA_SCALE_RANGE[1],
+    )
     quality: str | None = None
     output_format: str | None = None
     output_compression: int | None = None
@@ -87,26 +103,29 @@ class GenerationRequest(BaseModel):
         return v
 
 
-def _build_response(
-    results: list,
+def _check_common_fields(
+    *, n: int, response_format: str, steps=None, guidance=None, lora_scale=None,
+) -> None:
+    """The multipart twins of GenerationRequest's range checks."""
+    check_range("n", n, 1, MAX_N)
+    check_choice("response_format", response_format, RESPONSE_FORMATS)
+    check_range("steps", steps, *STEPS_RANGE)
+    check_range("guidance", guidance, *GUIDANCE_RANGE)
+    check_range("lora_scale", lora_scale, *LORA_SCALE_RANGE)
+
+
+def _entry_encoder(
     *,
     prompt: str | None,
     response_format: str,
     output_format: str,
     compression: int | None,
-    quality: str,
-    background: str,
-    ignored: list[str],
-    prompt_prefix_applied: bool | None = None,
-) -> dict:
-    """Shared envelope for generations/edits/variations.
+):
+    """One result -> ``(data entry, (width, height))``; runs off-loop.
 
-    A None `prompt` omits `revised_prompt`. `size` is what the first result
-    actually measured, not what was requested. A None
-    `prompt_prefix_applied` (the model declares no prompt_prefix) omits it.
+    A None `prompt` omits `revised_prompt`.
     """
-    data = []
-    for r in results:
+    def _encode(r):
         entry: dict = {}
         if prompt is not None:
             entry["revised_prompt"] = r.metadata.get("prompt", prompt)
@@ -116,19 +135,51 @@ def _build_response(
             entry["b64_json"] = base64.b64encode(
                 to_bytes(r.image, fmt=output_format, compression=compression),
             ).decode()
-        data.append(entry)
+        return entry, (r.width, r.height)
+
+    return _encode
+
+
+def _build_response(
+    encoded: list,
+    *,
+    output_format: str,
+    quality: str,
+    background: str,
+    ignored: list[str],
+    prompt_prefix_applied: bool | None = None,
+) -> dict:
+    """Shared envelope for generations/edits/variations.
+
+    `size` is what the first result actually measured, not what was
+    requested. A None `prompt_prefix_applied` (the model declares no
+    prompt_prefix) omits it.
+    """
     metadata: dict = {"ignored": ignored}
     if prompt_prefix_applied is not None:
         metadata["prompt_prefix_applied"] = prompt_prefix_applied
+    width, height = encoded[0][1]
     return {
         "created": int(time.time()),
-        "data": data,
-        "size": f"{results[0].width}x{results[0].height}",
+        "data": [entry for entry, _size in encoded],
+        "size": f"{width}x{height}",
         "quality": quality,
         "output_format": output_format,
         "background": background,
         "metadata": metadata,
     }
+
+
+async def _run_n(backend, n: int, produce, encode, *, inputs) -> list:
+    """Produce and encode ``n`` results off the event loop."""
+    stop = threading.Event()
+    return await offload_call(
+        lambda: produce_each(
+            n, produce, encode, lock=backend._inference_lock, stop=stop,
+        ),
+        inputs=inputs,
+        stop=stop,
+    )
 
 
 MAX_EDIT_IMAGES = 16
@@ -154,8 +205,7 @@ def _resolve_options(
     """
     width, height = parse_size(size, caps)
     quality_name, preset = resolve_quality(quality, caps)
-    if snaps(caps):
-        width, height = snap_size(width, height, caps, preset)
+    width, height = snap_size(width, height, caps, preset)
     fmt = check_output(output_format, output_compression)
     bg = check_background(background)
     ignored = ignored_fields(
@@ -187,28 +237,25 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.post("/generations")
     async def generations(req: GenerationRequest):
         model = registry.get_or_404(MODALITY, req.model)
-
-        # Resolve the effective model id (the registry default when req.model is None)
-        # so capability-gate errors and decode-failure errors name a real model.
-        effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+        effective_id = model.model_id
+        caps = registry.capabilities(MODALITY, effective_id)
 
         # lora_scale only applies to LoRA adapter models; reject early
         # for others (mirrors the supports_img2img capability gate).
-        if req.lora_scale is not None:
-            if not registry.capabilities(MODALITY, effective_id).get("lora_adapter"):
-                return error_response(
-                    400,
-                    "lora_not_supported",
-                    f"model {effective_id!r} is not a LoRA adapter model; "
-                    f"lora_scale only applies to LoRA models",
-                )
+        if req.lora_scale is not None and not caps.get("lora_adapter"):
+            return error_response(
+                400,
+                "lora_not_supported",
+                f"model {effective_id!r} is not a LoRA adapter model; "
+                f"lora_scale only applies to LoRA models",
+            )
 
         # img2img gating: if `image` is supplied, the selected model must
         # declare `supports_img2img: True` in its manifest, and the input
         # must decode to a PIL.Image.
         init_image = None
         if req.image is not None:
-            if not registry.capabilities(MODALITY, effective_id).get("supports_img2img"):
+            if not caps.get("supports_img2img"):
                 return error_response(
                     400,
                     "invalid_parameter",
@@ -217,14 +264,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
             try:
                 init_image = await decode_image_input(req.image)
-            except ValueError as e:
-                return error_response(
-                    400,
-                    "invalid_parameter",
-                    f"image decode failed: {e}",
-                )
+            except ImageInputError as e:
+                return image_error_response(e, field="image")
+        inputs = [init_image] if init_image is not None else []
 
-        caps = registry.capabilities(MODALITY, effective_id)
         try:
             opts = _resolve_options(
                 caps,
@@ -240,19 +283,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 steps=req.steps,
             )
         except OptionError as e:
-            close_decoded_images([init_image] if init_image is not None else [])
+            close_decoded_images(inputs)
             return error_response(400, e.code, e.message)
         width, height = opts["width"], opts["height"]
-        steps = opts["steps"]
-        output_format = opts["output_format"]
         prompt, prefix_applied = apply_prompt_prefix(req.prompt, caps)
 
-        def _call_one(seed_offset: int):
+        def _produce(seed_offset: int):
             kwargs: dict = {
                 "width": width,
                 "height": height,
                 "negative_prompt": req.negative_prompt,
-                "steps": steps,
+                "steps": opts["steps"],
                 "guidance": req.guidance,
                 "init_image": init_image,
                 "strength": req.strength,
@@ -260,56 +301,28 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             }
             if req.seed is not None:
                 kwargs["seed"] = req.seed + seed_offset
-            with model._inference_lock:
-                return model.generate(prompt, **kwargs)
+            return model.generate(prompt, **kwargs)
 
-        input_images = [init_image] if init_image is not None else []
-        results = []
-
-        def _cleanup_abandoned(current_result) -> None:
-            close_decoded_images(
-                input_images
-                + [getattr(result, "image", None) for result in results]
-                + [getattr(current_result, "image", None)]
-            )
-
-        try:
-            for i in range(req.n):
-                result = await run_native_offload(
-                    lambda i=i: _call_one(i),
-                    cleanup_abandoned=_cleanup_abandoned,
-                )
-                results.append(result)
-        except asyncio.CancelledError:
-            # The native ownership helper releases request inputs and any
-            # eventual result only after the running backend call settles.
-            raise
-        except BaseException:
-            close_decoded_images(
-                input_images
-                + [getattr(result, "image", None) for result in results]
-            )
-            raise
-
-        try:
-            return _build_response(
-                results,
+        encoded = await _run_n(
+            model, req.n, _produce,
+            _entry_encoder(
                 prompt=prompt,
                 response_format=req.response_format,
-                output_format=output_format,
+                output_format=opts["output_format"],
                 compression=req.output_compression,
-                quality=opts["quality"],
-                background=opts["background"],
-                ignored=opts["ignored"],
-                prompt_prefix_applied=(
-                    prefix_applied if "prompt_prefix" in caps else None
-                ),
-            )
-        finally:
-            close_decoded_images(
-                input_images
-                + [getattr(r, "image", None) for r in results]
-            )
+            ),
+            inputs=inputs,
+        )
+        return _build_response(
+            encoded,
+            output_format=opts["output_format"],
+            quality=opts["quality"],
+            background=opts["background"],
+            ignored=opts["ignored"],
+            prompt_prefix_applied=(
+                prefix_applied if "prompt_prefix" in caps else None
+            ),
+        )
 
     # ------- /v1/images/edits (inpainting or multi-reference, multipart) -------
 
@@ -335,35 +348,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         seed: int | None = Form(None),
         lora_scale: float | None = Form(None),
     ):
-        # Validate Form fields by hand. Pydantic's BaseModel can't validate
-        # a multipart body directly; we mirror the GenerationRequest range
-        # checks here so /edits returns the same 400 envelopes.
-        if not (1 <= len(prompt) <= 4000):
-            return error_response(
-                400, "invalid_parameter",
-                "prompt must be 1 to 4000 characters",
+        try:
+            check_length("prompt", prompt, 1, MAX_PROMPT_CHARS)
+            _check_common_fields(
+                n=n, response_format=response_format, steps=steps,
+                guidance=guidance, lora_scale=lora_scale,
             )
-        if not (1 <= n <= 10):
-            return error_response(
-                400, "invalid_parameter", "n must be in [1, 10]",
-            )
-        if response_format not in ("b64_json", "url"):
-            return error_response(
-                400, "invalid_parameter",
-                "response_format must be 'b64_json' or 'url'",
-            )
-        if steps is not None and not (1 <= steps <= 100):
-            return error_response(
-                400, "invalid_parameter", "steps must be in [1, 100]",
-            )
-        if guidance is not None and not (0.0 <= guidance <= 20.0):
-            return error_response(
-                400, "invalid_parameter", "guidance must be in [0, 20]",
-            )
-        if lora_scale is not None and not (0.0 <= lora_scale <= 2.0):
-            return error_response(
-                400, "invalid_parameter", "lora_scale must be in [0, 2]",
-            )
+        except FieldError as e:
+            return field_error_response(e)
 
         # `image` parts first, then `image[]` parts, in arrival order.
         parts = list(image or []) + list(image_list or [])
@@ -384,7 +376,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
 
         backend = registry.get_or_404(MODALITY, model)
-        effective_id = getattr(backend, "model_id", None) or (model or "<default>")
+        effective_id = backend.model_id
         caps = registry.capabilities(MODALITY, effective_id)
 
         if lora_scale is not None and not caps.get("lora_adapter"):
@@ -443,23 +435,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 set(opts["ignored"]) | {k for k, v in sent.items() if v is not None}
             )
 
-        decoded_images = []
-        try:
-            for part in parts:
-                decoded_images.append(await decode_image_file(part))
-            mask_image = None
-            if mask is not None:
-                mask_image = await decode_image_file(mask)
-                decoded_images.append(mask_image)
-            validate_total_image_pixels(decoded_images)
-        except ValueError as e:
-            close_decoded_images(decoded_images)
-            return error_response(
-                400, "invalid_parameter", f"image decode failed: {e}",
-            )
-        except BaseException:
-            close_decoded_images(decoded_images)
-            raise
+        uploads = [
+            ("image" if len(parts) == 1 else f"image[{i}]", part)
+            for i, part in enumerate(parts)
+        ]
+        if mask is not None:
+            uploads.append(("mask", mask))
+        decoded_images, error = await read_and_decode_uploads(
+            uploads, check_total_pixels=True,
+        )
+        if error is not None:
+            return error
+        mask_image = decoded_images[1] if mask is not None else None
 
         if mask_image is None:
             # The reference pipeline's image processor rejects these shapes.
@@ -475,73 +462,48 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         prompt, prefix_applied = apply_prompt_prefix(prompt, caps)
 
-        def _call_one(seed_offset: int):
-            with backend._inference_lock:
-                if mask_image is not None:
-                    return backend.inpaint(
-                        prompt,
-                        width=width,
-                        height=height,
-                        init_image=decoded_images[0],
-                        mask_image=mask_image,
-                    )
-                kwargs: dict = {
-                    "images": decoded_images,
-                    "width": width,
-                    "height": height,
-                    "steps": opts["steps"],
-                    "guidance": guidance,
-                    "negative_prompt": negative_prompt,
-                    "lora_scale": lora_scale,
-                }
-                if seed is not None:
-                    kwargs["seed"] = seed + seed_offset
-                return backend.edit(prompt, **kwargs)
-
-        results = []
-
-        def _cleanup_abandoned(current_result) -> None:
-            close_decoded_images(
-                decoded_images
-                + [getattr(result, "image", None) for result in results]
-                + [getattr(current_result, "image", None)]
-            )
-
-        try:
-            for i in range(n):
-                result = await run_native_offload(
-                    lambda i=i: _call_one(i),
-                    cleanup_abandoned=_cleanup_abandoned,
+        def _produce(seed_offset: int):
+            if mask_image is not None:
+                return backend.inpaint(
+                    prompt,
+                    width=width,
+                    height=height,
+                    init_image=decoded_images[0],
+                    mask_image=mask_image,
                 )
-                results.append(result)
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            close_decoded_images(
-                decoded_images
-                + [getattr(result, "image", None) for result in results]
-            )
-            raise
+            kwargs: dict = {
+                "images": decoded_images,
+                "width": width,
+                "height": height,
+                "steps": opts["steps"],
+                "guidance": guidance,
+                "negative_prompt": negative_prompt,
+                "lora_scale": lora_scale,
+            }
+            if seed is not None:
+                kwargs["seed"] = seed + seed_offset
+            return backend.edit(prompt, **kwargs)
 
-        try:
-            return _build_response(
-                results,
+        encoded = await _run_n(
+            backend, n, _produce,
+            _entry_encoder(
                 prompt=prompt,
                 response_format=response_format,
                 output_format=opts["output_format"],
                 compression=output_compression,
-                quality=opts["quality"],
-                background=opts["background"],
-                ignored=opts["ignored"],
-                prompt_prefix_applied=(
-                    prefix_applied if "prompt_prefix" in caps else None
-                ),
-            )
-        finally:
-            close_decoded_images(
-                decoded_images
-                + [getattr(r, "image", None) for r in results]
-            )
+            ),
+            inputs=decoded_images,
+        )
+        return _build_response(
+            encoded,
+            output_format=opts["output_format"],
+            quality=opts["quality"],
+            background=opts["background"],
+            ignored=opts["ignored"],
+            prompt_prefix_applied=(
+                prefix_applied if "prompt_prefix" in caps else None
+            ),
+        )
 
     # ---------------- /v1/images/variations (multipart) ----------------
 
@@ -553,94 +515,43 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         size: str = Form("512x512"),
         response_format: str = Form("b64_json"),
     ):
-        if not (1 <= n <= 10):
-            return error_response(
-                400, "invalid_parameter", "n must be in [1, 10]",
-            )
-        if response_format not in ("b64_json", "url"):
-            return error_response(
-                400, "invalid_parameter",
-                "response_format must be 'b64_json' or 'url'",
-            )
         try:
-            w, h = map(int, size.split("x"))
-        except Exception:  # noqa: BLE001
-            return error_response(
-                400, "invalid_parameter",
-                f"size must be 'WIDTHxHEIGHT'; got {size!r}",
-            )
-        if not (64 <= w <= 2048 and 64 <= h <= 2048):
-            return error_response(
-                400, "invalid_parameter",
-                f"size {size} out of supported range (64-2048 per side)",
-            )
+            _check_common_fields(n=n, response_format=response_format)
+            w, h = parse_size(size, {})
+        except FieldError as e:
+            return field_error_response(e)
+        except OptionError as e:
+            return error_response(400, e.code, e.message)
 
         backend = registry.get_or_404(MODALITY, model)
-
-        effective_id = getattr(backend, "model_id", None) or (model or "<default>")
+        effective_id = backend.model_id
         if not registry.capabilities(MODALITY, effective_id).get("supports_variations"):
             return error_response(
                 400, "invalid_parameter",
                 f"model {effective_id!r} does not support variations",
             )
 
-        try:
-            init_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(
-                400, "invalid_parameter", f"image decode failed: {e}",
-            )
+        images, error = await read_and_decode_uploads([("image", image)])
+        if error is not None:
+            return error
+        init_image = images[0]
 
-        def _call_one():
-            kwargs: dict = {
-                "width": w,
-                "height": h,
-                "init_image": init_image,
-            }
-            with backend._inference_lock:
-                return backend.vary(**kwargs)
-
-        results = []
-
-        def _cleanup_abandoned(current_result) -> None:
-            close_decoded_images(
-                [init_image]
-                + [getattr(result, "image", None) for result in results]
-                + [getattr(current_result, "image", None)]
-            )
-
-        try:
-            for _ in range(n):
-                result = await run_native_offload(
-                    _call_one,
-                    cleanup_abandoned=_cleanup_abandoned,
-                )
-                results.append(result)
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            close_decoded_images(
-                [init_image]
-                + [getattr(result, "image", None) for result in results]
-            )
-            raise
-
-        # Variations envelope: no revised_prompt (no prompt).
-        try:
-            return _build_response(
-                results,
-                prompt=None,
-                response_format=response_format,
-                output_format="png",
-                compression=None,
-                quality="auto",
-                background="auto",
-                ignored=[],
-            )
-        finally:
-            close_decoded_images(
-                [init_image]
-                + [getattr(r, "image", None) for r in results]
-            )
+        encoded = await _run_n(
+            backend, n,
+            lambda _i: backend.vary(width=w, height=h, init_image=init_image),
+            # Variations envelope: no revised_prompt (no prompt).
+            _entry_encoder(
+                prompt=None, response_format=response_format,
+                output_format="png", compression=None,
+            ),
+            inputs=images,
+        )
+        return _build_response(
+            encoded,
+            output_format="png",
+            quality="auto",
+            background="auto",
+            ignored=[],
+        )
 
     return router

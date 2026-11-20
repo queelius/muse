@@ -10,38 +10,31 @@ Capability flags on each model's manifest gate which route accepts it:
 Mismatch returns 400 with code `wrong_primitive`.
 
 All three routes:
-  - Multipart in (image upload via decode_image_file from
-    image_generation; MUSE_IMAGE_INPUT_MAX_BYTES env cap from v0.34.0).
-  - Per-backend inference lock (v0.34.0 Task A) serializes calls.
+  - Multipart in (``_common.images.read_and_decode_upload``;
+    MUSE_IMAGE_INPUT_MAX_BYTES cap, 413 / 400 per the shared table).
+  - Inference and envelope encoding run off the event loop under the
+    per-backend inference lock.
   - JSON out via the codec layer's encode_*_envelope helpers.
-  - OpenAI-shape error envelope on 400/404/500.
+  - OpenAI-shape error envelope on 400/404/413; backend failures reach
+    the app's generic 500 handler.
 """
 from __future__ import annotations
-
-import asyncio
-import logging
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
+from muse.modalities._common.images import read_and_decode_upload
+from muse.modalities._common.inference import offload_call
 from muse.modalities.image_cv.codec import (
     encode_depth_envelope,
     encode_detections_envelope,
     encode_keypoints_envelope,
 )
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
-    decode_image_file,
-)
 
 
 MODALITY = "image/cv"
-
-
-logger = logging.getLogger(__name__)
 
 
 def _capability_gate(
@@ -91,45 +84,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if gate is not None:
             return gate
 
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
+        pil_image, error = await read_and_decode_upload(image)
+        if error is not None:
+            return error
 
-        def _call():
-            with backend._inference_lock:
-                return backend.estimate_depth(pil_image)
-
-        abandoned = False
-        try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images([pil_image])
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("estimate_depth failed")
-            return error_response(
-                500, "internal_error",
-                "depth estimation backend failed; see server logs",
-            )
-        finally:
-            if not abandoned:
-                close_decoded_images([pil_image])
-
-        try:
-            body = encode_depth_envelope(
-                result, response_format=response_format,
-            )
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
+        body = await offload_call(
+            lambda: encode_depth_envelope(
+                backend.estimate_depth(pil_image),
+                response_format=response_format,
+            ),
+            lock=backend._inference_lock,
+            inputs=[pil_image],
+        )
         body["model"] = backend.model_id
         return JSONResponse(content=body)
 
@@ -152,44 +118,21 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if gate is not None:
             return gate
 
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
+        pil_image, error = await read_and_decode_upload(image)
+        if error is not None:
+            return error
 
         kwargs: dict = {}
         if threshold is not None:
             kwargs["threshold"] = threshold
 
-        def _call():
-            with backend._inference_lock:
-                return backend.detect_keypoints(pil_image, **kwargs)
-
-        abandoned = False
-        try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images([pil_image])
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("detect_keypoints failed")
-            return error_response(
-                500, "internal_error",
-                "keypoint detection backend failed; see server logs",
-            )
-        finally:
-            if not abandoned:
-                close_decoded_images([pil_image])
-
-        body = encode_keypoints_envelope(result)
+        body = await offload_call(
+            lambda: encode_keypoints_envelope(
+                backend.detect_keypoints(pil_image, **kwargs),
+            ),
+            lock=backend._inference_lock,
+            inputs=[pil_image],
+        )
         body["model"] = backend.model_id
         return JSONResponse(content=body)
 
@@ -218,10 +161,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if gate is not None:
             return gate
 
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
+        pil_image, error = await read_and_decode_upload(image)
+        if error is not None:
+            return error
 
         kwargs: dict = {}
         if threshold is not None:
@@ -229,35 +171,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if max_detections is not None:
             kwargs["max_detections"] = max_detections
 
-        def _call():
-            with backend._inference_lock:
-                return backend.detect_objects(pil_image, **kwargs)
-
-        abandoned = False
-        try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images([pil_image])
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("detect_objects failed")
-            return error_response(
-                500, "internal_error",
-                "object detection backend failed; see server logs",
-            )
-        finally:
-            if not abandoned:
-                close_decoded_images([pil_image])
-
-        body = encode_detections_envelope(result)
+        body = await offload_call(
+            lambda: encode_detections_envelope(
+                backend.detect_objects(pil_image, **kwargs),
+            ),
+            lock=backend._inference_lock,
+            inputs=[pil_image],
+        )
         body["model"] = backend.model_id
         return JSONResponse(content=body)
 

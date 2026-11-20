@@ -239,7 +239,7 @@ def test_text_route_backend_exception_returns_500():
     reg = ModalityRegistry()
     reg.register(MODALITY, backend, manifest=manifest)
     app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
-    c = TestClient(app)
+    c = TestClient(app, raise_server_exceptions=False)
     r = c.post("/v1/3d/generations", json={"prompt": "x"})
     assert r.status_code == 500, r.text
     body = r.json()
@@ -343,7 +343,7 @@ def test_image_route_empty_image_returns_400():
     assert body["error"]["code"] == "invalid_image"
 
 
-def test_image_route_oversized_returns_400(monkeypatch):
+def test_image_route_oversized_returns_413(monkeypatch):
     """MUSE_3D_INPUT_MAX_BYTES env cap rejects oversized uploads."""
     backend = _FakeBackend()
     client = _client(backend)
@@ -352,9 +352,9 @@ def test_image_route_oversized_returns_400(monkeypatch):
         "/v1/3d/from-image",
         files={"image": ("a.png", b"x" * 200, "image/png")},
     )
-    assert r.status_code == 400, r.text
+    assert r.status_code == 413, r.text
     body = r.json()
-    assert body["error"]["code"] == "invalid_image"
+    assert body["error"]["code"] == "payload_too_large"
     assert "MUSE_3D_INPUT_MAX_BYTES" in body["error"]["message"]
 
 
@@ -438,7 +438,7 @@ def test_image_route_closes_decoded_image_after_backend():
     decoded.size = (1, 1)
 
     with patch(
-        "muse.modalities.model_3d_generation.routes.decode_image_file",
+        "muse.modalities._common.images.decode_image_file",
         return_value=decoded,
     ):
         response = _client(backend).post(
@@ -464,7 +464,8 @@ def test_image_route_enforces_shared_decoded_pixel_cap(monkeypatch):
         files={"image": ("wide.png", buf.getvalue(), "image/png")},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "input_too_large"
     assert "max input pixels" in response.json()["error"]["message"]
     assert backend.image_called == 0
 
@@ -502,7 +503,7 @@ def test_image_route_backend_exception_no_temp_file_left():
     reg = ModalityRegistry()
     reg.register(MODALITY, backend, manifest=manifest)
     app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
-    c = TestClient(app)
+    c = TestClient(app, raise_server_exceptions=False)
     r = c.post(
         "/v1/3d/from-image",
         files={"image": ("a.png", png_bytes, "image/png")},
@@ -563,7 +564,7 @@ def test_image_route_backend_exception_returns_500():
     reg = ModalityRegistry()
     reg.register(MODALITY, backend, manifest=manifest)
     app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
-    c = TestClient(app)
+    c = TestClient(app, raise_server_exceptions=False)
     r = c.post(
         "/v1/3d/from-image",
         files={"image": ("a.png", png_bytes, "image/png")},
@@ -574,3 +575,51 @@ def test_image_route_backend_exception_returns_500():
     # Finding 1 (v0.58.1 review): the backend exception text must NOT
     # reach the client body; only a generic message does.
     assert "boom" not in body["error"]["message"]
+
+
+def test_image_route_keeps_alpha_for_the_runtime():
+    """TRELLIS / Hunyuan3D preprocessors use an alpha cutout; the route
+    must not flatten it (TripoSR converts to RGB itself)."""
+    from PIL import Image as PILImage
+    import io as _io
+
+    seen = []
+    backend = _FakeBackend()
+    real = backend.image_to_3d
+
+    def _spy(image, **kwargs):
+        seen.append(image.mode)
+        return real(image, **kwargs)
+
+    backend.image_to_3d = _spy
+    buf = _io.BytesIO()
+    PILImage.new("RGBA", (2, 2), (255, 0, 0, 0)).save(buf, format="PNG")
+    r = _client(backend).post(
+        "/v1/3d/from-image",
+        files={"image": ("cutout.png", buf.getvalue(), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    assert seen == ["RGBA"]
+
+
+def test_text_route_prompt_is_capped_at_4000_chars():
+    r = _client(_FakeBackend()).post(
+        "/v1/3d/generations", json={"prompt": "p" * 4001},
+    )
+    assert r.status_code == 422
+
+
+def test_image_route_decodes_and_encodes_off_the_event_loop(monkeypatch):
+    from muse.modalities.model_3d_generation import routes as routes_3d
+    from tests.modalities.loop_spy import spy_decode, spy_on
+
+    decoded = spy_decode(monkeypatch)
+    encoded: list[bool] = []
+    spy_on(monkeypatch, routes_3d, "encode_3d_response", encoded)
+    r = _client(_FakeBackend()).post(
+        "/v1/3d/from-image",
+        files={"image": ("a.png", _valid_png_bytes(), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    assert decoded == [False]
+    assert encoded == [False]

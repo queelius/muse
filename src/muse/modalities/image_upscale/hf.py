@@ -60,16 +60,8 @@ def _is_upscaler_name(repo_id: str) -> bool:
 
 
 def _infer_defaults(repo_id: str) -> dict[str, Any]:
-    """Sensible per-pattern defaults so each upscaler model lands with
-    reasonable scale / steps / guidance defaults out of the box."""
-    rid = repo_id.lower()
-    if "x4-upscaler" in rid or "x4" in rid:
-        return {
-            "default_scale": 4,
-            "supported_scales": [4],
-            "default_steps": 20,
-            "default_guidance": 9.0,
-        }
+    """Defaults for the one supported pipeline (StableDiffusionUpscalePipeline,
+    fixed 4x). A future upscaler family with other scales branches here."""
     return {
         "default_scale": 4,
         "supported_scales": [4],

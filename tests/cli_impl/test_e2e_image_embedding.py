@@ -150,7 +150,7 @@ def test_e2e_images_embeddings_400_on_bad_input():
         "input": "data:image/png;base64,!!!corrupt!!!",
     })
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert r.json()["error"]["code"] == "invalid_image"
 
 
 @pytest.mark.timeout(10)

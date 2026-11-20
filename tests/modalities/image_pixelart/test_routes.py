@@ -538,7 +538,7 @@ def _on_event_loop() -> bool:
 def loop_spy(monkeypatch):
     """Record, per call, whether image decoding and the pixel work ran on a
     thread with a running event loop (the handler's) or in a worker thread."""
-    import muse.modalities.image_generation.image_input as image_input
+    import muse.modalities._common.images as image_input
 
     seen: dict[str, list[bool]] = {"decode": [], "pixelize": [], "autotile": []}
     real_decode = image_input._bytes_to_pil

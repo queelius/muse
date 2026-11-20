@@ -1,7 +1,6 @@
 """FastAPI route for raster-to-SVG vectorization."""
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -10,11 +9,8 @@ from fastapi.responses import JSONResponse, Response
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
-    decode_image_file,
-)
+from muse.modalities._common.images import read_and_decode_upload
+from muse.modalities._common.inference import offload_call
 from muse.modalities.image_vectorization.codec import encode_vectorization
 from muse.modalities.image_vectorization.protocol import (
     VectorizationOutputError,
@@ -26,6 +22,7 @@ logger = logging.getLogger(__name__)
 MODALITY = "image/vectorization"
 _MAX_NEW_TOKENS = 7680
 _MAX_SEED = 2**63 - 1
+_SIDE_SETTING = "MUSE_VECTORIZATION_MAX_INPUT_SIDE"
 
 
 def _max_input_side() -> int:
@@ -77,16 +74,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         backend = registry.get_or_404(MODALITY, model)
 
-        max_side = _max_input_side()
-        try:
-            source = await decode_image_file(image, max_side=max_side)
-        except ValueError as exc:
-            message = str(exc)
-            if "exceeds max input side" in message:
-                message += (
-                    " (set MUSE_VECTORIZATION_MAX_INPUT_SIDE to raise)"
-                )
-            return error_response(400, "invalid_parameter", message)
+        source, error = await read_and_decode_upload(
+            image, max_side=_max_input_side(), side_setting=_SIDE_SETTING,
+        )
+        if error is not None:
+            return error
 
         width, height = source.size
 
@@ -112,32 +104,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             result.source_height = height
             return result
 
-        abandoned = False
         try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images([source])
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
+            result = await offload_call(_call, inputs=[source])
         except VectorizationOutputError as exc:
             logger.warning("vectorization produced invalid SVG: %s", exc)
             return error_response(
                 502, "invalid_model_output",
                 "vectorization backend produced invalid or unsafe SVG",
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("vectorization backend failed")
-            return error_response(
-                500, "internal_error",
-                "vectorization backend failed; see server logs",
-            )
-        finally:
-            if not abandoned:
-                close_decoded_images([source])
 
         # Registry identity is authoritative if a backend accidentally
         # reports an upstream repo id instead of Muse's catalog id.

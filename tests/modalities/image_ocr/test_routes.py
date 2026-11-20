@@ -131,7 +131,7 @@ def test_ocr_corrupt_image_returns_400():
     )
     assert r.status_code == 400
     body = r.json()
-    assert body["error"]["code"] == "invalid_parameter"
+    assert body["error"]["code"] == "invalid_image"
 
 
 def test_ocr_prompt_forwards_to_backend():
@@ -198,7 +198,7 @@ def test_ocr_runtime_exception_returns_500():
     reg = ModalityRegistry()
     reg.register(MODALITY, backend, manifest={"model_id": "broken"})
     app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
 
     r = client.post(
         "/v1/images/ocr",
@@ -227,3 +227,28 @@ def test_ocr_uses_inference_lock_per_backend():
         assert r.status_code == 200
     # Confirm registry attached the lock (v0.34.0 contract).
     assert hasattr(backend, "_inference_lock")
+
+
+def test_ocr_prompt_over_4000_chars_rejected():
+    backend = _FakeOcr(text="x")
+    client = _client(backend)
+    r = client.post(
+        "/v1/images/ocr",
+        files={"image": ("test.png", _png_bytes(), "image/png")},
+        data={"prompt": "p" * 4001},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == "prompt must be 0 to 4000 characters"
+
+
+def test_ocr_decodes_off_the_event_loop(monkeypatch):
+    from tests.modalities.loop_spy import spy_decode
+
+    decoded = spy_decode(monkeypatch)
+    client = _client(_FakeOcr(text="x"))
+    r = client.post(
+        "/v1/images/ocr",
+        files={"image": ("test.png", _png_bytes(), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    assert decoded == [False]

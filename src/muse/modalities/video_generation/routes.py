@@ -11,9 +11,8 @@ deliberately don't overlap: short looping animations go to
 """
 from __future__ import annotations
 
-import asyncio
 import base64
-import logging
+import threading
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -22,17 +21,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.fields import parse_bounded_size
+from muse.modalities._common.inference import offload_call, produce_each
 from muse.modalities.video_generation.codec import (
     UnsupportedFormatError,
     encode_frames_b64,
     encode_mp4,
     encode_webm,
+    require_imageio,
 )
 
 
 MODALITY = "video/generation"
-
-logger = logging.getLogger(__name__)
 
 _MAX_SIDE = 2048
 _MAX_PIXELS_PER_FRAME = 2_097_152
@@ -70,16 +70,9 @@ class VideoGenerationRequest(BaseModel):
     @field_validator("size")
     @classmethod
     def _bounded_size(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        width, height = map(int, value.split("x"))
-        if width < 1 or height < 1:
-            raise ValueError("size dimensions must be positive")
-        if width > _MAX_SIDE or height > _MAX_SIDE:
-            raise ValueError(f"size dimensions must not exceed {_MAX_SIDE}")
-        if width * height > _MAX_PIXELS_PER_FRAME:
-            raise ValueError(
-                f"size must not exceed {_MAX_PIXELS_PER_FRAME} pixels per frame"
+        if value is not None:
+            parse_bounded_size(
+                value, max_side=_MAX_SIDE, max_pixels=_MAX_PIXELS_PER_FRAME,
             )
         return value
 
@@ -99,6 +92,22 @@ class VideoGenerationRequest(BaseModel):
         return self
 
 
+class _FramesCapExceeded(Exception):
+    def __init__(self, total: int):
+        super().__init__(total)
+        self.total = total
+
+
+def _frames_cap_error(total: int, max_frames: int):
+    return error_response(
+        400, "invalid_parameter",
+        f"frames_b64 would emit {total} frames, exceeding "
+        f"MUSE_VIDEO_MAX_FRAMES_B64={max_frames}; request a "
+        f"shorter clip or use response_format=mp4 or webm "
+        f"(no frame cap).",
+    )
+
+
 def build_router(registry: ModalityRegistry) -> APIRouter:
     router = APIRouter(prefix="/v1/video", tags=["video/generation"])
 
@@ -106,98 +115,85 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def generations(req: VideoGenerationRequest):
         model = registry.get_or_404(MODALITY, req.model)
 
+        # Reject what can be rejected before minutes of GPU work: a format
+        # whose encoder is missing, and a frames_b64 clip whose frame count
+        # is already known to exceed the cap.
+        try:
+            require_imageio(req.response_format)
+        except UnsupportedFormatError as e:
+            return error_response(400, "invalid_parameter", str(e))
+        max_frames = _max_frames_b64()
+        frames_b64 = req.response_format == "frames_b64"
+        if frames_b64 and req.duration_seconds is not None and req.fps is not None:
+            predicted = max(1, round(req.duration_seconds * req.fps)) * req.n
+            if predicted > max_frames:
+                return _frames_cap_error(predicted, max_frames)
+
         width = height = None
         if req.size is not None:
             width, height = map(int, req.size.split("x"))
 
-        def _call_one(seed_offset: int):
-            with model._inference_lock:
-                kwargs = {
-                    "negative_prompt": req.negative_prompt,
-                    "duration_seconds": req.duration_seconds,
-                    "fps": req.fps,
-                    "width": width,
-                    "height": height,
-                    "steps": req.steps,
-                    "guidance": req.guidance,
-                }
-                if req.seed is not None:
-                    kwargs["seed"] = req.seed + seed_offset
-                return model.generate(req.prompt, **kwargs)
+        def _produce(seed_offset: int):
+            kwargs = {
+                "negative_prompt": req.negative_prompt,
+                "duration_seconds": req.duration_seconds,
+                "fps": req.fps,
+                "width": width,
+                "height": height,
+                "steps": req.steps,
+                "guidance": req.guidance,
+            }
+            if req.seed is not None:
+                kwargs["seed"] = req.seed + seed_offset
+            return model.generate(req.prompt, **kwargs)
 
-        try:
-            results = []
-            for i in range(req.n):
-                r = await asyncio.to_thread(_call_one, i)
-                results.append(r)
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("video generation failed")
-            return error_response(
-                500, "internal_error",
-                "video generation backend failed; see server logs",
-            )
+        emitted = 0
 
-        # frames_b64 inlines every frame; guard the response payload size.
-        # Checked post-generation because the frame count is only known once
-        # the model has run (duration_seconds/fps may be model defaults).
-        if req.response_format == "frames_b64":
-            max_frames = _max_frames_b64()
-            total_frames = sum(len(r.frames) for r in results)
-            if total_frames > max_frames:
-                return error_response(
-                    400, "invalid_parameter",
-                    f"frames_b64 would emit {total_frames} frames, exceeding "
-                    f"MUSE_VIDEO_MAX_FRAMES_B64={max_frames}; request a "
-                    f"shorter clip or use response_format=mp4 or webm "
-                    f"(no frame cap).",
-                )
-
-        data = []
-        for r in results:
-            try:
-                encoded = _encode(req.response_format, r)
-            except UnsupportedFormatError as e:
-                return error_response(400, "invalid_parameter", str(e))
-            except ValueError as e:
-                # mp4/webm encoders raise a plain ValueError when the
-                # backend hands back zero frames ("frames list is
-                # empty"). That's a backend/model misbehavior, not a
-                # bad request, so surface it as the OpenAI-shape 500
-                # envelope instead of letting it escape to FastAPI's
-                # bare default handler. Log the real exception server-side
-                # but never leak it to the client: str(e) can carry
-                # internal filesystem paths or other implementation detail.
-                logger.exception("video encode failed")
-                return error_response(
-                    500, "internal_error",
-                    "video encoding backend failed; see server logs",
-                )
-            if req.response_format == "frames_b64":
-                # encoded is list[str]; expand into per-frame data entries.
-                # For n>1 the per-result frame lists are appended in order;
-                # a future revision may add explicit per-result grouping.
-                for s in encoded:
-                    data.append({"b64_json": s})
+        def _encode_result(r):
+            nonlocal emitted
+            if frames_b64:
+                # frames_b64 inlines every frame; guard the response size
+                # (model defaults decide the count when duration/fps are
+                # omitted, so it is only known now).
+                emitted += len(r.frames)
+                if emitted > max_frames:
+                    raise _FramesCapExceeded(emitted)
+                # For n>1 the per-result frame lists are appended in order.
+                entries = [{"b64_json": s} for s in encode_frames_b64(r.frames)]
             else:
-                data.append({
-                    "b64_json": base64.b64encode(encoded).decode("ascii"),
-                })
+                encoded = _encode(req.response_format, r)
+                entries = [{"b64_json": base64.b64encode(encoded).decode("ascii")}]
+            meta = {
+                "frames": len(r.frames),
+                "fps": r.fps,
+                "duration_seconds": r.duration_seconds,
+                "format": req.response_format,
+                "size": [r.width, r.height],
+            }
+            return entries, meta
+
+        # A backend failure, or an encoder handed zero frames (a plain
+        # ValueError), is a server fault: the app's global handler returns
+        # the generic 500 envelope and logs the detail.
+        stop = threading.Event()
+        try:
+            encoded = await offload_call(
+                lambda: produce_each(
+                    req.n, _produce, _encode_result,
+                    lock=model._inference_lock, stop=stop,
+                ),
+                stop=stop,
+            )
+        except _FramesCapExceeded as e:
+            return _frames_cap_error(e.total, max_frames)
+        except UnsupportedFormatError as e:
+            return error_response(400, "invalid_parameter", str(e))
 
         # Use the first result for top-level metadata (n=1 is common)
-        head = results[0]
         body = {
-            "data": data,
+            "data": [entry for entries, _meta in encoded for entry in entries],
             "model": model.model_id,
-            "metadata": {
-                "frames": len(head.frames),
-                "fps": head.fps,
-                "duration_seconds": head.duration_seconds,
-                "format": req.response_format,
-                "size": [head.width, head.height],
-            },
+            "metadata": encoded[0][1],
         }
         return JSONResponse(content=body)
 
@@ -209,6 +205,4 @@ def _encode(fmt, result):
         return encode_mp4(result.frames, result.fps)
     if fmt == "webm":
         return encode_webm(result.frames, result.fps)
-    if fmt == "frames_b64":
-        return encode_frames_b64(result.frames)
     raise ValueError(f"unknown format: {fmt}")

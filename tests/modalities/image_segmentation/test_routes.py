@@ -66,7 +66,7 @@ def model():
     return RecordingSegmenter()
 
 
-def _build_client(model, capabilities=None):
+def _build_client(model, capabilities=None, *, raise_server_exceptions=True):
     if capabilities is None:
         capabilities = {
             "supports_automatic": True,
@@ -88,7 +88,7 @@ def _build_client(model, capabilities=None):
         registry=reg,
         routers={"image/segmentation": build_router(reg)},
     )
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 @pytest.fixture
@@ -399,7 +399,7 @@ def test_post_segment_empty_image_returns_400(client):
         data={"model": "fake-seg", "mode": "auto"},
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert r.json()["error"]["code"] == "invalid_image"
 
 
 def test_post_segment_malformed_image_returns_400(client):
@@ -411,18 +411,16 @@ def test_post_segment_malformed_image_returns_400(client):
     assert r.status_code == 400
 
 
-def test_post_segment_oversize_input_returns_400(client, monkeypatch):
+def test_post_segment_oversize_input_returns_413(client, monkeypatch):
     monkeypatch.setenv("MUSE_SEGMENTATION_MAX_INPUT_SIDE", "16")
     r = client.post(
         "/v1/images/segment",
         files={"image": ("src.png", _png_bytes(64, 64), "image/png")},
         data={"model": "fake-seg", "mode": "auto"},
     )
-    assert r.status_code == 400
-    assert (
-        "too large" in r.json()["error"]["message"].lower()
-        or "max" in r.json()["error"]["message"].lower()
-    )
+    assert r.status_code == 413
+    assert r.json()["error"]["code"] == "input_too_large"
+    assert "MUSE_SEGMENTATION_MAX_INPUT_SIDE" in r.json()["error"]["message"]
 
 
 def test_post_segment_unknown_model_returns_404(client):
@@ -456,7 +454,7 @@ def test_runtime_error_is_500_not_400():
     client 'invalid_parameter'. It must be 500, so clients retry rather
     than treating a valid request as malformed."""
     model = _RaisingSegmenter(RuntimeError("CUDA out of memory"))
-    client = _build_client(model)
+    client = _build_client(model, raise_server_exceptions=False)
     r = client.post(
         "/v1/images/segment",
         files={"image": ("src.png", _png_bytes(), "image/png")},
@@ -487,7 +485,7 @@ def test_unexpected_exception_is_500_envelope():
     """Any other backend exception surfaces as a 500 OpenAI envelope, not a
     bare Starlette 500 that escapes the error contract."""
     model = _RaisingSegmenter(KeyError("boom"))
-    client = _build_client(model)
+    client = _build_client(model, raise_server_exceptions=False)
     r = client.post(
         "/v1/images/segment",
         files={"image": ("src.png", _png_bytes(), "image/png")},
@@ -538,3 +536,37 @@ def test_mask_encoding_runs_off_the_event_loop(model, monkeypatch):
     )
     assert r.status_code == 200, r.text
     assert seen == [False]
+
+
+def test_capability_gate_defaults_to_deny(model):
+    """A manifest without the mode's supports_* flag does not get the mode."""
+    client = _build_client(model, capabilities={"max_masks": 16})
+    r = client.post(
+        "/v1/images/segment",
+        files={"image": ("src.png", _png_bytes(), "image/png")},
+        data={"model": "fake-seg", "mode": "auto"},
+    )
+    assert r.status_code == 400
+    assert "does not support automatic" in r.json()["error"]["message"]
+    assert model.calls == []
+
+
+def test_backend_value_error_from_encoding_is_a_server_fault(model):
+    """Only the backend's own CapabilityError/ValueError are client faults."""
+    from muse.modalities.image_segmentation.protocol import MaskRecord
+
+    def _bad(image, **kwargs):
+        return SegmentationResult(
+            masks=[MaskRecord(mask=np.zeros((2, 2, 2)), score=1.0,
+                              bbox=(0, 0, 1, 1), area=1)],
+            image_size=image.size, mode="auto", seed=-1,
+        )
+
+    model.segment = _bad
+    client = _build_client(model, raise_server_exceptions=False)
+    r = client.post(
+        "/v1/images/segment",
+        files={"image": ("src.png", _png_bytes(), "image/png")},
+        data={"model": "fake-seg", "mode": "auto"},
+    )
+    assert r.status_code == 500

@@ -55,7 +55,7 @@ def test_encode_frames_b64_returns_per_frame_base64():
 def test_encode_mp4_raises_when_imageio_unavailable():
     """mp4 requires imageio[ffmpeg]; if absent, raise a clean error."""
     with patch(
-        "muse.modalities.image_animation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=None,
     ):
         with pytest.raises(UnsupportedFormatError, match="imageio"):
@@ -74,7 +74,7 @@ def test_encode_mp4_calls_imageio_when_available():
     fake_imageio.mimwrite = fake_mimwrite
 
     with patch(
-        "muse.modalities.image_animation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         out = encode_mp4(_frames(n=3), fps=12)

@@ -67,7 +67,7 @@ def test_post_returns_mp4_by_default(client_default):
     client, _ = client_default
     fake = _fake_imageio_factory(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -91,7 +91,7 @@ def test_post_response_format_webm(client_default):
     client, _ = client_default
     fake = _fake_imageio_factory(b"FAKEWEBM")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -157,7 +157,7 @@ def test_mp4_not_subject_to_frames_b64_cap(client_default, monkeypatch):
     client, _ = client_default
     fake = _fake_imageio_factory(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -188,7 +188,7 @@ def test_post_n_2_returns_two_videos_for_mp4(client_default):
     client, _ = client_default
     fake = _fake_imageio_factory(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -261,7 +261,7 @@ def test_post_size_parsed_into_width_and_height(client_default):
     client, backend = client_default
     fake = _fake_imageio_factory(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -317,7 +317,7 @@ def test_post_seed_offset_per_n(client_default):
     backend.generate = tracked_generate
 
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -334,7 +334,7 @@ def test_post_unsupported_format_returns_400_when_imageio_absent(
     """If imageio isn't installed, mp4/webm requests get a clean 400."""
     client, _ = client_default
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=None,
     ):
         r = client.post(
@@ -385,7 +385,7 @@ def test_empty_frames_returns_openai_error_envelope():
 
     fake = _fake_imageio_factory(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -400,3 +400,59 @@ def test_empty_frames_returns_openai_error_envelope():
     # ("...frames list is empty") must NOT reach the client body; only a
     # generic message does.
     assert "empty" not in body["error"]["message"]
+
+
+def test_predictable_frames_b64_overflow_rejected_before_generation(
+    client_default, monkeypatch,
+):
+    monkeypatch.setenv("MUSE_VIDEO_MAX_FRAMES_B64", "10")
+    client, backend = client_default
+    r = client.post("/v1/video/generations", json={
+        "prompt": "x", "model": "fake-vid", "response_format": "frames_b64",
+        "duration_seconds": 2.0, "fps": 6,
+    })
+    assert r.status_code == 400
+    assert "12 frames" in r.json()["error"]["message"]
+    assert backend.last_kwargs is None
+
+
+def test_missing_imageio_rejected_before_generation(client_default):
+    client, backend = client_default
+    with patch(
+        "muse.modalities._common.video_codec._try_import_imageio",
+        return_value=None,
+    ):
+        r = client.post("/v1/video/generations", json={
+            "prompt": "x", "model": "fake-vid", "response_format": "webm",
+        })
+    assert r.status_code == 400
+    assert "imageio" in r.json()["error"]["message"]
+    assert backend.last_kwargs is None
+
+
+def test_encoding_runs_off_the_event_loop(client_default, monkeypatch):
+    from muse.modalities.video_generation import routes as video_routes
+    from tests.modalities.loop_spy import spy_on
+
+    client, _backend = client_default
+    seen: list[bool] = []
+    spy_on(monkeypatch, video_routes, "encode_mp4", seen)
+    with patch(
+        "muse.modalities._common.video_codec._try_import_imageio",
+        return_value=_fake_imageio_factory(b"MP4"),
+    ):
+        r = client.post("/v1/video/generations", json={
+            "prompt": "x", "model": "fake-vid", "n": 2,
+        })
+    assert r.status_code == 200, r.text
+    assert seen == [False, False]
+
+
+def test_float_frames_use_the_zero_to_one_convention():
+    """One to_pil convention: float frames are [0, 1], even when dark."""
+    import numpy as np
+
+    from muse.modalities._common.video_codec import to_pil
+
+    dark = np.full((2, 2, 3), 0.25, dtype=np.float32)
+    assert to_pil(dark).getpixel((0, 0)) == (63, 63, 63)

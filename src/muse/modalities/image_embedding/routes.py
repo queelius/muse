@@ -10,9 +10,11 @@ Wire shape mirrors /v1/embeddings:
              "usage": {"prompt_tokens": 0, "total_tokens": 0}}
 
 Each `input` entry must be a `data:image/...;base64,...` URL or an
-`http(s)://...` URL. The route layer decodes each into a PIL.Image via
-the shared `decode_image_input` helper from the image_generation
-modality, batches the list, and forwards to the registered backend.
+`http(s)://...` URL. The route layer decodes them concurrently (at most
+8 at a time, all within one 60 s deadline) into PIL.Images via the
+shared `muse.modalities._common.images.decode_image_input`, batches the
+list, and forwards to the registered backend. The response `model` is
+the registry id of the serving model.
 
 Error envelopes follow muse's OpenAI-compat convention. 404 raises
 ModelNotFoundError; 400 returns error_response() so the bare
@@ -22,9 +24,7 @@ ModelNotFoundError; 400 returns error_response() so the bare
 from __future__ import annotations
 
 import asyncio
-import logging
-
-from typing import Union
+from typing import Any, Union
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
@@ -32,19 +32,24 @@ from pydantic import BaseModel, Field, field_validator
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_embedding.codec import encode_embedding_list
-from muse.modalities.image_generation.image_input import (
+from muse.modalities._common.images import (
+    ImageFetchError,
+    ImageInputError,
     close_decoded_images,
     decode_image_input,
+    image_error_response,
     validate_total_image_pixels,
 )
-
-
-logger = logging.getLogger(__name__)
+from muse.modalities._common.inference import offload_call
+from muse.modalities.image_embedding.codec import encode_embedding_list
 
 
 MODALITY = "image/embedding"
+
+# URL inputs are fetched concurrently, bounded, under one overall deadline
+# (each fetch also has its own 30 s timeout).
+_DECODE_CONCURRENCY = 8
+_DECODE_DEADLINE_SECONDS = 60.0
 
 
 
@@ -85,6 +90,56 @@ class _ImageEmbeddingsRequest(BaseModel):
         return v
 
 
+async def _decode_all(items: list[str]) -> list[Any]:
+    """Decode every input concurrently; closes all of them on any failure.
+
+    Raises the first input's ImageInputError (or any other exception);
+    ImageFetchError when the batch misses the overall deadline.
+    """
+    gate = asyncio.Semaphore(_DECODE_CONCURRENCY)
+
+    async def _one(item: str) -> Any:
+        async with gate:
+            return await decode_image_input(item)
+
+    tasks = [asyncio.ensure_future(_one(item)) for item in items]
+
+    def _decoded() -> list[Any]:
+        return [
+            t.result() for t in tasks
+            if t.done() and not t.cancelled() and t.exception() is None
+        ]
+
+    async def _release() -> None:
+        # Stop the rest, then close what was decoded. A decode cancelled
+        # mid-flight closes its own image.
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        close_decoded_images(_decoded())
+
+    try:
+        done, pending = await asyncio.wait(
+            tasks, timeout=_DECODE_DEADLINE_SECONDS,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+    except BaseException:  # cancelled: the client is gone
+        await _release()
+        raise
+    failed = next(
+        (t for t in tasks if t in done and t.exception() is not None), None,
+    )
+    if failed is None and not pending:
+        return [t.result() for t in tasks]
+    await _release()
+    if failed is not None:
+        raise failed.exception()
+    raise ImageFetchError(
+        f"decoding {len(items)} inputs exceeded the "
+        f"{_DECODE_DEADLINE_SECONDS:g} s deadline"
+    )
+
+
 def build_router(registry: ModalityRegistry) -> APIRouter:
     router = APIRouter()
 
@@ -101,52 +156,27 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
         backend = registry.get_or_404(MODALITY, req.model)
 
-        # Decode each input entry into a PIL.Image. Failures surface as
-        # 400s with the OpenAI-shape error envelope; one bad input
-        # nukes the whole batch (consistent with /v1/embeddings).
-        images = []
+        # One bad input nukes the whole batch (consistent with
+        # /v1/embeddings).
         try:
-            for item in items:
-                images.append(await decode_image_input(item))
-                validate_total_image_pixels(images)
-        except ValueError as e:
-            close_decoded_images(images)
-            return error_response(
-                400, "invalid_parameter",
-                f"image decode failed: {e}",
-            )
-        except BaseException:
-            # A later URL decode may be cancelled or fail unexpectedly after
-            # earlier entries have already produced request-owned PIL images.
-            # Preserve the original control flow, but do not strand those
-            # decoded rasters until cyclic GC runs.
-            close_decoded_images(images)
-            raise
-
-        # backend.embed is sync (transformers forward); offload so a slow
-        # inference doesn't block sibling /health, /v1/models, or other
-        # in-flight requests on the same worker.
-        def _call():
-            with backend._inference_lock:
-                return backend.embed(images, dimensions=req.dimensions)
-
-        abandoned = False
+            images = await _decode_all(items)
+        except ImageInputError as e:
+            return image_error_response(e)
         try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images(images)
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
-        finally:
-            if not abandoned:
-                close_decoded_images(images)
+            validate_total_image_pixels(images)
+        except ImageInputError as e:
+            close_decoded_images(images)
+            return image_error_response(e)
 
+        result = await offload_call(
+            lambda: backend.embed(images, dimensions=req.dimensions),
+            lock=backend._inference_lock,
+            inputs=images,
+        )
+
+        # The registry id, not whatever id the runtime reports.
         return encode_embedding_list(
-            result.embeddings, model_id=result.model_id,
+            result.embeddings, model_id=backend.model_id,
             encoding_format=req.encoding_format,
         )
 
