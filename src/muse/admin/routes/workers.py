@@ -6,7 +6,10 @@ Endpoints (under /v1/admin):
   POST /workers/{port}/restart   SIGTERM by port; monitor handles bringup.
                                  Also revives a dead or process-less
                                  worker (status back to unhealthy, restart
-                                 budget reset) so the monitor respawns it.
+                                 budget reset) so the monitor respawns it,
+                                 when its models are still in
+                                 director.loaded; else 409
+                                 worker_not_revivable.
 
 Worker fields surfaced: port, models, pid, uptime_seconds, restart_count,
 status. PID is read from spec.process.pid; uptime from monotonic delta
@@ -35,6 +38,11 @@ def _revive_worker_spec(spec) -> None:
     (it treats a missing process as exited). Restart and failure counters
     reset so an operator restart re-arms the full automatic budget.
 
+    Callers revive a spec without a live process only when every one of
+    its models is still in ``director.loaded`` (or no director is bound):
+    a spec retained as dead by a disable, eviction or failed load is not
+    revivable.
+
     Local stand-in: batch 4 adds a supervisor-owned revive helper to
     `muse.cli_impl.supervisor`. At merge, replace this body with a call to
     that helper (same semantics: under ``spec.process_lock``, status
@@ -45,6 +53,22 @@ def _revive_worker_spec(spec) -> None:
             spec.status = "unhealthy"
         spec.restart_count = 0
         spec.failure_count = 0
+
+
+def _director_loaded_ids(state) -> set[str] | None:
+    """Snapshot of `director.loaded` ids, or None when no director is bound.
+
+    Read under the director's own lock BEFORE `state.lock` is taken, so the
+    two locks are never nested here.
+    """
+    director = getattr(state, "director", None)
+    if director is None:
+        return None
+    lock = getattr(director, "lock", None)
+    if lock is None:
+        return set(director.loaded)
+    with lock:
+        return set(director.loaded)
 
 
 def _restart_response(port: int, *, signalled: bool) -> dict:
@@ -87,6 +111,7 @@ def build_workers_router() -> APIRouter:
     @router.post("/workers/{port}/restart")
     def restart_worker(port: int):
         state = get_supervisor_state()
+        loaded_ids = _director_loaded_ids(state)
         with state.lock:
             spec = next((w for w in state.workers if w.port == port), None)
             if spec is None:
@@ -113,6 +138,22 @@ def build_workers_router() -> APIRouter:
                         409, "worker_busy",
                         f"worker on port {port} is mid-transition; "
                         "retry when it settles",
+                    )
+                if (
+                    not signalled
+                    and loaded_ids is not None
+                    and not set(spec.models) <= loaded_ids
+                ):
+                    # A spec retained as dead after a disable, an eviction or
+                    # a failed load (teardown unproven) is no longer in the
+                    # director's loaded set; reviving it would respawn a
+                    # worker that admission never sized and the idle
+                    # sweeper never evicts.
+                    return error_response(
+                        409, "worker_not_revivable",
+                        f"worker on port {port} was retired by a disable, "
+                        "eviction or failed load; re-enable or warm up the "
+                        "model instead",
                     )
                 # Signalled: the monitor sees the exit and respawns. Not
                 # signalled: the generation already exited, so reviving lets

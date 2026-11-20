@@ -427,7 +427,8 @@ model control. Admin is closed-by-default: every request returns 503
 environment, after which `Authorization: Bearer <token>` is required (scheme
 case-insensitive). `muse.admin.auth.check_bearer` is the one fastapi-free
 bearer check; the dashboard uses it too. Bad bodies or path params are 400
-`invalid_parameter` envelopes, never a 202 job that fails later.
+`invalid_parameter` envelopes, never a 202 job that fails later (pull with
+`{"identifier": ""}` is now a 400; omit it to use the path id).
 
 Endpoints:
 
@@ -441,7 +442,7 @@ Endpoints:
 | `DELETE /v1/admin/models/{id}?purge=bool` | sync | refuses 409 if loaded |
 | `GET /v1/admin/models/{id}/status` | sync | merged catalog + worker view |
 | `GET /v1/admin/workers` | sync | list workers + pid/uptime/restarts |
-| `POST /v1/admin/workers/{port}/restart` | sync | SIGTERM; monitor handles bringup; revives a dead worker (status unhealthy, restart budget reset) |
+| `POST /v1/admin/workers/{port}/restart` | sync | SIGTERM; monitor handles bringup; revives a dead worker (status unhealthy, restart budget reset) only if its models are still in `director.loaded`, else 409 `worker_not_revivable` |
 | `GET /v1/admin/memory` | sync | psutil + pynvml + per-model breakdown (incl. live `refcount` when a director is bound) |
 | `GET /v1/admin/jobs/{job_id}` | sync | one job; 404 once reaped |
 | `GET /v1/admin/jobs` | sync | recent jobs newest-first |

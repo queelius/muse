@@ -29,7 +29,9 @@ SupervisorState in production, or a SimpleNamespace in tests) exposing:
   state.telemetry_store  -- a TelemetryStore
   state.log_hub          -- a LogHub
   state.director.loaded  -- dict[str, LoadEntry-like] (refcount summed
-                            into the summary's in-flight request count)
+                            into the summary's in-flight request count,
+                            which excludes requests waiting on a cold
+                            load or a capacity wait)
   state.director.in_flight_loads -- cold loads in progress
   state.concurrency_gate (optional) -- a ConcurrencyGate (queue depths)
   state.node_url / state.node_id (optional) -- a stable node identifier
@@ -176,7 +178,8 @@ def build_dashboard_router(state) -> APIRouter:
         ]
         # `in_flight` is in-flight REQUESTS at this gateway: requests holding
         # a model (refcounts) plus requests parked on a concurrency gate
-        # (which take their refcount only after the gate admits them).
+        # (which take their refcount only after the gate admits them). It
+        # excludes requests waiting on a cold load or a capacity wait.
         # Federation balances on it. `in_flight_loads` counts cold loads.
         return {
             "node": _node_id(state),

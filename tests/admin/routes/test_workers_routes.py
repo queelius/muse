@@ -207,3 +207,49 @@ def test_non_integer_port_is_an_openai_400(monkeypatch):
     )
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "invalid_parameter"
+
+
+class TestReviveOnlyLiveDirectorModels:
+    """A spec retained as dead after a disable/eviction/failed load must not
+    be revived: its model is no longer in director.loaded, so a respawned
+    worker would sit outside admission and idle eviction."""
+
+    def _state(self, spec, loaded_ids):
+        import threading
+        from types import SimpleNamespace
+
+        state = SupervisorState(workers=[spec], device="cpu")
+        state.director = SimpleNamespace(
+            lock=threading.RLock(),
+            loaded={mid: object() for mid in loaded_ids},
+        )
+        return state
+
+    def test_evicted_retained_dead_spec_is_not_revived(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.status = "dead"
+        spec.restart_count = 4
+        set_supervisor_state(self._state(spec, loaded_ids=[]))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 409
+        body = r.json()["error"]
+        assert body["code"] == "worker_not_revivable"
+        assert "re-enable or warm up" in body["message"]
+        assert spec.status == "dead" and spec.restart_count == 4
+
+    def test_spec_still_in_director_loaded_is_revived(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.status = "dead"
+        set_supervisor_state(self._state(spec, loaded_ids=["x"]))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        assert spec.status == "unhealthy"
+
+    def test_live_process_is_still_signalled_regardless(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.process = MagicMock(pid=4242)
+        spec.process.poll.return_value = None
+        set_supervisor_state(self._state(spec, loaded_ids=[]))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["signal"] == "SIGTERM"

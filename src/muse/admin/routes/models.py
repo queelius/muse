@@ -139,7 +139,9 @@ def build_models_router() -> APIRouter:
         {"identifier": "hf://..."} so resolver URIs don't have to be
         path-encoded. If the body is missing/empty, the path id is
         used directly (works for bundled-script ids and curated aliases
-        without `://`).
+        without `://`). A present `identifier` must be a non-empty
+        string: `{"identifier": ""}` is a 400, not a fallback to the path
+        (omit the key or send null for that).
         """
         store = get_default_store()
         body = body or {}

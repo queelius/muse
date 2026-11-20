@@ -508,7 +508,9 @@ copy kept for tests and diagnostics).
 - `GET /v1/telemetry/summary` -- gated JSON: currently loaded models
   (`model_id`/`pool`/`gb`/`last_used`/`queue_depth`), cold-start
   `queued` models, `in_flight` (in-flight REQUESTS: director refcounts
-  plus gate-parked waiters; federation balances on it),
+  plus gate-parked waiters; federation balances on it. It excludes
+  requests waiting on a cold load or a capacity wait, which hold neither
+  a refcount nor a gate queue slot),
   `in_flight_loads` (cold loads in progress),
   `dropped_events`, and a federation-forward `node` id (`state.node_url`
   or `state.node_id` if set, else `socket.gethostname()`) so a future
@@ -625,7 +627,9 @@ local lookup, never a per-request fan-out. A node whose poll fails is
 marked unreachable and skipped by the router until it recovers
 (per-node failure isolation: one bad node never aborts the refresh for
 the others). A connect failure while forwarding also marks the node
-unreachable in the cache (`mark_unreachable`) until the next poll. The
+unreachable in the cache (`mark_unreachable`) until the next poll, which
+hides ALL of that node's models from routing, `/v1/models` and `/health`
+until that poll succeeds. The
 registry remembers each node's model list from its last reachable poll
 (`was_listed`).
 
