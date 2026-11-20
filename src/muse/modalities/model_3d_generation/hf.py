@@ -1,15 +1,18 @@
 """HF resolver plugin for 3d/generation.
 
-Sniffs HF repos for image-to-3d / text-to-3d shape and synthesizes a
-manifest pointing at the right runtime. Priority 110, same slot as the
+Sniffs HF repos whose name is a family muse has a runtime for
+(TripoSR, Shap-E, TRELLIS, Hunyuan3D) and synthesizes a manifest
+pointing at that runtime. An image-to-3d / text-to-3d tag alone does
+not claim a repo: Wonder3D, InstantMesh and other unsupported families
+would fall back to the TripoSR runtime and fail at load. Priority 110, same slot as the
 other modality-specific plugins (audio_classification, audio_embedding,
 image_segmentation, image_ocr, image_cv).
 
 Per-family dispatch via _family_for(): Shap-E repos route to
 ShapERuntime; TRELLIS repos route to TRELLISRuntime; Hunyuan3D-2
 repos route to Hunyuan3DRuntime (both added via v0.44.0+ _Family
-entries); unknown repos fall through to TripoSRRuntime via
-_DEFAULT_FAMILY. Wonder3D is deferred indefinitely. Adding a new
+entries); TripoSR (and curated entries the sniff does not see) use
+TripoSRRuntime via _DEFAULT_FAMILY. Wonder3D is deferred indefinitely. Adding a new
 family means appending one _Family entry to _FAMILIES plus shipping a
 runtime file; no new dispatch functions and no new conditional branches
 in _resolve.
@@ -250,20 +253,21 @@ def _family_for(repo_id: str) -> _Family:
 
 
 
-# Repo-name allowlist: the canonical 3D generation repos. These match
-# regardless of HF tagging (some repos are sloppy with tags). Highest
-# precedence.
+# Repo-name allowlist: only families with a runtime. TripoSR is the default
+# family; the others are the _FAMILIES hints. Wonder3D, InstantMesh and
+# similar have no runtime (they would fall back to TripoSR and fail), so
+# neither their names nor a bare image-to-3d / text-to-3d tag claims a repo.
 _NAME_HINTS = (
     "triposr",
-    "trellis",
-    "wonder3d",
-    "hunyuan3d",
-    "shap-e",
-    "instantmesh",
-    "stable-3d",
+    *(hint for family in _FAMILIES for hint in family.name_hints),
 )
-# Tag-based fallback. The canonical 3D generation tags on HF.
+# Search queries these tags, then keeps only repos the sniff would claim.
 _TAG_HINTS = ("image-to-3d", "text-to-3d")
+
+
+def _is_known_family(repo_id: str) -> bool:
+    name = repo_id.rsplit("/", 1)[-1].lower()
+    return any(_matches_hint(name, hint) for hint in _NAME_HINTS)
 
 
 def _download_hunyuan_bundle(
@@ -293,14 +297,9 @@ def _download_hunyuan_bundle(
 
 
 def _sniff(info) -> bool:
-    repo_id = (getattr(info, "id", "") or "").lower()
-    # Repo-name allowlist dominates: well-known 3D generators always
-    # claim, even when their HF tags are sloppy or absent.
-    if any(s in repo_id for s in _NAME_HINTS):
-        return True
-    # Tag-based fallback.
-    tags = getattr(info, "tags", None) or []
-    return any(t in tags for t in _TAG_HINTS)
+    # Known families claim regardless of HF tags (some repos are sloppy
+    # with them); the match is on the repo name, never the org.
+    return _is_known_family(getattr(info, "id", "") or "")
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
@@ -397,7 +396,8 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
 
     Iterates both `image-to-3d` and `text-to-3d` tags and dedupes by
     repo id so a multi-tagged repo (TRELLIS, Hunyuan3D-2) yields one
-    SearchResult, not two.
+    SearchResult, not two. Repos of families without a runtime are
+    skipped, since a pull would refuse them.
     """
     seen: set[str] = set()
     for tag in _TAG_HINTS:
@@ -407,7 +407,7 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
         )
         for repo in repos:
             repo_id = getattr(repo, "id", None)
-            if not repo_id or repo_id in seen:
+            if not repo_id or repo_id in seen or not _is_known_family(repo_id):
                 continue
             seen.add(repo_id)
             yield SearchResult(
