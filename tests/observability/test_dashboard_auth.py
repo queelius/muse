@@ -131,3 +131,9 @@ class TestRequireDashboardAuth:
         )
         assert r.status_code == 403
         assert r.json()["detail"]["error"]["code"] == "invalid_token"
+
+
+def test_lowercase_bearer_scheme_is_accepted(monkeypatch):
+    monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret123")
+    config.reset_config()
+    assert check_dashboard_token("bearer secret123") is None

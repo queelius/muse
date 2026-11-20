@@ -5,8 +5,13 @@ in-process usage (no HTTP), import the operations module directly.
 
 Token resolution:
   1. constructor `token=` arg
-  2. MUSE_ADMIN_TOKEN env var
-  3. None (every call will 503 since the server requires the env var)
+  2. admin.token (MUSE_ADMIN_TOKEN env var or config.yaml)
+  3. None (every call will 503 since the server requires a token)
+The token is stripped, as the server strips its own copy, and an empty
+result counts as None.
+
+Model and job ids are percent-encoded into the URL path, so ids holding
+`/`, `?`, `#` or `%` reach the route intact.
 
 Server resolution:
   1. constructor `base_url=` arg
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -65,6 +71,11 @@ def _extract_error(body: Any) -> dict:
     return {}
 
 
+def _seg(value: str) -> str:
+    """Percent-encode one URL path segment."""
+    return quote(str(value), safe="")
+
+
 class AdminClient:
     """HTTP client for /v1/admin/* admin endpoints."""
 
@@ -75,7 +86,8 @@ class AdminClient:
         timeout: float = 30.0,
     ):
         self.base_url = (base_url or config.get("client.server_url")).rstrip("/")
-        self.token = token or config.get("admin.token")
+        raw_token = token or config.get("admin.token")
+        self.token = (raw_token or "").strip() or None
         self._timeout = timeout
 
     def _headers(self) -> dict:
@@ -116,10 +128,10 @@ class AdminClient:
     # Per-model operations
 
     def enable(self, model_id: str) -> dict:
-        return self._request("POST", f"/v1/admin/models/{model_id}/enable", json={})
+        return self._request("POST", f"/v1/admin/models/{_seg(model_id)}/enable", json={})
 
     def disable(self, model_id: str) -> dict:
-        return self._request("POST", f"/v1/admin/models/{model_id}/disable", json={})
+        return self._request("POST", f"/v1/admin/models/{_seg(model_id)}/disable", json={})
 
     def warmup(self, model_id: str, *, timeout: float | None = None) -> dict:
         """Pre-load a model via the supervisor's LoadDirector.
@@ -137,7 +149,7 @@ class AdminClient:
         """
         return self._request(
             "POST",
-            f"/v1/admin/models/{model_id}/warmup",
+            f"/v1/admin/models/{_seg(model_id)}/warmup",
             json={},
             timeout=timeout,
         )
@@ -152,7 +164,7 @@ class AdminClient:
         body = {"no_inference": no_inference}
         if device is not None:
             body["device"] = device
-        return self._request("POST", f"/v1/admin/models/{model_id}/probe", json=body)
+        return self._request("POST", f"/v1/admin/models/{_seg(model_id)}/probe", json=body)
 
     def pull(self, identifier: str) -> dict:
         # Use the documented `_` placeholder path; identifier in body
@@ -166,12 +178,12 @@ class AdminClient:
     def remove(self, model_id: str, *, purge: bool = False) -> dict:
         return self._request(
             "DELETE",
-            f"/v1/admin/models/{model_id}",
+            f"/v1/admin/models/{_seg(model_id)}",
             params={"purge": "true" if purge else "false"},
         )
 
     def status(self, model_id: str) -> dict:
-        return self._request("GET", f"/v1/admin/models/{model_id}/status")
+        return self._request("GET", f"/v1/admin/models/{_seg(model_id)}/status")
 
     # Cluster-wide views
 
@@ -182,12 +194,12 @@ class AdminClient:
         return self._request("GET", "/v1/admin/workers")
 
     def restart_worker(self, port: int) -> dict:
-        return self._request("POST", f"/v1/admin/workers/{port}/restart")
+        return self._request("POST", f"/v1/admin/workers/{_seg(port)}/restart")
 
     # Job tracking
 
     def job(self, job_id: str) -> dict:
-        return self._request("GET", f"/v1/admin/jobs/{job_id}")
+        return self._request("GET", f"/v1/admin/jobs/{_seg(job_id)}")
 
     def jobs(self) -> dict:
         return self._request("GET", "/v1/admin/jobs")

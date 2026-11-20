@@ -210,3 +210,38 @@ class TestTokenResolution:
         monkeypatch.delenv("MUSE_SERVER", raising=False)
         c = AdminClient()
         assert c.base_url == "http://localhost:8000"
+
+
+class TestTokenAndPathHygiene:
+    def test_token_from_env_is_stripped(self, monkeypatch):
+        """The server strips the configured token ($(cat tokenfile) leaves a
+        newline); the client must too, or it sends `Bearer tok\\n`."""
+        monkeypatch.setenv("MUSE_ADMIN_TOKEN", "tok\n")
+        assert AdminClient(base_url="http://x").token == "tok"
+
+    def test_whitespace_only_token_is_none(self, monkeypatch):
+        monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+        c = AdminClient(base_url="http://x", token="  \n")
+        assert c.token is None
+        assert c._headers() == {}
+
+    @pytest.mark.parametrize("model_id", ["a?b", "a#b", "a/b", "a%2Fb", "a b"])
+    def test_model_ids_are_url_encoded_in_paths(
+        self, client, mock_httpx_client, model_id,
+    ):
+        from urllib.parse import quote
+
+        mock_httpx_client.request.return_value = _ok(200, {})
+        client.status(model_id)
+        url = mock_httpx_client.request.call_args.args[1]
+        assert url == (
+            "http://test.example.com/v1/admin/models/"
+            f"{quote(model_id, safe='')}/status"
+        )
+
+    def test_job_ids_are_url_encoded(self, client, mock_httpx_client):
+        mock_httpx_client.request.return_value = _ok(200, {})
+        client.job("x/../y")
+        assert mock_httpx_client.request.call_args.args[1].endswith(
+            "/v1/admin/jobs/x%2F..%2Fy"
+        )

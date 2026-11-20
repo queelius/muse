@@ -18,61 +18,31 @@ The token is never echoed in error messages or logs.
 """
 from __future__ import annotations
 
-import secrets
-
 from fastapi import Header
 
-from muse.admin.auth import _err
-from muse.core import config
+from muse.admin.auth import http_bearer_check
 
 
 def check_dashboard_token(bearer: str | None) -> None:
     """Raise unless the caller presents a valid Authorization header.
 
     ``bearer`` is the raw Authorization header value (None, "Bearer <tok>",
-    or malformed).
-
-    Branches, most authoritative first:
+    or malformed). The check is muse.admin.auth's shared `check_bearer`
+    (case-insensitive scheme, exact credential, constant-time compare):
       - admin.token unset / whitespace-only  -> 503 dashboard_closed
-      - no "Bearer " header supplied          -> 401 missing_token
-      - candidate mismatches expected         -> 403 invalid_token
-      - candidate matches                     -> return None (caller proceeds)
+      - no Bearer header supplied             -> 401 missing_token
+      - credential mismatches                 -> 403 invalid_token
+      - credential matches                    -> return None
     """
-    expected = config.get("admin.token")
-    # Strip the operator-supplied token: a whitespace-only value is treated
-    # as "unset" (closed-by-default), and this defends against the common
-    # `MUSE_ADMIN_TOKEN=$(cat tokenfile)` footgun, where a trailing newline
-    # would otherwise reject every legitimate request. The presented
-    # credential is NOT stripped: it must match the real secret exactly.
-    if expected:
-        expected = expected.strip()
-    if not expected:
-        raise _err(
-            503,
-            "dashboard_closed",
+    http_bearer_check(
+        bearer,
+        closed_code="dashboard_closed",
+        closed_message=(
             "Dashboard requires an admin token "
-            "(MUSE_ADMIN_TOKEN env or admin.token in config)",
-        )
-
-    if bearer and bearer.startswith("Bearer "):
-        candidate = bearer[len("Bearer "):]
-    else:
-        candidate = None
-
-    if candidate is None:
-        raise _err(
-            401,
-            "missing_token",
-            "Authorization: Bearer <token> header required",
-        )
-
-    # Constant-time compare prevents recovering the token byte-by-byte via
-    # response-time variance. Both operands are UTF-8-encoded to bytes:
-    # secrets.compare_digest raises TypeError on non-ASCII str args, so a
-    # candidate carrying non-ASCII bytes (headers arrive latin-1-decoded)
-    # would otherwise 500 instead of cleanly 403'ing as a bad token.
-    if not secrets.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8")):
-        raise _err(403, "invalid_token", "Bad dashboard token")
+            "(MUSE_ADMIN_TOKEN env or admin.token in config)"
+        ),
+        invalid_message="Bad dashboard token",
+    )
 
 
 def require_dashboard_auth(
