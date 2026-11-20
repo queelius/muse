@@ -163,6 +163,35 @@ def test_memory_display_honors_a_device_override():
     assert (s, gb, device) == ("4.0 GB CPU", 4.0, "CPU")
 
 
+def test_build_rows_probes_the_host_once_per_listing(monkeypatch):
+    """Resolving `auto` asks the host's GPU (NVML, then torch); a listing
+    with many auto rows must ask once, not once per row."""
+    from types import SimpleNamespace
+
+    import muse.cli_impl.models_list as ml
+
+    calls = []
+    monkeypatch.setattr(
+        "muse.cli_impl.supervisor._host_auto_uses_cuda",
+        lambda: calls.append(1) or False,
+    )
+    known = {
+        f"m{i}": SimpleNamespace(
+            extra={"device": "auto", "memory_gb": 1.0},
+            modality="audio/speech", description="d",
+        )
+        for i in range(5)
+    }
+    monkeypatch.setattr(ml, "_load_known_models", lambda: known)
+    monkeypatch.setattr(ml, "_load_curated_entries", lambda: {})
+    monkeypatch.setattr(ml, "_read_catalog_data", lambda: {})
+    monkeypatch.setattr(ml, "_director_loaded_ids", lambda: set())
+    monkeypatch.setattr(ml, "_is_pulled_for_row", lambda _m: False)
+    rows = ml.build_rows()
+    assert len(rows) == 5 and all(r.mem_device == "CPU" for r in rows)
+    assert len(calls) == 1
+
+
 def test_memory_display_falls_back_to_annotation():
     extra = {"device": "cpu", "memory_gb": 0.7}
     s, gb, device = _model_memory_display(extra, None)

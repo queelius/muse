@@ -152,6 +152,7 @@ def build_rows() -> list[_ListRow]:
     curated_entries = _load_curated_entries()
     catalog_data = _read_catalog_data()
     director_loaded = _director_loaded_ids()
+    auto_cuda = _host_auto_cuda_once()
 
     rows: list[_ListRow] = []
     seen: set[str] = set()
@@ -168,7 +169,7 @@ def build_rows() -> list[_ListRow]:
         else:
             status = STATUS_AVAILABLE
         mem_str, mem_gb, mem_device = _model_memory_display(
-            e.extra, catalog_data.get(model_id),
+            e.extra, catalog_data.get(model_id), auto_cuda=auto_cuda,
         )
         rows.append(_ListRow(
             id=model_id,
@@ -192,7 +193,7 @@ def build_rows() -> list[_ListRow]:
         else:
             status = STATUS_RECOMMENDED
         mem_str, mem_gb, mem_device = _model_memory_display(
-            c.capabilities or {}, catalog_data.get(cid),
+            c.capabilities or {}, catalog_data.get(cid), auto_cuda=auto_cuda,
         )
         rows.append(_ListRow(
             id=cid,
@@ -384,7 +385,27 @@ def _render_footer(rows: list[_ListRow], *, no_color: bool) -> None:
     )
 
 
-def _model_memory_display(extra: dict, catalog_entry: dict | None):
+def _host_auto_cuda_once():
+    """A callable that asks the host whether `auto` means cuda, at most once.
+
+    The probe (NVML, then torch) is the slow part of sizing an `auto` row;
+    one listing shares one answer.
+    """
+    answer: list[bool] = []
+
+    def resolve() -> bool:
+        if not answer:
+            from muse.cli_impl.supervisor import _host_auto_uses_cuda
+
+            answer.append(bool(_host_auto_uses_cuda()))
+        return answer[0]
+
+    return resolve
+
+
+def _model_memory_display(
+    extra: dict, catalog_entry: dict | None, *, auto_cuda=None,
+):
     """Return (display_str, gb_for_aggregate, device_label).
 
     The number is admission's own estimate (`supervisor.memory_estimate`):
@@ -395,14 +416,25 @@ def _model_memory_display(extra: dict, catalog_entry: dict | None):
 
     The device label is the pool: "CPU" when the model sizes against host
     RAM (a cpu model, or an auto model on a host without CUDA), else "GPU".
+    `auto_cuda` (from `_host_auto_cuda_once`) answers the host question for
+    a whole listing; None asks the host for this row.
     """
     from muse.cli_impl.supervisor import _measurement_key, memory_estimate
 
+    if auto_cuda is None:
+        auto_cuda = _host_auto_cuda_once()
     entry = dict(catalog_entry or {})
     entry["manifest"] = {"capabilities": dict(extra or {})}
-    estimate = memory_estimate(entry)
+    declared = str((extra or {}).get("device") or "auto").lower()
+    pinned = str(entry.get("device_override") or "").lower()
+    needs_host = declared in ("auto", "") or pinned == "auto"
+    auto_cuda_available = auto_cuda() if needs_host else None
+    estimate = memory_estimate(entry, auto_cuda_available=auto_cuda_available)
     device = str(entry.get("device_override") or estimate.device).lower()
-    pool = _measurement_key(device, None) if device in ("auto", "") else device
+    pool = (
+        _measurement_key(device, auto_cuda())
+        if device in ("auto", "") else device
+    )
     device_label = "CPU" if pool == "cpu" else "GPU"
     if not estimate.status:
         return "-", None, device_label
