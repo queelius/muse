@@ -22,6 +22,7 @@ reference, so seeding never leaves extra weights behind.
 """
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
 import logging
@@ -152,10 +153,13 @@ def seed_repo(
                 else:
                     os.replace(tmp, dst)
                     seeded.append(dst)
-                    continue
             except OSError as exc:
                 logger.debug("not seeding %s/%s: %s", repo_id, name, exc)
-            tmp.unlink(missing_ok=True)
+            finally:
+                # Gone after a successful replace; removed on every other
+                # exit, including a non-OSError that aborts the loop.
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
         if seeded:
             logger.info("reusing %d file(s) of %s from the shared Hugging Face cache", len(seeded), repo_id)
         return seeded

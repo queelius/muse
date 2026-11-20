@@ -133,3 +133,21 @@ def test_folder_patterns_and_revisions_follow_huggingface_hub(tmp_path):
     assert [p.name for p in seeded] == [_lfs(a)]
     seeded = seed_repo(tmp_path / "w3", REPO, shared=shared, revision="c" * 40)
     assert sorted(p.name for p in seeded) == sorted([_lfs(a), _lfs(b)])
+
+
+def test_temp_link_is_removed_when_verification_raises(tmp_path, monkeypatch):
+    """A non-OSError (e.g. hashlib refusing sha1 under FIPS) aborts seeding
+    but must not leave the .muse-seed temp hardlink in the weights cache."""
+    from muse.core import hf_seed
+
+    data = b"W" * 100
+    shared = _shared(tmp_path, {"model.safetensors": (data, _lfs(data))})
+
+    def boom(path, name):
+        raise ValueError("unsupported hash type")
+
+    monkeypatch.setattr(hf_seed, "_verified", boom)
+    muse = tmp_path / "weights"
+    assert seed_repo(muse, REPO, shared=shared) == []
+    blobs = muse / repo_folder(REPO) / "blobs"
+    assert list(blobs.iterdir()) == []
