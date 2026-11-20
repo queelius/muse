@@ -252,3 +252,64 @@ def test_revived_worker_is_adopted_by_the_director():
     entry = state.director.loaded[MODEL]
     assert entry.worker_port == spec.port
     assert entry.refcount == 0 and entry.memory_gb == 1.0
+
+
+# --- /v1/models and /health catalog enrichment runs off the loop (I4) ------
+
+
+def _seed_unloaded(n: int) -> None:
+    from muse.core.catalog import _read_catalog, _write_catalog
+
+    catalog = dict(_read_catalog())
+    template = catalog[MODEL]
+    for i in range(n):
+        catalog[f"cold-{i}"] = dict(
+            template, manifest=dict(template["manifest"], model_id=f"cold-{i}"),
+        )
+    _write_catalog(catalog)
+
+
+@pytest.mark.parametrize("path", ["/v1/models", "/health"])
+def test_listing_enrichment_runs_off_the_event_loop(path):
+    """The per-model servability walk (provenance stats, capacity probes,
+    weights walks) must not stall hot inference traffic on the loop."""
+    _seed_unloaded(3)
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    app = build_gateway(state=state)
+    loop_threads: set[int] = set()
+    check_threads: list[int] = []
+    real = sup.revalidate_servability
+
+    def recording(state_arg, model_id, **kwargs):
+        check_threads.append(threading.get_ident())
+        return real(state_arg, model_id, **kwargs)
+
+    @app.middleware("http")
+    async def note_loop_thread(request, call_next):
+        loop_threads.add(threading.get_ident())
+        return await call_next(request)
+
+    with patch("muse.cli_impl.gateway.revalidate_servability", recording):
+        body = TestClient(app).get(path).json()
+    assert len(check_threads) == 4
+    assert loop_threads and not loop_threads & set(check_threads)
+    if path == "/v1/models":
+        assert {m["id"] for m in body["data"]} >= {"cold-0", "cold-1", "cold-2"}
+
+
+def test_listing_probes_capacity_once_per_request():
+    _seed_unloaded(3)
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    app = build_gateway(state=state)
+    real = sup._capacity_pools
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    with patch("muse.cli_impl.supervisor._capacity_pools", counting):
+        TestClient(app).get("/v1/models")
+    assert len(calls) == 1

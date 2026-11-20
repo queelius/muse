@@ -2279,11 +2279,25 @@ def validate_catalog_at_boot(
             state.unservable_reasons[model_id] = reason
 
 
+def servability_capacity(
+    state: SupervisorState, *, memory_probe: "Any | None" = None,
+) -> tuple[float, "float | None", bool]:
+    """One live capacity reading for `revalidate_servability(capacity=...)`.
+
+    A listing that re-checks many models probes psutil/NVML once instead of
+    once per model.
+    """
+    if memory_probe is None:
+        memory_probe = _MemoryProbeAdapter()
+    return _capacity_pools(memory_probe, **_director_capacity_knobs(state.director))
+
+
 def revalidate_servability(
     state: SupervisorState,
     model_id: str,
     *,
     memory_probe: "Any | None" = None,
+    capacity: "tuple[float, float | None, bool] | None" = None,
 ) -> str | None:
     """Re-derive one model's unservable verdict against the LIVE catalog.
 
@@ -2303,13 +2317,12 @@ def revalidate_servability(
     working set before 503'ing. The gateway 503s such a model directly.
 
     Scoped to one model: no full-catalog walk. Reads live memory via the
-    probe (defaults to the production adapter; tests inject a MagicMock).
+    probe (defaults to the production adapter; tests inject a MagicMock),
+    unless the caller passes a `servability_capacity` reading.
     Returns the current reason (None when now servable). Mutations to
     `state.unservable_reasons` are made under `state.lock`; the probe read
     and `_servability_reason` run outside the lock.
     """
-    if memory_probe is None:
-        memory_probe = _MemoryProbeAdapter()
     catalog = _read_catalog()
     entry = catalog.get(model_id)
     if entry is None:
@@ -2321,9 +2334,9 @@ def revalidate_servability(
         with state.lock:
             state.unservable_reasons.pop(model_id, None)
         return None
-    cpu_available_gb, gpu_available_gb, cuda_available = _capacity_pools(
-        memory_probe, **_director_capacity_knobs(state.director),
-    )
+    if capacity is None:
+        capacity = servability_capacity(state, memory_probe=memory_probe)
+    cpu_available_gb, gpu_available_gb, cuda_available = capacity
     reason = model_load_blocker(model_id, entry) or _servability_reason(
         _entry_with_live_manifest(model_id, entry),
         cpu_available_gb=cpu_available_gb,

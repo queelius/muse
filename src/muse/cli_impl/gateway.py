@@ -86,6 +86,7 @@ from muse.cli_impl.supervisor import (
     _director_capacity_knobs,
     backfill_manifest_memory,
     revalidate_servability,
+    servability_capacity,
 )
 
 # OperationError lives at module-top because `_route_via_director` must
@@ -702,16 +703,19 @@ def build_gateway(
         # before appending the unloaded rows.
         state = app.state.routes_state
         if state is not None:
-            _enrich_loaded_at(state, aggregated)
-        # Also advertise enabled-but-unloaded catalog models so
-        # /v1/models reflects the catalog, not just resident workers. The
-        # loaded workers above are authoritative for loaded=True; here we
-        # append every enabled catalog row not already present, with
-        # loaded=False + its boot unservable_reason (if any). Skipped in
-        # legacy static-routes mode (no SupervisorState to read the
-        # unservable map from).
-        if state is not None:
-            aggregated.extend(_unloaded_catalog_entries(state, aggregated))
+            # Also advertise enabled-but-unloaded catalog models so
+            # /v1/models reflects the catalog, not just resident workers.
+            # The loaded workers above are authoritative for loaded=True;
+            # every enabled catalog row not already present is appended
+            # with loaded=False + its live unservable_reason (if any).
+            # Revision lookups, servability checks and manifest reads are
+            # blocking (provenance stats, capacity probes, weights walks),
+            # so they run off the event loop.
+            def enrich() -> list[dict]:
+                _enrich_loaded_at(state, aggregated)
+                return aggregated + _unloaded_catalog_entries(state, aggregated)
+
+            aggregated = await asyncio.to_thread(enrich)
         return {"object": "list", "data": aggregated}
 
     @app.get("/health")
@@ -770,7 +774,10 @@ def build_gateway(
         # these triggers an on-demand load.
         if state is not None:
             already = [{"id": m} for m in models]
-            for entry in _unloaded_catalog_entries(state, already):
+            unloaded = await asyncio.to_thread(
+                _unloaded_catalog_entries, state, already,
+            )
+            for entry in unloaded:
                 models.add(entry["id"])
                 if entry.get("modality"):
                     modalities.add(entry["modality"])
@@ -1153,12 +1160,15 @@ def _capabilities_document(
             depths = None  # unknown is never rendered as 0
 
     pairs: list[tuple[ModelFacts, ModelState]] = []
+    capacity = None
     for mid in ids:
         is_loaded = mid in resident
         reason = None
         if not is_loaded and state is not None:
             try:
-                reason = revalidate_servability(state, mid)
+                if capacity is None:
+                    capacity = servability_capacity(state)
+                reason = revalidate_servability(state, mid, capacity=capacity)
             except Exception as e:  # noqa: BLE001
                 logger.warning("/v1/capabilities: servability of %s failed: %s", mid, e)
                 reason = getattr(state, "unservable_reasons", {}).get(mid)
@@ -1197,12 +1207,16 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
         logger.warning("/v1/models: catalog read failed: %s", e)
         return []
     out: list[dict] = []
+    capacity = None
     for model_id, entry in catalog.items():
         if model_id in loaded_ids:
             continue
         if not entry.get("enabled", True):
             continue
-        reason = revalidate_servability(state, model_id)
+        if capacity is None:
+            # One live reading for the whole listing (psutil + NVML).
+            capacity = servability_capacity(state)
+        reason = revalidate_servability(state, model_id, capacity=capacity)
         try:
             manifest = get_manifest(model_id)
         except (CatalogError, KeyError):
