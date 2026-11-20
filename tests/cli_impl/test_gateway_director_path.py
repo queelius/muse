@@ -203,6 +203,9 @@ def test_health_reports_degraded_while_a_worker_is_dead():
     ("unhealthy", 1, True, "ok"),          # one failed monitor poll: not down
     ("running", 0, False, "ok"),           # one failed gateway poll: not down
     ("unhealthy", sup._FAILURE_THRESHOLD, True, "degraded"),
+    # A crashed process: the monitor sets the threshold but status stays
+    # "running" through backoff, spawn and wait_for_ready.
+    ("running", sup._FAILURE_THRESHOLD, False, "degraded"),
     ("dead", 0, True, "degraded"),
 ])
 def test_health_counts_only_dead_or_threshold_unhealthy_workers(

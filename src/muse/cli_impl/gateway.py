@@ -689,19 +689,18 @@ def build_gateway(
                 models.update(
                     value for value in raw_models if isinstance(value, str)
                 )
-        # A worker is down once the monitor has given up on it or has seen
-        # it fail its threshold of consecutive health checks (it is then
-        # restarting); a single failed check is not an outage.
+        # A worker is down once the monitor has given up on it or has
+        # counted its threshold of failures, whatever its status: a crashed
+        # process is set to the threshold but keeps status "running" through
+        # backoff, spawn and wait_for_ready. A single failed check is not an
+        # outage.
         if state is not None:
             from muse.cli_impl.supervisor import _FAILURE_THRESHOLD
 
             with state.lock:
                 if any(
                     getattr(spec, "status", None) == "dead"
-                    or (
-                        getattr(spec, "status", None) == "unhealthy"
-                        and getattr(spec, "failure_count", 0) >= _FAILURE_THRESHOLD
-                    )
+                    or getattr(spec, "failure_count", 0) >= _FAILURE_THRESHOLD
                     for spec in state.workers
                 ):
                     any_down = True
