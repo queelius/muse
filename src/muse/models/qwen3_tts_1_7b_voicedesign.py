@@ -28,7 +28,7 @@ MANIFEST = {
     "limits": [
         "The same description gives a somewhat different voice each call; save a take "
         "to qwen3-tts-0.6b-base to keep a character consistent",
-        "No word timestamps, no speed control (`speed` is ignored), no streaming (one chunk)",
+        "No word timestamps, no speed control (`speed` is ignored), `voice` is ignored (describe the voice in `instructions`), no streaming (one chunk)",
         "Slow: ~10 s per short line on a 12 GB GPU without flash-attn",
     ],
     "quality_tier": "good",

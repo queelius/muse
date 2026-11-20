@@ -15,7 +15,9 @@ from muse.modalities._common.audio_decode import (
 )
 from muse.modalities.audio_speech import DISCOVERY
 from muse.modalities.audio_speech import routes
-from muse.modalities.audio_speech.protocol import UnknownVoiceError, VoiceError
+from muse.modalities.audio_speech.protocol import (
+    UnknownVoiceError, VoiceError, VoiceUnreadableError,
+)
 from muse.modalities.audio_speech.routes import build_router
 from muse.modalities.audio_speech.voices import StoredVoice
 
@@ -209,3 +211,45 @@ def test_discovery_lists_both_routes():
     assert post["request_content_type"] == "multipart/form-data"
     assert post["file_fields"] == ["audio"]
     assert routes_[("DELETE", "/v1/audio/speech/voices/{name}")]["mcp_tool"] is None
+
+
+class StoreBackedTTS(FakeTTS):
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    def save_voice(self, name, audio, sample_rate, transcript, *,
+                   overwrite=False, source_filename=None):
+        return self.store.save(name, audio, sample_rate, transcript,
+                               overwrite=overwrite, source_filename=source_filename)
+
+
+def test_save_trailing_newline_name_is_invalid(decode, tmp_path):
+    from muse.modalities.audio_speech.voices import VoiceStore
+    c = _client(StoreBackedTTS(VoiceStore(tmp_path)))
+    r = _save(c, name="grimbold\n")
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "invalid_voice_name"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_save_storage_unavailable_has_own_fixed_message(decode):
+    fake = FakeTTS(save_raises=VoiceUnreadableError("/secret/path is bad"))
+    r = _save(_client(fake))
+    assert r.status_code == 500
+    err = r.json()["error"]
+    assert err["code"] == "voice_storage_unavailable"
+    assert err["message"] == "voice storage is unavailable"
+    assert "/secret" not in r.text
+
+
+def test_list_voices_unreadable_is_500_envelope():
+    class Bad(FakeTTS):
+        @property
+        def voices(self):
+            raise VoiceUnreadableError("/secret/path unreadable")
+    r = _client(Bad()).get("/v1/audio/speech/voices")
+    assert r.status_code == 500
+    err = r.json()["error"]
+    assert err["code"] == "voice_unreadable"
+    assert "/secret" not in r.text

@@ -319,8 +319,9 @@ def _annotations(route: dict, props: dict) -> types.ToolAnnotations:
 
     No generated tool is read-only: any of them can write a local file (a
     media output, a non-JSON body, or a spilled large result). None is
-    destructive: they change no muse state and write only new or explicitly
-    named (``out_path``) files. A call can still cold-load its model, which
+    destructive: they never delete or overwrite muse state (``muse_save_voice``
+    stores a new voice, and replaces one only with ``overwrite``) and write
+    only new or explicitly named (``out_path``) files. A call can still cold-load its model, which
     may evict other idle models from memory; that is load management, not a
     destructive update. A tool taking ``*_url`` / ``*_urls`` inputs reaches
     URLs outside the muse server (``openWorldHint``). A GET is idempotent.

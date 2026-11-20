@@ -29,7 +29,7 @@ def test_save_then_get_round_trips(tmp_path):
     assert not v.read_only and len(v.identity) == 2
 
 
-@pytest.mark.parametrize("name", ["../x", "Grimbold", "", "-a", "a" * 65, "a/b", "a.b"])
+@pytest.mark.parametrize("name", ["../x", "Grimbold", "", "-a", "a" * 65, "a/b", "a.b", "grimbold\n", "\ngrimbold"])
 def test_invalid_names_rejected_and_nothing_written(tmp_path, name):
     with pytest.raises(VoiceError) as e:
         VoiceStore(tmp_path).save(name, _secs(), 24000, "hi")
@@ -265,3 +265,35 @@ def test_voice_store_root_does_not_create(tmp_path, monkeypatch):
     assert root == tmp_path / "home" / "voices" / "m"
     assert not root.exists()
     assert voices_dir("m") == root and root.is_dir()
+
+
+def test_bundled_voice_reloads_after_package_files_are_rewritten(tmp_path):
+    scratch = VoiceStore(tmp_path / "scratch")
+    ref = scratch.save("narrator", _secs(), 24000, "bundled line")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "narrator.wav").write_bytes(ref.audio_path.read_bytes())
+    (pkg / "narrator.json").write_text(json.dumps(
+        {"transcript": "bundled line", "sample_rate": 24000, "duration_seconds": 2.0}))
+    bundled = load_bundled_voice("narrator", pkg / "narrator.wav", pkg / "narrator.json")
+    store = VoiceStore(tmp_path / "root", bundled={"narrator": bundled})
+    # simulate an in-place reinstall: files replaced (new inodes) under a live store
+    (pkg / "narrator.wav.new").write_bytes((pkg / "narrator.wav").read_bytes())
+    (pkg / "narrator.wav.new").replace(pkg / "narrator.wav")
+    (pkg / "narrator.json.new").write_text(json.dumps(
+        {"transcript": "new line", "sample_rate": 24000, "duration_seconds": 2.0}))
+    (pkg / "narrator.json.new").replace(pkg / "narrator.json")
+    stored, audio = store.get_with_audio("narrator")
+    assert stored.transcript == "new line" and audio.size > 0
+    assert stored.identity != bundled.identity
+    assert store.get("narrator") is stored
+
+
+def test_saved_voice_still_fails_closed_on_identity_change(tmp_path):
+    from muse.modalities.audio_speech.voices import read_voice_audio
+    store = VoiceStore(tmp_path)
+    store.save("grimbold", _secs(), 24000, "hi")
+    stale = store.get("grimbold")
+    store.save("grimbold", _secs(), 24000, "hi again", overwrite=True)
+    with pytest.raises(VoiceUnreadableError):
+        read_voice_audio(stale)

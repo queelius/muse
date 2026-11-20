@@ -107,7 +107,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.get("/speech/voices")
     def list_voices(model: str | None = None):
         m = registry.get_or_404(MODALITY, model)
-        voices = getattr(m, "voices", [])
+        try:
+            voices = getattr(m, "voices", [])
+        except VoiceUnreadableError as exc:
+            return _voice_error_response(exc)
         return {"model": m.model_id, "voices": voices}
 
     @router.post("/speech/voices")
@@ -159,7 +162,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         except VoiceError as exc:
             return error_response(exc.status, exc.code, str(exc))
         except VoiceUnreadableError as exc:
-            return _voice_error_response(exc)
+            logger.error("voice storage unavailable: %s", exc, exc_info=exc)
+            return error_response(
+                500, "voice_storage_unavailable", "voice storage is unavailable",
+            )
         except AudioDecoderUnavailableError:
             logger.exception("audio decoder unavailable")
             return error_response(

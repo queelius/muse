@@ -73,6 +73,7 @@ class StoredVoice:
     sha256: str
     read_only: bool
     identity: tuple
+    meta_path: Path | None = None
 
 
 def _read_file(path: Path) -> tuple[bytes, tuple]:
@@ -108,6 +109,7 @@ def _load(name: str, wav_path: Path, json_path: Path, *, read_only: bool) -> Sto
         sha256=hashlib.sha256(wav_bytes).hexdigest(),
         read_only=read_only,
         identity=(wav_id, json_id),
+        meta_path=json_path,
     )
 
 
@@ -176,7 +178,7 @@ class VoiceStore:
         names = []
         for d in entries:
             try:
-                if not NAME_PATTERN.match(d.name) or d.is_symlink() or not d.is_dir():
+                if not NAME_PATTERN.fullmatch(d.name) or d.is_symlink() or not d.is_dir():
                     continue
                 if not (d / _WAV).is_file():
                     continue
@@ -194,7 +196,7 @@ class VoiceStore:
                 n for n in self._saved_names() if n not in self._bundled]
 
     def _saved_dir(self, name: str) -> Path:
-        if not isinstance(name, str) or not NAME_PATTERN.match(name):
+        if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
             raise UnknownVoiceError(name, self.names())
         d = self.root / name
         try:
@@ -219,13 +221,26 @@ class VoiceStore:
         an in-process save or delete cannot land between the two reads."""
         with self._lock:
             stored = self.get(name)
-            return stored, read_voice_audio(stored)
+            try:
+                return stored, read_voice_audio(stored)
+            except VoiceUnreadableError:
+                # A bundled voice's package files can be rewritten under a
+                # live worker (`muse models refresh`); reload it once from
+                # package data. Saved voices keep failing closed.
+                if not (stored.read_only and name in self._bundled
+                        and stored.meta_path is not None):
+                    raise
+                fresh = _load(name, stored.audio_path, stored.meta_path,
+                              read_only=True)
+                audio = read_voice_audio(fresh)
+                self._bundled[name] = fresh
+                return fresh, audio
 
     # -- writing -----------------------------------------------------------
 
     @staticmethod
     def _validate(name, audio, sample_rate, transcript) -> tuple[np.ndarray, str]:
-        if not isinstance(name, str) or not NAME_PATTERN.match(name):
+        if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
             raise VoiceError(
                 "invalid_voice_name",
                 "voice name must match [a-z0-9][a-z0-9_-]{0,63}")

@@ -351,7 +351,7 @@ def render_llms_txt(doc: dict) -> str:
         "",
         "## MCP",
         "",
-        "For agents with MCP (Claude Code, Claude Desktop): one tool per route"
+        "For agents with MCP (Claude Code, Claude Desktop): tools for the inference routes"
         " plus `muse_describe`; media outputs are written to local files and"
         " returned as paths with sha256, never inline.",
         "",

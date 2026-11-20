@@ -52,7 +52,9 @@ with no paths. Voices are managed on `/v1/audio/speech/voices`:
   name, duration_seconds, sha256}` (sha256 of the stored WAV). Errors: 400
   `invalid_voice_name` (name must match `^[a-z0-9][a-z0-9_-]{0,63}$`),
   `invalid_transcript` (1-1000 chars), `invalid_reference_audio` (1-30 s),
-  `voice_read_only` (`narrator`), `voice_saving_not_supported`; 409
+  `voice_read_only` (`narrator`), `voice_saving_not_supported`; 500
+  `voice_storage_unavailable` (fixed message, no paths; a read failure on
+  GET is `voice_unreadable`); 409
   `voice_exists` (without `overwrite`) and `voice_limit_reached`; 413
   `payload_too_large` (`limits.voice_reference_max_bytes`, default 20 MB);
   415 `unsupported_media_type` (undecodable audio). MCP tool `muse_save_voice`.
@@ -62,6 +64,9 @@ with no paths. Voices are managed on `/v1/audio/speech/voices`:
   has no DELETE support). The gateway routes DELETE by the `model` query
   param; `muse federate` forwards only GET and POST, so delete through a node
   directly.
+- Saved voices live on one node's disk. Under `muse federate`, save and speak
+  through the same node: a voice saved on node A is unknown (400
+  `voice_not_found`) on node B.
 
 Storage: `<paths.home>/voices/<model_id>/<name>/{reference.wav, voice.json}`
 (voices are per model id; the store root is created 0700). The reference is
