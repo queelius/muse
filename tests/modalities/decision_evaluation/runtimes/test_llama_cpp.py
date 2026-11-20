@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+import muse.modalities._common.gguf as gguf_common
+
 import muse.modalities.decision_evaluation.runtimes.llama_cpp as runtime
 from muse.core.placement import is_native_gguf
 from muse.modalities.decision_evaluation import templates
@@ -118,7 +120,7 @@ def fake(tmp_path):
     FakeLlama.logits_fn = None
     FakeLlama.tokenize_fn = staticmethod(fake_tokenize)
     with patch.object(runtime, "Llama", FakeLlama), \
-         patch.object(runtime, "native_gpu_offload", return_value=False):
+         patch.object(gguf_common, "native_gpu_offload", return_value=False):
         yield tmp_path
 
 
@@ -499,7 +501,7 @@ def test_cuda_runtime_is_prepared_before_import(kw, cpu_only, fake, monkeypatch)
 
     calls = []
     monkeypatch.setattr(runtime, "Llama", None)
-    monkeypatch.setattr(runtime, "prepare_llama_cpp", lambda **k: calls.append(k))
+    monkeypatch.setattr(gguf_common, "prepare_llama_cpp", lambda **k: calls.append(k))
     monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
     _model(fake, **kw)
     assert calls == [{"cpu_only": cpu_only}]

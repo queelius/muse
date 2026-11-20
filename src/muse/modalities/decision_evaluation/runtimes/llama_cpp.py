@@ -17,11 +17,15 @@ import logging
 import math
 import threading
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
-from muse.core.llama_cuda import prepare_llama_cpp
-from muse.core.placement import native_gpu_backend, native_gpu_offload, native_placement
+from muse.modalities._common.gguf import (
+    gguf_path as _gguf_path,
+    import_llama,
+    is_cpu_only,
+    require_llama,
+    resolve_placement,
+)
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
     DecisionCancelled,
@@ -51,15 +55,8 @@ Llama: Any = None
 
 def _ensure_deps(*, cpu_only: bool = False) -> None:
     global Llama
-    if Llama is not None:
-        return
-    try:
-        # A prebuilt CUDA wheel needs NVIDIA's pip runtime loaded first.
-        prepare_llama_cpp(cpu_only=cpu_only)
-        from llama_cpp import Llama as _Llama
-        Llama = _Llama
-    except Exception as e:  # noqa: BLE001
-        logger.debug("llama-cpp-python unavailable: %s", e)
+    if Llama is None:
+        Llama = import_llama(cpu_only=cpu_only)
 
 
 def final_candidate_logits(
@@ -124,28 +121,16 @@ class DecisionLlamaCppModel:
         n_threads: int = 2,
         **_: Any,
     ) -> None:
-        _ensure_deps(cpu_only=device == "cpu" or n_gpu_layers == 0)
-        if Llama is None:
-            raise RuntimeError(
-                "llama-cpp-python is not installed; run `muse pull` or "
-                "install `llama-cpp-python` into this venv"
-            )
+        _ensure_deps(cpu_only=is_cpu_only(device, n_gpu_layers))
+        require_llama(Llama)
         if not 1 <= int(context_length) <= MAX_CONTEXT:
             raise ValueError(f"context_length must be 1-{MAX_CONTEXT}")
-        if not local_dir:
-            raise RuntimeError("local_dir is required; the GGUF file must be on disk")
-        gguf_path = Path(local_dir) / gguf_file
-        if not gguf_path.exists():
-            raise FileNotFoundError(f"GGUF file not found: {gguf_file}")
+        gguf_path = _gguf_path(local_dir, gguf_file)
 
         self.model_id = model_id
         self.hf_repo = hf_repo
         self.context_length = int(context_length)
-        offload = native_gpu_offload() if device != "cpu" and n_gpu_layers != 0 else False
-        placement = native_placement(
-            device, n_gpu_layers, gpu_offload=offload,
-            gpu_backend=native_gpu_backend() if offload else None,
-        )
+        placement = resolve_placement(device, n_gpu_layers)
         self.device = placement.device
         self._lock = threading.Lock()
         self._unusable = False
