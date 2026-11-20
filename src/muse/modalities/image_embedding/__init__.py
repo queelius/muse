@@ -13,8 +13,8 @@ Wire contract (OpenAI-shape, mirroring /v1/embeddings):
 
 Each `input` entry is a data: URL or http(s):// URL pointing at a
 PNG/JPEG/WEBP image. Image decoding uses the shared
-`decode_image_input` helper from the image_generation modality so all
-muse routes accept the same image-input shapes.
+`muse.modalities._common.images.decode_image_input` helper so all muse
+routes accept the same image-input shapes.
 
 Cross-modal note: CLIP/SigLIP can also embed text. The current modality
 exposes only image embedding. Future work may add a text route at
