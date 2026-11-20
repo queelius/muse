@@ -1189,6 +1189,40 @@ class TestEnableFnException:
         director.allow_model("fake-model")
         assert "fake-model" not in director._blocked_models
 
+    def _stranded(self, *, disable_fn):
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=0),
+            disable_fn=disable_fn,
+            memory_probe=_make_probe(),
+            cpu_budget_gb=3.0,
+            cpu_headroom_gb=0.0,
+        )
+        disable_fn.side_effect = RuntimeError("worker teardown uncertain")
+        with pytest.raises(OperationError):
+            director.acquire("fake-model", manifest=_manifest(memory_gb=2.0))
+        assert "fake-model" in director._failed_rollbacks
+        disable_fn.side_effect = None
+        return director
+
+    def test_lru_cleanup_of_a_failed_rollback_releases_its_block(self):
+        """R14: once a cleanup teardown succeeds and the model is not
+        admin-disabled, the block goes too (it used to stay 409 forever)."""
+        director = self._stranded(disable_fn=MagicMock())
+        director.enable_fn.return_value = 9002
+        # Pressure from another model evicts the stranded entry (LRU).
+        assert director.acquire("other", manifest=_manifest(memory_gb=2.0)) == 9002
+        assert "fake-model" not in director.loaded
+        assert "fake-model" not in director._failed_rollbacks
+        assert "fake-model" not in director._blocked_models
+
+    def test_cleanup_keeps_the_block_of_a_catalog_disabled_model(self):
+        _write_catalog({"fake-model": {"enabled": False}})
+        director = self._stranded(disable_fn=MagicMock())
+        director.enable_fn.return_value = 9002
+        director.acquire("other", manifest=_manifest(memory_gb=2.0))
+        assert "fake-model" not in director._failed_rollbacks
+        assert "fake-model" in director._blocked_models
+
     def test_concurrent_waiter_wakes_and_reattempts(self):
         # Two threads racing on a cold acquire: the winner's enable_fn
         # raises. The loser was awaiting the winner's Event; on wake

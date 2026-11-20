@@ -257,6 +257,9 @@ class ModelEviction:
     keep_blocked: bool
     was_blocked: bool
     free_before_gb: float | None
+    # The entry was a failed-rollback placeholder when claimed: a successful
+    # teardown is the cleanup that may lift its block (see finish_eviction).
+    failed_rollback: bool = False
     token: object = field(default_factory=object, repr=False)
 
 
@@ -818,6 +821,7 @@ class LoadDirector:
                 keep_blocked=keep_blocked,
                 was_blocked=was_blocked,
                 free_before_gb=free_before_gb,
+                failed_rollback=model_id in self._failed_rollbacks,
             )
             self._eviction_claims[model_id] = claim
             return claim
@@ -864,7 +868,9 @@ class LoadDirector:
         still own its memory, and logs a ``disable_fn_raised`` decision.
         Explicit-disable blocking is intentionally not cleared here: the admin
         wrapper decides from the catalog's committed state whether failure
-        should remain fail-closed or restore allowance.
+        should remain fail-closed or restore allowance. The one block a
+        successful teardown lifts is a failed rollback's, when the claim is
+        not an admin disable and the catalog still has the model enabled.
 
         A successful eviction of a loaded entry emits one ``model_evict``
         telemetry event (never allowed to raise). ``notify=False`` skips the
@@ -872,6 +878,16 @@ class LoadDirector:
         own exit points.
         """
         evicted_entry: LoadEntry | None = None
+        # A failed rollback blocked the model only until its worker was
+        # cleaned up. A successful non-admin teardown is that cleanup, so the
+        # block goes too unless the catalog says the model is disabled
+        # (read outside the lock; any read failure keeps the block).
+        lift_rollback_block = (
+            success
+            and claim.failed_rollback
+            and claim.reason != "admin_disabled"
+            and self._catalog_enabled(claim.model_id)
+        )
         with self.lock:
             if self._eviction_claims.get(claim.model_id) is not claim:
                 return False
@@ -881,6 +897,8 @@ class LoadDirector:
                 self.loaded.setdefault(claim.model_id, entry)
             elif success:
                 self._failed_rollbacks.discard(claim.model_id)
+                if lift_rollback_block:
+                    self._blocked_models.discard(claim.model_id)
 
             self._evicting.pop(claim.model_id, None)
 
@@ -1029,6 +1047,15 @@ class LoadDirector:
             )
             self._inflight_epoch += 1
             return True
+
+    @staticmethod
+    def _catalog_enabled(model_id: str) -> bool:
+        """Whether the catalog leaves ``model_id`` enabled (False on error)."""
+        try:
+            entry = _read_catalog().get(model_id)
+        except Exception:  # noqa: BLE001
+            return False
+        return not isinstance(entry, dict) or bool(entry.get("enabled", True))
 
     def _fire_capacity_listener(self) -> None:
         """Fire capacity_listener, if set, swallowing any exception.
@@ -1952,6 +1979,8 @@ class LoadDirector:
                     free_before_gb = self._free_for_device(device)
                     # LRU never changes an explicit admin block: a blocked
                     # entry (e.g. a restored failed disable) stays blocked.
+                    # Only a failed-rollback block lifts once this teardown
+                    # succeeds (finish_eviction).
                     claim = self._begin_eviction_locked(
                         victim.model_id,
                         entry=victim,
