@@ -4,6 +4,7 @@ Endpoints (all under /v1/admin):
 
   POST  /models/{id}/enable      async; spawns or joins worker
   POST  /models/{id}/disable     sync; unloads from worker
+  POST  /models/{id}/warmup      sync; loads via the director, no refcount
   POST  /models/{id}/probe       async; runs measure
   POST  /models/_/pull           async; runs `muse pull <identifier>`
                                  (the `_` placeholder is a documented stub
@@ -12,6 +13,7 @@ Endpoints (all under /v1/admin):
   DELETE /models/{id}            sync; catalog removal (?purge=bool)
   GET   /models/{id}/status      sync; merged catalog + worker view
 
+Bodies are validated before any job starts (400 invalid_parameter).
 All routes return JSON with the OpenAI envelope on errors: an
 OperationError raised by an operation is rendered by the handler that
 `muse.admin.errors.install_admin_error_handler` registers. Async ops
