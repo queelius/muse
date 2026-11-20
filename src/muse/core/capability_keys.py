@@ -33,7 +33,7 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "gguf_file", "chat_format", "n_gpu_layers", "n_threads",
     "n_threads_batch", "n_batch", "flash_attn", "use_mlock", "type_k",
     "type_v", "allow_patterns", "torch_compile", "cpu_offload", "vae_tiling",
-    "overlapped_decode", "trust_remote_code", "precision",
+    "overlapped_decode", "trust_remote_code", "code_repo", "precision",
     "option_cache_size", "idle_timeout_seconds", "max_concurrency",
     "lora_scale", "lora_scale_factor", "reference_runtime", "image_processor_overrides", "window_seconds", "num_beams",
     "temperature", "probabilities", "calibration", "confidence",
