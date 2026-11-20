@@ -1,7 +1,10 @@
-"""Multipart upload handling shared by the audio-input routes.
+"""Multipart upload handling shared by the upload routes.
 
-- `read_upload`: bounded read + close, mapping empty -> 400 and
-  oversize -> 413 (`payload_too_large`).
+- `read_bounded`: read at most `max_bytes + 1` bytes, then close the
+  upload (sync or async `close`, or none). The one bounded read behind
+  both `read_upload` and `_common.images.read_image_file`.
+- `read_upload`: `read_bounded` for the audio-input routes, mapping
+  empty -> 400 and oversize -> 413 (`payload_too_large`).
 - `run_on_spooled_upload`: write the bytes to a temp file and run the
   synchronous backend call on it, both off the event loop. The temp file is
   removed by the worker thread once the call finishes, so a cancelled
@@ -16,11 +19,12 @@
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
@@ -56,6 +60,27 @@ _DECODE_ERROR_TOKENS = (
 )
 
 
+async def read_bounded(upload: Any, max_bytes: int) -> bytes:
+    """Read at most ``max_bytes + 1`` bytes from ``upload``, then close it.
+
+    The extra byte lets callers tell "exactly at the cap" from "over it".
+    The upload is closed on success, failure and cancellation (a multipart
+    UploadFile may hold a spooled temp file); ``close`` may be sync, async
+    or absent (test doubles).
+    """
+    try:
+        return await upload.read(max_bytes + 1)
+    finally:
+        close = getattr(upload, "close", None)
+        if callable(close):
+            try:
+                outcome = close()
+                if inspect.isawaitable(outcome):
+                    await outcome
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to close upload", exc_info=True)
+
+
 async def read_upload(
     upload: UploadFile,
     *,
@@ -69,13 +94,7 @@ async def read_upload(
     empty, 413 when over the cap. `limit` names the knob in the 413
     message (e.g. ``"MUSE_AUDIO_QUALITY_MAX_BYTES=52428800"``).
     """
-    try:
-        data = await upload.read(max_bytes + 1)
-    finally:
-        try:
-            await upload.close()
-        except Exception:  # noqa: BLE001
-            logger.debug("failed to close upload", exc_info=True)
+    data = await read_bounded(upload, max_bytes)
     if not data:
         return error_response(400, "invalid_parameter", f"{label} is empty")
     if len(data) > max_bytes:

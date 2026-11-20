@@ -10,6 +10,7 @@ import pytest
 
 from muse.modalities._common.uploads import (
     looks_like_audio_decode_error,
+    read_bounded,
     read_upload,
     run_on_spooled_upload,
     upload_suffix,
@@ -58,6 +59,46 @@ async def test_read_upload_oversize_is_413():
     assert status == 413
     assert err["code"] == "payload_too_large"
     assert err["message"] == "file[0] exceeds MUSE_CAP=10"
+
+
+async def test_read_bounded_reads_cap_plus_one_and_closes():
+    up = _Upload(b"x" * 20)
+    assert await read_bounded(up, 10) == b"x" * 11
+    assert up.read_sizes == [11] and up.closed
+
+
+async def test_read_bounded_accepts_a_sync_close_or_none():
+    class _SyncClose(_Upload):
+        def close(self):  # type: ignore[override]
+            self.closed = True
+
+    up = _SyncClose(b"ab")
+    assert await read_bounded(up, 10) == b"ab" and up.closed
+
+    class _NoClose:
+        async def read(self, size):
+            return b"ab"
+
+    assert await read_bounded(_NoClose(), 10) == b"ab"
+
+
+async def test_read_bounded_closes_when_the_read_raises():
+    class _Boom(_Upload):
+        async def read(self, size):
+            raise OSError("disk")
+
+    up = _Boom(b"")
+    with pytest.raises(OSError):
+        await read_bounded(up, 10)
+    assert up.closed
+
+
+def test_image_reads_share_the_bounded_read():
+    import inspect
+
+    from muse.modalities._common import images
+
+    assert "read_bounded(" in inspect.getsource(images.read_image_file)
 
 
 def test_upload_suffix():

@@ -104,11 +104,6 @@ MANIFEST = {
 }
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
 class Model:
     """SAM-2 Hiera tiny backend.
 
@@ -138,7 +133,7 @@ class Model:
                 "transformers is not installed; "
                 "run `muse pull sam2-hiera-tiny`"
             )
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self.max_masks = int(max_masks)
         self._supports_text_prompts = bool(supports_text_prompts)
         self._supports_point_prompts = bool(supports_point_prompts)

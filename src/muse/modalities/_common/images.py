@@ -27,7 +27,6 @@ PIL is imported lazily (it is a pip_extra of the image runtimes).
 from __future__ import annotations
 
 import base64
-import inspect
 import io
 import logging
 import re
@@ -36,6 +35,7 @@ from typing import Any
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.net_fetch import ResponseTooLargeError, afetch_url_bytes
+from muse.modalities._common.uploads import read_bounded
 from muse.modalities._native_offload import run_native_offload
 
 
@@ -294,21 +294,9 @@ async def read_image_file(file: Any, *, max_bytes: int | None = None) -> bytes:
     cap = max_bytes if max_bytes is not None else _default_max_bytes()
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         raise ValueError("max_bytes must be a positive integer")
-    try:
-        raw = await file.read(cap + 1)
-    finally:
-        # Multipart UploadFile objects may be backed by a spooled temporary
-        # file.  The decoder owns the upload after its single bounded read, so
-        # close it on success, rejection, and cancellation.  Test doubles with
-        # no close method remain supported.
-        close = getattr(file, "close", None)
-        if callable(close):
-            try:
-                outcome = close()
-                if inspect.isawaitable(outcome):
-                    await outcome
-            except Exception:  # noqa: BLE001
-                logger.debug("failed to close image upload", exc_info=True)
+    # The decoder owns the upload after its single bounded read, which
+    # closes it on success, rejection and cancellation.
+    raw = await read_bounded(file, cap)
     if not raw:
         raise ImageDecodeError("empty image file")
     if len(raw) > cap:

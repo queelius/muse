@@ -18,9 +18,8 @@ via Python's ``ast`` module and asserts:
     itself locally.
 
 Thin delegators (e.g. ``def _select_device(d): return select_device(d, ...)``)
-are *allowed* and not flagged. Test imports of the per-module
-``_select_device`` and ``_set_inference_mode`` symbols are preserved
-for backward compatibility, but the bodies must delegate.
+would not be flagged, but none remain: runtimes and bundled scripts call
+the helpers directly.
 
 AST-based detection is preferred over string ``grep`` because:
   - It ignores comments / docstrings that legitimately reference the

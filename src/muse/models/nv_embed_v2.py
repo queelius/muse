@@ -138,7 +138,7 @@ class Model:
             raise RuntimeError(
                 "transformers is not installed; run `muse pull nv-embed-v2`"
             )
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._instruction = instruction
         self._max_length = max_length
         src = local_dir or hf_repo
@@ -236,6 +236,3 @@ def _count_tokens(model: Any, texts: list[str]) -> int:
         return 0
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
