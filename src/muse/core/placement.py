@@ -7,9 +7,11 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 
+from muse.core import securefs
 from muse.core.owned_command import run_owned_command
 
 
@@ -129,11 +131,7 @@ print(json.dumps({'gpu_offload': bool(llama_cpp.llama_supports_gpu_offload()),
 
 def _identity(path: str) -> tuple:
     try:
-        stat = Path(path).stat()
-        return (
-            path, stat.st_dev, stat.st_ino, stat.st_size,
-            stat.st_mtime_ns, stat.st_ctime_ns,
-        )
+        return securefs.file_identity(path, Path(path).stat())
     except OSError:
         return (path, None)
 
@@ -162,7 +160,8 @@ def _interpreter_capability(python: str) -> tuple[bool, str]:
         # Share successes AND failures without retrying once per waiter.
         try:
             return pending.result(timeout=35)
-        except TimeoutError as exc:
+        # concurrent.futures.TimeoutError is only the builtin from 3.11 on.
+        except FutureTimeoutError as exc:
             raise RuntimeError("could not query native GGUF GPU offload: capability check is still running; retry") from exc
     try:
         if not _query_slots.acquire(timeout=15):

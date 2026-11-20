@@ -258,14 +258,7 @@ _CatalogFileKey = tuple[str, int, int, int, int, int]
 
 def _catalog_file_key(path: Path, info: os.stat_result) -> _CatalogFileKey:
     """Return a replacement-sensitive identity for one opened catalog."""
-    return (
-        str(path),
-        info.st_dev,
-        info.st_ino,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
+    return securefs.file_identity(path, info)
 
 
 def _catalog_dir() -> Path:

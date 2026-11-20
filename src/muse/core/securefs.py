@@ -52,6 +52,16 @@ _GROUP_OTHER_WRITE = 0o022
 _IS_POSIX = os.name == "posix"
 
 
+def file_identity(path: str | Path, info: os.stat_result) -> tuple:
+    """A replacement-sensitive identity for one file: (path, dev, ino, size,
+    mtime_ns, ctime_ns). An atomic replace that keeps size and mtime still
+    changes the inode (and ctime), so caches keyed on it never go stale."""
+    return (
+        str(path), info.st_dev, info.st_ino, info.st_size,
+        info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
 def _trusted(owners: Collection[int] | None) -> Collection[int]:
     return (os.geteuid(),) if owners is None else owners
 
