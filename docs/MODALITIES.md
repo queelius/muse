@@ -11,7 +11,13 @@ fallback is presented as measured. `pronunciations` keeps respellings or IPA
 separate from display text. Kokoro native times come from its English pipeline
 (`lang_code`, always "a" in muse today), so non-English voices get timings from
 English G2P; models without native timings and streaming timestamps return 400. Legacy
-`align` / `X-Alignment` remains Soprano paragraph timing. Qwen3-ASR returns
+`align` / `X-Alignment` remains Soprano paragraph timing. `stream: true`
+returns base64 PCM16 SSE chunks, so it rejects `response_format: opus` (400
+`format_not_streamable`) and `align` (400 `alignment_not_streamable`) instead
+of dropping them. Speech and chat streaming share
+`muse.modalities._common.streaming.threaded_sse_events`, which starts the
+producer thread on the body's first iteration (a client that leaves before
+then never strands a lock-holding producer). Qwen3-ASR returns
 transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
 `vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.
 For pronunciation checks omit `prompt`, whose context biases the listener.

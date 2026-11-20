@@ -95,6 +95,20 @@ def test_streaming_response(client):
     assert "text/event-stream" in r.headers["content-type"]
 
 
+@pytest.mark.parametrize("field, value, code", [
+    ("response_format", "opus", "format_not_streamable"),
+    ("align", True, "alignment_not_streamable"),
+])
+def test_streaming_rejects_fields_it_cannot_honour(client, field, value, code):
+    """R18: streaming returns raw PCM16, so opus output and paragraph
+    alignment would be dropped silently; reject them instead."""
+    r = client.post("/v1/audio/speech", json={
+        "input": "hello world", "stream": True, field: value,
+    })
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == code
+
+
 def test_404_uses_openai_error_envelope(client):
     """Unknown model must return {error:{...}} not {detail:...}."""
     r = client.post("/v1/audio/speech", json={

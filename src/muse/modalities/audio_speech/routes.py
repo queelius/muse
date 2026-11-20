@@ -12,10 +12,7 @@ import hashlib
 import json
 import logging
 import math
-import threading
 
-
-import numpy as np
 from fastapi import APIRouter, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, SkipValidation
@@ -34,6 +31,7 @@ from muse.modalities.audio_speech.pronunciations import (
 from muse.modalities.audio_speech.protocol import TimestampsUnavailableError
 from muse.modalities.audio_speech.word_timing import TimedSpan, assemble_words
 from muse.core.errors import error_response
+from muse.modalities._common.streaming import threaded_sse_events
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -103,6 +101,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "timestamps_not_streamable",
                 "Word timestamps are not available while streaming",
+            )
+        if req.stream and req.response_format != "wav":
+            return error_response(
+                400, "format_not_streamable",
+                "Streaming returns base64 PCM16 chunks; response_format "
+                f"{req.response_format!r} is only available without stream",
+            )
+        if req.stream and req.align:
+            return error_response(
+                400, "alignment_not_streamable",
+                "Paragraph alignment (align) is not available while streaming",
             )
         if req.timestamps and not capabilities.get("supports_word_timestamps"):
             return _timestamps_not_supported()
@@ -261,131 +270,20 @@ async def _stream(
     model, req: SpeechRequest, *, spoken: str,
     headers: dict[str, str],
 ) -> EventSourceResponse:
-    async def event_gen():
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_DEPTH)
-        queue_slots = threading.Semaphore(_STREAM_QUEUE_DEPTH)
-        cancelled = threading.Event()
-        producer_done = threading.Event()
-        done_sentinel = object()
-        error_sentinel = object()
-
-        def _enqueue(item: object) -> bool:
-            """Reserve bounded queue capacity from the producer thread."""
-            while not cancelled.is_set():
-                if not queue_slots.acquire(timeout=_STREAM_POLL_SECONDS):
-                    continue
-                if cancelled.is_set():
-                    queue_slots.release()
-                    return False
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, item)
-                except RuntimeError:
-                    # The event loop can close during process shutdown.
-                    queue_slots.release()
-                    return False
-                return True
-            return False
-
-        def _acquire_inference_lock() -> bool:
-            """Wait for the model without stranding disconnected requests."""
-            while not cancelled.is_set():
-                if model._inference_lock.acquire(timeout=_STREAM_POLL_SECONDS):
-                    return True
-            return False
-
-        def _produce():
-            stream = None
-            lock_acquired = False
-            failure_reported = False
-            try:
-                lock_acquired = _acquire_inference_lock()
-                if not lock_acquired or cancelled.is_set():
-                    return
-
-                stream = iter(model.synthesize_stream(
-                    spoken,
-                    voice=req.voice, speed=req.speed,
-                ))
-                while not cancelled.is_set():
-                    try:
-                        chunk = next(stream)
-                    except StopIteration:
-                        break
-                    if not _enqueue(chunk):
-                        break
-            except Exception:
-                logger.exception("audio speech stream backend failed")
-                failure_reported = _enqueue(error_sentinel)
-            finally:
-                if stream is not None:
-                    close = getattr(stream, "close", None)
-                    if callable(close):
-                        try:
-                            close()
-                        except Exception:
-                            logger.exception("audio speech stream cleanup failed")
-                            if not failure_reported:
-                                failure_reported = _enqueue(error_sentinel)
-                if lock_acquired:
-                    model._inference_lock.release()
-                if not cancelled.is_set():
-                    _enqueue(done_sentinel)
-                producer_done.set()
-
-        # threading.Thread (not loop.run_in_executor) so the producer's
-        # lifecycle is explicit and decoupled from the asyncio default
-        # executor's bounded thread pool. Matches chat_completion. The
-        # earlier run_in_executor pattern discarded the returned Future,
-        # so executor saturation could silently hang the consumer on
-        # an empty queue.
-        producer = threading.Thread(
-            target=_produce,
-            name="muse-audio-stream",
-            daemon=True,
-        )
-        try:
-            producer.start()
-        except Exception:
-            logger.exception("audio speech stream producer failed to start")
-            yield _stream_error_event()
-            yield {"event": "done", "data": ""}
-            return
-
-        try:
-            while True:
-                item = await queue.get()
-                queue_slots.release()
-                if item is done_sentinel:
-                    yield {"event": "done", "data": ""}
-                    return
-                if item is error_sentinel:
-                    yield _stream_error_event()
-                    yield {"event": "done", "data": ""}
-                    return
-                try:
-                    pcm = float_to_pcm16(item.audio)
-                except Exception:
-                    logger.exception("audio speech stream encoding failed")
-                    yield _stream_error_event()
-                    yield {"event": "done", "data": ""}
-                    return
-                yield {"data": base64.b64encode(pcm.tobytes()).decode()}
-        finally:
-            # EventSourceResponse closes the generator when the client
-            # disconnects. Wake a producer waiting for queue capacity or
-            # model ownership, then briefly give it a chance to close its
-            # backend iterator and release the inference lock. A backend
-            # blocked inside next() cannot be force-killed safely; keep the
-            # wait bounded and report that condition server-side.
-            cancelled.set()
-            deadline = loop.time() + _STREAM_CLEANUP_GRACE_SECONDS
-            while not producer_done.is_set() and loop.time() < deadline:
-                await asyncio.sleep(_STREAM_POLL_SECONDS)
-            if not producer_done.is_set():
-                logger.warning(
-                    "audio speech stream producer did not stop within %.2fs",
-                    _STREAM_CLEANUP_GRACE_SECONDS,
-                )
-
-    return EventSourceResponse(event_gen(), headers=headers)
+    events = threaded_sse_events(
+        lock=model._inference_lock,
+        open_stream=lambda: model.synthesize_stream(
+            spoken, voice=req.voice, speed=req.speed,
+        ),
+        # Look float_to_pcm16 up at call time so tests can patch it.
+        encode=lambda chunk: {
+            "data": base64.b64encode(float_to_pcm16(chunk.audio).tobytes()).decode(),
+        },
+        done_events=({"event": "done", "data": ""},),
+        error_event=_stream_error_event,
+        label="audio-speech",
+        queue_depth=_STREAM_QUEUE_DEPTH,
+        poll_seconds=_STREAM_POLL_SECONDS,
+        cleanup_grace_seconds=_STREAM_CLEANUP_GRACE_SECONDS,
+    )
+    return EventSourceResponse(events, headers=headers)
