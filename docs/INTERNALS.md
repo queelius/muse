@@ -728,3 +728,92 @@ did not disturb those tests' plain `.snapshot()`-only fakes.
 Client usage is unchanged OpenAI-compat, just pointed at the
 coordinator: `OpenAI(base_url="http://coordinator:8100/v1",
 api_key="not-used")`.
+
+## Dead workers
+
+After 10 unsuccessful restart attempts the monitor marks a worker dead and
+the director forgets its models (`LoadDirector.forget_worker`), so the next
+request cold-loads a replacement instead of getting 502s. `/health` reports
+"degraded" while any worker is dead or its `failure_count` is at the 3-check
+threshold, whatever its status: a crashed process is set to the threshold
+but keeps status "running" through backoff, spawn and readiness wait, and a
+single missed poll is not an outage. `/v1/models` lists a forgotten model as
+`loaded: false`.
+`supervisor.revive_worker`
+(the admin restart route) gives only such a monitor-exhausted spec a fresh
+budget; a spec retained dead after an unproven teardown stays dead.
+A dead worker whose process could not be stopped keeps its models
+accounted but blocked (503 `model_cleanup_required`) until an admin-API
+disable retries the teardown or a monitor restart of that spec reaches
+readiness (`LoadDirector.settle_restarted_worker`); a catalog-only disable
+does not clear it.
+The admin restart route (`POST /v1/admin/workers/{port}/restart`) signals a
+live process, or hands a process-less spec to `revive_worker`; a refused
+spec is 409 `worker_not_revivable`, and a signalled spec the helper refuses
+is reported `revived: false` (re-enable or warm up the model instead).
+
+## Fresh-venv smoke test (CI)
+
+Bundled scripts under `src/muse/models/` declare `pip_extras` covering the
+deps the runtime source-imports. The dev environment installs broad
+extras (`muse[dev,server,audio,images,embeddings]`), so transitive deps
+that `from_pretrained` (or sentence-transformers, or diffusers) ALSO
+imports at load time happen to be present. Per-model venvs created via
+`muse pull <id>` install only `muse[server]` plus the model's declared
+`pip_extras`; transitive holes show up as ImportError when the worker
+tries to load the model.
+
+The v0.30.0 audit (#110, `tests/models/test_pip_extras_audit.py`)
+catches direct-import gaps via AST scan but cannot see transitive
+imports that `from_pretrained` triggers. v0.32.0 closes that gap with
+a CI workflow:
+
+- `.github/workflows/fresh-venv-smoke.yml` runs on every push to main
+  and every PR. Matrix-tests the lightweight bundled models listed in
+  the workflow's `model:` matrix (16 as of v0.70: kokoro-82m, dinov2-small,
+  bart-large-cnn, bge-reranker-v2-m3, mert-v1-95m, supertonic-3, the two
+  text classifiers, trocr-base-printed, the three image/cv models,
+  ast-audioset, pixel-tools, utmos, audiobox-aesthetics).
+- Each job creates a fresh venv, installs only what `muse pull` would
+  install, then runs the in-venv probe worker (`muse _probe_worker
+  --no-inference`) to verify load. Failure surfaces a structured label
+  like `kokoro-82m: FAIL (missing dep: librosa)`.
+- Heavy / GPU-only models (sd-turbo, animatediff, stable-audio, wan,
+  large LLMs) are deferred until paid runner budget allows.
+
+Local repro: `python scripts/smoke_fresh_venv.py --model_id <id>`.
+Use `--json` for machine-readable output.
+
+When you add a new bundled script and the smoke matrix should cover it,
+add the id to the matrix in `.github/workflows/fresh-venv-smoke.yml`.
+Lightweight models (under ~1 GB on disk, CPU-friendly) are good
+candidates; heavier models need GPU runners and are out of scope for
+the free-tier CI matrix.
+
+## Benchmarks
+
+`scripts/bench/` holds the reusable performance harness (v0.57.0):
+`bench_llm.py` (muse-vs-ollama head-to-head: generation tok/s, streaming
+TTFT/inter-token, long-prompt eval, multi-turn prefix-reuse detection,
+worker-direct vs gateway split) and `bench_modalities.py` (per-modality
+hot latencies against a live server). Reports land in `docs/benchmarks/`.
+Protocol lesson from the 2026-07-08 baseline: on thermally-scaled boxes,
+only alternating same-window comparisons are trustworthy; cross-window
+medians can differ 3x. LlamaCppModel accepts optional perf kwargs
+(n_threads, n_threads_batch, n_batch, flash_attn, use_mlock, type_k,
+type_v) via manifest capabilities; defaults match llama-cpp-python (and
+ollama's thread choice) and shipped untuned because the baseline showed
+muse already competitive (non-streaming faster than ollama; streaming
+comparison inconclusive on the noisy laptop test box -- muse 5.8-14.3 vs
+ollama 7.6-10.9 tok/s in the committed alternating run, with muse's
+within-run variance exceeding the delta).
+
+## Probe shapes
+
+**Memory is a function of input shape, not a single number.** Whisper
+at 30s audio uses different VRAM than at 5min. SDXL-Turbo at 512^2 uses
+~half as much as at 1024^2. AnimateDiff at 8 frames uses roughly half
+as much as at 16 frames. The `memory_gb` annotation reflects a
+typical-shape peak. Probe measures the actual default shape. Future
+versions may add `--shape preset=small|medium|large` sweeps to map the
+full curve.

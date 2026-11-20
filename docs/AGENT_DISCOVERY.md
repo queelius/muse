@@ -168,3 +168,13 @@ it), `/`, `/llms.txt`, and the first reachable node's `/openapi.json`.
 The coordinator's own `/docs` and `/redoc` are disabled. Inference routes
 forward as before, and the provenance headers pass through from the node that
 served the request. See the federation section of `CLAUDE.md`.
+
+## Implementation notes
+
+`modality_discovery()` adds `model_optional` to every route (true when the
+package lists the path in `MODEL_OPTIONAL_PATHS`), returning deep copies so
+the memoized declarations are never mutated. The coordinator's merged
+document sets every `model_optional` to false (its proxy has no
+default-model seam). `server.mcp.install` pins `museq[mcp]>=<major>.<minor>`
+for a release version and leaves dev or local builds unpinned, so uvx does
+not reuse an older cached client.
