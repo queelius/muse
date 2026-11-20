@@ -40,7 +40,7 @@ validates the value against the registry and refuses to write a bad one.
 
 | Command | Effect |
 |---|---|
-| `muse config generate [--force]` | Write a fully-commented `config.yaml` from the registry (every setting, default, env name). Refuses to overwrite without `--force`. |
+| `muse config generate [--force]` | Write a fully-commented `config.yaml` from the registry (every setting, default, env name). Every leaf is commented out at its default, so the file overrides nothing until you uncomment a group header and a leaf. Refuses to overwrite without `--force`. |
 | `muse config show [--json]` | Every setting's effective value AND source (default / file / env). `admin.token` is redacted to `set` / `unset`. |
 | `muse config path` | Print the resolved config-file path. |
 | `muse config get <key>` | Print one effective value. |

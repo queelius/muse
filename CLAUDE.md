@@ -398,7 +398,8 @@ STRICT path (validates and refuses a bad value).
 
 `muse config` CLI verbs:
 - `muse config generate [--force]` -- write a fully-commented `config.yaml`
-  from the registry (every setting, its default, its env name).
+  from the registry (every setting, its default, its env name; every leaf
+  commented out, so it overrides nothing until edited).
 - `muse config show [--json]` -- every setting's effective value AND source
   (default / file / env). `admin.token` is redacted to `set` / `unset`.
 - `muse config path` -- print the resolved config-file path.
