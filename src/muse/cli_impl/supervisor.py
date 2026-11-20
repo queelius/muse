@@ -110,6 +110,10 @@ class WorkerSpec:
     failure_count: int = 0
     last_spawn_at: float = 0.0
     status: str = "pending"
+    # True only when the monitor declared this spec dead because its restart
+    # budget ran out. Other dead specs (retained after a teardown that could
+    # not be proven, or a failed spawn) must never be revived.
+    restart_exhausted: bool = False
     # Opaque token for the generation that owns an in-flight transition.
     # The waitable ownership record lives in SupervisorState; this marker
     # lets routing/monitor code cheaply exclude the spec during slow I/O.
@@ -809,6 +813,7 @@ def _attempt_restart(
             spec.port, max_restarts,
         )
         spec.status = "dead"
+        spec.restart_exhausted = True
         return
 
     # Exponential backoff, capped
@@ -920,7 +925,15 @@ def revive_worker(state: "SupervisorState", spec: WorkerSpec) -> bool:
     ``restart_count`` reset, and the monitor respawns it on its next tick
     (its director entry is re-created once it is ready). Returns False,
     changing nothing, when the spec is no longer tracked, an operation
-    owns it, or it still has a live process (signal that one instead).
+    owns it, it still has a live process (signal that one instead), or it
+    is dead for any reason other than the monitor exhausting its restart
+    budget: a spec retained dead after an unproven teardown or a failed
+    spawn stays dead unless no director is bound.
+
+    (The monitor's give-up removes the spec's models from
+    ``director.loaded`` when its process was released, so "every model is
+    still loaded" cannot identify a revivable spec; ``restart_exhausted``
+    does.)
     """
     with state.lock:
         if not any(item is spec for item in state.workers):
@@ -931,6 +944,13 @@ def revive_worker(state: "SupervisorState", spec: WorkerSpec) -> bool:
             has_process = spec.process is not None
         if spec.status != "dead" and has_process:
             return False
+        if (
+            spec.status == "dead"
+            and not spec.restart_exhausted
+            and getattr(state, "director", None) is not None
+        ):
+            return False
+        spec.restart_exhausted = False
         spec.status = "unhealthy"
         spec.restart_count = 0
         spec.failure_count = _FAILURE_THRESHOLD

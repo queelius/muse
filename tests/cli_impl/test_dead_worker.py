@@ -225,8 +225,10 @@ def test_revived_worker_is_adopted_by_the_director():
     spec = _kill_and_exhaust(state)
     assert MODEL not in state.director.loaded
 
+    assert spec.restart_exhausted is True
     assert sup.revive_worker(state, spec) is True
     assert spec.status == "unhealthy" and spec.restart_count == 0
+    assert spec.restart_exhausted is False
 
     def respawn(s, **_kw):
         s.process = object()
@@ -313,3 +315,17 @@ def test_listing_probes_capacity_once_per_request():
     with patch("muse.cli_impl.supervisor._capacity_pools", counting):
         TestClient(app).get("/v1/models")
     assert len(calls) == 1
+
+
+def test_a_retained_dead_spec_is_never_revived():
+    """Only a spec the monitor gave up on may be revived; one retained dead
+    after an unproven teardown or failed spawn stays dead."""
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    spec = WorkerSpec(models=[MODEL], python_path="/p", port=9200, status="dead")
+    state.workers.append(spec)
+    assert sup.revive_worker(state, spec) is False
+    assert spec.status == "dead"
+
+    state.director = None
+    assert sup.revive_worker(state, spec) is True
