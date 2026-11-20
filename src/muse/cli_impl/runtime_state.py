@@ -19,14 +19,19 @@ from muse.core import config
 _NOISY_LOGGERS = ("httpx", "httpcore")
 
 
-def _quiet_http_logs() -> None:
-    """Raise per-request HTTP loggers to WARNING (only raise, never lower).
+def quiet_noisy_loggers(names: tuple[str, ...] = _NOISY_LOGGERS) -> None:
+    """Raise per-request third-party loggers to WARNING for CLI output.
 
-    Users who explicitly asked for DEBUG (`muse --log-level DEBUG ...`)
-    with a custom config keep whatever they configured.
+    Skipped entirely when the root logger is at DEBUG (`muse --log-level
+    DEBUG ...`), so an operator who asks for DEBUG sees the httpx lines.
+    Otherwise it only raises levels, never lowers them: a logger already
+    set to ERROR stays at ERROR.
     """
-    for name in _NOISY_LOGGERS:
+    if logging.getLogger().getEffectiveLevel() <= logging.DEBUG:
+        return
+    for name in names:
         lg = logging.getLogger(name)
+        # NOTSET (0) means "inherit"; treat as silenceable.
         if lg.level == logging.NOTSET or lg.level < logging.WARNING:
             lg.setLevel(logging.WARNING)
 
@@ -49,7 +54,7 @@ def fetch_public_models(timeout: float = 2.0) -> list[dict] | None:
         import httpx
     except Exception:  # noqa: BLE001
         return None
-    _quiet_http_logs()
+    quiet_noisy_loggers()
     try:
         with httpx.Client(timeout=timeout) as client:
             r = client.get(f"{base}/v1/models")
