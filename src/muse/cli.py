@@ -56,10 +56,11 @@ class AdminActionOutcome(str, Enum):
       ambiguous (the job may still complete server-side), so it is NOT
       folded into FAILED; callers raise `typer.Exit(3)` to give operators
       a distinct signal from a hard failure.
-    - NOT_HANDLED: no admin token configured, the admin API is
-      unreachable, or it reports 503 admin_disabled -- caller falls
+    - NOT_HANDLED: no admin token configured, the admin API cannot be
+      connected to, or it reports admin_disabled -- caller falls
       through to the catalog-only path exactly as if no admin API
-      existed.
+      existed. A request that connected but did not complete (e.g. a
+      read timeout) is TIMEOUT, never NOT_HANDLED.
     """
 
     SUCCESS = "success"
@@ -771,7 +772,7 @@ def _set_model_enabled(model_id: str, enabled: bool) -> None:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(2)
     typer.echo(
-        f"{action}d {model_id} (catalog only; supervisor will pick this up on restart)"
+        f"{action}d {model_id} (catalog only; a running supervisor applies it on the next request)"
     )
 
 
@@ -1225,7 +1226,9 @@ def _try_admin_action(action: str, model_id: str) -> AdminActionOutcome:
     through to the catalog-only path is correct.
     """
     try:
-        client = _admin_client(timeout=5.0)
+        # Disable is synchronous and includes the worker teardown (up to a
+        # TERM grace plus KILL), so it gets far more than enable's 202.
+        client = _admin_client(timeout=5.0 if action == "enable" else 60.0)
     except Exception:  # noqa: BLE001
         return AdminActionOutcome.NOT_HANDLED
     if client is None:
@@ -1277,16 +1280,29 @@ def _try_admin_action(action: str, model_id: str) -> AdminActionOutcome:
                 )
             return AdminActionOutcome.SUCCESS
     except AdminClientError as e:
-        if e.status == 503 or e.code == "admin_disabled":
+        # Only "no admin API configured" falls back. Every other refusal
+        # (worker_shutdown_incomplete, server_shutting_down, ...) is the
+        # live supervisor answering; editing the catalog behind it is wrong.
+        if e.code == "admin_disabled":
             return AdminActionOutcome.NOT_HANDLED
         typer.echo(f"error: {e.message}", err=True)
         return AdminActionOutcome.FAILED
     except Exception as e:  # noqa: BLE001
+        import httpx
+        if isinstance(e, (ConnectionError, httpx.ConnectError, httpx.ConnectTimeout)):
+            typer.echo(
+                f"warning: admin API unreachable ({e}); falling back to catalog-only update",
+                err=True,
+            )
+            return AdminActionOutcome.NOT_HANDLED
+        # The request reached the supervisor (or may have): the action may
+        # still complete there, so neither report success nor fall back.
         typer.echo(
-            f"warning: admin API unreachable ({e}); falling back to catalog-only update",
+            f"warning: {action} request to the admin API did not complete "
+            f"({e}); check `muse models info {model_id}`",
             err=True,
         )
-        return AdminActionOutcome.NOT_HANDLED
+        return AdminActionOutcome.TIMEOUT
     return AdminActionOutcome.NOT_HANDLED
 
 
