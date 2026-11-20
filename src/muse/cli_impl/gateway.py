@@ -838,6 +838,22 @@ def build_gateway(
     return app
 
 
+def _director_loaded(director: Any) -> "dict | None":
+    """A copy of ``director.loaded`` taken under its lock (briefly).
+
+    None when there is no real loaded map: no director, or a loose test
+    double whose ``loaded`` is not a dict.
+    """
+    loaded = getattr(director, "loaded", None)
+    if not isinstance(loaded, dict):
+        return None
+    lock = getattr(director, "lock", None)
+    if lock is None:
+        return dict(loaded)
+    with lock:
+        return dict(loaded)
+
+
 def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
     """Fill last_loaded_at on resident /v1/models entries, in place.
 
@@ -854,30 +870,14 @@ def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
     for entry in aggregated:
         if entry.get("revision") is None and isinstance(entry.get("id"), str):
             entry["revision"] = lookup_revision(entry["id"]).revision
-    director = getattr(state, "director", None)
-    if director is None:
-        return
-    loaded = getattr(director, "loaded", None)
-    if not isinstance(loaded, dict):
-        return
-    # Snapshot id -> loaded_at under the director lock (held briefly); the
-    # monotonic->wall-clock render happens outside the lock.
-    lock = getattr(director, "lock", None)
     try:
-        if lock is not None:
-            with lock:
-                snap = {
-                    mid: getattr(e, "loaded_at", None)
-                    for mid, e in loaded.items()
-                }
-        else:
-            snap = {
-                mid: getattr(e, "loaded_at", None)
-                for mid, e in loaded.items()
-            }
+        loaded = _director_loaded(getattr(state, "director", None))
     except Exception as e:  # noqa: BLE001
         logger.warning("/v1/models: loaded_at join failed: %s", e)
         return
+    if loaded is None:
+        return
+    snap = {mid: getattr(e, "loaded_at", None) for mid, e in loaded.items()}
     for entry in aggregated:
         if entry.get("last_loaded_at") is not None:
             continue
@@ -967,18 +967,10 @@ def _resident_ids(state: Any, routes_now: Callable[[], dict]) -> set[str]:
         out.update(routes_now())
     except Exception as e:  # noqa: BLE001
         logger.warning("/v1/capabilities: route snapshot failed: %s", e)
-    director = getattr(state, "director", None)
-    loaded = getattr(director, "loaded", None)
-    if isinstance(loaded, dict):
-        lock = getattr(director, "lock", None)
-        try:
-            if lock is not None:
-                with lock:
-                    out.update(loaded)
-            else:
-                out.update(loaded)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("/v1/capabilities: director snapshot failed: %s", e)
+    try:
+        out.update(_director_loaded(getattr(state, "director", None)) or {})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/capabilities: director snapshot failed: %s", e)
     return out
 
 
@@ -1127,14 +1119,8 @@ def _cold_model_needs_servability_check(director: Any, model_id: str) -> bool:
     when no old stamp exists.  Loose test doubles expose a fabricated
     ``loaded`` mock; only a concrete dict opts into this additional path.
     """
-    loaded = getattr(director, "loaded", None)
-    if not isinstance(loaded, dict):
-        return False
-    lock = getattr(director, "lock", None)
-    if lock is None:
-        return model_id not in loaded
-    with lock:
-        return model_id not in loaded
+    loaded = _director_loaded(director)
+    return loaded is not None and model_id not in loaded
 
 
 _manifest_preparations: dict[tuple, asyncio.Task] = {}
