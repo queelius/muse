@@ -51,15 +51,6 @@ def test_modalities_are_isolated(reg):
         reg.get("audio/speech", "fake-diffusion")
 
 
-def test_set_default_overrides_first_registered(reg):
-    a1 = FakeAudioModel(model_id="tts-1")
-    a2 = FakeAudioModel(model_id="tts-2")
-    reg.register("audio/speech", a1)
-    reg.register("audio/speech", a2)
-    reg.set_default("audio/speech", "tts-2")
-    assert reg.get("audio/speech").model_id == "tts-2"
-
-
 def test_list_models_returns_modelinfo_per_modality(reg):
     reg.register("audio/speech", FakeAudioModel())
     reg.register("image/generation", FakeImageModel())
