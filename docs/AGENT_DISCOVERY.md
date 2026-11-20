@@ -85,7 +85,12 @@ tool result (below).
    The capabilities document's `server.mcp.install` gives this line with the
    server's own minor version as the floor (unpinned for a dev build), so
    uvx does not reuse an older cached museq. At initialize the server sends
-   `instructions`: the describe, pick a model, call, read files workflow.
+   `instructions` (`muse.mcp.server.INSTRUCTIONS`): the describe, pick a
+   model, call, read files workflow; the path-input rules and the `_paths` /
+   `_urls` list forms; that admin tools need the token except
+   `muse_list_models` and `muse_search_models`; and that long jobs return a
+   job_id to poll. An admin-only or inference-only filter sends just its
+   half.
 
 2. Call `muse_describe`: returns the capabilities document for the live
    server. Narrowed by `modality` or `model`, it comes back inline. Unfiltered

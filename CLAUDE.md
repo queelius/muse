@@ -600,20 +600,15 @@ Transports: stdio (default) and `muse mcp --http --port 8088` (Starlette,
 pins the surface. `--admin-token` / `$MUSE_ADMIN_TOKEN` is the admin bearer.
 Long-running ops (pull, probe, enable) return a `job_id`; poll `muse_get_jobs`.
 
-The server sends `instructions` at initialize (`muse.mcp.server.INSTRUCTIONS`):
-the describe, pick a model, call, read files workflow; the path-input rules
-and the `_paths` / `_urls` list forms; that admin tools need the token except
-`muse_list_models` and `muse_search_models`, and that long jobs return a
-job_id to poll. An admin-only or inference-only filter sends just its half.
-Every tool has a `title` and `ToolAnnotations`. Generated inference tools are
-never `readOnlyHint` (any can write a local file) nor `destructiveHint` (a
-cold load evicting idle models is load management), are `openWorldHint` only
-with `*_url` / `*_urls` inputs, and are idempotent on GET routes.
-`muse_describe` and the admin read tools are read-only; `muse_remove_model`,
-`muse_disable_model` and `muse_pull_model` are destructive (a re-pull
-replaces weights; a failed probe disables the model); `muse_search_models`
-and `muse_pull_model` are open-world. The generated `model` argument has
-`minLength: 1` and is not required on a `model_optional` route.
+The server sends `instructions` at initialize (`muse.mcp.server.INSTRUCTIONS`:
+workflow, path-input rules, which admin tools need the token, job polling);
+an admin-only or inference-only filter sends just its half. Every tool has a
+`title` and `ToolAnnotations`: generated inference tools are never read-only
+(any can write a file) nor destructive, open-world only with `*_url` /
+`*_urls` inputs, idempotent on GET; `muse_remove_model`, `muse_disable_model`
+and `muse_pull_model` are destructive. The generated `model` argument has
+`minLength: 1` and is optional on a `model_optional` route. Full rules:
+docs/AGENT_DISCOVERY.md.
 
 I/O conventions:
 - Media outputs are written to files and returned as path, sha256, model and
