@@ -34,7 +34,17 @@ synchronously before it returns a Response; once it returns a
 StreamingResponse the relay runs independently and this function is not
 on the hook for it) retries ONCE against a different candidate for the
 same model. If no other candidate exists, or the retry also fails, the
-coordinator returns 502 `no_node_available`. A `httpx.ReadTimeout` (the
+coordinator returns 502 `no_node_available`. A node that fails at connect
+time is marked unreachable in the registry cache (when the registry
+supports `mark_unreachable`) so later requests skip it until the next poll.
+
+No candidate at all is a 404 `model_not_available` only when the answer
+is likely permanent. Before the first poll lands (empty snapshot), when no
+node is reachable, or when some node listed the model in its last
+reachable poll (`registry.was_listed`) but every such node is unreachable
+now, the coordinator returns a retryable 503 `no_node_available` instead.
+
+A `httpx.ReadTimeout` (the
 node accepted the request and is processing or stuck) is deliberately
 NOT a failover trigger: retrying would re-execute a full, possibly
 non-idempotent generation on a second node. A ReadTimeout is mapped to a
@@ -127,6 +137,27 @@ def build_coordinator(
     wiring.
     """
     rr_counter = {} if rr_counter is None else rr_counter
+
+    def _mark_unreachable(node: NodeState) -> None:
+        mark = getattr(registry, "mark_unreachable", None)
+        if mark is not None:
+            mark(node.spec.url)
+
+    def _no_candidate_response(model_id: str, states: list[NodeState]):
+        was_listed = getattr(registry, "was_listed", None)
+        if (
+            not any(s.reachable for s in states)
+            or (was_listed is not None and was_listed(model_id))
+        ):
+            return error_response(
+                503, "no_node_available",
+                f"no reachable node serves model {model_id!r} right now; "
+                "retry shortly",
+            )
+        return error_response(
+            404, "model_not_available",
+            f"no node serves model {model_id!r}",
+        )
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -247,10 +278,13 @@ def build_coordinator(
         from muse.core.capabilities import server_block
 
         states: list[NodeState] = registry.snapshot()
-        live = [s for s in states if s.reachable]
-        docs = await _fetch_nodes("/v1/capabilities", states)
-        by_name = {s.spec.name: d for s, d in zip(live, docs)}
-        node_docs = [(s.spec.name, by_name.get(s.spec.name)) for s in states]
+        docs = iter(await _fetch_nodes("/v1/capabilities", states))
+        # Zip by position, not by name: `_fetch_nodes` returns one document
+        # per reachable state in order, and keying by name would let two
+        # same-named nodes overwrite each other.
+        node_docs = [
+            (s.spec.name, next(docs) if s.reachable else None) for s in states
+        ]
         base_url = str(request.base_url).rstrip("/")
         server = server_block(
             version=__version__, node="federation-coordinator", base_url=base_url,
@@ -332,10 +366,7 @@ def build_coordinator(
         states: list[NodeState] = registry.snapshot()
         node = select_node(model_id, states, rr_counter=app.state.rr_counter)
         if node is None:
-            return error_response(
-                404, "model_not_available",
-                f"no node serves model {model_id!r}",
-            )
+            return _no_candidate_response(model_id, states)
 
         # At most two attempts: the selected node, then ONE failover
         # candidate when the first fails at connect time. Re-running
@@ -349,6 +380,7 @@ def build_coordinator(
                     request, f"{node.spec.url}/{full_path}", app.state.timeout,
                 )
             except _FAILOVER_EXCEPTIONS:
+                _mark_unreachable(node)
                 if failed is not None:
                     return error_response(
                         502, "no_node_available",
@@ -402,7 +434,8 @@ def run_coordinator(
     `load_nodes` then merges CLI `--node` entries with the resolved yaml
     file (CLI wins on url collision, per `muse.federation.nodes`).
 
-    Returns 2 (and starts nothing) when the merged node list is empty --
+    Returns 2 (and starts nothing) when the node list is invalid (a bad
+    url, or two nodes with one name) or when the merged list is empty --
     a coordinator with zero nodes would boot healthy and 404 every
     request, which is a worse failure mode than refusing to start.
     Otherwise builds the `NodeRegistry` + coordinator app (whose lifespan
@@ -419,7 +452,11 @@ def run_coordinator(
         if candidate.exists():
             resolved_config_path = str(candidate)
 
-    nodes = load_nodes(cli_nodes=cli_nodes, config_path=resolved_config_path)
+    try:
+        nodes = load_nodes(cli_nodes=cli_nodes, config_path=resolved_config_path)
+    except ValueError as exc:
+        print(f"invalid federation node list: {exc}", file=sys.stderr)
+        return 2
     if not nodes:
         print(
             "no federation nodes: pass --node URL or create a federation.yaml",

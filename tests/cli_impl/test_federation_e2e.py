@@ -174,14 +174,15 @@ async def test_coordinator_routes_and_fails_over_across_two_real_nodes():
         assert r.status_code == 200, r.text
         assert r.json()["node"] == "b"
 
-        # model-a exists ONLY on node a. With a down and no other
-        # candidate, the coordinator returns 502 no_node_available
+        # model-a exists ONLY on node a. The connect failure above marked a
+        # unreachable in the cache, and a listed model-a in its last poll,
+        # so the coordinator returns a retryable 503 no_node_available
         # rather than silently succeeding against the wrong node.
         r = client.post(
             "/v1/chat/completions",
             json={"model": "model-a", "messages": [{"role": "user", "content": "hi"}]},
         )
-        assert r.status_code == 502
+        assert r.status_code == 503
         assert r.json()["error"]["code"] == "no_node_available"
     finally:
         server_a.stop()

@@ -11,7 +11,9 @@ Two node sources merge into one list:
   - A yaml file with shape `nodes: [{url, name?, token?}, ...]`.
 
 Both sources are merged and deduped by normalized url; the first
-occurrence wins (CLI entries take precedence over the yaml file).
+occurrence wins (CLI entries take precedence over the yaml file). Node
+names must be unique after that dedupe: the default name is `host:port`
+(so two nodes on one host differ), and a duplicate name is rejected.
 """
 
 from __future__ import annotations
@@ -53,10 +55,25 @@ def _normalize_url(url: object) -> str:
     return url.rstrip("/")
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def _default_name(url: str) -> str:
-    """Derive a default node name from the url's host, falling back to
-    the url itself when it has no parseable hostname."""
-    return urlparse(url).hostname or url
+    """Derive a default node name, ``host:port``, from the url.
+
+    The port is part of the name so two nodes on one host (``box:8000`` and
+    ``box:8001``) get distinct names; a url without an explicit port uses its
+    scheme's default. IPv6 hosts keep their brackets. Falls back to the url
+    itself when it has no parseable hostname.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return url
+    port = parsed.port or _DEFAULT_PORTS.get(parsed.scheme.lower())
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{port}" if port else host
 
 
 def _normalize_name(name: object | None, *, url: str) -> str:
@@ -141,6 +158,8 @@ def load_nodes(
 
     Dedup by normalized url; the first occurrence wins, so CLI entries
     take precedence over entries from the yaml file with the same url.
+    Raises ValueError when two remaining nodes share a name: names key the
+    coordinator's per-node views, so a collision would merge two nodes.
     """
     nodes: list[NodeSpec] = []
     for entry in cli_nodes or []:
@@ -155,4 +174,13 @@ def load_nodes(
             continue
         seen.add(node.url)
         deduped.append(node)
+
+    names: set[str] = set()
+    for node in deduped:
+        if node.name in names:
+            raise ValueError(
+                f"duplicate federation node name {node.name!r}: give each "
+                "node a unique name"
+            )
+        names.add(node.name)
     return deduped

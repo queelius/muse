@@ -374,3 +374,105 @@ def test_capabilities_unknown_filter_is_openai_404(coordinator_client, params):
     assert r.status_code == 404
     err = r.json()["error"]
     assert err["code"] == "not_found" and isinstance(err["message"], str)
+
+
+def test_capabilities_keeps_both_nodes_that_share_a_name(monkeypatch):
+    """Docs are zipped to states by position, not keyed by name: even if two
+    states carry one name, neither node's document is dropped."""
+    class Reg:
+        def snapshot(self):
+            return [
+                NodeState(NodeSpec("http://box:8000", "box"), True, {}, 0, 0.0),
+                NodeState(NodeSpec("http://box:8001", "box"), True, {}, 0, 0.0),
+            ]
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            mid = "m1" if url.startswith("http://box:8000") else "m2"
+            return httpx.Response(200, json=_node_doc(mid))
+
+    monkeypatch.setattr(fed.httpx, "AsyncClient", FakeClient)
+    body = TestClient(fed.build_coordinator(Reg(), timeout=5)).get(
+        "/v1/capabilities",
+    ).json()
+    assert sorted(m["id"] for m in body["models"]) == ["m1", "m2"]
+    assert all(len(m["nodes"]) == 1 for m in body["models"])
+
+
+class _EmptyReg:
+    def snapshot(self):
+        return []
+
+
+def test_503_before_the_first_poll_lands():
+    r = TestClient(fed.build_coordinator(_EmptyReg(), timeout=5)).post(
+        "/v1/chat/completions", json={"model": "m", "messages": []},
+    )
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "no_node_available"
+
+
+def test_503_when_no_node_is_reachable():
+    class Reg:
+        def snapshot(self):
+            return [NodeState(NodeSpec("http://a:8000", "a"), False, {}, None, 0.0)]
+
+    r = TestClient(fed.build_coordinator(Reg(), timeout=5)).post(
+        "/v1/chat/completions", json={"model": "m", "messages": []},
+    )
+    assert r.status_code == 503
+
+
+def test_503_when_the_model_was_listed_by_a_now_unreachable_node():
+    class Reg:
+        def snapshot(self):
+            return [
+                NodeState(NodeSpec("http://a:8000", "a"), False, {}, None, 0.0),
+                NodeState(NodeSpec("http://b:8000", "b"), True,
+                          {"other": ModelAvail(True)}, 0, 0.0),
+            ]
+
+        def was_listed(self, model_id):
+            return model_id == "m"
+
+    c = TestClient(fed.build_coordinator(Reg(), timeout=5))
+    r = c.post("/v1/chat/completions", json={"model": "m", "messages": []})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "no_node_available"
+    # A model no node ever listed is still a permanent 404.
+    r = c.post("/v1/chat/completions", json={"model": "never", "messages": []})
+    assert r.status_code == 404
+
+
+def test_connect_failure_marks_the_node_unreachable(monkeypatch):
+    marked = []
+
+    class Reg:
+        def snapshot(self):
+            return [
+                NodeState(NodeSpec("http://a:8000", "a"), True, {"m": ModelAvail(True)}, 0, 0.0),
+                NodeState(NodeSpec("http://b:8000", "b"), True, {"m": ModelAvail(True)}, 0, 0.0),
+            ]
+
+        def mark_unreachable(self, url):
+            marked.append(url)
+
+    async def fake_forward(request, target_url, timeout):
+        if target_url.startswith("http://a:"):
+            raise httpx.ConnectError("refused")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(fed, "_forward", fake_forward)
+    r = TestClient(fed.build_coordinator(Reg(), timeout=5, rr_counter={})).post(
+        "/v1/chat/completions", json={"model": "m", "messages": []},
+    )
+    assert r.status_code == 200
+    assert marked == ["http://a:8000"]
