@@ -35,7 +35,7 @@ from typing import Any
 
 from muse.core import config
 from muse.core.errors import error_response
-from muse.core.net_fetch import afetch_url_bytes
+from muse.core.net_fetch import ResponseTooLargeError, afetch_url_bytes
 from muse.modalities._native_offload import run_native_offload
 
 
@@ -359,12 +359,15 @@ def _decode_data_url(value: str, *, max_bytes: int, max_pixels: int):
 
 
 async def _fetch_http_url(value: str, *, max_bytes: int) -> bytes:
-    # net_fetch raises a plain ValueError for SSRF refusals, redirects and
-    # an over-cap body alike, so they all map to ImageFetchError.
+    # An over-cap body is net_fetch's typed ResponseTooLargeError (413, like
+    # an oversize upload); SSRF refusals, bad redirects and the deadline are
+    # plain ValueErrors and map to ImageFetchError (400).
     try:
         return await afetch_url_bytes(
             value, max_bytes=max_bytes, timeout=_HTTP_TIMEOUT,
         )
+    except ResponseTooLargeError as e:
+        raise ImageTooLargeError(str(e)) from e
     except ValueError as e:
         raise ImageFetchError(str(e)) from e
     except Exception as e:  # noqa: BLE001

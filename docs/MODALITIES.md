@@ -325,8 +325,8 @@ these were 400 `invalid_parameter` on most routes): byte cap -> 413
 413 `input_too_large`; empty, malformed or undecodable -> 400
 `invalid_image`; a refused or failed URL fetch and other bad fields -> 400
 `invalid_parameter`. An http(s) image URL whose body exceeds the byte cap
-is also 400 `invalid_parameter`, not 413: `muse.core.net_fetch` raises a
-plain ValueError for it (a typed core error is a follow-up). PIL's
+is 413 `payload_too_large` too (`muse.core.net_fetch` raises the typed
+`ResponseTooLargeError`). PIL's
 decompression-bomb refusal counts as the pixel cap (413). Size messages
 name the setting that raises the cap.
 Out-of-range JSON fields are still 422 `invalid_request` (Pydantic); their

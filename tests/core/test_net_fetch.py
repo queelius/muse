@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from muse.core.net_fetch import fetch_url_bytes, resolve_public_ip
+from muse.core.net_fetch import ResponseTooLargeError, fetch_url_bytes, resolve_public_ip
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ class TestFetchUrlBytes:
         mock_client_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch("muse.core.net_fetch.httpx.Client", return_value=mock_client_ctx):
-            with pytest.raises(ValueError, match="exceeds"):
+            with pytest.raises(ResponseTooLargeError, match="exceeds"):
                 fetch_url_bytes(
                     "https://example.com/huge.bin", max_bytes=999,
                 )
@@ -538,3 +538,9 @@ class TestFetchSchemeAndDeadline:
                 fetch_url_bytes("https://example.com/a", max_bytes=10,
                                 total_timeout=60.0)
         assert inner.send.call_count == 1
+
+
+def test_response_too_large_is_a_typed_value_error():
+    from muse.core.net_fetch import ResponseTooLargeError
+
+    assert issubclass(ResponseTooLargeError, ValueError)

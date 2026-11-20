@@ -798,7 +798,9 @@ Commits follow Conventional Commits with a scope (`feat(pixelart): ...`,
   `~/.muse/`), `MUSE_HOME` / `paths.home` (voices dir base),
   `MUSE_ALLOW_PRIVATE_FETCH` / `fetch.allow_private` (opt-in escape hatch
   for the SSRF guard in `muse.core.net_fetch`, which also requires http(s)
-  on every redirect hop and bounds the whole fetch by a 120 s deadline;
+  on every redirect hop and bounds the whole fetch, excluding DNS
+  resolution, by a 120 s deadline; an over-cap body is a typed
+  `ResponseTooLargeError`, which image routes answer with 413;
   default off; needed only when operators on a trusted network want
   `image` URLs to reach internal services), `MUSE_IMAGE_INPUT_MAX_BYTES` / `limits.image_input_max_bytes`
   (per-request size cap for image uploads and data URLs; default 10485760 /

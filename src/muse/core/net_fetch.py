@@ -20,7 +20,11 @@ Design decisions:
   - One overall deadline (``total_timeout``) spans every hop and chunk: httpx's
     ``timeout`` bounds each connect/read separately, so without it a server
     that drips a byte just under the read timeout would hold the fetch (and
-    the worker thread running it) indefinitely.
+    the worker thread running it) indefinitely. DNS resolution
+    (``socket.gethostbyname``, which takes no timeout) is not bounded by it:
+    a hop's time left is computed before its host is resolved.
+  - An over-cap body raises ``ResponseTooLargeError`` (a ValueError), so
+    callers can answer 413 instead of a generic 400.
   - Every hop must be http or https, and a redirect may not downgrade https
     to http.
   - MUSE_ALLOW_PRIVATE_FETCH=1 escape hatch is preserved for operators on
@@ -129,6 +133,10 @@ def _pin_url_to_ip(url: str, ip: str) -> tuple[str, str]:
     return pinned, host_header
 
 
+class ResponseTooLargeError(ValueError):
+    """The response body exceeded ``max_bytes``."""
+
+
 _ALLOWED_SCHEMES = ("http", "https")
 DEFAULT_TOTAL_TIMEOUT = 120.0
 
@@ -163,12 +171,14 @@ def fetch_url_bytes(
       hostname), so no re-resolution can flip to a private IP (M4).
     - Uses ``follow_redirects=False``; manually follows up to ``max_redirects``
       hops, re-resolving + re-validating the redirect target's host each hop.
-    - Streams the body and raises ``ValueError`` as soon as accumulated bytes
-      exceed ``max_bytes`` (does NOT buffer the full body before checking).
+    - Streams the body and raises ``ResponseTooLargeError`` (a ValueError) as
+      soon as accumulated bytes exceed ``max_bytes`` (does NOT buffer the
+      full body before checking).
     - Accepts only http(s) on every hop and refuses an https->http redirect.
     - ``timeout`` bounds each connect/read; ``total_timeout`` bounds the whole
       fetch across hops and chunks (each hop's timeout is capped at the time
-      left, so the deadline is overshot by at most one read).
+      left, so the deadline is overshot by at most one read). DNS
+      resolution of each hop is not bounded by it.
 
     Raises:
         ValueError: SSRF block, bad scheme, size exceeded, too many
@@ -247,7 +257,7 @@ def fetch_url_bytes(
                     _remaining()
                     buf += chunk
                     if len(buf) > max_bytes:
-                        raise ValueError(
+                        raise ResponseTooLargeError(
                             f"response body exceeds max ({len(buf)} > {max_bytes} bytes) "
                             f"while fetching {url!r}"
                         )

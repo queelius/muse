@@ -613,3 +613,21 @@ async def test_read_and_decode_uploads_closes_earlier_images_on_failure():
     assert decoded is None
     assert error.status_code == 400
     assert b"b: image decode failed" in error.body
+
+
+async def test_oversize_http_body_is_a_413_not_a_400():
+    """net_fetch's typed ResponseTooLargeError maps to ImageTooLargeError
+    (413 payload_too_large), matching an oversize upload or data URL."""
+    from unittest.mock import patch
+
+    from muse.core.net_fetch import ResponseTooLargeError
+    from muse.modalities._common.images import ImageTooLargeError
+
+    async def boom(*_a, **_kw):
+        raise ResponseTooLargeError("response body exceeds max (11 > 10 bytes)")
+
+    with patch("muse.modalities._common.images.afetch_url_bytes", boom):
+        with pytest.raises(ImageTooLargeError) as info:
+            await decode_image_input("https://example.com/big.png", max_bytes=10)
+    assert info.value.status == 413
+    assert info.value.code == "payload_too_large"
