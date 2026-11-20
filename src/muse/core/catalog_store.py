@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from muse.core import config, securefs
-from muse.core.resolvers import COMMIT_RE
+from muse.core.hf_receipt import SHA256_HEX_RE, ReceiptError, validate_receipt_item
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +226,6 @@ def _validated_persisted_manifest(
 
 
 _MODEL_ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _validate_model_id_for_fs(model_id: str) -> None:
@@ -351,7 +350,7 @@ def _validate_code_receipt_item(item: dict, *, path: str) -> None:
                 f"{path}.{field_name} must be a non-empty string"
             )
     digest = item.get("source_sha256")
-    if not isinstance(digest, str) or _SHA256_HEX_RE.fullmatch(digest) is None:
+    if not isinstance(digest, str) or SHA256_HEX_RE.fullmatch(digest) is None:
         raise _CatalogSchemaError(
             f"{path}.source_sha256 must be a 64-character SHA-256 hex digest"
         )
@@ -373,30 +372,10 @@ def _validate_artifact_receipt(
         if allow_code and item.get("kind") == "code":
             _validate_code_receipt_item(item, path=item_path)
             continue
-        for field_name in ("repo_id", "revision", "subdir"):
-            field = item.get(field_name)
-            if not isinstance(field, str):
-                raise _CatalogSchemaError(
-                    f"{item_path}.{field_name} must be a string"
-                )
-        revision = item["revision"]
-        if COMMIT_RE.fullmatch(revision) is None:
-            raise _CatalogSchemaError(
-                f"{item_path}.revision must be a 40-character commit"
-            )
-        for field_name in ("allow_patterns", "required_patterns"):
-            patterns = item.get(field_name)
-            if patterns is None:
-                continue
-            if (
-                isinstance(patterns, (str, bytes))
-                or not isinstance(patterns, (list, tuple))
-                or not patterns
-                or not all(isinstance(pattern, str) and pattern for pattern in patterns)
-            ):
-                raise _CatalogSchemaError(
-                    f"{item_path}.{field_name} must be a non-empty list of strings"
-                )
+        try:
+            validate_receipt_item(item, label=item_path)
+        except ReceiptError as exc:
+            raise _CatalogSchemaError(str(exc)) from exc
 
 
 def _validate_measurements(value: Any, *, path: str) -> None:

@@ -671,21 +671,16 @@ def _bundled_download_spec(
     else:
         revision = raw_revision
 
-    raw_allow_patterns = entry.extra.get("allow_patterns")
-    if raw_allow_patterns is not None and (
-        isinstance(raw_allow_patterns, (str, bytes))
-        or not isinstance(raw_allow_patterns, (list, tuple))
-        or not all(
-            isinstance(pattern, str) and pattern
-            for pattern in raw_allow_patterns
+    from muse.core.hf_receipt import ReceiptError, validate_patterns
+
+    try:
+        allow_patterns = validate_patterns(
+            entry.extra.get("allow_patterns"), label="allow_patterns",
         )
-    ):
+    except ReceiptError as exc:
         raise CatalogError(
             f"bundled model {model_id!r} has invalid allow_patterns"
-        )
-    allow_patterns = (
-        tuple(raw_allow_patterns) if raw_allow_patterns is not None else None
-    )
+        ) from exc
 
     if "hf_artifacts" not in entry.extra:
         provenance = None

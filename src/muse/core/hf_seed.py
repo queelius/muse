@@ -31,9 +31,10 @@ import stat
 from collections.abc import Iterable
 from pathlib import Path
 
+from muse.core.hf_receipt import SHA256_HEX_RE
+
 logger = logging.getLogger(__name__)
 
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 _SHA1 = re.compile(r"[0-9a-f]{40}")
 
 
@@ -64,7 +65,7 @@ def _make_private(blob: Path) -> bool:
 
 def _verified(blob: Path, name: str) -> bool:
     """`blob`'s content hashes to `name` (its blob name in the cache)."""
-    if _SHA256.fullmatch(name):
+    if SHA256_HEX_RE.fullmatch(name):
         h = hashlib.sha256()
     elif _SHA1.fullmatch(name):
         h = hashlib.sha1(b"blob %d\0" % blob.stat().st_size)

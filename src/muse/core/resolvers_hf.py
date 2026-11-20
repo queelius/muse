@@ -6,13 +6,13 @@ URI shapes:
   hf://org/faster-whisper-tiny   # CT2 faster-whisper (audio/transcription)
   hf://org/Text-Moderation       # text-classification (text/classification)
 
-All four bundled modalities ship per-modality hf.py plugins. The resolver
-itself is a thin dispatcher: it sniffs each plugin in (priority, modality)
+Each modality that supports `hf://` pulls ships its own hf.py plugin
+(see docs/HF_PLUGINS.md). The resolver itself is a thin dispatcher: it sniffs each plugin in (priority, modality)
 order on resolve, and filters by modality on search.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 import inspect
 import logging
@@ -22,13 +22,13 @@ from typing import Iterable
 from huggingface_hub import HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
 
-from muse.core.discovery import discover_hf_plugins, _default_hf_plugin_dirs
+from muse.core.discovery import discover_hf_plugins, modality_dirs
+from muse.core.hf_receipt import ReceiptError, validate_patterns, validate_receipt_item
 from muse.core.resolvers import (
     Resolver,
     ResolvedModel,
     ResolverError,
     SearchResult,
-    COMMIT_RE,
     hf_commit_revision,
     parse_uri,
     register_resolver,
@@ -87,62 +87,18 @@ def _validated_hf_result(
     receipt: list[dict[str, object]] = []
     seen: set[tuple[str, str, str]] = set()
     for index, raw in enumerate(raw_receipt):
-        if not isinstance(raw, Mapping):
-            raise ResolverError(f"HF artifact provenance item {index} is not an object")
-        unknown = set(raw) - {
-            "repo_id",
-            "revision",
-            "subdir",
-            "allow_patterns",
-            "required_patterns",
-        }
-        if unknown:
-            raise ResolverError(
-                f"HF artifact provenance item {index} has unknown keys: "
-                f"{sorted(unknown)}"
+        try:
+            canonical = validate_receipt_item(
+                raw,
+                label=f"HF artifact provenance item {index}",
+                default_subdir=".",
+                reject_unknown=True,
             )
-        item_repo = raw.get("repo_id")
-        item_revision = raw.get("revision")
-        subdir = raw.get("subdir", ".")
-        if (
-            not isinstance(item_repo, str)
-            or item_repo.count("/") != 1
-            or any(char.isspace() for char in item_repo)
-        ):
-            raise ResolverError(f"HF artifact provenance item {index} has invalid repo_id")
-        if (
-            not isinstance(item_revision, str)
-            or COMMIT_RE.fullmatch(item_revision) is None
-        ):
-            raise ResolverError(
-                f"HF artifact provenance item {index} lacks an immutable commit"
-            )
-        if (
-            not isinstance(subdir, str)
-            or not subdir
-            or "/" in subdir
-            or "\\" in subdir
-            or subdir == ".."
-        ):
-            raise ResolverError(f"HF artifact provenance item {index} has invalid subdir")
-        canonical: dict[str, object] = {
-            "repo_id": item_repo,
-            "revision": item_revision,
-            "subdir": subdir,
-        }
-        for field_name in ("allow_patterns", "required_patterns"):
-            patterns = raw.get(field_name)
-            if patterns is None:
-                continue
-            if (
-                isinstance(patterns, (str, bytes))
-                or not isinstance(patterns, Sequence)
-                or not all(isinstance(value, str) and value for value in patterns)
-            ):
-                raise ResolverError(
-                    f"HF artifact provenance item {index} has invalid {field_name}"
-                )
-            canonical[field_name] = list(patterns)
+        except ReceiptError as exc:
+            raise ResolverError(str(exc)) from exc
+        item_repo = canonical["repo_id"]
+        item_revision = canonical["revision"]
+        subdir = canonical["subdir"]
         identity = (item_repo, item_revision, subdir)
         if identity in seen:
             raise ResolverError(f"duplicate HF artifact provenance item {index}")
@@ -153,15 +109,12 @@ def _validated_hf_result(
         for item in receipt
     ):
         raise ResolverError("HF artifact provenance omits the resolved primary repository")
-    allow_patterns = resolved.allow_patterns
-    if allow_patterns is not None:
-        if (
-            isinstance(allow_patterns, (str, bytes))
-            or not isinstance(allow_patterns, Sequence)
-            or not all(isinstance(value, str) and value for value in allow_patterns)
-        ):
-            raise ResolverError("HF plugin returned invalid allow_patterns")
-        allow_patterns = tuple(allow_patterns)
+    try:
+        allow_patterns = validate_patterns(
+            resolved.allow_patterns, label="HF plugin allow_patterns",
+        )
+    except ReceiptError as exc:
+        raise ResolverError(str(exc)) from exc
     return replace(
         resolved,
         artifact_provenance=tuple(receipt),
@@ -193,7 +146,7 @@ class HFResolver(Resolver):
     def __init__(self, plugins: list[dict] | None = None) -> None:
         self._api = HfApi()
         self._plugins = plugins if plugins is not None else discover_hf_plugins(
-            _default_hf_plugin_dirs()
+            modality_dirs()
         )
 
     def _repo_info(self, repo_id: str, *, revision: str | None = None):

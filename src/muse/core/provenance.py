@@ -23,11 +23,11 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from muse.core.hf_receipt import SHA256_HEX_RE
 from muse.core.hf_repo import catalog_entries_for_repo
 from muse.core.resolvers import COMMIT_RE
 
 _SNAP = re.compile(r"/snapshots/([0-9a-f]{40})(?:/|$)")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ def _weightless_revision(model_id: str, entry: Mapping) -> ModelRevision:
         for item in prov:
             if (isinstance(item, Mapping) and item.get("kind") == "code"
                     and isinstance(item.get("source_sha256"), str)
-                    and _SHA256.fullmatch(item["source_sha256"])):
+                    and SHA256_HEX_RE.fullmatch(item["source_sha256"])):
                 payload = f"{item['source_sha256']}:{version}"
                 digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
                 break

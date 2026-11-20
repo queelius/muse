@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import stat
 import sys
 import tempfile
@@ -14,13 +13,13 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-from muse.core.resolvers import COMMIT_RE
+from muse.core.hf_receipt import SAFE_LEAF_RE as _SAFE_LEAF_RE
+from muse.core.hf_receipt import ReceiptError, validate_receipt_item
 from muse.core.venv import remove_owned_entry
 
 
 logger = logging.getLogger(__name__)
 
-_SAFE_LEAF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 class ArtifactBundleError(RuntimeError):
@@ -38,45 +37,15 @@ class HFSnapshotArtifact:
     required_patterns: tuple[str, ...] | None = None
 
 
-def _normalize_required_patterns(
-    raw: Any,
-    *,
-    index: int,
-) -> tuple[str, ...] | None:
-    if raw is None:
-        return None
-    if (
-        isinstance(raw, (str, bytes))
-        or not isinstance(raw, Sequence)
-        or not raw
-        or not all(isinstance(pattern, str) and pattern for pattern in raw)
-    ):
-        raise ArtifactBundleError(
-            f"hf_artifacts[{index}].required_patterns must be a non-empty "
-            "sequence of non-empty strings"
-        )
-    patterns = tuple(raw)
-    for pattern in patterns:
-        parts = pattern.split("/")
-        if (
-            pattern.startswith(("/", "\\"))
-            or "\\" in pattern
-            or ":" in pattern
-            or "\x00" in pattern
-            or any(part in {"", ".", ".."} for part in parts)
-            or parts[0] == ".cache"
-        ):
-            raise ArtifactBundleError(
-                f"hf_artifacts[{index}].required_patterns contains an "
-                f"unsafe relative pattern: {pattern!r}"
-            )
-    return patterns
-
-
 def normalize_hf_artifacts(
     artifacts: Sequence[HFSnapshotArtifact | Mapping[str, Any]],
 ) -> tuple[HFSnapshotArtifact, ...]:
-    """Validate and copy a manifest-provided artifact descriptor."""
+    """Validate and copy a manifest-provided artifact descriptor.
+
+    Each member is checked by the shared receipt validator
+    (`muse.core.hf_receipt`), as a bundle member: its subdir must be a safe
+    directory leaf, never "" or ".".
+    """
     if isinstance(artifacts, (str, bytes)) or not isinstance(artifacts, Sequence):
         raise ArtifactBundleError("hf_artifacts must be a non-string sequence")
     if len(artifacts) < 2:
@@ -86,91 +55,29 @@ def normalize_hf_artifacts(
     seen_subdirs: set[str] = set()
     for index, raw in enumerate(artifacts):
         if isinstance(raw, HFSnapshotArtifact):
-            artifact = raw
-        elif isinstance(raw, Mapping):
-            repo_id = raw.get("repo_id")
-            revision = raw.get("revision")
-            subdir = raw.get("subdir")
-            allow_patterns = raw.get("allow_patterns")
-            required_patterns = _normalize_required_patterns(
-                raw.get("required_patterns"),
-                index=index,
+            raw = {
+                "repo_id": raw.repo_id,
+                "revision": raw.revision,
+                "subdir": raw.subdir,
+                "allow_patterns": raw.allow_patterns,
+                "required_patterns": raw.required_patterns,
+            }
+        try:
+            item = validate_receipt_item(
+                raw, label=f"hf_artifacts[{index}]", allow_root=False,
             )
-            if allow_patterns is not None:
-                if (
-                    isinstance(allow_patterns, (str, bytes))
-                    or not isinstance(allow_patterns, Sequence)
-                    or not all(
-                        isinstance(pattern, str) and pattern
-                        for pattern in allow_patterns
-                    )
-                ):
-                    raise ArtifactBundleError(
-                        f"hf_artifacts[{index}].allow_patterns must be "
-                        "a sequence of non-empty strings"
-                    )
-                allow_patterns = tuple(allow_patterns)
-            artifact = HFSnapshotArtifact(
-                repo_id=repo_id,
-                revision=revision,
-                subdir=subdir,
-                allow_patterns=allow_patterns,
-                required_patterns=required_patterns,
-            )
-        else:
-            raise ArtifactBundleError(
-                f"hf_artifacts[{index}] must be an object"
-            )
-
-        if (
-            not isinstance(artifact.repo_id, str)
-            or artifact.repo_id.count("/") != 1
-            or any(char.isspace() for char in artifact.repo_id)
-        ):
-            raise ArtifactBundleError(
-                f"hf_artifacts[{index}].repo_id is invalid"
-            )
-        if (
-            not isinstance(artifact.revision, str)
-            or COMMIT_RE.fullmatch(artifact.revision) is None
-        ):
-            raise ArtifactBundleError(
-                f"hf_artifacts[{index}].revision must be a 40-character commit"
-            )
-        if (
-            not isinstance(artifact.subdir, str)
-            or _SAFE_LEAF_RE.fullmatch(artifact.subdir) is None
-            or artifact.subdir in {".", ".."}
-        ):
-            raise ArtifactBundleError(
-                f"hf_artifacts[{index}].subdir must be a safe directory name"
-            )
-        normalized_allow_patterns = artifact.allow_patterns
-        if normalized_allow_patterns is not None:
-            if (
-                isinstance(normalized_allow_patterns, (str, bytes))
-                or not isinstance(normalized_allow_patterns, Sequence)
-                or not normalized_allow_patterns
-                or not all(
-                    isinstance(pattern, str) and pattern
-                    for pattern in normalized_allow_patterns
-                )
-            ):
-                raise ArtifactBundleError(
-                    f"hf_artifacts[{index}].allow_patterns must be a "
-                    "non-empty sequence of non-empty strings"
-                )
-            normalized_allow_patterns = tuple(normalized_allow_patterns)
-        normalized_required_patterns = _normalize_required_patterns(
-            artifact.required_patterns,
-            index=index,
-        )
+        except ReceiptError as exc:
+            raise ArtifactBundleError(str(exc)) from exc
+        allow_patterns = item.get("allow_patterns")
+        required_patterns = item.get("required_patterns")
         artifact = HFSnapshotArtifact(
-            repo_id=artifact.repo_id,
-            revision=artifact.revision,
-            subdir=artifact.subdir,
-            allow_patterns=normalized_allow_patterns,
-            required_patterns=normalized_required_patterns,
+            repo_id=item["repo_id"],
+            revision=item["revision"],
+            subdir=item["subdir"],
+            allow_patterns=tuple(allow_patterns) if allow_patterns is not None else None,
+            required_patterns=(
+                tuple(required_patterns) if required_patterns is not None else None
+            ),
         )
         if artifact.subdir in seen_subdirs:
             raise ArtifactBundleError(

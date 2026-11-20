@@ -134,7 +134,8 @@ def modality_dirs() -> list[Path]:
     return [bundled] + ([Path(env)] if env else [])
 
 
-# Kept for existing importers (muse.core.resolvers_hf, tests).
+# Test-only alias (tests/modalities import it); production code calls
+# modality_dirs directly.
 _default_hf_plugin_dirs = modality_dirs
 
 
