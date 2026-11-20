@@ -18,6 +18,7 @@ a warning log.
 from __future__ import annotations
 
 import ast
+import functools
 import importlib.util
 import logging
 import sys
@@ -190,8 +191,30 @@ def _reset_model_optional_paths_cache() -> None:
     """Test seam: clear the memoized default (dirs=None) scans behind
     model_optional_paths() and the other AST-read declaration seams."""
     _DECLARATION_CACHE.clear()
+    _SEAM_RESULT_CACHE.clear()
 
 
+_SEAM_RESULT_CACHE: dict[str, Any] = {}
+
+
+def _memoize_default_scan(fn):
+    """Memoize a declaration seam's validated result for the default scan
+    (dirs=None), so a malformed declaration is warned about once per process
+    rather than on every request-path call. Explicit `dirs` always rescan.
+    A dict result is returned as a shallow copy so callers cannot edit the
+    cached one."""
+    @functools.wraps(fn)
+    def wrapper(dirs: list[Path] | None = None):
+        if dirs is not None:
+            return fn(dirs)
+        if fn.__name__ not in _SEAM_RESULT_CACHE:
+            _SEAM_RESULT_CACHE[fn.__name__] = fn(None)
+        result = _SEAM_RESULT_CACHE[fn.__name__]
+        return dict(result) if isinstance(result, dict) else result
+    return wrapper
+
+
+@_memoize_default_scan
 def model_optional_paths(dirs: list[Path] | None = None) -> dict[str, str]:
     """{request_path: modality_tag} for every modality package that
     exports MODEL_OPTIONAL_PATHS.
@@ -260,6 +283,7 @@ _DECLARATION_CACHE: dict[str, list[tuple[str, Any]]] = {}
 _CEILING_KEYS = ("max_concurrency", "max_queue_depth")
 
 
+@_memoize_default_scan
 def concurrency_ceilings(dirs: list[Path] | None = None) -> dict[str, dict[str, int]]:
     """{modality tag: {"max_concurrency": n, "max_queue_depth": n}} for every
     modality package that exports CONCURRENCY_CEILING.
@@ -356,6 +380,7 @@ def _valid_discovery(value: Any) -> bool:
     )
 
 
+@_memoize_default_scan
 def modality_discovery(dirs: list[Path] | None = None) -> dict[str, dict]:
     """{modality tag: DISCOVERY dict} for every modality package that exports
     a well-formed DISCOVERY literal (what the capabilities document, OpenAPI
@@ -371,6 +396,7 @@ def modality_discovery(dirs: list[Path] | None = None) -> dict[str, dict]:
     return out
 
 
+@_memoize_default_scan
 def strict_request_parsers(dirs: list[Path] | None = None) -> dict[str, str]:
     """{request path: "module:callable"} for every modality package that
     exports STRICT_REQUEST_PARSERS.
@@ -393,6 +419,7 @@ def strict_request_parsers(dirs: list[Path] | None = None) -> dict[str, str]:
     return out
 
 
+@_memoize_default_scan
 def probe_timeouts(dirs: list[Path] | None = None) -> dict[str, float]:
     """{modality tag: seconds} for every modality exporting a literal
     PROBE_TIMEOUT_SECONDS, for modalities whose representative inference
@@ -406,6 +433,7 @@ def probe_timeouts(dirs: list[Path] | None = None) -> dict[str, float]:
     return out
 
 
+@_memoize_default_scan
 def disconnect_cancellable_paths(dirs: list[Path] | None = None) -> frozenset[str]:
     """Request paths whose modality exports CANCEL_ON_DISCONNECT_PATHS.
 
@@ -417,7 +445,7 @@ def disconnect_cancellable_paths(dirs: list[Path] | None = None) -> frozenset[st
     """
     out: set[str] = set()
     for tag, value in _declarations("CANCEL_ON_DISCONNECT_PATHS", dirs):
-        if isinstance(value, tuple) and all(
+        if isinstance(value, (tuple, list)) and all(
             isinstance(v, str) and v.startswith("/") for v in value
         ):
             out.update(value)

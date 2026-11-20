@@ -555,3 +555,34 @@ def test_malformed_probe_timeout_is_ignored(tmp_path):
     pkg.mkdir()
     (pkg / "__init__.py").write_text('MODALITY = "fake/mod"\nPROBE_TIMEOUT_SECONDS = "long"\n')
     assert probe_timeouts([tmp_path]) == {}
+
+
+class TestDeclarationSeamConsistency:
+    def test_cancel_on_disconnect_accepts_list_like_model_optional_paths(self, tmp_path):
+        from muse.core.discovery import disconnect_cancellable_paths
+        _write_modality_package(tmp_path, "a_x", '''
+            MODALITY = "a/x"
+            CANCEL_ON_DISCONNECT_PATHS = ["/v1/a"]
+        ''')
+        assert disconnect_cancellable_paths([tmp_path]) == frozenset({"/v1/a"})
+
+    def test_malformed_default_scan_warns_once(self, tmp_path, monkeypatch, caplog):
+        import logging
+        from muse.core import discovery
+        _write_modality_package(tmp_path, "a_x", '''
+            MODALITY = "a/x"
+            MODEL_OPTIONAL_PATHS = "/v1/not-a-tuple"
+            CANCEL_ON_DISCONNECT_PATHS = 3
+        ''')
+        monkeypatch.setattr(discovery, "modality_dirs", lambda: [tmp_path])
+        _reset_model_optional_paths_cache()
+        try:
+            with caplog.at_level(logging.WARNING, logger="muse.core.discovery"):
+                for _ in range(3):
+                    assert discovery.model_optional_paths() == {}
+                    assert discovery.disconnect_cancellable_paths() == frozenset()
+            warnings = [r.getMessage() for r in caplog.records]
+            assert sum("MODEL_OPTIONAL_PATHS" in m for m in warnings) == 1
+            assert sum("CANCEL_ON_DISCONNECT_PATHS" in m for m in warnings) == 1
+        finally:
+            _reset_model_optional_paths_cache()
