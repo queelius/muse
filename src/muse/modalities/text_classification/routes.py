@@ -125,15 +125,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         safe_labels = _resolve_safe_labels(capabilities)
         # A zero-shot pipeline has no classify(); say so instead of a 500.
         # A manifest that omits the flag (older pulls) still dispatches.
-        if (
-            capabilities.get("supports_classification") is False
-            or not hasattr(backend, "classify")
-        ):
+        if capabilities.get("supports_classification") is False:
             return error_response(
                 400, "classification_not_supported",
-                f"model {effective_id!r} is not a fine-tuned classifier "
-                f"(supports_classification=False); use "
+                f"model {effective_id!r} declares "
+                f"supports_classification=False (a zero-shot model); use "
                 f"/v1/text/classifications with candidate_labels",
+            )
+        if not hasattr(backend, "classify"):
+            return error_response(
+                400, "classification_not_supported",
+                f"model {effective_id!r}'s runtime has no classify() method; "
+                f"use /v1/text/classifications with candidate_labels",
             )
 
         results = await run_locked(

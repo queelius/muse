@@ -530,6 +530,18 @@ def test_moderations_rejects_zero_shot_only_model_with_400():
     r = client.post("/v1/moderations", json={"input": "hi", "model": "zs-only"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "classification_not_supported"
+    assert "supports_classification=False" in r.json()["error"]["message"]
+
+
+def test_moderations_names_a_backend_without_classify():
+    backend = _fake_zs_backend("no-classify")
+    del backend.classify
+    client = _make_client(backend, manifest={"model_id": "no-classify"})
+    r = client.post("/v1/moderations", json={"input": "hi", "model": "no-classify"})
+    assert r.status_code == 400
+    message = r.json()["error"]["message"]
+    assert "classify" in message
+    assert "supports_classification=False" not in message
 
 
 def test_classifications_bounds_inputs_times_labels():
