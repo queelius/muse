@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from muse.core.curated import _reset_curated_cache_for_tests, find_curated
-from muse.core.discovery import _default_hf_plugin_dirs, discover_hf_plugins
+from muse.core.discovery import modality_dirs, discover_hf_plugins
 from muse.core.resolvers_hf import HFResolver
 from muse.modalities.decision_evaluation.codec import (
     choice_confidence,
@@ -81,7 +81,7 @@ def test_curated_modality_resolves_through_the_decision_plugin(model_id):
         siblings=[SimpleNamespace(rfilename=f) for f in SOURCES[repo]["files"]],
         card_data=SimpleNamespace(license="apache-2.0"),
     )
-    resolver = HFResolver(plugins=discover_hf_plugins(_default_hf_plugin_dirs()))
+    resolver = HFResolver(plugins=discover_hf_plugins(modality_dirs()))
     resolver._api = MagicMock()
     resolver._api.repo_info.return_value = info
     resolved = resolver.resolve(uri, modality="decision/evaluation", revision=revision)

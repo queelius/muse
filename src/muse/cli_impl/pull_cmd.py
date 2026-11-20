@@ -21,11 +21,11 @@ def run_pull(
 
     Unrecognized pull failures re-raise so real bugs keep their traceback.
     """
-    from muse.core.catalog import (
+    from muse.core.catalog import pull as _pull
+    from muse.core.catalog_store import (
         ModelIdConflictError,
         ModelInUseError,
         _validate_model_id_for_fs,
-        pull as _pull,
     )
     from muse.core.venv import install_output_mode
     # Always register the HF resolver before dispatching. The arg may

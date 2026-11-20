@@ -9,11 +9,11 @@ import pytest
 
 from muse.cli_impl.refresh import (
     RefreshResult,
-    _muse_repo_root,
     _select_targets,
     refresh_one,
     run_refresh,
 )
+from muse.core.catalog_pull import _muse_repo_root
 
 
 @pytest.fixture

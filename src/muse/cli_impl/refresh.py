@@ -30,19 +30,16 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from muse.core.catalog import (
+from muse.core.catalog import get_manifest, is_enabled
+from muse.core.catalog_locks import _model_pull_lock, _model_resource_lease
+from muse.core.catalog_pull import _muse_server_install_args
+from muse.core.catalog_store import (
     ModelInUseError,
     _catalog_dir,
     _ensure_owned_directory,
-    _model_pull_lock,
-    _model_resource_lease,
-    _muse_repo_root,
     _read_catalog,
     _validate_model_id_for_fs,
-    get_manifest,
-    is_enabled,
 )
-from muse.core.catalog_pull import _muse_server_install_args
 from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.owned_command import run_owned_command
 from muse.core.pip_install import pip_install_commands

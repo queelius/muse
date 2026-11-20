@@ -4,7 +4,7 @@ import pytest
 
 from muse.core.discovery import (
     REQUIRED_HF_PLUGIN_KEYS,
-    _default_hf_plugin_dirs,
+    modality_dirs,
     discover_hf_plugins,
 )
 from muse.core.resolvers import ResolvedModel, ResolverError
@@ -32,7 +32,7 @@ def test_required_keys_and_metadata():
 def test_plugin_precedes_broad_audio_classification_plugin():
     modalities = [
         plugin["modality"]
-        for plugin in discover_hf_plugins(_default_hf_plugin_dirs())
+        for plugin in discover_hf_plugins(modality_dirs())
     ]
     assert modalities.index("audio/quality") < modalities.index(
         "audio/classification"

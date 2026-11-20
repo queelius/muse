@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from muse.core.discovery import _default_hf_plugin_dirs, discover_hf_plugins
+from muse.core.discovery import modality_dirs, discover_hf_plugins
 
 
 def _info(repo_id, tags=(), files=()):
@@ -20,7 +20,7 @@ def _info(repo_id, tags=(), files=()):
 
 
 def _first_claim(info):
-    for plugin in discover_hf_plugins(_default_hf_plugin_dirs()):
+    for plugin in discover_hf_plugins(modality_dirs()):
         if plugin["sniff"](info):
             return plugin["modality"]
     return None

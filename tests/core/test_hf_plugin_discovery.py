@@ -124,7 +124,7 @@ def test_skips_nonexistent_dirs(tmp_path):
 
 
 def test_default_dirs_includes_bundled():
-    from muse.core.discovery import _default_hf_plugin_dirs
-    dirs = _default_hf_plugin_dirs()
+    from muse.core.discovery import modality_dirs
+    dirs = modality_dirs()
     assert dirs[0].name == "modalities"
     assert dirs[0].is_dir()

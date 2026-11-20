@@ -12,7 +12,7 @@ import pytest
 import muse.modalities.decision_evaluation.hf as plugin_mod
 from muse.core.discovery import (
     REQUIRED_HF_PLUGIN_KEYS,
-    _default_hf_plugin_dirs,
+    modality_dirs,
     discover_hf_plugins,
 )
 from muse.core.resolvers import ResolvedModel, ResolverError
@@ -74,7 +74,7 @@ def decima_info(**kw):
 def test_plugin_has_required_keys_and_runs_before_every_other_plugin():
     assert set(REQUIRED_HF_PLUGIN_KEYS) <= set(HF_PLUGIN)
     assert HF_PLUGIN["modality"] == "decision/evaluation"
-    others = [p for p in discover_hf_plugins(_default_hf_plugin_dirs())
+    others = [p for p in discover_hf_plugins(modality_dirs())
               if p["modality"] != "decision/evaluation"]
     assert HF_PLUGIN["priority"] < min(p["priority"] for p in others)
 
@@ -96,7 +96,7 @@ def test_plugin_imports_only_stdlib_hub_and_core():
 
 
 def test_discovered_as_a_single_file_plugin():
-    found = [p for p in discover_hf_plugins(_default_hf_plugin_dirs())
+    found = [p for p in discover_hf_plugins(modality_dirs())
              if p["modality"] == "decision/evaluation"]
     assert len(found) == 1 and found[0]["priority"] == HF_PLUGIN["priority"]
 
@@ -260,7 +260,7 @@ def test_verify_files_rejects_mismatches(files, error, tmp_path):
 
 
 def _resolver(info):
-    r = HFResolver(plugins=discover_hf_plugins(_default_hf_plugin_dirs()))
+    r = HFResolver(plugins=discover_hf_plugins(modality_dirs()))
     r._api = MagicMock()
     r._api.repo_info.return_value = info
     return r
@@ -275,7 +275,7 @@ def test_decima_dispatches_to_decision_not_nli_classifier():
 
 
 def test_without_the_decision_plugin_decima_was_misdispatched():
-    plugins = [p for p in discover_hf_plugins(_default_hf_plugin_dirs())
+    plugins = [p for p in discover_hf_plugins(modality_dirs())
                if p["modality"] != "decision/evaluation"]
     r = HFResolver(plugins=plugins)
     r._api = MagicMock()

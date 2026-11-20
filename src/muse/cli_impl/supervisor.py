@@ -1888,38 +1888,21 @@ def _declared_or_measured(
     return estimate.status, estimate.gb, estimate.device
 
 
-def _repo_key(repo: Any) -> str | None:
-    """An HF repo id normalized for matching: lowercase, without an
-    `hf://` scheme or an `@revision` suffix. None when it is not a repo id."""
-    if not isinstance(repo, str) or "/" not in repo:
-        return None
-    key = repo.strip().lower()
-    if key.startswith("hf://"):
-        key = key[len("hf://"):]
-    return key.split("@", 1)[0].strip("/") or None
-
-
 def _base_entries(base: str, catalog: dict) -> list[tuple[str, dict]]:
     """Catalog entries that `base_model` names: the entry under that muse id,
     or, for an HF repo id (a raw `hf://` LoRA pull takes it from the Hub
-    tag), every entry whose `hf_repo` (top-level or persisted manifest) is
-    that repo, case-insensitively and ignoring any @revision."""
+    tag), every entry whose `hf_repo` is that repo
+    (`muse.core.hf_repo.catalog_entries_for_repo`)."""
     if "/" not in base:
         entry = catalog.get(base)
         return [(base, entry)] if isinstance(entry, dict) else []
-    want = _repo_key(base)
-    out = []
-    for model_id, entry in sorted(catalog.items()):
-        if not isinstance(entry, dict):
-            continue
-        manifest = entry.get("manifest")
-        repos = {
-            _repo_key(entry.get("hf_repo")),
-            _repo_key(manifest.get("hf_repo") if isinstance(manifest, dict) else None),
-        }
-        if want in repos:
-            out.append((model_id, entry))
-    return out
+    from muse.core.hf_repo import catalog_entries_for_repo
+
+    return [
+        (model_id, entry)
+        for model_id, entry in catalog_entries_for_repo(base, catalog)
+        if isinstance(entry, dict)
+    ]
 
 
 def _measurement_gb(record: Any) -> float | None:

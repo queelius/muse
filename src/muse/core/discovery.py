@@ -136,11 +136,6 @@ def modality_dirs() -> list[Path]:
     return [bundled] + ([Path(env)] if env else [])
 
 
-# Test-only alias (tests/modalities import it); production code calls
-# modality_dirs directly.
-_default_hf_plugin_dirs = modality_dirs
-
-
 def _modality_inits(dirs: list[Path], label: str):
     """Yield (MODALITY tag, __init__.py) per modality package, AST-read and
     first-found-wins per tag. An unreadable scan root is logged and skipped,
