@@ -103,7 +103,7 @@ The owner listened and agreed the voices work well, and chose design-then-clone.
 - `POST /v1/audio/speech/voices` (multipart): `model`, `name`, `audio` (file),
   `transcript`, optional `overwrite` (default false). Only on models with
   capability `supports_saved_voices`; others 400 `voice_saving_not_supported`.
-  Returns `{"object": "audio.voice", "model", "name", "duration_seconds",
+  Returns 200 `{"object": "audio.voice", "model", "name", "duration_seconds",
   "sha256"}` (sha256 of the stored WAV). 409 `voice_exists` without overwrite.
 - `DELETE /v1/audio/speech/voices/{name}?model=...`: 200
   `{"deleted": true, ...}`, 404 `voice_not_found`.
@@ -113,8 +113,9 @@ The owner listened and agreed the voices work well, and chose design-then-clone.
   gates (these models declare none of them); respellings work as for any model.
 - Gateway: `extract_model_from_request` also reads the `model` query param on
   `DELETE` (today only `GET`), so the delete route reaches the worker.
-- DISCOVERY gets both new routes (MCP tools `muse_save_voice`,
-  `muse_delete_voice`; `audio` is a file field); docs updated.
+- DISCOVERY gets both new routes (MCP tool `muse_save_voice`, `audio` is a
+  file field; amended at planning: the delete route has no MCP tool, since the
+  MCP generator has no DELETE or path-parameter support); docs updated.
 
 ### Voice storage
 
@@ -132,9 +133,9 @@ The owner listened and agreed the voices work well, and chose design-then-clone.
   holds transcript, duration, sha256, created time, source filename.
 - Name: `^[a-z0-9][a-z0-9_-]{0,63}$`. Anything else: 400 `invalid_voice_name`.
 - Upload bounded by the existing upload helpers; decoded with
-  `_common/audio_decode` to mono at its original rate (downsampled only above
-  48 kHz) and stored as PCM16 WAV; qwen-tts resamples internally. Stored once,
-  never re-encoded. Duration 1-30 s, else 400
+  `_common/audio_decode` to mono 24 kHz (amended at planning: `decode_audio`
+  needs a target rate, and 24 kHz is what the model consumes) and stored as
+  PCM16 WAV. Stored once, never re-encoded. Duration 1-30 s, else 400
   `invalid_reference_audio`. Transcript 1-1000 chars.
 - Writes go to a temp dir in the same parent and are renamed into place
   (overwrite replaces atomically). Use `muse.core.securefs` for the

@@ -29,6 +29,54 @@ Qwen3-ASR validates `language` before decoding and decodes at most
 default silently).
 For pronunciation checks omit `prompt`, whose context biases the listener.
 
+Designed and saved speech voices (Qwen3-TTS; spec
+`docs/superpowers/specs/2026-11-20-npc-voices-design.md`). `POST
+/v1/audio/speech` takes an optional `instructions` string (the OpenAI
+`gpt-4o-mini-tts` field, at most 4096 chars), accepted only by models with
+capability `supports_instructions` (else 400 `instructions_not_supported`) and
+forwarded to the backend only when non-blank. `qwen3-tts-1.7b-voicedesign`
+speaks from that description (a neutral default when omitted) and ignores
+`voice`, so the response reports no voice. `qwen3-tts-0.6b-base`
+(`supports_saved_voices`) clones a saved voice named by `voice`, defaults to
+the bundled read-only `narrator` (about 4 s, package data under
+`audio_speech/data/`), and refuses `instructions`. Both ignore `speed`, have
+no word timestamps, stream the whole line as one chunk, and take about 10 s
+per short line on a 12 GB GPU without flash-attn. An unknown `voice` is 400
+`voice_not_found` (also before a stream starts, via the backend's
+`check_voice`); a stored voice that cannot be read is 500 `voice_unreadable`
+with no paths. Voices are managed on `/v1/audio/speech/voices`:
+- `GET ?model=` lists them (for the Base model: `narrator` plus the saved
+  names, re-read from disk).
+- `POST` (multipart `model`, `name`, `transcript`, optional `overwrite`
+  default false, file `audio`) returns 200 `{"object": "audio.voice", model,
+  name, duration_seconds, sha256}` (sha256 of the stored WAV). Errors: 400
+  `invalid_voice_name` (name must match `^[a-z0-9][a-z0-9_-]{0,63}$`),
+  `invalid_transcript` (1-1000 chars), `invalid_reference_audio` (1-30 s),
+  `voice_read_only` (`narrator`), `voice_saving_not_supported`; 409
+  `voice_exists` (without `overwrite`) and `voice_limit_reached`; 413
+  `payload_too_large` (`limits.voice_reference_max_bytes`, default 20 MB);
+  415 `unsupported_media_type` (undecodable audio). MCP tool `muse_save_voice`.
+- `DELETE /v1/audio/speech/voices/{name}?model=` returns 200
+  `{"object": "audio.voice.deleted", model, name, "deleted": true}`; 404
+  `voice_not_found`, 400 `voice_read_only`. It has no MCP tool (the generator
+  has no DELETE support). The gateway routes DELETE by the `model` query
+  param; `muse federate` forwards only GET and POST, so delete through a node
+  directly.
+
+Storage: `<paths.home>/voices/<model_id>/<name>/{reference.wav, voice.json}`
+(voices are per model id; the store root is created 0700). The reference is
+decoded to mono 24 kHz and stored once as PCM16 WAV, never re-encoded;
+`voice.json` holds transcript, sample rate, duration, sha256, created time
+and source filename. Saves write a temp dir and rename it into place. The
+count cap `limits.max_saved_voices` (default 200 per model) is read when the
+model loads, so a change needs a reload. The clone prompt is cached per voice
+(LRU of 32) keyed by the files' stat identity; save and delete evict it.
+Design-then-clone, the intended workflow for a recurring character:
+1. Audition on the VoiceDesign model with `instructions` until a take fits.
+2. Save that take with its exact text as the transcript: `POST /v1/audio/speech/voices` on `qwen3-tts-0.6b-base`, `name: grimbold`.
+3. Speak every later line on the Base model with `voice: "grimbold"`; it holds tighter than re-describing each line.
+4. For a one-off emotional line, go back to the VoiceDesign model with `instructions`.
+
 `audio/quality` is muse's twenty-first modality. `POST
 /v1/audio/quality` accepts multipart `file` plus optional `model` and
 returns `{id, object, model, primary_score, scores, metadata}`. Each
