@@ -241,3 +241,29 @@ async def test_cancelling_a_running_request_asks_the_backend_to_stop(executor):
     assert seen[0]() is True
     backend.gate.set()
     await _until(lambda: executor.running == 0)
+
+
+async def test_release_pairs_with_a_taken_slot(monkeypatch):
+    """The slot is released only when acquire_slot actually took one."""
+    backend = BlockingBackend()
+    backend.gate.set()
+    executor = DecisionExecutor("m")
+    released = []
+
+    async def _no_slot(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(executor._gate, "acquire_slot", _no_slot)
+    monkeypatch.setattr(executor._gate, "release_slot", lambda m: released.append(m))
+    await executor.execute(backend, REQUEST, deadline=time.monotonic() + 5)
+    await asyncio.sleep(0.05)
+    assert released == []
+    await executor.close()
+
+
+def test_route_constants_match_the_concurrency_ceiling():
+    """D7: the literal CONCURRENCY_CEILING (AST-read by the gateway) and the
+    worker route's executor settings must agree."""
+    from muse.modalities.decision_evaluation import CONCURRENCY_CEILING, routes
+    assert routes.MAX_CONCURRENCY == CONCURRENCY_CEILING["max_concurrency"]
+    assert routes.MAX_QUEUE_DEPTH == CONCURRENCY_CEILING["max_queue_depth"]

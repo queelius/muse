@@ -62,6 +62,8 @@ class DecisionExecutor:
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_concurrency, thread_name_prefix=f"decision-{model_id}",
         )
+        # Mutated from pool threads (_finished) and read on the loop (close).
+        self._running_lock = threading.Lock()
         self._running: set[concurrent.futures.Future] = set()
         self._closed = False
 
@@ -71,7 +73,8 @@ class DecisionExecutor:
 
     @property
     def running(self) -> int:
-        return len(self._running)
+        with self._running_lock:
+            return len(self._running)
 
     async def execute(
         self, backend: DecisionModel, request: DecisionRequest, *, deadline: float,
@@ -80,7 +83,9 @@ class DecisionExecutor:
         DecisionBackendError when the backend is unusable or closed, and
         whatever prepare/evaluate raise."""
         self._check_open(backend)
-        await self._gate.acquire_slot(
+        # Release only a slot actually taken (the gateway's rule): False
+        # means "uncapped, nothing reserved".
+        took_slot = await self._gate.acquire_slot(
             self.model_id, self._cap, deadline=deadline, max_queue_depth=self._depth,
         )
         stop = threading.Event()
@@ -88,10 +93,14 @@ class DecisionExecutor:
             self._check_open(backend)
             future = self._pool.submit(_run, backend, request, stop)
         except BaseException:
-            self._gate.release_slot(self.model_id)
+            if took_slot:
+                self._gate.release_slot(self.model_id)
             raise
-        self._running.add(future)
-        future.add_done_callback(self._finished)
+        with self._running_lock:
+            self._running.add(future)
+        future.add_done_callback(
+            lambda done: self._finished(done, release=took_slot),
+        )
         wrapped = asyncio.wrap_future(future)
         wrapped.add_done_callback(_consume)
         # shield: a cancelled request must not cancel the native work's
@@ -102,9 +111,13 @@ class DecisionExecutor:
             stop.set()
             raise
 
-    def _finished(self, future: concurrent.futures.Future) -> None:
-        self._running.discard(future)
-        self._gate.release_slot(self.model_id)  # threadsafe
+    def _finished(
+        self, future: concurrent.futures.Future, *, release: bool,
+    ) -> None:
+        with self._running_lock:
+            self._running.discard(future)
+        if release:
+            self._gate.release_slot(self.model_id)  # threadsafe
 
     def _check_open(self, backend: DecisionModel) -> None:
         if self._closed:
@@ -118,7 +131,9 @@ class DecisionExecutor:
         """Refuse new work, wait up to `timeout` for running native work,
         then stop the thread. Returns whether everything drained."""
         self._closed = True
-        pending = [asyncio.wrap_future(f) for f in list(self._running)]
+        with self._running_lock:
+            running = list(self._running)
+        pending = [asyncio.wrap_future(f) for f in running]
         drained = True
         if pending:
             _, still = await asyncio.wait(pending, timeout=timeout)
