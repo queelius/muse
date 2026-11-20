@@ -117,3 +117,22 @@ def test_nonfinite_geometry_is_not_exposed_in_response_metadata():
     assert result.width is None
     assert result.height is None
     assert result.view_box is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # A CSS escape spells url( without the literal token.
+        '<svg><rect style="fill:\\75rl(//evil.example/x.png)"/></svg>',
+        '<svg><rect fill="\\75rl(//evil.example/x.png)"/></svg>',
+        '<svg><rect style="fill:u\\rl(//evil.example/x.png)"/></svg>',
+        '<svg><rect filter="\\75rl(//evil.example/x.png)"/></svg>',
+        # Protocol-relative targets are remote fetches.
+        '<svg><rect fill="url(//evil.example/x.png)"/></svg>',
+        '<svg><rect style="fill:url(//evil.example/x.png)"/></svg>',
+        '<svg><use href="//evil.example/x.svg"/></svg>',
+    ],
+)
+def test_rejects_css_escapes_and_protocol_relative_urls(payload):
+    with pytest.raises(VectorizationOutputError):
+        validate_static_svg(payload)
