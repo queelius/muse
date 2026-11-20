@@ -228,3 +228,17 @@ def test_the_digest_cache_drops_inodes_that_no_longer_exist(tmp_path):
     dedupe_venvs(root, cache=cache)
     kept = json.loads(cache.read_text())
     assert "1:999999" not in kept and kept
+
+
+def test_digest_cache_save_failure_leaves_no_temp_file(tmp_path, monkeypatch):
+    from muse.core import venv_dedupe
+
+    cache = venv_dedupe._DigestCache(tmp_path / "venv-digests.json")
+    cache.used["1:2"] = [3, 4, "a" * 64]
+
+    def fail(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(venv_dedupe.os, "replace", fail)
+    cache.save({"1:2"})
+    assert list(tmp_path.iterdir()) == []

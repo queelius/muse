@@ -25,6 +25,7 @@ old or the new file, and a running worker keeps the inode it has open.
 """
 from __future__ import annotations
 
+import contextlib
 import filecmp
 import hashlib
 import json
@@ -169,13 +170,19 @@ class _DigestCache:
         if self.path is None:
             return
         kept = {k: v for k, v in {**self.entries, **self.used}.items() if k in live}
+        tmp = None
         try:
             fd, tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
             with os.fdopen(fd, "w") as fh:
                 json.dump(kept, fh)
             os.replace(tmp, self.path)
+            tmp = None
         except OSError:
             logger.debug("could not save the dedupe digest cache", exc_info=True)
+        finally:
+            if tmp is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
 
 
 def _digest(path: Path) -> str:
