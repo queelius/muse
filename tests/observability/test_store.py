@@ -129,3 +129,27 @@ def test_last_cold_load_seconds_on_closed_store_returns_empty(tmp_path):
     store = TelemetryStore(tmp_path / "t.db")
     store.close()
     assert store.last_cold_load_seconds() == {}
+
+
+def test_store_still_writes_to_a_database_with_the_retired_gpu_used_gb_column(tmp_path):
+    """Databases created before gpu_used_gb was dropped keep that nullable
+    column; inserts name their columns, so they keep working."""
+    import sqlite3
+
+    from muse.observability.events import event_to_row
+    from muse.observability.store import TelemetryStore
+
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE events (ts REAL NOT NULL, type TEXT NOT NULL, "
+        "gpu_used_gb REAL)"
+    )
+    conn.commit()
+    conn.close()
+    store = TelemetryStore(str(path))
+    try:
+        store.insert_many([event_to_row("sample", 1.0, free_ram_gb=2.0)])
+        assert store.summary_counts()["total"] == 1
+    finally:
+        store.close()

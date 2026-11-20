@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS events (
     stream INTEGER,
     free_vram_gb REAL,
     free_ram_gb REAL,
-    gpu_used_gb REAL,
     loaded_count INTEGER,
     in_flight_count INTEGER,
     modality TEXT
