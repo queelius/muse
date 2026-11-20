@@ -33,8 +33,10 @@ from muse.modalities.chat_completion.codec import (
     result_to_openai_dict,
 )
 from muse.modalities._common.images import (
+    ImageInputError,
     close_decoded_images,
     decode_image_input,
+    image_error_response,
     validate_total_image_pixels,
 )
 
@@ -124,12 +126,14 @@ class _ImageDecodeError(Exception):
     """Raised by _decode_image_parts with a structured error code + message.
 
     The route handler catches this and translates to a 400 with the
-    OpenAI-shape error envelope.
+    OpenAI-shape error envelope, or returns ``response`` as-is when set (a
+    typed image-input error rendered through the shared image error table).
     """
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, response: Any = None) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+        self.response = response
 
 
 async def _decode_image_parts(
@@ -177,9 +181,9 @@ async def _decode_image_parts(
     # here, before the decode loop, also avoids wasted HTTP fetches.
     decoded_images: list[Any] = []
 
-    def _abort(code: str, message: str) -> None:
+    def _abort(code: str, message: str, response: Any = None) -> None:
         close_decoded_images(decoded_images)
-        raise _ImageDecodeError(code, message)
+        raise _ImageDecodeError(code, message, response)
 
     total_image_count = sum(
         1
@@ -244,6 +248,10 @@ async def _decode_image_parts(
                 # 4. decode.
                 try:
                     img = await decode_image_input(url)
+                except ImageInputError as ie:
+                    # The shared table: 413 for byte/pixel caps, 400
+                    # invalid_image for undecodable input.
+                    _abort(ie.code, str(ie), image_error_response(ie))
                 except ValueError as ve:
                     _abort(
                         "invalid_image",
@@ -313,6 +321,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 model_id=effective_id,
             )
         except _ImageDecodeError as e:
+            if e.response is not None:
+                return e.response
             return error_response(400, e.code, e.message)
 
         decoded_images = _decoded_message_images(messages)

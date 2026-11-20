@@ -568,3 +568,24 @@ def test_capability_error_fires_before_sse_stream_opens():
     # Pre-stream 400 (not text/event-stream).
     assert r.status_code == 400
     assert "text/event-stream" not in r.headers.get("content-type", "")
+
+
+def test_over_cap_image_is_413_like_the_image_routes(monkeypatch):
+    """The shared image error table applies to chat's VLM path: a byte-cap
+    overflow is 413 payload_too_large, not 400 invalid_image."""
+    import base64
+
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "16")
+    model = _FakeChatModel("vlm", supports_vision=True, supports_multi_image=True)
+    client = _client_with_model(model)
+    url = "data:image/png;base64," + base64.b64encode(b"x" * 64).decode()
+    r = client.post("/v1/chat/completions", json={
+        "model": "vlm",
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": url}}],
+        }],
+    })
+    assert r.status_code == 413
+    assert r.json()["error"]["code"] == "payload_too_large"
+    assert "MUSE_IMAGE_INPUT_MAX_BYTES" in r.json()["error"]["message"]
