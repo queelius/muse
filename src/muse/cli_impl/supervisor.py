@@ -1722,30 +1722,28 @@ def _effective_model_device(
     supervisor_device: str = "auto",
 ) -> str:
     """Resolve placement using the same precedence as ``load_backend``."""
-    from muse.core.placement import is_native_gguf, resolve_model_placement
+    from muse.core.placement import (
+        effective_device, is_native_gguf, resolve_model_placement,
+    )
     manifest = catalog_entry.get("manifest") or {}
     if is_native_gguf(manifest):
         return resolve_model_placement(
             manifest.get("model_id", ""), manifest,
             requested=supervisor_device, entry=catalog_entry,
         ).device
-    override = str(catalog_entry.get("device_override") or "").lower()
-    if override:
-        return override
-
     manifest = catalog_entry.get("manifest") or {}
     if not isinstance(manifest, dict):
         manifest = {}
     capabilities = manifest.get("capabilities") or {}
     if not isinstance(capabilities, dict):
         capabilities = {}
-    manifest_device = str(capabilities.get("device") or "auto").lower()
-    if manifest_device not in ("", "auto"):
-        return manifest_device
-
-    requested = str(supervisor_device or "auto").lower()
-    if requested not in ("", "auto"):
-        return requested
+    device = effective_device(
+        catalog_entry.get("device_override"),
+        capabilities.get("device"),
+        supervisor_device,
+    )
+    if device != "auto" or catalog_entry.get("device_override"):
+        return device  # an operator "auto" pin is returned as-is
 
     # A real live manifest explicitly says auto, so placement must follow
     # current runtime detection rather than a stale probe device.  The

@@ -457,11 +457,14 @@ def load_backend(model_id: str, **kwargs) -> Any:
     # without editing the bundled script. override="auto" un-pins a model to
     # auto-detect. Other capability keys still lose to kwargs (the documented
     # contract); device is the exception because it is a placement preference.
-    override = entry_data.get("device_override")
-    if override:
-        merged["device"] = override
-    elif "device" in capabilities and capabilities["device"] != "auto":
-        merged["device"] = capabilities["device"]
+    from muse.core.placement import effective_device
+
+    if entry_data.get("device_override") or "device" in merged:
+        merged["device"] = effective_device(
+            entry_data.get("device_override"),
+            capabilities.get("device"),
+            kwargs.get("device", merged.get("device")),
+        )
     # GPU-layers precedence (spec 2026-07-08), most authoritative first:
     #   1. catalog `gpu_layers_override` (operator, via
     #      `muse models set-gpu-layers`)

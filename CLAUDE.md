@@ -207,7 +207,9 @@ class serves many models.
 
 ### Device placement precedence (v0.48.0+)
 
-Which device a model loads on is resolved in `load_backend`, most
+Which device a model loads on is resolved by one rule,
+`muse.core.placement.effective_device` (used by `load_backend`, placement
+and the supervisor's sizing; values compared lowercased), most
 authoritative first:
 
 1. **catalog `device_override`** -- an operator pin set via

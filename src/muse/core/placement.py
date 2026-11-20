@@ -203,6 +203,27 @@ def _interpreter_capability(python: str) -> tuple[bool, str]:
             _queries.pop(python, None)
 
 
+def effective_device(override: object, capability: object, requested: object) -> str:
+    """The device a model loads on, before ``auto`` is resolved to a pool.
+
+    Precedence, most authoritative first (shared by ``catalog.load_backend``,
+    ``resolve_model_placement`` and the supervisor's sizing):
+      1. catalog ``device_override`` (``muse models set-device``; ``auto``
+         un-pins and still beats the ``--device`` flag)
+      2. manifest ``capabilities.device`` when it is not ``auto``
+      3. the requested device (the ``--device`` server flag)
+      4. ``"auto"``
+    Values are compared and returned lowercased.
+    """
+    pin = str(override or "").strip().lower()
+    if pin:
+        return pin
+    cap = str(capability or "").strip().lower()
+    if cap and cap != "auto":
+        return cap
+    return str(requested or "").strip().lower() or "auto"
+
+
 def resolve_model_placement(
     model_id: str, manifest: dict, *, requested: str = "auto", entry: dict | None = None,
 ) -> Placement:
@@ -211,9 +232,7 @@ def resolve_model_placement(
         from muse.core.catalog import _read_catalog
         entry = _read_catalog().get(model_id, {})
     caps = manifest.get("capabilities") or {}
-    override = entry.get("device_override")
-    cap = str(caps.get("device") or "auto").lower()
-    device = str(override or (cap if cap != "auto" else requested) or "auto").lower()
+    device = effective_device(entry.get("device_override"), caps.get("device"), requested)
     layers_override = entry.get("gpu_layers_override")
     layers = int(layers_override if layers_override is not None else caps.get("n_gpu_layers", -1))
     if is_native_gguf(manifest):
