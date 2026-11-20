@@ -509,3 +509,32 @@ def test_segmentation_side_zero_env_falls_back(monkeypatch):
     from muse.modalities.image_segmentation.routes import _max_input_side
     assert _max_input_side() == config.SETTINGS_BY_KEY["limits.segmentation_max_input_side"].default
     config.reset_config()
+
+
+def test_mask_encoding_runs_off_the_event_loop(model, monkeypatch):
+    """Encoding up to 256 masks must not block the worker's event loop
+    (the supervisor restarts a worker whose /health stalls)."""
+    import asyncio
+
+    from muse.modalities.image_segmentation import routes as seg_routes
+
+    seen: list[bool] = []
+    real = seg_routes.encode_segmentation
+
+    def _spy(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            seen.append(True)
+        except RuntimeError:
+            seen.append(False)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(seg_routes, "encode_segmentation", _spy)
+    client = _build_client(model)
+    r = client.post(
+        "/v1/images/segment",
+        files={"image": ("src.png", _png_bytes(), "image/png")},
+        data={"model": "fake-seg", "mode": "auto", "mask_format": "rle"},
+    )
+    assert r.status_code == 200, r.text
+    assert seen == [False]

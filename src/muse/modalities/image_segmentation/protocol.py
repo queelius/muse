@@ -10,7 +10,7 @@ Axis-order convention split (documented here so callers don't trip):
   - ``PIL.Image.size``       -> ``(W, H)``        used by ``image_size``
   - numpy 2D arrays          -> ``[H, W]``        used by ``mask``
   - COCO bbox                -> ``[x, y, w, h]``  used by ``bbox``
-  - COCO RLE size field      -> ``[H, W]``        used at the wire layer
+  - RLE size field (COCO order) -> ``[H, W]``        used at the wire layer
 
 Each field follows the convention of its native ecosystem; clients
 following the convention of the field they read get consistent

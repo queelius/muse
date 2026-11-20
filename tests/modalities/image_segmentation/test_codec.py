@@ -1,8 +1,7 @@
 """Tests for the image/segmentation codec.
 
-Two RLE paths exercised via patching ``_try_import_pycocotools``:
-  - Pure-Python fallback (pycocotools=None): exhaustive round-trip.
-  - pycocotools-stub: delegation verified.
+RLE: muse's own ``p:`` run-length format (not COCO-compressed): round-trip,
+equivalence with the reference per-pixel loop, and a large-mask timing check.
 
 PNG path: header check + PIL round-trip back to a bool array.
 """
@@ -60,12 +59,26 @@ def test_encode_mask_png_rejects_non_2d():
         codec.encode_mask_png(np.zeros((2, 3, 4)))
 
 
-# ---------------- Pure-Python RLE round-trip ----------------
+# ---------------- RLE round-trip ----------------
 
 
-def test_rle_round_trip_with_no_pycocotools(monkeypatch):
+def _reference_runs(arr):
+    """The original per-pixel loop, kept as the oracle for the vectorised one."""
+    flat = np.asarray(arr).reshape(-1, order="F").tolist()
+    runs, last, count = [], 0, 0
+    for v in flat:
+        if v == last:
+            count += 1
+        else:
+            runs.append(count)
+            last = 1 - last
+            count = 1
+    runs.append(count)
+    return runs
+
+
+def test_rle_round_trip():
     """Encode then decode equals the original mask, byte-for-byte."""
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
     rng = np.random.default_rng(seed=42)
     for _ in range(10):
         h, w = int(rng.integers(8, 32)), int(rng.integers(8, 32))
@@ -78,82 +91,88 @@ def test_rle_round_trip_with_no_pycocotools(monkeypatch):
         np.testing.assert_array_equal(decoded.astype(np.uint8), arr)
 
 
-def test_rle_round_trip_all_zeros(monkeypatch):
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+@pytest.mark.parametrize("seed", range(20))
+def test_rle_runs_match_reference_loop(seed):
+    rng = np.random.default_rng(seed)
+    h, w = int(rng.integers(1, 40)), int(rng.integers(1, 40))
+    arr = (rng.random((h, w)) > rng.random()).astype(np.uint8)
+    assert codec._binary_mask_to_runs(arr) == _reference_runs(arr)
+
+
+@pytest.mark.parametrize("value", [0, 1])
+def test_rle_runs_constant_masks_match_reference(value):
+    arr = np.full((5, 7), value, dtype=np.uint8)
+    assert codec._binary_mask_to_runs(arr) == _reference_runs(arr)
+
+
+def test_rle_encode_is_vectorised_for_large_masks():
+    """A noisy 2048x2048 mask took ~0.5 s per mask in the per-pixel loop."""
+    import time
+
+    rng = np.random.default_rng(0)
+    arr = (rng.random((2048, 2048)) > 0.5).astype(np.uint8)
+    t0 = time.perf_counter()
+    rle = codec.encode_mask_rle(arr)
+    elapsed = time.perf_counter() - t0
+    np.testing.assert_array_equal(codec.decode_mask_rle(rle), arr.astype(bool))
+    assert elapsed < 0.4, elapsed
+
+
+def test_rle_round_trip_all_zeros():
     arr = np.zeros((6, 8), dtype=np.uint8)
     rle = codec.encode_mask_rle(arr)
     decoded = codec.decode_mask_rle(rle)
     np.testing.assert_array_equal(decoded.astype(np.uint8), arr)
 
 
-def test_rle_round_trip_all_ones(monkeypatch):
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+def test_rle_round_trip_all_ones():
     arr = np.ones((6, 8), dtype=np.uint8)
     rle = codec.encode_mask_rle(arr)
     decoded = codec.decode_mask_rle(rle)
     np.testing.assert_array_equal(decoded.astype(np.uint8), arr)
 
 
-def test_rle_size_uses_h_w_not_w_h(monkeypatch):
-    """COCO RLE stores [H, W] in size; verify against a non-square mask."""
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+def test_rle_size_uses_h_w_not_w_h():
+    """RLE stores [H, W] in size; verify against a non-square mask."""
     arr = np.zeros((3, 7), dtype=np.uint8)
     rle = codec.encode_mask_rle(arr)
     assert rle["size"] == [3, 7]
 
 
-def test_rle_pure_python_counts_starts_with_marker(monkeypatch):
-    """The pure-Python fallback marks its output with the `p:` prefix."""
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+def test_rle_counts_starts_with_marker():
+    """muse's own run-length format is marked with the `p:` prefix."""
     arr = np.array([[0, 1], [1, 0]], dtype=np.uint8)
     rle = codec.encode_mask_rle(arr)
-    assert rle["counts"].startswith("p:")
+    assert rle["counts"] == "p:1,2,1"
 
 
-# ---------------- pycocotools delegation ----------------
+def test_rle_encode_never_uses_pycocotools(monkeypatch):
+    """The format does not depend on what happens to be installed."""
+    import sys
+    import types
 
-
-def test_rle_delegates_to_pycocotools_when_available(monkeypatch):
-    """encode + decode go through pycocotools.mask when importable."""
-
-    encode_calls: list = []
-    decode_calls: list = []
-
-    class _StubPct:
-        @staticmethod
-        def encode(arr):
-            encode_calls.append(arr.shape)
-            return {"size": [int(arr.shape[0]), int(arr.shape[1])],
-                    "counts": b"OK"}
-
-        @staticmethod
-        def decode(rle):
-            decode_calls.append(rle["counts"])
-            h, w = rle["size"]
-            return np.ones((h, w), dtype=np.uint8)
-
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: _StubPct)
-
+    stub = types.ModuleType("pycocotools")
+    stub.mask = types.SimpleNamespace(
+        encode=lambda a: pytest.fail("pycocotools must not be used"),
+    )
+    monkeypatch.setitem(sys.modules, "pycocotools", stub)
+    monkeypatch.setitem(sys.modules, "pycocotools.mask", stub.mask)
     arr = np.zeros((4, 5), dtype=np.uint8)
-    rle = codec.encode_mask_rle(arr)
-    assert rle["counts"] == "OK"
-    assert encode_calls == [(4, 5)]
-
-    decoded = codec.decode_mask_rle(rle)
-    assert decoded.shape == (4, 5)
-    assert decode_calls == [b"OK"]
+    assert codec.encode_mask_rle(arr)["counts"].startswith("p:")
 
 
-def test_rle_decode_raises_without_pycocotools_for_native_format(monkeypatch):
-    """If we're handed pycocotools-encoded counts but pct is unavailable, raise."""
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+def test_rle_decode_rejects_unmarked_counts():
     rle = {"size": [4, 4], "counts": "abcd"}  # no `p:` prefix
-    with pytest.raises(RuntimeError, match="pycocotools is required"):
+    with pytest.raises(ValueError, match="p:"):
         codec.decode_mask_rle(rle)
 
 
-def test_rle_encode_rejects_3d_mask(monkeypatch):
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+def test_rle_decode_rejects_runs_not_matching_size():
+    with pytest.raises(ValueError, match="size"):
+        codec.decode_mask_rle({"size": [2, 2], "counts": "p:1,2"})
+
+
+def test_rle_encode_rejects_3d_mask():
     with pytest.raises(ValueError, match="must be 2D"):
         codec.encode_mask_rle(np.zeros((2, 3, 4)))
 
@@ -189,8 +208,7 @@ def test_encode_segmentation_envelope_png_format():
     assert decoded[:8] == b"\x89PNG\r\n\x1a\n"
 
 
-def test_encode_segmentation_envelope_rle_format(monkeypatch):
-    monkeypatch.setattr(codec, "_try_import_pycocotools", lambda: None)
+def test_encode_segmentation_envelope_rle_format():
     arr = np.zeros((4, 6), dtype=np.uint8)
     arr[1:3, 1:4] = 1
     record = MaskRecord(mask=arr, score=0.8, bbox=(1, 1, 3, 2), area=6)

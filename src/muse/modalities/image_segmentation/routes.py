@@ -18,7 +18,7 @@ of quads of integers). Bad JSON or shape mismatches yield 400.
 The output envelope (see codec.encode_segmentation) carries an id,
 the model id, the dispatch mode, the input image_size in PIL
 convention (W, H), and a list of masks with index, score, bbox, area,
-plus the encoded mask (PNG b64 or COCO RLE).
+plus the encoded mask (PNG b64 or muse's `p:` run-length format).
 """
 from __future__ import annotations
 
@@ -213,9 +213,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_parameter", f"image decode failed: {message}",
             )
 
-        def _call() -> object:
+        def _call() -> dict:
             with backend._inference_lock:
-                return backend.segment(
+                result = backend.segment(
                     pil_image,
                     mode=mode,
                     prompt=prompt,
@@ -223,10 +223,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     boxes=parsed_boxes,
                     max_masks=max_masks,
                 )
+            # Encode off the event loop too: up to 256 masks per request.
+            return encode_segmentation(
+                result, model_id=effective_id, mask_format=mask_format,
+            )
 
         abandoned = False
         try:
-            result = await run_native_offload(
+            envelope = await run_native_offload(
                 _call,
                 cleanup_abandoned=(
                     lambda _result: close_decoded_images([pil_image])
@@ -261,8 +265,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             if not abandoned:
                 close_decoded_images([pil_image])
 
-        return encode_segmentation(
-            result, model_id=effective_id, mask_format=mask_format,
-        )
+        return envelope
 
     return router
