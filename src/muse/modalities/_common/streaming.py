@@ -11,6 +11,14 @@ ever run (a client that disconnects while the response start is still being
 sent), and an async generator that never started does not run its `finally`
 on close. Starting the producer earlier would leave it holding the lock with
 nobody left to tell it to stop.
+
+The stream is stopped from the response's `__call__`, not only from the
+generator's own `finally`: when sse_starlette's task group is cancelled
+while a `send` is in progress, the generator stays paused at a `yield`
+and sse_starlette 3.0.4 never closes it, so that `finally` would wait for
+the async-generator finalizer (cyclic GC). `_ThreadedSSEResponse.__call__`
+sets the cancel flag and closes the generator deterministically, and runs
+`on_finish` itself when the body never started.
 """
 from __future__ import annotations
 
@@ -19,11 +27,41 @@ import logging
 import threading
 from typing import Any, AsyncIterator, Callable, Iterable, Sequence
 
+from sse_starlette.sse import EventSourceResponse
+
 
 logger = logging.getLogger(__name__)
 
 
-def threaded_sse_events(
+class _ThreadedSSEResponse(EventSourceResponse):
+    """EventSourceResponse that always stops its producer on the way out."""
+
+    def __init__(self, events: AsyncIterator[dict], *, stop: Callable[[], Any],
+                 **kwargs: Any) -> None:
+        super().__init__(events, **kwargs)
+        self._events = events
+        self._stop = stop
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._stop()
+
+
+def threaded_sse_response(
+    *,
+    headers: dict[str, str] | None = None,
+    **kwargs: Any,
+) -> EventSourceResponse:
+    """`threaded_sse_events(**kwargs)` wrapped in a response that stops the
+    producer, closes the generator and runs `on_finish` (if the producer
+    never ran) when the response ends for any reason."""
+    events, stop = _threaded_sse_events(**kwargs)
+    return _ThreadedSSEResponse(events, stop=stop, headers=headers)
+
+
+def _threaded_sse_events(
     *,
     lock: Any,
     open_stream: Callable[[], Iterable[Any]],
@@ -44,15 +82,32 @@ def threaded_sse_events(
     event on the event loop. A backend or encoding failure is logged with
     `label` and becomes `error_event()` followed by `done_events`; so the
     client never sees backend text. `on_finish` runs on the producer thread
-    after the lock is released (or when the producer could not start).
+    after the lock is released, or when the producer never ran.
+
+    Returns the generator and an async `stop()` that sets the cancel flag,
+    closes the generator (running its bounded cleanup wait) and runs
+    `on_finish` if the producer never started. `stop()` is idempotent.
     """
+    cancelled = threading.Event()
+    producer_done = threading.Event()
+    finish_lock = threading.Lock()
+    state = {"producer_started": False, "finished": False}
+
+    def _finish() -> None:
+        with finish_lock:
+            if state["finished"]:
+                return
+            state["finished"] = True
+        if on_finish is not None:
+            try:
+                on_finish()
+            except Exception:
+                logger.exception("%s stream cleanup failed", label)
 
     async def _events() -> AsyncIterator[dict]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue(maxsize=queue_depth)
         queue_slots = threading.Semaphore(queue_depth)
-        cancelled = threading.Event()
-        producer_done = threading.Event()
         done_sentinel = object()
         error_sentinel = object()
 
@@ -81,13 +136,6 @@ def threaded_sse_events(
                 if lock.acquire(timeout=poll_seconds):
                     return True
             return False
-
-        def _finish() -> None:
-            if on_finish is not None:
-                try:
-                    on_finish()
-                except Exception:
-                    logger.exception("%s stream cleanup failed", label)
 
         def _produce() -> None:
             stream = None
@@ -132,6 +180,7 @@ def threaded_sse_events(
         )
         try:
             producer.start()
+            state["producer_started"] = True
         except Exception:
             logger.exception("%s stream producer failed to start", label)
             _finish()
@@ -178,4 +227,25 @@ def threaded_sse_events(
                     label, cleanup_grace_seconds,
                 )
 
-    return _events()
+    events = _events()
+
+    async def stop() -> None:
+        cancelled.set()
+        try:
+            await events.aclose()
+        except RuntimeError:
+            # Still being iterated elsewhere; its own finally will clean up.
+            logger.debug("%s stream generator busy at close", label)
+        if not state["producer_started"]:
+            _finish()
+
+    return events, stop
+
+
+def threaded_sse_events(**kwargs: Any) -> AsyncIterator[dict]:
+    """The bare event generator (for callers that drive it directly).
+
+    Prefer `threaded_sse_response`, which also stops the producer when the
+    response is cancelled mid-send.
+    """
+    return _threaded_sse_events(**kwargs)[0]

@@ -22,11 +22,10 @@ from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
-from sse_starlette.sse import EventSourceResponse
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._common.streaming import threaded_sse_events
+from muse.modalities._common.streaming import threaded_sse_response
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.chat_completion.codec import (
     DONE_SENTINEL,
@@ -385,7 +384,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             }}
             return {"event": "error", "data": json.dumps(payload)}
 
-        events = threaded_sse_events(
+        return threaded_sse_response(
             lock=model._inference_lock,
             open_stream=lambda: model.chat_stream(messages, **kwargs),
             encode=lambda chunk: {
@@ -398,6 +397,5 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             poll_seconds=_STREAM_POLL_SECONDS,
             on_finish=lambda: close_decoded_images(decoded_images),
         )
-        return EventSourceResponse(events)
 
     return router

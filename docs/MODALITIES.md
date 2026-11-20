@@ -15,9 +15,12 @@ English G2P; models without native timings and streaming timestamps return 400. 
 returns base64 PCM16 SSE chunks, so it rejects `response_format: opus` (400
 `format_not_streamable`) and `align` (400 `alignment_not_streamable`) instead
 of dropping them. Speech and chat streaming share
-`muse.modalities._common.streaming.threaded_sse_events`, which starts the
-producer thread on the body's first iteration (a client that leaves before
-then never strands a lock-holding producer). Qwen3-ASR returns
+`muse.modalities._common.streaming.threaded_sse_response`, which starts
+the producer thread on the body's first iteration and, from the response's
+own `__call__`, always sets the cancel flag and closes the generator when
+the response ends (sse_starlette leaves a generator paused at `yield` when
+the client leaves mid-send, and would otherwise rely on GC). A body that
+never started still runs `on_finish`, which closes chat's decoded images. Qwen3-ASR returns
 transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
 `vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.
 Qwen3-ASR validates `language` before decoding and decodes at most

@@ -31,7 +31,7 @@ from muse.modalities.audio_speech.pronunciations import (
 from muse.modalities.audio_speech.protocol import TimestampsUnavailableError
 from muse.modalities.audio_speech.word_timing import TimedSpan, assemble_words
 from muse.core.errors import error_response
-from muse.modalities._common.streaming import threaded_sse_events
+from muse.modalities._common.streaming import threaded_sse_response
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -276,7 +276,8 @@ async def _stream(
     model, req: SpeechRequest, *, spoken: str,
     headers: dict[str, str],
 ) -> EventSourceResponse:
-    events = threaded_sse_events(
+    return threaded_sse_response(
+        headers=headers,
         lock=model._inference_lock,
         open_stream=lambda: model.synthesize_stream(
             spoken, voice=req.voice, speed=req.speed,
@@ -292,4 +293,3 @@ async def _stream(
         poll_seconds=_STREAM_POLL_SECONDS,
         cleanup_grace_seconds=_STREAM_CLEANUP_GRACE_SECONDS,
     )
-    return EventSourceResponse(events, headers=headers)
