@@ -18,10 +18,10 @@ Design decisions:
   - Body is streamed chunk-by-chunk so the size cap fires before the full body
     is buffered into RAM (C3).
   - MUSE_ALLOW_PRIVATE_FETCH=1 escape hatch is preserved for operators on
-    trusted internal networks (same as the original image_input convention);
+    trusted internal networks (same as the original image-input convention);
     when set, resolution + pinning are skipped and the hostname is dialed as-is.
 
-IPv6 caveat (inherited from image_input._validate_public_host):
+IPv6 caveat (inherited from the original image-input host check):
   socket.gethostbyname is IPv4-only. A hostname that resolves ONLY to an AAAA
   record will fail gethostbyname with OSError, causing a ValueError ("DNS
   resolution failed") before any fetch is attempted -- conservative, not

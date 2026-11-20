@@ -16,7 +16,7 @@ the bundled modalities are:
   - image/animation: /v1/images/animations (AnimateDiff; short looping clips, animated WebP/GIF/MP4)
   - image/embedding: /v1/images/embeddings (transformers AutoModel; CLIP, SigLIP, DINOv2)
   - image/generation: /v1/images/generations, /v1/images/edits (inpaint), /v1/images/variations (diffusers)
-  - image/segmentation: /v1/images/segment (SAM-2; multipart upload, mode-aware: auto/points/boxes/text; PNG or COCO RLE masks)
+  - image/segmentation: /v1/images/segment (SAM-2; multipart upload, mode-aware: auto/points/boxes/text; PNG or muse run-length masks)
   - image/upscale: /v1/images/upscale (StableDiffusionUpscalePipeline; SD x4; multipart upload)
   - image/vectorization: /v1/images/vectorize (StarVector-1B; raster-to-static-SVG; multipart upload)
   - text/classification: /v1/moderations (HF text-classification)

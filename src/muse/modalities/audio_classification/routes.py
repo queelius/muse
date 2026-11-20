@@ -40,7 +40,7 @@ def _max_bytes() -> int:
     registry default (50MB) with a logged warning. A resolved value
     that is None (empty env) or non-positive (parseable but nonsensical
     as a byte cap) also falls back to the registry default, mirroring
-    image_generation/image_input.py's _default_max_bytes guard."""
+    muse.modalities._common.images' _default_max_bytes guard."""
     return config.get_positive("limits.audio_cls_max_bytes")
 
 

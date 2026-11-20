@@ -55,10 +55,10 @@ async def test_decode_data_url_jpeg():
 
 
 def _patch_afetch(content: bytes):
-    """Patch afetch_url_bytes as imported into image_input to return ``content``.
+    """Patch afetch_url_bytes as imported into _common.images to return ``content``.
 
-    image_input imports afetch_url_bytes via ``from muse.core.net_fetch import
-    afetch_url_bytes``, so the patch target is the name in image_input's own
+    _common.images imports afetch_url_bytes via ``from muse.core.net_fetch import
+    afetch_url_bytes``, so the patch target is the name in _common.images' own
     namespace, not the origin module.
     """
     return patch(
@@ -192,7 +192,7 @@ def test_bytes_to_pil_maps_decompression_bomb_to_input_too_large(monkeypatch):
 async def test_fetch_blocks_loopback(monkeypatch):
     """A URL whose host resolves to 127.0.0.1 must reject without fetching.
 
-    SSRF guard now lives in muse.core.net_fetch; image_input delegates to it
+    SSRF guard now lives in muse.core.net_fetch; _common.images delegates to it
     via afetch_url_bytes. Patch DNS at net_fetch and confirm fetch is rejected
     before any network I/O reaches afetch_url_bytes's inner httpx call.
     """

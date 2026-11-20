@@ -2,7 +2,7 @@
 
 Uses a fake ImageSegmentationModel backend; no real weights. The fake
 segmenter returns a single small mask which the codec encodes back
-into either base64 PNG or COCO RLE end-to-end.
+into either base64 PNG or muse's run-length format end-to-end.
 """
 from __future__ import annotations
 

@@ -115,7 +115,7 @@ def test_audio_cls_cap_zero_env_falls_back(monkeypatch):
 
     config.get() parses "0" to the literal int 0 (a valid int, not an
     error), so the accessor must guard non-positive values itself and
-    fall back to the registry default, mirroring image_input.py's
+    fall back to the registry default, mirroring _common/images.py's
     _default_max_bytes."""
     from muse.core import config
     monkeypatch.setenv("MUSE_AUDIO_CLS_MAX_BYTES", "0")
