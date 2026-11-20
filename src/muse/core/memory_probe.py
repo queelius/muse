@@ -63,9 +63,6 @@ def init_pynvml() -> bool:
     has succeeded; returns ``False`` on any failure (module missing,
     driver missing, AMD card, CPU-only host). The verdict is sticky for
     the remainder of the process: a failure is not retried.
-
-    The pre-commit hook policy bans em-dashes; we use parens above for
-    aside clauses.
     """
     global pynvml, _init_attempted, _init_ok
     with _init_lock:

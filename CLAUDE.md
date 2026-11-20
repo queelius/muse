@@ -98,7 +98,8 @@ Modality backends implementing modality-specific protocols
 - `muse.core.catalog.known_models()`: discovery-driven, two-tier cache.
   The script-discovery scan (importlib) is cached for the process
   lifetime (new scripts need a restart); the merged result is memoized
-  against catalog.json's (path, mtime_ns), so catalog writes from ANY
+  against catalog.json's file identity (path, dev, ino, size, mtime_ns,
+  ctime_ns), so catalog writes from ANY
   process (admin pull subprocess, operator CLI pull/remove beside a
   running supervisor) are visible on the next call without a restart.
   Projects each script's MANIFEST onto the `CatalogEntry` shape
@@ -754,9 +755,10 @@ Commits follow Conventional Commits with a scope (`feat(pixelart): ...`,
   / `paths.catalog_dir` (catalog + config.yaml location, defaults
   `~/.muse/`), `MUSE_HOME` / `paths.home` (voices dir base),
   `MUSE_ALLOW_PRIVATE_FETCH` / `fetch.allow_private` (opt-in escape hatch
-  for the SSRF guard on `_fetch_http_url`; default off; needed only when
-  operators on a trusted network want `image` URLs to reach internal
-  services), `MUSE_IMAGE_INPUT_MAX_BYTES` / `limits.image_input_max_bytes`
+  for the SSRF guard in `muse.core.net_fetch`, which also requires http(s)
+  on every redirect hop and bounds the whole fetch by a 120 s deadline;
+  default off; needed only when operators on a trusted network want
+  `image` URLs to reach internal services), `MUSE_IMAGE_INPUT_MAX_BYTES` / `limits.image_input_max_bytes`
   (per-request size cap for image uploads and data URLs; default 10485760 /
   10MB; read per-call so changes take effect without a server restart).
 - **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.

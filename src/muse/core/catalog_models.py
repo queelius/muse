@@ -151,11 +151,11 @@ _discovered_sources_cache: dict[str, Path] | None = None
 
 
 # Merged known-models cache, keyed by the catalog.json identity
-# (path_str, mtime_ns) it was built against. A catalog write from ANY
-# process -- the admin pull endpoint's `muse pull` subprocess, an operator
-# running `muse pull` / `muse models remove` in a shell beside a running
-# supervisor -- bumps the file's mtime, so the next known_models() call
-# rebuilds the merge instead of serving a frozen snapshot. Without this,
+# (path_str, dev, ino, size, mtime_ns, ctime_ns) it was built against. A
+# catalog write from ANY process -- the admin pull endpoint's `muse pull`
+# subprocess, an operator running `muse pull` / `muse models remove` in a
+# shell beside a running supervisor -- replaces the file atomically, so the
+# next known_models() call rebuilds the merge instead of serving a frozen snapshot. Without this,
 # the supervisor 404'd "unknown model" on enable/route for anything pulled
 # after its cache was built, even though catalog.json and /v1/models both
 # showed the entry. _MISSING_CATALOG_KEY keeps the no-catalog-file state
@@ -264,10 +264,10 @@ def known_models() -> dict[str, CatalogEntry]:
 
     Caching is two-tier. The discovery scan (importlib over script dirs)
     is cached for the process lifetime: new SCRIPTS still require a
-    restart. The merged result is memoized against catalog.json's
-    (path, mtime_ns), so catalog changes written by ANY process (the
-    admin pull subprocess, an operator's CLI pull/remove beside a running
-    supervisor) are picked up on the next call -- no restart, no manual
+    restart. The merged result is memoized against catalog.json's file
+    identity (path, dev, ino, size, mtime_ns, ctime_ns), so catalog changes
+    written by ANY process (the admin pull subprocess, an operator's CLI
+    pull/remove beside a running supervisor) are picked up on the next call -- no restart, no manual
     cache reset. The stat key is taken BEFORE the catalog read: if the
     file changes between stat and read we cache newer content under an
     older key, which the next call's key mismatch rebuilds away; the
@@ -345,7 +345,8 @@ def known_models() -> dict[str, CatalogEntry]:
 def _catalog_cache_key() -> _CatalogFileKey | None:
     """Identity of the catalog file the known_models merge was built against.
 
-    (path_str, mtime_ns) for an existing file; a stable sentinel when the
+    (path_str, dev, ino, size, mtime_ns, ctime_ns) for an existing file;
+    a stable sentinel when the
     file does not exist (fresh install -- cacheable until a file appears);
     None when the file exists but cannot be stat'ed (never cache: always
     rebuild rather than risk serving a snapshot we cannot validate).
@@ -436,7 +437,8 @@ def get_manifest(model_id: str) -> dict:
          see `_apply_manifest_overlays` for why that matters.
       2. The model script's module-level MANIFEST, cached by discovery.
 
-    Returns a copy so callers can mutate without affecting the source.
+    Returns a deep copy so callers can mutate it (nested capabilities
+    included) without affecting the source.
 
     Raises KeyError if the model is not in `known_models()`.
     """
@@ -470,4 +472,4 @@ def get_manifest(model_id: str) -> dict:
             discovered_manifest = (_discovered_manifests_cache or {}).get(model_id)
     # The script's own MANIFEST, from discovery: a script may alias its Model
     # to a shared runtime class, so backend_path's module need not carry it.
-    return dict(discovered_manifest or {})
+    return copy.deepcopy(discovered_manifest or {})

@@ -3,11 +3,10 @@
 This module is the single source of truth for every environment-variable
 knob muse reads: what its dotted config key is, what env var backs it,
 what type it coerces to, what its default is, which group it belongs to,
-and a human-readable help string. Later tasks build a layered Config
-object (env > config.yaml > defaults) on top of this registry; this task
-only establishes the registry, the coercion function, and the two
-bootstrap path helpers that the config file itself needs before it can
-be loaded.
+and a human-readable help string. It also holds the layered `Config`
+reader (env > config.yaml > defaults, lenient), the strict `set_value` /
+`unset_value` writers, `render_template` for `muse config generate`, and
+the two bootstrap path helpers that locate the config file itself.
 
 Import-light by design: stdlib + pathlib + yaml only (yaml is a core
 muse dependency). No torch, no fastapi, no transformers. `muse --help`

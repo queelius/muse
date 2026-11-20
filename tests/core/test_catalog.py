@@ -1696,6 +1696,24 @@ def test_get_manifest_falls_back_to_script_module_for_bundled(tmp_catalog):
     assert m["modality"] == "audio/speech"
 
 
+def test_get_manifest_copy_is_deep_for_script_models(tmp_catalog):
+    """Mutating the returned capabilities must not edit the script MANIFEST."""
+    from muse.core.catalog import get_manifest
+    m = get_manifest("kokoro-82m")
+    m.setdefault("capabilities", {})["injected"] = True
+    assert "injected" not in (get_manifest("kokoro-82m").get("capabilities") or {})
+
+
+def test_get_manifest_copy_is_deep_for_resolver_models(tmp_catalog):
+    from muse.core.catalog import get_manifest
+    _write_persisted_resolver_entry(
+        tmp_catalog, model_id="q3-gguf-q4", capabilities={"gguf_file": "q4.gguf"},
+    )
+    _reset_known_models_cache()
+    get_manifest("q3-gguf-q4")["capabilities"]["gguf_file"] = "edited.gguf"
+    assert get_manifest("q3-gguf-q4")["capabilities"]["gguf_file"] == "q4.gguf"
+
+
 # --- _read_catalog mtime cache ---------------------------------------------
 #
 # `get_manifest` runs on the gateway hot path (every request). Without
