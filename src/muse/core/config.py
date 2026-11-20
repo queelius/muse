@@ -191,6 +191,11 @@ SETTINGS: list[Setting] = [
             "float", 5.0, "server",
             "Per-worker httpx timeout (s) for /v1/models and /health fan-out.",
             minimum=0, minimum_exclusive=True),
+    Setting("server.worker_ready_timeout_seconds", "MUSE_WORKER_READY_TIMEOUT_SECONDS",
+            "float", 300.0, "server",
+            "Seconds a spawned worker may take to load its model and pass /health "
+            "(lazy load, admin enable/restart, monitor restart).",
+            minimum=0, minimum_exclusive=True),
     Setting("server.max_request_body_mb", "MUSE_MAX_REQUEST_BODY_MB",
             "int", 64, "server",
             "Global maximum request-body size (MB) accepted by the gateway.",

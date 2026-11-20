@@ -12,6 +12,14 @@ from muse.cli_impl.models_info_display import (
 from muse.core.catalog import CatalogEntry
 
 
+@pytest.fixture(autouse=True)
+def _no_host_gpu_query(monkeypatch):
+    """The admission-size line resolves `auto` models; never ask the host."""
+    monkeypatch.setattr(
+        "muse.cli_impl.supervisor._host_auto_uses_cuda", lambda: False,
+    )
+
+
 def _entry(model_id="kokoro-82m", modality="audio/speech", **kwargs):
     return CatalogEntry(
         model_id=model_id,
@@ -108,10 +116,10 @@ class TestFormatInfo:
                 "worker_uptime_seconds": 60 * 60 + 30 * 60 + 5,
                 "worker_status": "running",
                 "restart_count": 0,
-                "last_error": None,
             },
         )
         assert "loaded on worker port 9001" in out
+        assert "last error" not in out
         assert "pid:" in out
         assert "4711" in out
         assert "1h 30m" in out
@@ -252,6 +260,23 @@ class TestFormatInfo:
         assert "measured (cuda):" in out
         assert "weights 2.00 GB" in out
         assert "peak 3.00 GB at 1x1024" in out
+
+    def test_memory_section_shows_the_admission_size(self):
+        """The number admission uses: max(annotation, pool measurement)."""
+        catalog_known = {"k": _entry(
+            model_id="k", modality="audio/speech",
+            extra={"memory_gb": 2.5, "device": "cuda"},
+        )}
+        out = format_info(
+            "k",
+            catalog_known=catalog_known,
+            catalog_data={
+                "enabled": True,
+                "measurements": {"cuda": {"peak_bytes": 3 * 1024**3}},
+            },
+            online_status=None,
+        )
+        assert "admission size:  3.0 GB GPU" in out
 
     def test_unknown_model_returns_error(self):
         out = format_info(

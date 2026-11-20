@@ -48,7 +48,7 @@ inside the eviction failure path). The callable injection seam
 (`build_load_director`) injects its real worker spawn / shutdown callables.
 
 Bounded in-flight wait: waiters on an in-flight cold load call
-  event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS) rather than an
+  event.wait(timeout=self.inflight_wait_timeout_seconds) rather than an
   unbounded wait(). If the load-winner thread is killed non-cooperatively
   (SIGKILL/OOM during wait_for_ready), _abort/set() never runs and every
   waiter would block forever without a timeout. On timeout, the waiter
@@ -59,7 +59,6 @@ Bounded in-flight wait: waiters on an in-flight cold load call
 from __future__ import annotations
 
 import collections
-import collections.abc
 import logging
 import math
 import threading
@@ -77,15 +76,22 @@ from typing import Any, Callable, Literal
 from muse.core.catalog import _CATALOG_WRITE_LOCK, _read_catalog, _write_catalog
 
 # Maximum seconds a waiter will block on an in-flight Event before
-# re-entering the decision phase. The value must exceed the load timeout
-# used by wait_for_ready (120s in production) plus some margin so normal
-# loads never time out. 180s is 60s of headroom above the worst-case
-# wait_for_ready window. A waiter that times out re-decides: if the
-# winner succeeded it takes the hot path; if the winner failed it becomes
-# the new winner. This avoids permanent hang when a winner thread is
-# killed non-cooperatively (SIGKILL / OOM / hardware reset) without
-# introducing a tight spin loop.
-_INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
+# re-entering the decision phase: the worker readiness timeout
+# (`server.worker_ready_timeout_seconds`, which bounds the winner's
+# wait_for_ready) plus this margin, so normal loads never time out. A waiter
+# that times out re-decides: if the winner succeeded it takes the hot path;
+# if the winner failed it becomes the new winner. This avoids permanent hang
+# when a winner thread is killed non-cooperatively (SIGKILL / OOM / hardware
+# reset) without introducing a tight spin loop.
+_INFLIGHT_WAIT_MARGIN_SECONDS = 60.0
+
+
+def default_inflight_wait_timeout_seconds() -> float:
+    """The worker readiness timeout plus `_INFLIGHT_WAIT_MARGIN_SECONDS`."""
+    from muse.core import config
+    return float(config.get("server.worker_ready_timeout_seconds")) + (
+        _INFLIGHT_WAIT_MARGIN_SECONDS
+    )
 
 from muse.core.memory_probe import (
     auto_uses_cuda,
@@ -189,8 +195,8 @@ class EvictingReservation:
     """Accounting for one model whose worker shutdown is in progress.
 
     ``pool`` is the concrete accounting pool of the popped entry, or None for
-    a marker with no entry (an admin disable of an unloaded model, or a bare
-    marker inserted through the ``evicting`` view): an unknown pool stays
+    a marker with no entry (an admin disable of an unloaded model): an
+    unknown pool stays
     conservatively relevant to every pool's capacity-wait decision.
     ``memory_gb`` stays debited from configured budgets until the shutdown
     owner confirms the worker has stopped (then it drops to 0.0 while the
@@ -199,39 +205,6 @@ class EvictingReservation:
 
     pool: str | None = None
     memory_gb: float = 0.0
-
-
-class _EvictingIds(collections.abc.MutableSet):
-    """Set-shaped live view of ``LoadDirector._evicting``'s keys.
-
-    Keeps the historical ``director.evicting`` set surface (membership,
-    iteration, equality with a set, ``add``/``discard``) working on top of the
-    single id -> EvictingReservation mapping. ``add`` inserts an unknown-pool,
-    zero-memory marker.
-    """
-
-    __slots__ = ("_records",)
-
-    def __init__(self, records: dict[str, EvictingReservation]):
-        self._records = records
-
-    def __contains__(self, model_id: object) -> bool:
-        return model_id in self._records
-
-    def __iter__(self):
-        return iter(list(self._records))
-
-    def __len__(self) -> int:
-        return len(self._records)
-
-    def add(self, model_id: str) -> None:
-        self._records.setdefault(model_id, EvictingReservation())
-
-    def discard(self, model_id: str) -> None:
-        self._records.pop(model_id, None)
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({set(self._records)!r})"
 
 
 @dataclass(eq=False)
@@ -250,6 +223,9 @@ class ModelEviction:
     keep_blocked: bool
     was_blocked: bool
     free_before_gb: float | None
+    # The entry was a failed-rollback placeholder when claimed: a successful
+    # teardown is the cleanup that may lift its block (see finish_eviction).
+    failed_rollback: bool = False
     token: object = field(default_factory=object, repr=False)
 
 
@@ -295,6 +271,7 @@ class LoadDirector:
         gpu_headroom_gb: float = _DEFAULT_GPU_HEADROOM_GB,
         cpu_headroom_gb: float = _DEFAULT_CPU_HEADROOM_GB,
         cuda_available_fn: Callable[[], bool] | None = None,
+        inflight_wait_timeout_seconds: float | None = None,
     ):
         self.enable_fn = enable_fn
         self.disable_fn = disable_fn
@@ -313,6 +290,12 @@ class LoadDirector:
             "cpu_headroom_gb", cpu_headroom_gb,
         )
         self.cuda_available_fn = cuda_available_fn
+        # Bounded wait for another thread's cold load (see module docstring).
+        self.inflight_wait_timeout_seconds = (
+            float(inflight_wait_timeout_seconds)
+            if inflight_wait_timeout_seconds is not None
+            else default_inflight_wait_timeout_seconds()
+        )
 
         self.loaded: dict[str, LoadEntry] = {}
         self.in_flight_loads: dict[str, InFlightLoad] = {}
@@ -324,8 +307,7 @@ class LoadDirector:
         # the victim's pool), and configured-budget admission keeps debiting
         # the victim's declared memory until disable_fn confirms the worker
         # stopped (else another cold load could overlap the still-resident
-        # victim). `evicting` is a set-shaped view of its keys. Guarded by
-        # self.lock.
+        # victim). Guarded by self.lock.
         self._evicting: dict[str, EvictingReservation] = {}
         # Explicit admin disable is persistent: once claimed, new acquires
         # remain blocked until the matching enable path calls allow_model().
@@ -374,11 +356,6 @@ class LoadDirector:
         # capacity-waiters wake and re-decide. Never allowed to raise into
         # the caller (wrapped at each call site).
         self.capacity_listener: Callable[[], None] | None = None
-
-    @property
-    def evicting(self) -> _EvictingIds:
-        """Set-shaped live view of the model ids whose eviction is in flight."""
-        return _EvictingIds(self._evicting)
 
     @staticmethod
     def _validate_capacity_knob(
@@ -533,14 +510,14 @@ class LoadDirector:
                 #
                 # Bounded wait instead of unbounded wait().
                 # If the winner is killed non-cooperatively (SIGKILL/OOM
-                # during the ~120s wait_for_ready), _abort/set() never
+                # during wait_for_ready), _abort/set() never
                 # runs. With no timeout, every waiter blocks forever.
                 # With a timeout, the waiter wakes and re-enters _decide:
                 # if the winner succeeded the model will be hot; if the
                 # winner failed there will be no LoadEntry and this
                 # thread becomes the new winner. This breaks the permanent
                 # hang without introducing a tight spin loop because each
-                # iteration is bounded by _INFLIGHT_WAIT_TIMEOUT_SECONDS.
+                # iteration is bounded by self.inflight_wait_timeout_seconds.
                 claim = decision[1]
                 self._wait_for_in_flight(model_id, claim)
                 # Loop and re-decide. Either the entry is now hot (winner
@@ -576,6 +553,30 @@ class LoadDirector:
                 claim=decision[1],
                 initial_refcount=initial_refcount,
             )
+
+    def try_acquire_loaded(self, model_id: str) -> int | None:
+        """The gateway's hot fast path: bump a resident entry, never load.
+
+        Returns the worker port after taking a refcount when ``model_id``
+        is resident and nothing else (block, eviction, worker transition)
+        owns it; otherwise None and changes nothing, and the caller takes
+        the full ``acquire`` path, which reports the precise state. Never
+        does I/O, so it is safe to call on the event loop.
+        """
+        with self.lock:
+            if (
+                model_id in self._blocked_models
+                or model_id in self._failed_rollbacks
+                or model_id in self._evicting
+                or model_id in self._worker_transitions
+            ):
+                return None
+            entry = self.loaded.get(model_id)
+            if entry is None:
+                return None
+            entry.refcount += 1
+            entry.last_touched_at = time.monotonic()
+            return entry.worker_port
 
     def release(self, model_id: str) -> None:
         """Decrement refcount + bump last_touched_at.
@@ -804,6 +805,7 @@ class LoadDirector:
                 keep_blocked=keep_blocked,
                 was_blocked=was_blocked,
                 free_before_gb=free_before_gb,
+                failed_rollback=model_id in self._failed_rollbacks,
             )
             self._eviction_claims[model_id] = claim
             return claim
@@ -850,7 +852,9 @@ class LoadDirector:
         still own its memory, and logs a ``disable_fn_raised`` decision.
         Explicit-disable blocking is intentionally not cleared here: the admin
         wrapper decides from the catalog's committed state whether failure
-        should remain fail-closed or restore allowance.
+        should remain fail-closed or restore allowance. The one block a
+        successful teardown lifts is a failed rollback's, when the claim is
+        not an admin disable and the catalog still has the model enabled.
 
         A successful eviction of a loaded entry emits one ``model_evict``
         telemetry event (never allowed to raise). ``notify=False`` skips the
@@ -858,6 +862,16 @@ class LoadDirector:
         own exit points.
         """
         evicted_entry: LoadEntry | None = None
+        # A failed rollback blocked the model only until its worker was
+        # cleaned up. A successful non-admin teardown is that cleanup, so the
+        # block goes too unless the catalog says the model is disabled
+        # (read outside the lock; any read failure keeps the block).
+        lift_rollback_block = (
+            success
+            and claim.failed_rollback
+            and claim.reason != "admin_disabled"
+            and self._catalog_enabled(claim.model_id)
+        )
         with self.lock:
             if self._eviction_claims.get(claim.model_id) is not claim:
                 return False
@@ -867,6 +881,8 @@ class LoadDirector:
                 self.loaded.setdefault(claim.model_id, entry)
             elif success:
                 self._failed_rollbacks.discard(claim.model_id)
+                if lift_rollback_block:
+                    self._blocked_models.discard(claim.model_id)
 
             self._evicting.pop(claim.model_id, None)
 
@@ -934,6 +950,97 @@ class LoadDirector:
             self._fire_capacity_listener()
         return True
 
+    def forget_worker(
+        self, model_ids: list[str], *, worker_port: int, process_released: bool,
+    ) -> list[str]:
+        """Stop routing to a worker the supervisor monitor gave up on.
+
+        Only entries that still point at ``worker_port`` are touched; a
+        model already moved to another worker, or one an eviction or worker
+        transition currently owns, is left to that owner. When the dead
+        worker's process was released, each entry is settled through the
+        normal eviction claim (decision log, telemetry, capacity wake) so
+        the next request cold-loads a replacement. When the process could
+        not be released it may still hold memory: the entry stays
+        accounted but is blocked as a failed rollback until a cleanup
+        teardown succeeds. Returns the model ids that were changed.
+        """
+        claims: list[ModelEviction] = []
+        blocked: list[str] = []
+        with self.lock:
+            for model_id in model_ids:
+                entry = self.loaded.get(model_id)
+                if (
+                    entry is None
+                    or entry.worker_port != worker_port
+                    or model_id in self._eviction_claims
+                    or model_id in self._worker_transitions
+                ):
+                    continue
+                if process_released:
+                    claims.append(self._begin_eviction_locked(
+                        model_id,
+                        entry=entry,
+                        reason="worker_dead",
+                        keep_blocked=True,
+                        was_blocked=model_id in self._blocked_models,
+                    ))
+                else:
+                    entry.refcount = 0
+                    self._blocked_models.add(model_id)
+                    self._failed_rollbacks.add(model_id)
+                    blocked.append(model_id)
+        for claim in claims:
+            self.finish_eviction(claim, success=True)
+        if blocked:
+            self._fire_capacity_listener()
+        return [claim.model_id for claim in claims] + blocked
+
+    def adopt_worker(self, model_id: str, *, worker_port: int, manifest: dict) -> bool:
+        """Account a worker the supervisor restarted outside a director load.
+
+        A revived dead worker comes back through the monitor, not through
+        ``acquire``; without an entry its memory would be invisible to
+        admission and the idle sweeper. The entry starts idle (refcount 0).
+        Returns False when the model already has an entry or another owner
+        (load, eviction, transition, block) is in charge of it.
+        """
+        memory_gb = self._memory_requirement_gb(manifest, model_id)
+        pool = self._resolve_pool_device(
+            declared_device((manifest or {}).get("capabilities")),
+        )
+        with self.lock:
+            if (
+                model_id in self.loaded
+                or model_id in self.in_flight_loads
+                or model_id in self._evicting
+                or model_id in self._eviction_claims
+                or model_id in self._worker_transitions
+                or model_id in self._blocked_models
+            ):
+                return False
+            now = time.monotonic()
+            self.loaded[model_id] = LoadEntry(
+                model_id=model_id,
+                worker_port=worker_port,
+                memory_gb=memory_gb,
+                refcount=0,
+                last_touched_at=now,
+                loaded_at=now,
+                pool=pool,
+            )
+            self._inflight_epoch += 1
+            return True
+
+    @staticmethod
+    def _catalog_enabled(model_id: str) -> bool:
+        """Whether the catalog leaves ``model_id`` enabled (False on error)."""
+        try:
+            entry = _read_catalog().get(model_id)
+        except Exception:  # noqa: BLE001
+            return False
+        return not isinstance(entry, dict) or bool(entry.get("enabled", True))
+
     def _fire_capacity_listener(self) -> None:
         """Fire capacity_listener, if set, swallowing any exception.
 
@@ -950,10 +1057,11 @@ class LoadDirector:
             logger.warning("capacity_listener raised; ignoring", exc_info=True)
 
     def status(self) -> dict[str, dict[str, Any]]:
-        """Snapshot of currently-loaded models for /v1/models lookup.
+        """Snapshot of currently-loaded models (test introspection).
 
         Each value is `{"loaded": True, "worker_port", "last_touched_at",
-        "refcount"}`. Models not currently loaded are absent.
+        "refcount"}`. Models not currently loaded are absent. No production
+        caller: /v1/models and the admin routes read `loaded` directly.
         """
         with self.lock:
             return {
@@ -1157,10 +1265,19 @@ class LoadDirector:
             device = resolve_model_placement(model_id, snapshot, entry=entry).device
         except Exception as exc:
             failure = exc
-        return self._decide_locked(
-            model_id, manifest=manifest, bump_refcount=bump_refcount,
-            native_device=device, prepared=(snapshot, entry), placement_error=failure,
-        )
+        from muse.admin.operations import OperationError
+        try:
+            return self._decide_locked(
+                model_id, manifest=manifest, bump_refcount=bump_refcount,
+                native_device=device, prepared=(snapshot, entry), placement_error=failure,
+            )
+        except OperationError as exc:
+            if exc.code == "model_placement_changed":
+                # Retryable, but no release or eviction will ever wake a
+                # gateway waiter parked on it; wake it now so it re-decides
+                # against the edited manifest/catalog straight away.
+                self._fire_capacity_listener()
+            raise
 
     def _decide_locked(
         self, model_id: str, *, manifest: dict, bump_refcount: bool,
@@ -1174,8 +1291,10 @@ class LoadDirector:
             bumped under the lock (when bump_refcount=True); port is the
             worker_port read under the same lock (no TOCTOU window for
             an evictor to race in).
-          ("wait",): another thread owns the load; caller awaits the Event.
-          ("load",): we just claimed ownership; run load phase + commit.
+          ("wait", claim): another thread owns the load; caller awaits the
+            claim's Event (`_wait_for_in_flight`).
+          ("load", claim): we just claimed ownership (an InFlightLoad);
+            run the load phase + commit.
           ("prepare_native", manifest): prepare a native cold load outside
             this lock, then repeat classification and configuration checks.
           ("evict_and_retry", shortfall_gb, device, required_gb): the
@@ -1190,12 +1309,21 @@ class LoadDirector:
         request accounting) and False for warmup (load idempotently
         without skewing LRU ordering or pinning the model).
 
-        On the ("load",) return path, an Event has been stashed in
+        On the ("load", claim) return path, the claim has been stashed in
         self.in_flight_loads[model_id]. The caller is responsible for
-        either committing (success) or popping + setting the Event
-        (failure). _commit and _abort cover both cases.
+        either committing (success) or popping + setting its Event
+        (failure); _load_and_commit and _abort cover both cases.
         """
         with self.lock:
+            if model_id in self._failed_rollbacks:
+                from muse.admin.operations import OperationError
+                raise OperationError(
+                    "model_cleanup_required",
+                    f"model {model_id!r} has a worker that could not be "
+                    "cleanly stopped; disable it to retry the cleanup",
+                    status=503,
+                    retryable=False,
+                )
             if model_id in self._blocked_models:
                 from muse.admin.operations import OperationError
                 raise OperationError(
@@ -1329,7 +1457,7 @@ class LoadDirector:
         identity compare-and-swap; a still-live owner produces a retryable
         timeout instead of spawning a duplicate worker behind its back.
         """
-        if claim.event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS):
+        if claim.event.wait(timeout=self.inflight_wait_timeout_seconds):
             return
 
         try:
@@ -1342,7 +1470,7 @@ class LoadDirector:
 
         expired = (
             time.monotonic() - claim.claimed_at
-            >= _INFLIGHT_WAIT_TIMEOUT_SECONDS
+            >= self.inflight_wait_timeout_seconds
         )
         reclaimed = False
         with self.lock:
@@ -1847,6 +1975,8 @@ class LoadDirector:
                     free_before_gb = self._free_for_device(device)
                     # LRU never changes an explicit admin block: a blocked
                     # entry (e.g. a restored failed disable) stays blocked.
+                    # Only a failed-rollback block lifts once this teardown
+                    # succeeds (finish_eviction).
                     claim = self._begin_eviction_locked(
                         victim.model_id,
                         entry=victim,
@@ -1936,12 +2066,20 @@ class LoadDirector:
                         device=device,
                     )
                 cumulative_freed_gb += freed_this_round
+            except BaseException:
+                # An unexpected exception propagating (from the poll after a
+                # confirmed shutdown, or a BaseException out of disable_fn,
+                # where the worker may still be alive and its entry is
+                # restored). This loop's own exit-point wake is skipped, so
+                # settle with notify: a confirmed shutdown freed capacity
+                # that parked requests must get a chance to use.
+                if not settled:
+                    settled = True
+                    self.finish_eviction(claim, success=disabled, notify=True)
+                raise
             finally:
                 if not settled:
-                    # Normal success, or an unexpected exception propagating
-                    # (from the poll after a confirmed shutdown, or a
-                    # BaseException out of disable_fn, where the worker may
-                    # still be alive and its entry is restored).
+                    # Normal success.
                     self.finish_eviction(claim, success=disabled, notify=False)
 
         # Loop exited normally: cumulative_freed_gb >= shortfall_gb, i.e.
@@ -2020,7 +2158,7 @@ class LoadDirector:
 
         Note this is the POOL, not the measurements bucket key: "mps" pools
         against host RAM here but keeps its own "mps" bucket in
-        _record_observed_peak (matching what `muse models probe` writes).
+        observed_peak (matching what `muse models probe` writes).
         """
         normalized = str(device or "auto").lower()
         if normalized not in ("auto", ""):

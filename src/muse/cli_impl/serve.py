@@ -10,14 +10,6 @@ from __future__ import annotations
 from muse.cli_impl.supervisor import run_supervisor
 
 
-def run_serve(*, host: str, port: int, device: str, **_: object) -> int:
-    """Thin wrapper delegating to the supervisor.
-
-    Kept as a separate function (instead of pointing `muse.cli._cmd_serve`
-    directly at `run_supervisor`) so future ergonomic flags (gateway
-    auth, TLS, etc.) have a natural home.
-
-    **_ absorbs deprecated kwargs (modalities, models) that older callers
-    might still pass; they're silently ignored.
-    """
+def run_serve(*, host: str, port: int, device: str) -> int:
+    """Run the supervisor; the home for future serve-only flags (auth, TLS)."""
     return run_supervisor(host=host, port=port, device=device)

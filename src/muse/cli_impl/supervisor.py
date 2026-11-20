@@ -77,6 +77,10 @@ logger = logging.getLogger(__name__)
 _SUPERVISOR_PID_ENV = "MUSE_SUPERVISOR_PID"
 _WORKER_NONCE_ENV = "MUSE_WORKER_NONCE"
 _WORKER_NONCE_HEADER = "X-Muse-Worker-Nonce"
+# Secrets a worker never needs. Workers run third-party model code
+# (trust_remote_code models, arbitrary pip_extras), so the admin bearer
+# token stays in the supervisor.
+_WORKER_SECRET_ENV = ("MUSE_ADMIN_TOKEN",)
 _WORKER_LOG_READ_BYTES = 16 * 1024
 _WORKER_LOG_LINE_BYTES = 64 * 1024
 _WORKER_LOG_TRUNCATION = b"...[truncated]\n"
@@ -106,6 +110,10 @@ class WorkerSpec:
     failure_count: int = 0
     last_spawn_at: float = 0.0
     status: str = "pending"
+    # True only when the monitor declared this spec dead because its restart
+    # budget ran out. Other dead specs (retained after a teardown that could
+    # not be proven, or a failed spawn) must never be revived.
+    restart_exhausted: bool = False
     # Opaque token for the generation that owns an in-flight transition.
     # The waitable ownership record lives in SupervisorState; this marker
     # lets routing/monitor code cheaply exclude the spec during slow I/O.
@@ -505,6 +513,8 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             cmd.extend(["--model", m])
         logger.info("spawning worker: %s", " ".join(cmd))
         child_env = os.environ.copy()
+        for name in _WORKER_SECRET_ENV:
+            child_env.pop(name, None)
         child_env[_SUPERVISOR_PID_ENV] = str(os.getpid())
         worker_nonce = secrets.token_urlsafe(32)
         child_env[_WORKER_NONCE_ENV] = worker_nonce
@@ -671,18 +681,30 @@ def _require_worker_generation_alive(spec: WorkerSpec, proc: Any) -> None:
         )
 
 
+def worker_ready_timeout_seconds() -> float:
+    """Seconds a spawned worker may take to pass /health.
+
+    One setting (`server.worker_ready_timeout_seconds`) bounds every
+    readiness wait: lazy load, admin enable/restart and monitor restart.
+    """
+    return float(config.get("server.worker_ready_timeout_seconds"))
+
+
 def wait_for_ready(
-    *, port: int, timeout: float = 60.0, poll_interval: float = 0.5,
+    *, port: int, timeout: float | None = None, poll_interval: float = 0.5,
     stop_event: "threading.Event | None" = None,
     expected_nonce: str | None = None,
     worker: WorkerSpec | None = None,
 ) -> None:
     """Block until http://127.0.0.1:<port>/health returns 200, or timeout.
 
+    `timeout` defaults to `worker_ready_timeout_seconds()`.
     Raises TimeoutError if the worker never becomes ready. If `stop_event`
     is supplied, shutdown aborts the wait promptly instead of leaving an
     executor thread parked for the full model-load timeout.
     """
+    if timeout is None:
+        timeout = worker_ready_timeout_seconds()
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/health"
     last_err: Exception | None = None
@@ -764,7 +786,7 @@ def _attempt_restart(
     max_restarts: int = _MAX_RESTARTS,
     backoff_base: float = _BACKOFF_BASE,
     backoff_cap: float = _BACKOFF_CAP,
-    ready_timeout: float = 60.0,
+    ready_timeout: float | None = None,
     log_hub: "Any | None" = None,
 ) -> None:
     """Terminate existing process if alive, wait backoff, respawn.
@@ -777,6 +799,10 @@ def _attempt_restart(
     the documented budget: the failure branch increments it, while a
     replacement that reaches readiness resets it to zero.
 
+    `ready_timeout` defaults to `worker_ready_timeout_seconds()`, the same
+    budget the original load had: a model that loads in 60-120s must not be
+    killed by its own restart.
+
     `log_hub` is forwarded to `spawn_worker` so a respawned worker keeps
     piping its stdout into the LogHub when telemetry is enabled (mirrors
     the admin `_restart_worker_inplace` path in `muse.admin.operations`).
@@ -787,6 +813,7 @@ def _attempt_restart(
             spec.port, max_restarts,
         )
         spec.status = "dead"
+        spec.restart_exhausted = True
         return
 
     # Exponential backoff, capped
@@ -818,7 +845,10 @@ def _attempt_restart(
         spawn_worker(spec, device=spec.device, log_hub=log_hub)
         wait_for_ready(
             port=spec.port,
-            timeout=ready_timeout,
+            timeout=(
+                ready_timeout if ready_timeout is not None
+                else worker_ready_timeout_seconds()
+            ),
             stop_event=stop_event,
             expected_nonce=spec.worker_nonce,
             worker=spec,
@@ -838,6 +868,93 @@ def _attempt_restart(
         _shutdown_workers([spec])
         spec.restart_count += 1
         spec.status = "unhealthy"
+
+
+def _reconcile_dead_worker(state: "SupervisorState", spec: WorkerSpec) -> None:
+    """Tell the director a worker is gone for good (the monitor gave up).
+
+    Without this the director keeps the dead worker's LoadEntry and every
+    request is forwarded to a closed port (502) indefinitely.
+    """
+    director = getattr(state, "director", None)
+    forget = getattr(director, "forget_worker", None)
+    if forget is None:
+        return
+    with spec.process_lock:
+        released = spec.process is None
+    try:
+        forget(list(spec.models), worker_port=spec.port, process_released=released)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "could not reconcile dead worker on port %d with the director",
+            spec.port, exc_info=True,
+        )
+
+
+def _adopt_restarted_worker(state: "SupervisorState", spec: WorkerSpec) -> None:
+    """Account a restarted worker whose models the director no longer tracks.
+
+    Normally a no-op (the director kept its entries through the restart);
+    it matters for a worker revived after being declared dead.
+    """
+    director = getattr(state, "director", None)
+    adopt = getattr(director, "adopt_worker", None)
+    loaded = getattr(director, "loaded", None)
+    if adopt is None or not isinstance(loaded, dict):
+        return
+    for model_id in list(spec.models):
+        with director.lock:
+            if model_id in loaded:
+                continue
+        try:
+            manifest = backfill_manifest_memory(
+                get_manifest(model_id), model_id, supervisor_device=state.device,
+            )
+            adopt(model_id, worker_port=spec.port, manifest=manifest)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "could not account restarted worker %r on port %d",
+                model_id, spec.port, exc_info=True,
+            )
+
+
+def revive_worker(state: "SupervisorState", spec: WorkerSpec) -> bool:
+    """Give a dead or process-less spec a fresh restart budget.
+
+    For the admin restart route: the spec goes back to "unhealthy" with
+    ``restart_count`` reset, and the monitor respawns it on its next tick
+    (its director entry is re-created once it is ready). Returns False,
+    changing nothing, when the spec is no longer tracked, an operation
+    owns it, it still has a live process (signal that one instead), or it
+    is dead for any reason other than the monitor exhausting its restart
+    budget: a spec retained dead after an unproven teardown or a failed
+    spawn stays dead unless no director is bound.
+
+    (The monitor's give-up removes the spec's models from
+    ``director.loaded`` when its process was released, so "every model is
+    still loaded" cannot identify a revivable spec; ``restart_exhausted``
+    does.)
+    """
+    with state.lock:
+        if not any(item is spec for item in state.workers):
+            return False
+        if spec.job_id is not None:
+            return False
+        with spec.process_lock:
+            has_process = spec.process is not None
+        if spec.status != "dead" and has_process:
+            return False
+        if (
+            spec.status == "dead"
+            and not spec.restart_exhausted
+            and getattr(state, "director", None) is not None
+        ):
+            return False
+        spec.restart_exhausted = False
+        spec.status = "unhealthy"
+        spec.restart_count = 0
+        spec.failure_count = _FAILURE_THRESHOLD
+        return True
 
 
 def _monitor_workers(
@@ -972,6 +1089,11 @@ def _monitor_workers(
                         max_restarts=max_restarts,
                         log_hub=getattr(state, "log_hub", None),
                     )
+                    if state is not None and not stop_event.is_set():
+                        if spec.status == "dead":
+                            _reconcile_dead_worker(state, spec)
+                        elif spec.status == "running":
+                            _adopt_restarted_worker(state, spec)
                 finally:
                     if operation is not None:
                         with state.lock:
@@ -1661,15 +1783,37 @@ def _measurement_key(device: str, auto_cuda_available: "bool | None") -> str:
     return normalized
 
 
-def _declared_or_measured(
-    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
-) -> tuple[bool | None, float, str]:
-    """Tier 1 of the sizing ladder: the entry's own estimate.
+@dataclass(frozen=True)
+class MemoryEstimate:
+    """Tier 1 of the sizing ladder for one catalog entry.
 
-    Returns (True, gb, device) for a usable `capabilities.memory_gb` or
-    probe measurement, (False, 0.0, device) for a malformed declaration
-    (which must not be replaced by a fallback), and (None, 0.0, device)
-    when the entry has neither.
+    ``status`` is True for a usable estimate, False for a malformed
+    `capabilities.memory_gb` (which must not be replaced by a fallback),
+    None when the entry has neither a declaration nor a measurement.
+    ``source`` says which number won: "declared" or "measured".
+    """
+
+    status: bool | None
+    gb: float
+    device: str
+    source: str | None = None
+
+
+def memory_estimate(
+    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
+) -> MemoryEstimate:
+    """The entry's own size: max(declared memory_gb, measured peak).
+
+    One precedence for admission, servability, `muse models list` and
+    `muse models info` (ruling R13). A declared `capabilities.memory_gb` is a
+    floor: a probe or lazy-load measurement for the pool the model loads
+    into raises it, so estimates self-heal upward. Only the resolved pool's
+    measurement counts against a declaration ("auto" resolves to the pool
+    `auto_uses_cuda` picks; None asks the live host), so a stale
+    cross-device probe never re-sizes a declared model. With no declaration
+    the resolved pool's measurement is preferred, else any device's (whose
+    recorded device is then adopted, so a bundled GPU model probed on cuda
+    is sized against the cuda pool).
     """
     manifest = catalog_entry.get("manifest", {}) or {}
     if not isinstance(manifest, dict):
@@ -1683,68 +1827,65 @@ def _declared_or_measured(
     measurements = catalog_entry.get("measurements", {}) or {}
     if not isinstance(measurements, dict):
         measurements = {}
-    # Probe records key by the resolved device (e.g. "cpu" / "cuda")
-    # so we look up by the same key; "auto" by the pool it resolves to on
-    # this host (`_measurement_key`), and only when there is a measurement
-    # to pick (no host query for a declared or unmeasured entry).
-    measurement_key = (
-        _measurement_key(device, auto_cuda_available)
-        if measurements and declared is None else device
-    )
-    measurement = measurements.get(measurement_key) or {}
-    if not isinstance(measurement, dict):
-        measurement = {}
-    measured = measurement.get("peak_bytes")
-    if measured is not None and device in ("auto", ""):
-        # Report the pool the measurement belongs to, as the cross-device
-        # recovery below does.
-        device = str(measurement.get("device") or measurement_key).lower()
-
-    # Bundled models have no persisted manifest in catalog.json, so `device`
-    # falls back to "cpu" above even when the probe ran on cuda. If the
-    # manifest-derived device has no measurement but the catalog has one for
-    # another device, use it and adopt the measurement's own recorded device
-    # so the capacity check below picks the right memory pool. Without this,
-    # `muse models probe` never clears a bundled GPU model's "no memory
-    # estimate" flag (the probe writes measurements.cuda; the lookup reads
-    # measurements.cpu).
-    #
-    # Gate on `declared is None`: this recovery only matters when there is no
-    # declared memory_gb (the bundled-model case). A model that DOES declare
-    # memory_gb already trusts its manifest device below, so we must not let a
-    # stale cross-device measurement (e.g. a CPU probe of a declared-cuda model
-    # pulled with --no-probe) overwrite that device and mis-size the GPU model
-    # against the CPU pool.
-    if measured is None and declared is None:
-        for dev_key, rec in measurements.items():
-            if not isinstance(rec, dict):
-                continue
-            peak = rec.get("peak_bytes")
-            if peak:
-                measured = peak
-                device = str(rec.get("device") or dev_key).lower() or device
-                break
 
     if declared is not None:
-        if not isinstance(declared, bool):
-            try:
-                declared_gb = float(declared)
-            except (TypeError, ValueError):
-                declared_gb = math.nan
-            if math.isfinite(declared_gb) and declared_gb >= 0.0:
-                return True, declared_gb, device
-        # An explicit malformed declaration must not be silently replaced by
-        # a smaller on-disk fallback while the unchanged manifest continues
-        # to hand the bad value to the director.
-        return False, 0.0, device
-    if measured is not None and not isinstance(measured, bool):
+        if isinstance(declared, bool):
+            return MemoryEstimate(False, 0.0, device)
         try:
-            measured_gb = float(measured) / (1024 ** 3)
+            declared_gb = float(declared)
         except (TypeError, ValueError):
-            measured_gb = math.nan
-        if math.isfinite(measured_gb) and measured_gb > 0.0:
-            return True, measured_gb, device
-    return None, 0.0, device
+            declared_gb = math.nan
+        if not (math.isfinite(declared_gb) and declared_gb >= 0.0):
+            # An explicit malformed declaration must not be silently
+            # replaced by a smaller on-disk fallback while the unchanged
+            # manifest continues to hand the bad value to the director.
+            return MemoryEstimate(False, 0.0, device)
+        measured_gb = None
+        if measurements:
+            placed = str(catalog_entry.get("device_override") or device).lower()
+            measured_gb = _measurement_gb(
+                measurements.get(_measurement_key(placed, auto_cuda_available)),
+            )
+        if measured_gb is not None and measured_gb > declared_gb:
+            return MemoryEstimate(True, measured_gb, device, "measured")
+        return MemoryEstimate(True, declared_gb, device, "declared")
+
+    # Probe records key by the resolved device (e.g. "cpu" / "cuda"), so
+    # look up by the same key; "auto" by the pool it resolves to on this
+    # host, and only when there is a measurement to pick (no host query
+    # for an unmeasured entry).
+    measurement_key = (
+        _measurement_key(device, auto_cuda_available) if measurements else device
+    )
+    measurement = measurements.get(measurement_key)
+    measured_gb = _measurement_gb(measurement)
+    if measured_gb is not None:
+        if device in ("auto", ""):
+            # Report the pool the measurement belongs to.
+            device = str(measurement.get("device") or measurement_key).lower()
+        return MemoryEstimate(True, measured_gb, device, "measured")
+
+    # Bundled models have no persisted manifest in catalog.json, so `device`
+    # falls back to "auto" above even when the probe ran on cuda. If the
+    # resolved pool has no measurement but another device does, use it and
+    # adopt the measurement's own recorded device so the capacity check
+    # picks the right memory pool. Without this, `muse models probe` never
+    # clears a bundled GPU model's "no memory estimate" flag.
+    for dev_key, rec in measurements.items():
+        gb = _measurement_gb(rec)
+        if gb is not None:
+            device = str(rec.get("device") or dev_key).lower() or device
+            return MemoryEstimate(True, gb, device, "measured")
+    return MemoryEstimate(None, 0.0, device)
+
+
+def _declared_or_measured(
+    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
+) -> tuple[bool | None, float, str]:
+    """Tier 1 of the sizing ladder as (status, gb, device); see
+    `memory_estimate`."""
+    estimate = memory_estimate(catalog_entry, auto_cuda_available=auto_cuda_available)
+    return estimate.status, estimate.gb, estimate.device
 
 
 def _repo_key(repo: Any) -> str | None:
@@ -1878,10 +2019,10 @@ def _has_memory_data(
 
     Sizing ladder, in order of preference (CLAUDE.md "Lazy load + LRU
     eviction" uses the same numbering):
-      1. `manifest.capabilities.memory_gb` annotation (hand-set or
-         from a script's MANIFEST), else
-         `measurements.<device>.peak_bytes` from a probe run / self-healed
-         lazy-load observation.
+      1. the larger of the `manifest.capabilities.memory_gb` annotation
+         (hand-set or from a script's MANIFEST) and the
+         `measurements.<pool>.peak_bytes` from a probe run / self-healed
+         lazy-load observation (`memory_estimate`).
       2. for a manifest with `capabilities.base_model` (a LoRA adapter),
          the base catalog entry's probe measurement (this entry's pool
          first) or declared memory_gb, the base found by muse id or by
@@ -2158,11 +2299,25 @@ def validate_catalog_at_boot(
             state.unservable_reasons[model_id] = reason
 
 
+def servability_capacity(
+    state: SupervisorState, *, memory_probe: "Any | None" = None,
+) -> tuple[float, "float | None", bool]:
+    """One live capacity reading for `revalidate_servability(capacity=...)`.
+
+    A listing that re-checks many models probes psutil/NVML once instead of
+    once per model.
+    """
+    if memory_probe is None:
+        memory_probe = _MemoryProbeAdapter()
+    return _capacity_pools(memory_probe, **_director_capacity_knobs(state.director))
+
+
 def revalidate_servability(
     state: SupervisorState,
     model_id: str,
     *,
     memory_probe: "Any | None" = None,
+    capacity: "tuple[float, float | None, bool] | None" = None,
 ) -> str | None:
     """Re-derive one model's unservable verdict against the LIVE catalog.
 
@@ -2182,13 +2337,12 @@ def revalidate_servability(
     working set before 503'ing. The gateway 503s such a model directly.
 
     Scoped to one model: no full-catalog walk. Reads live memory via the
-    probe (defaults to the production adapter; tests inject a MagicMock).
+    probe (defaults to the production adapter; tests inject a MagicMock),
+    unless the caller passes a `servability_capacity` reading.
     Returns the current reason (None when now servable). Mutations to
     `state.unservable_reasons` are made under `state.lock`; the probe read
     and `_servability_reason` run outside the lock.
     """
-    if memory_probe is None:
-        memory_probe = _MemoryProbeAdapter()
     catalog = _read_catalog()
     entry = catalog.get(model_id)
     if entry is None:
@@ -2200,9 +2354,9 @@ def revalidate_servability(
         with state.lock:
             state.unservable_reasons.pop(model_id, None)
         return None
-    cpu_available_gb, gpu_available_gb, cuda_available = _capacity_pools(
-        memory_probe, **_director_capacity_knobs(state.director),
-    )
+    if capacity is None:
+        capacity = servability_capacity(state, memory_probe=memory_probe)
+    cpu_available_gb, gpu_available_gb, cuda_available = capacity
     reason = model_load_blocker(model_id, entry) or _servability_reason(
         _entry_with_live_manifest(model_id, entry),
         cpu_available_gb=cpu_available_gb,
@@ -2236,7 +2390,8 @@ def backfill_manifest_memory(
        ("fits anywhere", never evicting). We fill it from the sizing ladder
        (`_has_memory_data`: probe measurement, else the muse-id base's
        estimate for a manifest with base_model, else on-disk weights size).
-       An explicit declared `memory_gb` always wins.
+       A declared `memory_gb` is a floor that a larger measurement for the
+       model's pool raises (`memory_estimate`).
 
     2. **device** -- An operator `set-device` pin (catalog `device_override`)
        decides where the worker actually loads, mirroring load_backend's
@@ -2259,7 +2414,18 @@ def backfill_manifest_memory(
     out = manifest
     caps = manifest.get("capabilities", {}) or {}
 
-    if entry is not None and caps.get("memory_gb") is None:
+    if entry is not None and caps.get("memory_gb") is not None:
+        # A declaration is a floor: a larger measurement for the pool the
+        # model loads into wins (`memory_estimate`), so probes and observed
+        # peaks reach admission and eviction too. A malformed declaration
+        # passes through for the director to reject.
+        estimate = memory_estimate(dict(entry, manifest=manifest))
+        if estimate.status and estimate.source == "measured":
+            out = dict(out)
+            out_caps = dict(caps)
+            out_caps["memory_gb"] = estimate.gb
+            out["capabilities"] = out_caps
+    elif entry is not None:
         gb: float | None = None
         # A manifest layered on a base (a LoRA adapter) is sized from its
         # muse-id base's estimate when it has no probe measurement of its
@@ -2548,11 +2714,15 @@ def _init_telemetry(state: SupervisorState) -> None:
         retention_days = config.get("telemetry.retention_days")
 
         def _prune_loop() -> None:
-            while not state.stop_event.wait(3600):
+            # Prune at startup too: a supervisor restarted within the hour
+            # would otherwise never prune.
+            while True:
                 try:
                     store.prune(time.time() - float(retention_days) * 86400)
                 except Exception:
                     logger.warning("telemetry prune failed", exc_info=True)
+                if state.stop_event.wait(3600):
+                    return
 
         prune_thread = threading.Thread(
             target=_prune_loop,

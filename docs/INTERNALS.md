@@ -164,9 +164,12 @@ A model's load size comes from a four-step sizing ladder (in
 `supervisor.py:_has_memory_data`; its docstring uses the same numbering),
 most-honest first:
 
-1. `capabilities.memory_gb` (declared annotation), or
-   `measurements.<device>.peak_bytes` from a prior probe -- the
-   authoritative numbers.
+1. The larger of `capabilities.memory_gb` (declared annotation) and
+   `measurements.<pool>.peak_bytes` from a probe or an observed lazy-load
+   peak for the pool the model loads into (`supervisor.memory_estimate`,
+   ruling R13): a declaration is a floor that measurements raise, never a
+   ceiling. With no declaration, the pool's measurement, else another
+   device's.
 2. *Base chase:* when neither exists and the manifest declares
    `capabilities.base_model` (a LoRA adapter, whose own dir holds only the
    adapter), the ladder sizes it from that base's catalog entry
@@ -416,7 +419,7 @@ Configuration:
 Two gateway-side mechanisms (spec docs/superpowers/specs/2026-07-08-request-queueing-design.md), both waiting ON the event loop (never in pool threads):
 
 - **Per-model concurrency cap:** `capabilities.max_concurrency` (else `server.default_max_concurrency`, default 0 = unlimited = no gating). Excess requests park FIFO on a per-model asyncio.Semaphore in `muse.cli_impl.queueing.ConcurrencyGate`. The CPU box's 32B runs with `max_concurrency: 1`.
-- **Capacity-wait:** the LoadDirector tags its capacity 503 `retryable=True` when the failure is TRANSIENT -- any of the three in-flight states holds: an in-use loaded model (refcount > 0) blocks eviction, another model's cold load is in flight (its reservation made the fit fail; v0.57.1), or an eviction is mid-flight (`director.evicting`: victim popped from `loaded` but disable_fn still shutting the worker down, so the director looks idle while VRAM is still occupied; v0.57.2). The gateway parks on `CapacityNotifier` (generation asyncio.Event, fired threadsafe by the director on release-to-zero, post-eviction, and load commit/abort) and retries under the shared deadline. Only a truly idle-and-empty device that still cannot fit the model 503s immediately.
+- **Capacity-wait:** the LoadDirector tags its capacity 503 `retryable=True` when the failure is TRANSIENT -- any of the three in-flight states holds: an in-use loaded model (refcount > 0) blocks eviction, another model's cold load is in flight (its reservation made the fit fail; v0.57.1), or an eviction is mid-flight (`director._evicting`: victim popped from `loaded` but disable_fn still shutting the worker down, so the director looks idle while VRAM is still occupied; v0.57.2). The gateway parks on `CapacityNotifier` (generation asyncio.Event, fired threadsafe by the director on release-to-zero, post-eviction, and load commit/abort) and retries under the shared deadline. Only a truly idle-and-empty device that still cannot fit the model 503s immediately.
 
 A modality may export a literal `CONCURRENCY_CEILING = {"max_concurrency": n, "max_queue_depth": n}` (AST-read by `muse.core.discovery.concurrency_ceilings`, like `MODEL_OPTIONAL_PATHS`). The gateway clamps every model of that modality to it, so no manifest, catalog edit or `server.default_max_concurrency` can raise it; `acquire_slot(..., max_queue_depth=)` takes the smaller positive of the ceiling and `server.max_queue_depth`, so a global 0 does not remove it. The gate applies a LOWERED cap live (surplus permits are retired: free ones at once, held ones as their holders release, never over-issuing); a raised cap still applies on restart. decision/evaluation declares 1 / 32.
 
@@ -692,9 +695,9 @@ never shadowed:
   default `300.0`) -- per-request timeout when forwarding to a node
   (long, since generation requests can run for minutes).
 - `federation.poll_timeout_seconds` (`MUSE_FEDERATION_POLL_TIMEOUT_SECONDS`,
-  default `10.0`) -- per-node timeout for each
-  background poll (above a node's own aggregation timeout, so a briefly
-  slow node is not dropped from routing).
+  default `10.0`) -- per-node timeout for each background poll; keep it
+  above a node's `server.aggregation_timeout_seconds` (see docs/CONFIG.md),
+  so a briefly slow node is not dropped from routing.
 - `federation.config_file` (`MUSE_FEDERATION_CONFIG`, default unset) --
   explicit path to the node-list yaml, overriding the
   `<catalog_dir>/federation.yaml` default-if-exists lookup.

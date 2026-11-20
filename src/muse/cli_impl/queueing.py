@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from contextlib import asynccontextmanager
 
 from muse.core import config
 
@@ -181,25 +180,10 @@ class ConcurrencyGate:
         except asyncio.TimeoutError:
             raise QueueTimeout(model_id) from None
 
-    @asynccontextmanager
-    async def slot(
-        self, model_id: str, cap: int | None, *, deadline: float,
-        max_queue_depth: int | None = None,
-    ):
-        """acquire_slot/release_slot as a lexical async context."""
-        held = await self.acquire_slot(
-            model_id, cap, deadline=deadline, max_queue_depth=max_queue_depth,
-        )
-        try:
-            yield
-        finally:
-            if held:
-                self.release_slot(model_id)
-
     # The gateway holds a slot across a NON-lexical span: acquire happens in
     # _route_via_director, but release fires later from
     # _forward's buffered/stream finally (possibly OFF the event
-    # loop), so it uses acquire_slot/release_slot directly.
+    # loop), hence acquire_slot/release_slot rather than a context manager.
 
     async def acquire_slot(
         self, model_id: str, cap: int | None, *, deadline: float,

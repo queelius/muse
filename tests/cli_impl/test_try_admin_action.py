@@ -1,4 +1,4 @@
-"""Tests for `muse.cli._try_admin_action`'s enable/disable dispatch.
+"""Tests for `muse.cli_impl.admin_actions.try_admin_action`'s enable/disable dispatch.
 
 `_try_admin_action` is the admin-API-first path `models_enable` /
 `models_disable` consult before falling back to a catalog-only mutation.
@@ -31,7 +31,7 @@ def test_enable_missing_job_id_is_still_success(monkeypatch):
     still be treated as SUCCESS, not fall through to the catalog
     fallback.
     """
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -48,7 +48,7 @@ def test_enable_falsy_job_id_is_still_success(monkeypatch):
     """An empty-string job_id is falsy but still a successful response
     shape; must not be treated as "admin API not used".
     """
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -62,7 +62,7 @@ def test_enable_falsy_job_id_is_still_success(monkeypatch):
 
 def test_enable_with_job_id_still_waits_and_reports(monkeypatch):
     """Sanity check: the normal (job_id present) success path is unaffected."""
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -77,7 +77,7 @@ def test_enable_with_job_id_still_waits_and_reports(monkeypatch):
 
 
 def test_enable_job_finished_non_done_is_failed(monkeypatch):
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -91,7 +91,7 @@ def test_enable_job_finished_non_done_is_failed(monkeypatch):
 
 
 def test_enable_job_wait_timeout_is_timeout_outcome(monkeypatch):
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -105,7 +105,7 @@ def test_enable_job_wait_timeout_is_timeout_outcome(monkeypatch):
 
 
 def test_disable_success(monkeypatch):
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -119,7 +119,7 @@ def test_disable_success(monkeypatch):
 
 def test_non_503_admin_client_error_is_failed(monkeypatch):
     from muse.admin.client import AdminClientError
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -135,7 +135,7 @@ def test_non_503_admin_client_error_is_failed(monkeypatch):
 
 def test_503_admin_disabled_is_not_handled(monkeypatch):
     from muse.admin.client import AdminClientError
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -150,7 +150,7 @@ def test_503_admin_disabled_is_not_handled(monkeypatch):
 
 
 def test_unreachable_admin_api_is_not_handled(monkeypatch):
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     _with_admin_token(monkeypatch)
     fake_client = MagicMock()
@@ -162,8 +162,64 @@ def test_unreachable_admin_api_is_not_handled(monkeypatch):
     assert outcome is AdminActionOutcome.NOT_HANDLED
 
 
+@pytest.mark.parametrize("code", [
+    "worker_shutdown_incomplete", "server_shutting_down", "admin_job_capacity",
+])
+def test_other_503s_are_real_failures_not_catalog_fallbacks(monkeypatch, code):
+    """I5: only admin_disabled means "no admin API"; any other 503 is the
+    supervisor refusing, and writing the catalog behind its back is wrong."""
+    from muse.admin.client import AdminClientError
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
+
+    _with_admin_token(monkeypatch)
+    fake_client = MagicMock()
+    fake_client.disable.side_effect = AdminClientError(
+        status=503, code=code, message="try later", body={},
+    )
+    with patch("muse.admin.client.AdminClient", return_value=fake_client):
+        outcome = _try_admin_action("disable", "some-model")
+    assert outcome is AdminActionOutcome.FAILED
+
+
+def test_connect_error_is_not_handled(monkeypatch):
+    import httpx
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
+
+    _with_admin_token(monkeypatch)
+    fake_client = MagicMock()
+    fake_client.disable.side_effect = httpx.ConnectError("refused")
+    with patch("muse.admin.client.AdminClient", return_value=fake_client):
+        outcome = _try_admin_action("disable", "some-model")
+    assert outcome is AdminActionOutcome.NOT_HANDLED
+
+
+def test_read_timeout_is_ambiguous_not_a_fallback(monkeypatch):
+    """A slow but possibly successful disable must not be reported as
+    "unreachable" and then rewritten in the catalog."""
+    import httpx
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
+
+    _with_admin_token(monkeypatch)
+    fake_client = MagicMock()
+    fake_client.disable.side_effect = httpx.ReadTimeout("slow")
+    with patch("muse.admin.client.AdminClient", return_value=fake_client):
+        outcome = _try_admin_action("disable", "some-model")
+    assert outcome is AdminActionOutcome.TIMEOUT
+
+
+def test_disable_allows_worker_teardown_time(monkeypatch):
+    from muse.cli_impl.admin_actions import try_admin_action as _try_admin_action
+
+    _with_admin_token(monkeypatch)
+    fake_client = MagicMock()
+    fake_client.disable.return_value = {}
+    with patch("muse.admin.client.AdminClient", return_value=fake_client) as ctor:
+        _try_admin_action("disable", "some-model")
+    assert ctor.call_args.kwargs["timeout"] >= 30.0
+
+
 def test_no_admin_token_is_not_handled(monkeypatch):
-    from muse.cli import AdminActionOutcome, _try_admin_action
+    from muse.cli_impl.admin_actions import AdminActionOutcome, try_admin_action as _try_admin_action
 
     monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
     outcome = _try_admin_action("enable", "some-model")

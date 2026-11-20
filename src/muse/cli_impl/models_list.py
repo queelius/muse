@@ -387,45 +387,24 @@ def _render_footer(rows: list[_ListRow], *, no_color: bool) -> None:
 def _model_memory_display(extra: dict, catalog_entry: dict | None):
     """Return (display_str, gb_for_aggregate, device_label).
 
-    Resolution order, in decreasing fidelity:
-      1. measured peak from `muse models probe` (per-device measurement)
-      2. annotated `capabilities.memory_gb`
-      3. None (display "-")
+    The number is admission's own estimate (`supervisor.memory_estimate`):
+    the larger of the annotated `capabilities.memory_gb` and the probe /
+    lazy-load measurement for the pool the model loads into, honoring a
+    `set-device` pin. A measured number is shown plainly, an annotation
+    with a ~ prefix, nothing as "-".
 
-    The device label ("CPU" or "GPU") is derived from
-    `capabilities.device`: cpu -> CPU; everything else
-    (cuda/auto/mps/unset) -> GPU.
+    The device label is the pool: "CPU" when the model sizes against host
+    RAM (a cpu model, or an auto model on a host without CUDA), else "GPU".
     """
-    extra = extra or {}
-    cap_device = (extra.get("device") or "auto").lower()
-    if cap_device == "cpu":
-        device_label = "CPU"
-        measurement_keys = ("cpu",)
-    else:
-        device_label = "GPU"
-        # Probe persists under the CONCRETE device it ran on: "cuda" on
-        # NVIDIA, "mps" on Apple Silicon. "auto" is never a written bucket
-        # (it resolves to a concrete device before the measurement is
-        # stored), so including it here found nothing and Mac measurements
-        # showed "-".
-        measurement_keys = ("cuda", "mps")
+    from muse.cli_impl.supervisor import _measurement_key, memory_estimate
 
-    measurements = (catalog_entry or {}).get("measurements") or {}
-    for key in measurement_keys:
-        m = measurements.get(key)
-        if not m:
-            continue
-        peak = m.get("peak_bytes") or 0
-        if peak > 0:
-            gb = peak / (1024**3)
-            return f"{gb:.1f} GB {device_label}", gb, device_label
-
-    annotation = extra.get("memory_gb")
-    if annotation is not None:
-        try:
-            gb = float(annotation)
-        except (TypeError, ValueError):
-            return "-", None, device_label
-        return f"~{gb:.1f} GB {device_label}", gb, device_label
-
-    return "-", None, device_label
+    entry = dict(catalog_entry or {})
+    entry["manifest"] = {"capabilities": dict(extra or {})}
+    estimate = memory_estimate(entry)
+    device = str(entry.get("device_override") or estimate.device).lower()
+    pool = _measurement_key(device, None) if device in ("auto", "") else device
+    device_label = "CPU" if pool == "cpu" else "GPU"
+    if not estimate.status:
+        return "-", None, device_label
+    prefix = "" if estimate.source == "measured" else "~"
+    return f"{prefix}{estimate.gb:.1f} GB {device_label}", estimate.gb, device_label

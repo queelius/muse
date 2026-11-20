@@ -296,14 +296,15 @@ def test_capabilities_document_callable_on_app_state(gateway_client):
     assert callable(fn)
 
 
-def test_static_routes_mode_serves_document(manifest_calls):
-    from muse.cli_impl.gateway import WorkerRoute
+def test_running_worker_without_director_entry_is_loaded(manifest_calls, revalidate_calls):
+    from muse.cli_impl.supervisor import WorkerSpec
 
-    app = build_gateway(routes=[WorkerRoute("fake-tts", "http://127.0.0.1:9")])
+    worker = WorkerSpec(models=["fake-tts"], python_path="/p", port=9, status="running")
+    app = build_gateway(state=SupervisorState(workers=[worker], device="cpu"))
     by_id = _models(TestClient(app))
     assert by_id["fake-tts"]["loaded"] is True
     assert by_id["fake-asr"]["loaded"] is False
-    assert by_id["fake-asr"]["unservable_reason"] is None
+    assert by_id["fake-asr"]["unservable_reason"] == "no worker environment"
 
 
 def test_catalog_file_key_is_replacement_sensitive(tmp_path, monkeypatch):

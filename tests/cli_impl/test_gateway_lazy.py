@@ -488,20 +488,10 @@ class TestAcquireRelease:
         state.director.release.assert_called_once_with("fake-model")
         state.director.acquire.assert_called_once()
 
-    def test_release_runs_when_request_body_read_raises(self):
-        """L16: director.acquire() bumps the refcount, then
-        _forward reads the request body. A ClientDisconnect
-        (client vanished mid-body) during that read happens AFTER acquire
-        and BEFORE the stream-open try/except, so without the fix it skips
-        director.release and strands the refcount, wedging eviction.
-
-        A body-bearing GET is the reachable path: GET routes extract the
-        model from the query string, so the body is unread until
-        _forward -- the read there is the first one and CAN
-        disconnect (a POST's body is already read + cached during model
-        extraction, so its later read never hits the network). The read
-        must release the slot on failure.
-        """
+    def test_body_read_failure_happens_before_any_acquire(self):
+        """L16: a ClientDisconnect while the body is read must never strand
+        a refcount. The proxy reads (and caches) the body before routing,
+        so a disconnect there holds nothing yet."""
         state = _make_state_with_director(acquire_port=9001)
         app = build_gateway(state=state)
         client = TestClient(app, raise_server_exceptions=False)
@@ -517,8 +507,24 @@ class TestAcquireRelease:
             )
 
         assert r.status_code == 500
-        state.director.acquire.assert_called_once()
-        state.director.release.assert_called_once_with("fake-model")
+        state.director.acquire.assert_not_called()
+        state.director.release.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_forward_releases_when_its_body_read_raises(self):
+        """_forward keeps its own guard: a body read failure after the
+        caller took a refcount still releases it."""
+        from muse.cli_impl.gateway import _forward
+
+        request = MagicMock()
+        request.body = AsyncMock(side_effect=ClientDisconnect("gone"))
+        released = []
+        with pytest.raises(ClientDisconnect):
+            await _forward(
+                request, "http://127.0.0.1:9001/x", 1.0,
+                release=lambda: released.append(True),
+            )
+        assert released == [True]
 
 
 # =============================================================================
@@ -1491,35 +1497,6 @@ class TestHealthReflectsCatalog:
         assert "audio/speech" in body["modalities"]
         assert "embedding/text" in body["modalities"]
         assert "image/generation" not in body["modalities"]
-
-
-class TestLegacyStaticRoutesStillWork:
-    """The build_gateway(routes=...) signature used by tests must keep
-    working for tests that pre-date Task F. The static-routes path is the
-    fallback when state is None or state.director is None.
-    """
-
-    def test_static_routes_path_does_not_call_get_manifest(self):
-        from muse.cli_impl.gateway import WorkerRoute
-
-        routes = [WorkerRoute(model_id="fake-model", worker_url="http://127.0.0.1:9001")]
-        app = build_gateway(routes)
-        client = TestClient(app)
-
-        # If get_manifest were called on the static-routes path, this
-        # patch would break the request. The static path predates Task F
-        # and must keep working untouched.
-        with patch(
-            "muse.cli_impl.gateway.get_manifest",
-            side_effect=AssertionError("static path should not call get_manifest"),
-        ), patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
-            _wire_async_client_json(mock_cls)
-            r = client.post(
-                "/v1/audio/speech",
-                json={"input": "hi", "model": "fake-model"},
-            )
-
-        assert r.status_code == 200
 
 
 # =============================================================================

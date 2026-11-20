@@ -144,3 +144,22 @@ def test_fetch_public_models_quiets_httpx_log(monkeypatch):
     )
     rs.fetch_public_models()
     assert httpx_logger.level >= logging.WARNING
+
+
+def test_log_level_debug_keeps_http_request_lines(monkeypatch):
+    """`muse --log-level DEBUG` must be able to show httpx lines: the CLI
+    quieting only applies when the operator did not ask for DEBUG."""
+    import logging
+
+    from muse.cli_impl.runtime_state import quiet_noisy_loggers
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "level", logging.DEBUG)
+    httpx_logger = logging.getLogger("httpx")
+    monkeypatch.setattr(httpx_logger, "level", logging.NOTSET)
+    quiet_noisy_loggers(("httpx",))
+    assert httpx_logger.level == logging.NOTSET
+
+    monkeypatch.setattr(root, "level", logging.INFO)
+    quiet_noisy_loggers(("httpx",))
+    assert httpx_logger.level == logging.WARNING

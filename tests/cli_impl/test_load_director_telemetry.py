@@ -196,4 +196,4 @@ class TestEvictionEmitsTelemetry:
             "newcomer", manifest=_manifest(memory_gb=6.0, device="cpu"),
         ) == 9002
         assert "victim" not in director.loaded
-        assert director.evicting == set()
+        assert director._evicting == {}

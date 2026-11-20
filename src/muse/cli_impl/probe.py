@@ -299,14 +299,11 @@ def run_probe_all(
 
 
 def _print_human(r: dict) -> None:
-    """Format a measurement record for terminal display."""
-    if "error" in r and not r.get("ran_inference"):
-        # Load-failure record (worker exited 2 with an error JSON line).
-        print(f"  device:   {r.get('device', '?')}")
-        print(f"  error:    {r['error']}")
-        print()
-        print("Persisted to catalog.json (with error field)")
-        return
+    """Format a measurement record for terminal display.
+
+    Only successful-load records reach here: a load failure exits the probe
+    worker non-zero, and `run_probe` returns before parsing.
+    """
     device = r.get("device", "?")
     weights_gb = r.get("weights_bytes", 0) / (1024**3)
     peak_gb = r.get("peak_bytes", 0) / (1024**3)

@@ -11,11 +11,11 @@ live on internal ports (9001+). The gateway:
   4. Aggregates /v1/models and /health across all workers
   5. Mounts /v1/admin/* with bearer-token auth
 
-The legacy static-routes path (build_gateway(routes=...)) survives for
-tests that pre-date the lazy-load wiring. When `state.director` is set,
-the proxy skips the static map entirely and calls director.acquire on
-every request; release fires on completion in a finally clause that
-spans both buffered and streaming responses.
+Every inference request takes a director refcount for its worker port
+(`try_acquire_loaded` for a resident model, else `acquire`); the port comes
+from the director, never from `state.workers`. Release fires exactly once on completion, for buffered and
+streaming responses alike. `/v1/models` and `/health` fan out to the
+running workers in `state.workers`.
 
 Proxy routing is modality-agnostic: any request with a `model` field
 routes to the worker hosting that model, regardless of URL path. This
@@ -86,6 +86,7 @@ from muse.cli_impl.supervisor import (
     _director_capacity_knobs,
     backfill_manifest_memory,
     revalidate_servability,
+    servability_capacity,
 )
 
 # OperationError lives at module-top because `_route_via_director` must
@@ -119,22 +120,13 @@ _HOP_BY_HOP_HEADERS = frozenset({
 })
 
 
-class RequestBodyTooLarge(ValueError):
-    """An inbound gateway request exceeded its configured byte budget."""
-
-    def __init__(self, *, limit: int, observed: int) -> None:
-        self.limit = limit
-        self.observed = observed
-        super().__init__(f"request body exceeds {limit} byte limit")
-
-
 class RequestBodyLimitMiddleware:
     """Bound and replay every inbound HTTP body before route dispatch.
 
     Enforcement at the ASGI boundary covers explicit admin, aggregation,
     dashboard, and future routes as well as the catch-all inference proxy.
     The downstream app receives one replayable request message, so FastAPI
-    body parsing and the proxy's own cache can consume it normally.
+    body parsing and the proxy can consume it normally.
     """
 
     def __init__(self, app: Any, *, limit: int) -> None:
@@ -408,46 +400,6 @@ class WorkerRoute:
     worker_url: str
 
 
-async def cache_bounded_request_body(request: Request, *, limit: int) -> bytes:
-    """Read and cache at most ``limit`` bytes from an ASGI request stream.
-
-    ``Content-Length`` is only an early rejection optimization; chunked or
-    dishonest clients are still bounded while streaming.  Starlette normally
-    sets ``request._body`` in ``Request.body()``.  We set the same cache after
-    our bounded read so model extraction and the eventual worker forward see
-    exactly one body without consuming the receive channel twice.
-    """
-    if limit <= 0:
-        raise ValueError("request body limit must be positive")
-    cached = getattr(request, "_body", None)
-    if isinstance(cached, bytes):
-        if len(cached) > limit:
-            raise RequestBodyTooLarge(limit=limit, observed=len(cached))
-        return cached
-
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared = int(content_length)
-        except (TypeError, ValueError):
-            declared = None
-        if declared is not None and declared > limit:
-            raise RequestBodyTooLarge(limit=limit, observed=declared)
-
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > limit:
-            raise RequestBodyTooLarge(limit=limit, observed=total)
-        chunks.append(chunk)
-    body = b"".join(chunks)
-    request._body = body
-    return body
-
-
 async def extract_model_from_request(request: Any) -> Any:
     """Extract the `model` field from a request.
 
@@ -522,25 +474,18 @@ def _resolve_default_model(modality: str) -> str | None:
 
 
 def build_gateway(
-    routes: list[WorkerRoute] | None = None,
     timeout: float = 300.0,
     *,
-    state: "object | None" = None,
+    state: "object",
     aggregation_timeout: float | None = None,
     max_request_body_bytes: int | None = None,
 ) -> FastAPI:
-    """Build the gateway FastAPI app.
+    """Build the gateway FastAPI app over a SupervisorState.
 
-    Two routing modes:
-
-      - state-driven (preferred for `muse serve`): pass `state`, a
-        SupervisorState. Routes are re-derived per request from
-        state.workers, filtered to status=='running'. Late-promoting
-        workers join the routing table without an app rebuild and
-        pending workers don't surface in /v1/models. The
-        SupervisorState's lock guards each snapshot.
-      - static: pass `routes`, a fixed list of WorkerRoute. Used by
-        tests that want a frozen routing table.
+    Inference requests route through `state.director` (lazy load, LRU
+    eviction, admission). The aggregated endpoints re-derive the worker
+    set per request from `state.workers`, filtered to status=='running',
+    under the state's lock.
 
     `aggregation_timeout` bounds the per-worker httpx client used by the
     /v1/models and /health fan-out (NOT the per-request forward timeout,
@@ -572,9 +517,8 @@ def build_gateway(
             # Cold loads run in asyncio's default executor; their readiness
             # waits consume this event and unwind before asyncio joins that
             # executor. Without this early signal, Ctrl+C can appear to finish
-            # Uvicorn while the supervisor remains hidden for up to 120s.
-            if state is not None:
-                state.stop_event.set()
+            # Uvicorn while the supervisor stays hidden for a whole readiness wait.
+            state.stop_event.set()
             try:
                 from muse.admin.jobs import get_default_store
                 get_default_store().shutdown(timeout=5.0)
@@ -583,9 +527,6 @@ def build_gateway(
 
     app = FastAPI(title="Muse Gateway", lifespan=_lifespan)
     app.state.routes_state = state
-    app.state.static_routes = (
-        {r.model_id: r for r in routes} if routes is not None else {}
-    )
     app.state.timeout = timeout
     app.state.max_request_body_bytes = (
         max_request_body_bytes
@@ -602,7 +543,7 @@ def build_gateway(
         RequestBodyLimitMiddleware,
         limit=app.state.max_request_body_bytes,
     )
-    stop_event = getattr(state, "stop_event", None) if state is not None else None
+    stop_event = getattr(state, "stop_event", None)
     if callable(getattr(stop_event, "is_set", None)):
         # Added after the body limiter so it is the outermost user middleware
         # and covers body reads, queue waits, route dispatch, and response-body
@@ -619,37 +560,22 @@ def build_gateway(
     )
 
     def _routes_now() -> dict[str, WorkerRoute]:
-        """Return the current routing table.
+        """The running workers, by model id, built fresh from state.workers.
 
-        State-driven: filter state.workers to status=='running' and build
-        the table fresh; this means a worker that promotes after gateway
-        boot becomes routable on the next request.
-        Static: return the frozen dict captured at build_gateway time.
+        A worker that becomes ready after gateway boot is aggregated on the
+        next request.
         """
-        if app.state.routes_state is not None:
-            out: dict[str, WorkerRoute] = {}
-            s = app.state.routes_state
-            with s.lock:
-                for spec in s.workers:
-                    if getattr(spec, "status", None) != "running":
-                        continue
-                    url = f"http://127.0.0.1:{spec.port}"
-                    for m in spec.models:
-                        out[m] = WorkerRoute(model_id=m, worker_url=url)
-            return out
-        return dict(app.state.static_routes)
+        out: dict[str, WorkerRoute] = {}
+        with state.lock:
+            for spec in state.workers:
+                if getattr(spec, "status", None) != "running":
+                    continue
+                url = f"http://127.0.0.1:{spec.port}"
+                for m in spec.models:
+                    out[m] = WorkerRoute(model_id=m, worker_url=url)
+        return out
 
     app.state.routes_now = _routes_now
-
-    @app.get("/_gateway-info")
-    def info():
-        cur = app.state.routes_now()
-        return {
-            "routes": [
-                {"model_id": r.model_id, "worker_url": r.worker_url}
-                for r in cur.values()
-            ],
-        }
 
     @app.get("/v1/models")
     async def list_models():
@@ -702,16 +628,19 @@ def build_gateway(
         # before appending the unloaded rows.
         state = app.state.routes_state
         if state is not None:
-            _enrich_loaded_at(state, aggregated)
-        # Also advertise enabled-but-unloaded catalog models so
-        # /v1/models reflects the catalog, not just resident workers. The
-        # loaded workers above are authoritative for loaded=True; here we
-        # append every enabled catalog row not already present, with
-        # loaded=False + its boot unservable_reason (if any). Skipped in
-        # legacy static-routes mode (no SupervisorState to read the
-        # unservable map from).
-        if state is not None:
-            aggregated.extend(_unloaded_catalog_entries(state, aggregated))
+            # Also advertise enabled-but-unloaded catalog models so
+            # /v1/models reflects the catalog, not just resident workers.
+            # The loaded workers above are authoritative for loaded=True;
+            # every enabled catalog row not already present is appended
+            # with loaded=False + its live unservable_reason (if any).
+            # Revision lookups, servability checks and manifest reads are
+            # blocking (provenance stats, capacity probes, weights walks),
+            # so they run off the event loop.
+            def enrich() -> list[dict]:
+                _enrich_loaded_at(state, aggregated)
+                return aggregated + _unloaded_catalog_entries(state, aggregated)
+
+            aggregated = await asyncio.to_thread(enrich)
         return {"object": "list", "data": aggregated}
 
     @app.get("/health")
@@ -755,13 +684,25 @@ def build_gateway(
                 models.update(
                     value for value in raw_models if isinstance(value, str)
                 )
+        # A worker the monitor is restarting or has given up on is down
+        # too; it is not in the routing table, so nothing above polled it.
+        state = app.state.routes_state
+        if state is not None:
+            with state.lock:
+                if any(
+                    getattr(spec, "status", None) in ("dead", "unhealthy")
+                    for spec in state.workers
+                ):
+                    any_down = True
         # Also report enabled-but-unloaded catalog models so the
         # serviceable surface matches /v1/models: a request naming one of
         # these triggers an on-demand load.
-        state = app.state.routes_state
         if state is not None:
             already = [{"id": m} for m in models]
-            for entry in _unloaded_catalog_entries(state, already):
+            unloaded = await asyncio.to_thread(
+                _unloaded_catalog_entries, state, already,
+            )
+            for entry in unloaded:
                 models.add(entry["id"])
                 if entry.get("modality"):
                     modalities.add(entry["modality"])
@@ -817,12 +758,10 @@ def build_gateway(
     install_admin_error_handler(app)
 
     # Dashboard router (/dashboard shell + gated /v1/telemetry/* JSON+SSE
-    # endpoints). Gated on BOTH: telemetry.enabled (a global off-switch)
-    # AND state is not None (the legacy static-routes test path passes no
-    # SupervisorState, so there is no state.telemetry_store/log_hub for
-    # the data endpoints to read). The /dashboard HTML shell itself never
-    # touches state; only the gated data endpoints do.
-    if config.get("telemetry.enabled") and state is not None:
+    # endpoints), gated on telemetry.enabled (a global off-switch). The
+    # /dashboard HTML shell itself never touches state; only the gated data
+    # endpoints do.
+    if config.get("telemetry.enabled"):
         app.include_router(build_dashboard_router(state))
 
     from muse.cli_impl.agent_routes import install_agent_routes
@@ -837,16 +776,8 @@ def build_gateway(
         # registered BEFORE this catch-all, so they win via FastAPI's
         # registration order.
 
-        try:
-            body = await cache_bounded_request_body(
-                request, limit=app.state.max_request_body_bytes,
-            )
-        except RequestBodyTooLarge as exc:
-            return error_response(
-                413,
-                "request_too_large",
-                f"request body exceeds the configured {exc.limit} byte limit",
-            )
+        # RequestBodyLimitMiddleware already bounded (and replays) the body.
+        body = await request.body()
 
         # A modality may declare a strict parser for its paths (decision's
         # /v1/systemone). It runs on the raw body BEFORE model selection, so
@@ -896,46 +827,32 @@ def build_gateway(
             )
             model_id = default_id
 
-        # Director-driven path (lazy load). When the SupervisorState
-        # carries a LoadDirector, every request acquires the worker port
-        # via director.acquire and releases on completion. The director
-        # transparently handles cold load, LRU eviction, and singleton-
-        # load coordination. Static-routes mode (build_gateway(routes=...)
-        # with no state.director) still works for the legacy test path.
-        s = app.state.routes_state
-        if s is not None and getattr(s, "director", None) is not None:
-            return await _route_via_director(
-                request, full_path, model_id, s, app.state.timeout,
-                cancellable_paths=app.state.disconnect_cancellable_paths,
-            )
-
-        # Legacy static-routes path: look up the worker URL in a frozen
-        # dict and forward. No acquire/release. Used by tests that build
-        # the gateway with build_gateway(routes=...).
-        cur = app.state.routes_now()
-        route = cur.get(model_id)
-        if route is None:
-            return error_response(
-                404, "model_not_found",
-                f"model {model_id!r} is not registered with any worker; "
-                f"known: {sorted(cur)}",
-            )
-
-        target_url = f"{route.worker_url}/{full_path}"
-        try:
-            return await _forward(request, target_url, app.state.timeout)
-        except httpx.TimeoutException:
-            return error_response(
-                504, "worker_timeout",
-                f"worker for model {model_id!r} timed out",
-            )
-        except httpx.TransportError:
-            return error_response(
-                502, "worker_unavailable",
-                f"worker for model {model_id!r} is unavailable",
-            )
+        # Lazy load: director.acquire returns the worker port (cold load,
+        # LRU eviction and singleton-load coordination included) and the
+        # forward releases it on completion.
+        return await _route_via_director(
+            request, full_path, model_id, app.state.routes_state,
+            app.state.timeout,
+            cancellable_paths=app.state.disconnect_cancellable_paths,
+        )
 
     return app
+
+
+def _director_loaded(director: Any) -> "dict | None":
+    """A copy of ``director.loaded`` taken under its lock (briefly).
+
+    None when there is no real loaded map: no director, or a loose test
+    double whose ``loaded`` is not a dict.
+    """
+    loaded = getattr(director, "loaded", None)
+    if not isinstance(loaded, dict):
+        return None
+    lock = getattr(director, "lock", None)
+    if lock is None:
+        return dict(loaded)
+    with lock:
+        return dict(loaded)
 
 
 def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
@@ -954,30 +871,14 @@ def _enrich_loaded_at(state: Any, aggregated: list[dict]) -> None:
     for entry in aggregated:
         if entry.get("revision") is None and isinstance(entry.get("id"), str):
             entry["revision"] = lookup_revision(entry["id"]).revision
-    director = getattr(state, "director", None)
-    if director is None:
-        return
-    loaded = getattr(director, "loaded", None)
-    if not isinstance(loaded, dict):
-        return
-    # Snapshot id -> loaded_at under the director lock (held briefly); the
-    # monotonic->wall-clock render happens outside the lock.
-    lock = getattr(director, "lock", None)
     try:
-        if lock is not None:
-            with lock:
-                snap = {
-                    mid: getattr(e, "loaded_at", None)
-                    for mid, e in loaded.items()
-                }
-        else:
-            snap = {
-                mid: getattr(e, "loaded_at", None)
-                for mid, e in loaded.items()
-            }
+        loaded = _director_loaded(getattr(state, "director", None))
     except Exception as e:  # noqa: BLE001
         logger.warning("/v1/models: loaded_at join failed: %s", e)
         return
+    if loaded is None:
+        return
+    snap = {mid: getattr(e, "loaded_at", None) for mid, e in loaded.items()}
     for entry in aggregated:
         if entry.get("last_loaded_at") is not None:
             continue
@@ -1067,18 +968,10 @@ def _resident_ids(state: Any, routes_now: Callable[[], dict]) -> set[str]:
         out.update(routes_now())
     except Exception as e:  # noqa: BLE001
         logger.warning("/v1/capabilities: route snapshot failed: %s", e)
-    director = getattr(state, "director", None)
-    loaded = getattr(director, "loaded", None)
-    if isinstance(loaded, dict):
-        lock = getattr(director, "lock", None)
-        try:
-            if lock is not None:
-                with lock:
-                    out.update(loaded)
-            else:
-                out.update(loaded)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("/v1/capabilities: director snapshot failed: %s", e)
+    try:
+        out.update(_director_loaded(getattr(state, "director", None)) or {})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/capabilities: director snapshot failed: %s", e)
     return out
 
 
@@ -1144,12 +1037,15 @@ def _capabilities_document(
             depths = None  # unknown is never rendered as 0
 
     pairs: list[tuple[ModelFacts, ModelState]] = []
+    capacity = None
     for mid in ids:
         is_loaded = mid in resident
         reason = None
         if not is_loaded and state is not None:
             try:
-                reason = revalidate_servability(state, mid)
+                if capacity is None:
+                    capacity = servability_capacity(state)
+                reason = revalidate_servability(state, mid, capacity=capacity)
             except Exception as e:  # noqa: BLE001
                 logger.warning("/v1/capabilities: servability of %s failed: %s", mid, e)
                 reason = getattr(state, "unservable_reasons", {}).get(mid)
@@ -1188,12 +1084,16 @@ def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:
         logger.warning("/v1/models: catalog read failed: %s", e)
         return []
     out: list[dict] = []
+    capacity = None
     for model_id, entry in catalog.items():
         if model_id in loaded_ids:
             continue
         if not entry.get("enabled", True):
             continue
-        reason = revalidate_servability(state, model_id)
+        if capacity is None:
+            # One live reading for the whole listing (psutil + NVML).
+            capacity = servability_capacity(state)
+        reason = revalidate_servability(state, model_id, capacity=capacity)
         try:
             manifest = get_manifest(model_id)
         except (CatalogError, KeyError):
@@ -1220,17 +1120,14 @@ def _cold_model_needs_servability_check(director: Any, model_id: str) -> bool:
     when no old stamp exists.  Loose test doubles expose a fabricated
     ``loaded`` mock; only a concrete dict opts into this additional path.
     """
-    loaded = getattr(director, "loaded", None)
-    if not isinstance(loaded, dict):
-        return False
-    lock = getattr(director, "lock", None)
-    if lock is None:
-        return model_id not in loaded
-    with lock:
-        return model_id not in loaded
+    loaded = _director_loaded(director)
+    return loaded is not None and model_id not in loaded
 
 
 _manifest_preparations: dict[tuple, asyncio.Task] = {}
+# model id -> (key, (manifest, revision headers)) for resident models; the
+# key carries the catalog file version, so any catalog write invalidates it.
+_hot_preparations: dict[str, tuple[tuple, tuple[dict, list]]] = {}
 
 
 async def _prepare_director_manifest(
@@ -1305,11 +1202,16 @@ async def _route_via_director(
          corrupt and no last-known-good cache exists) -> 503
          catalog_unavailable, so a corrupt catalog degrades to a clean
          OpenAI-shaped error instead of an uncaught 500.
-      3. Call `state.director.acquire(model_id, manifest=...)`. This may
-         block on cold load + eviction. On `OperationError` (the director's
-         user-facing failure type, e.g. model_too_large_for_device), map
-         to the corresponding HTTP status. Other exceptions propagate to
-         FastAPI's default 500 path.
+         A resident model with no stamp reuses the manifest and revision
+         headers cached for the current catalog version (the hot path).
+      3. Take a concurrency-gate slot, then the refcount: a resident model
+         via `director.try_acquire_loaded` on the loop, else
+         `state.director.acquire(model_id, manifest=...)` off the loop,
+         coalesced per model, inside the capacity wait. It may block on
+         cold load + eviction. An `OperationError` (the director's
+         user-facing failure type, e.g. model_too_large_for_device) maps to
+         its HTTP status; any other exception becomes 503
+         model_load_failed.
       4. On a successful acquire, forward the request to the returned port.
          The release call MUST fire on completion regardless of outcome.
          Buffered responses release before returning. Streaming responses
@@ -1360,36 +1262,67 @@ async def _route_via_director(
         unservable_reason is not None
         or _cold_model_needs_servability_check(state.director, model_id)
     )
-    # Native placement can require a bounded interpreter query. Keep both
-    # validation and backfill off-loop, with one task per model/configuration
-    # so concurrent HTTP waiters do not occupy one executor thread each.
-    try:
-        unservable_reason, manifest = await _prepare_director_manifest(
-            state, model_id, catalog_entry, check_servability=needs_servability_check,
+    # Hot fast path (a resident model with no stamp): the manifest the
+    # director would size from and the revision headers are cached per
+    # catalog version, so a hot request does no thread hops for them, and
+    # the refcount is taken on the loop by try_acquire_loaded below.
+    # Loose test doubles (no real `loaded` dict) always take the full path.
+    hot = (
+        not needs_servability_check
+        and isinstance(getattr(state.director, "loaded", None), dict)
+    )
+    hot_key = None
+    prepared = None
+    if hot:
+        hot_key = (
+            _catalog_file_key(), id(state), id(state.director), state.device,
+            tuple(sorted(_director_capacity_knobs(state.director).items())),
         )
-    except KeyError:
-        return error_response(
-            404, "model_not_found",
-            f"model {model_id!r} is not in the catalog",
+        cached = _hot_preparations.get(model_id)
+        if cached is not None and cached[0] == hot_key:
+            prepared = cached[1]
+    if prepared is not None:
+        manifest, rev_headers = prepared
+    else:
+        # Native placement can require a bounded interpreter query. Keep
+        # both validation and backfill off-loop, with one task per
+        # model/configuration so concurrent HTTP waiters do not occupy one
+        # executor thread each.
+        try:
+            unservable_reason, manifest = await _prepare_director_manifest(
+                state, model_id, catalog_entry, check_servability=needs_servability_check,
+            )
+        except KeyError:
+            return error_response(
+                404, "model_not_found",
+                f"model {model_id!r} is not in the catalog",
+            )
+        except CatalogError as exc:
+            logger.error(
+                "manifest preparation for %r failed: catalog is unavailable: %s",
+                model_id, exc,
+            )
+            return error_response(
+                503,
+                "catalog_unavailable",
+                f"model catalog is temporarily unavailable: {exc}",
+            )
+        except RuntimeError as exc:
+            unservable_reason = str(exc)
+        if unservable_reason is not None:
+            return error_response(
+                503,
+                "model_unservable",
+                f"model {model_id!r} cannot be served: {unservable_reason}",
+            )
+
+        # Resolve the revision BEFORE taking a gate slot or director
+        # refcount: a cancel during this await must not leak either.
+        rev_headers = revision_headers(
+            await asyncio.to_thread(lookup_revision, model_id)
         )
-    except CatalogError as exc:
-        logger.error(
-            "manifest preparation for %r failed: catalog is unavailable: %s",
-            model_id, exc,
-        )
-        return error_response(
-            503,
-            "catalog_unavailable",
-            f"model catalog is temporarily unavailable: {exc}",
-        )
-    except RuntimeError as exc:
-        unservable_reason = str(exc)
-    if unservable_reason is not None:
-        return error_response(
-            503,
-            "model_unservable",
-            f"model {model_id!r} cannot be served: {unservable_reason}",
-        )
+        if hot and hot_key[0] is not None:
+            _hot_preparations[model_id] = (hot_key, (manifest, rev_headers))
 
     # 3. Queueing (spec 2026-07-08). ONE deadline covers the concurrency-gate
     # wait + the capacity wait + all retries. queue_timeout_seconds == 0
@@ -1402,12 +1335,6 @@ async def _route_via_director(
     # queue delay with load time. gate_wait_seconds and
     # capacity_wait_seconds are each measured tightly around their own
     # await below, not via a single wall-clock span across this whole block.
-    # Resolve the revision BEFORE taking a gate slot or director refcount: a
-    # cancel during this await must not leak either (nothing is held yet).
-    rev_headers = revision_headers(
-        await asyncio.to_thread(lookup_revision, model_id)
-    )
-
     queued_ms = 0.0
     queue_budget = config.get("server.queue_timeout_seconds") or 0.0
     queue_t0 = time.monotonic()
@@ -1463,11 +1390,15 @@ async def _route_via_director(
     # event loop. _acquire_coalesced elects ONE loader per cold model
     # (#319). _acquire_with_capacity_wait parks on a retryable capacity 503
     # until a release/eviction fires capacity_notifier or the deadline lapses.
+    fast_port = state.director.try_acquire_loaded(model_id) if hot else None
     try:
-        worker_port, capacity_wait_seconds = await _acquire_with_capacity_wait(
-            lambda: _acquire_coalesced(state, model_id, manifest),
-            state.capacity_notifier, deadline=deadline, model_id=model_id,
-        )
+        if fast_port is not None:
+            worker_port, capacity_wait_seconds = fast_port, 0.0
+        else:
+            worker_port, capacity_wait_seconds = await _acquire_with_capacity_wait(
+                lambda: _acquire_coalesced(state, model_id, manifest),
+                state.capacity_notifier, deadline=deadline, model_id=model_id,
+            )
     except QueueTimeout:
         _release_slot()
         return error_response(
@@ -1826,7 +1757,7 @@ async def _forward(
     chunks dispatch as the worker produces them.
 
     `release` (the director refcount + concurrency-gate slot, from
-    `_route_via_director`; None for federation and the static-routes path)
+    `_route_via_director`; None for federation)
     runs exactly once, from one idempotent cleanup that also exits the
     upstream stream and closes the client, in that order. Release goes first
     and is synchronous, so neither a failing close step nor a second
@@ -1886,9 +1817,10 @@ async def _forward(
                 )
 
     try:
-        # The body read comes after the caller took its refcount. For a
-        # body-bearing GET it is the first read and can fail on a client
-        # disconnect, so it sits inside the cleanup guard too.
+        # The body read comes after the caller took its refcount. The
+        # gateway proxy has already cached it, but a caller that has not
+        # (federation) reads it here for the first time and can fail on a
+        # client disconnect, so it sits inside the cleanup guard too.
         body = await request.body()
         client = httpx.AsyncClient(timeout=timeout)
         stream_ctx = client.stream(

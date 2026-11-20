@@ -1,4 +1,4 @@
-"""`muse models refresh`: re-install museq[server,<extras>] into per-model venvs.
+"""`muse models refresh`: re-install museq[server] + pip_extras into per-model venvs.
 
 Use case: museq[server] gets a new dep (e.g. python-multipart in v0.13.1)
 and existing per-model venvs created by older `muse pull` calls are
@@ -8,9 +8,11 @@ times. `muse models refresh --all` upgrades every venv in one pass.
 
 Behavior:
   - Inspect catalog.json for the target model_id(s).
-  - For each: invoke <venv>/bin/pip install --upgrade <muse-target>[server,<modality-extras>],
+  - For each: invoke <venv>/bin/pip install --upgrade <muse-target>[server],
     where <muse-target> is `-e <source-tree>` from a checkout or the
-    published `museq` distribution from a wheel/PyPI install.
+    published `museq` distribution from a wheel/PyPI install: exactly what
+    `muse pull` installs (`catalog_pull._muse_server_install_args`), so a
+    refreshed venv never gains torch/diffusers floors a fresh pull lacks.
   - Then (unless --no-extras): refresh the model's pip extras and immutable
     non-packaged Python sources.
   - Continue past failures; aggregate at the end.
@@ -32,7 +34,6 @@ from muse.core.catalog import (
     ModelInUseError,
     _catalog_dir,
     _ensure_owned_directory,
-    _installed_muse_requirement,
     _model_pull_lock,
     _model_resource_lease,
     _muse_repo_root,
@@ -41,6 +42,7 @@ from muse.core.catalog import (
     get_manifest,
     is_enabled,
 )
+from muse.core.catalog_pull import _muse_server_install_args
 from muse.core.venv_dedupe import dedupe_after_install
 from muse.core.owned_command import run_owned_command
 from muse.core.pip_install import pip_install_commands
@@ -57,22 +59,6 @@ logger = logging.getLogger(__name__)
 _PIP_TIMEOUT = 1800
 
 
-# Map a modality tag to the muse-side optional-deps extras names.
-# `server` is added unconditionally on top of these. The map is
-# hand-maintained: each entry corresponds to a pyproject [project.
-# optional-dependencies] block (see pyproject.toml). New modalities
-# either bring a new extra (then add a row here) or reuse `server`
-# (then need no row; unknown modalities map to []).
-MODALITY_EXTRAS: dict[str, list[str]] = {
-    "audio/speech": ["audio"],
-    "image/generation": ["images"],
-    "image/animation": ["images"],
-    "image/upscale": ["images"],
-    "embedding/text": ["embeddings"],
-    "video/generation": ["images"],
-}
-
-
 @dataclass
 class RefreshResult:
     """Outcome record for one model's venv refresh."""
@@ -82,28 +68,6 @@ class RefreshResult:
     message: str = ""
     pip_output: str = ""
     extras: list[str] = field(default_factory=list)
-
-
-def _infer_extras(modality: str) -> list[str]:
-    """Look up museq[server,<extras>] for a modality tag. Unknown -> []."""
-    return list(MODALITY_EXTRAS.get(modality, []))
-
-
-# The source-tree sniff and exact installed-distribution requirement are shared
-# with core.catalog, which applies the same fork to `muse pull` venv creation.
-
-
-def _pip_target_args(extras: list[str]) -> list[str]:
-    """pip target args for refreshing muse inside a per-model venv.
-
-    Source-tree detection is performed once so a concurrent filesystem change
-    cannot pair an editable flag with a distribution target (or vice versa).
-    """
-    root = _muse_repo_root()
-    if root is not None:
-        spec = ",".join(["server", *extras])
-        return ["-e", f"{root}[{spec}]"]
-    return [_installed_muse_requirement(["server", *extras])]
 
 
 def _validated_refresh_venv(model_id: str, entry: dict) -> tuple[Path, Path]:
@@ -160,7 +124,7 @@ def _refresh_one_locked(
     complete catalog-read and venv-mutation transaction.
 
     Two pip invocations plus an optional reviewed-source refresh:
-      1. install --upgrade <muse-target>[server,<modality-extras>]
+      1. install --upgrade <muse-target>[server]
          (editable `-e <tree>` from a checkout, else `museq` from PyPI)
       2. install --upgrade <model's pip_extras...>  (skipped if --no-extras
          or pip_extras is empty)
@@ -191,12 +155,11 @@ def _refresh_one_locked(
         manifest = get_manifest(model_id)
     except KeyError:
         manifest = {}
-    modality = manifest.get("modality") or entry.get("modality") or ""
     pip_extras_list = list(manifest.get("pip_extras") or ())
     python_sources = list(manifest.get("python_sources") or ())
-    muse_extras = _infer_extras(modality)
+    muse_extras: list[str] = []
     try:
-        target_args = _pip_target_args(muse_extras)
+        target_args = _muse_server_install_args()
     except RuntimeError as exc:
         return RefreshResult(model_id, "failed", str(exc), extras=muse_extras)
     try:
