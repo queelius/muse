@@ -11,8 +11,9 @@ image_segmentation, image_ocr, image_cv).
 Per-family dispatch via _family_for(): Shap-E repos route to
 ShapERuntime; TRELLIS repos route to TRELLISRuntime; Hunyuan3D-2
 repos route to Hunyuan3DRuntime (both added via v0.44.0+ _Family
-entries); TripoSR (and curated entries the sniff does not see) use
-TripoSRRuntime via _DEFAULT_FAMILY. Wonder3D is deferred indefinitely. Adding a new
+entries); TripoSR repos route to TripoSRRuntime. Any other repo is
+refused by _resolve too (curated pulls skip the sniff). Wonder3D is
+deferred indefinitely. Adding a new
 family means appending one _Family entry to _FAMILIES plus shipping a
 runtime file; no new dispatch functions and no new conditional branches
 in _resolve.
@@ -30,7 +31,12 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.artifacts import download_hf_artifact_bundle
-from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.resolvers import (
+    ResolvedModel,
+    ResolverError,
+    SearchResult,
+    hf_commit_revision,
+)
 from muse.core.hf_plugin_helpers import hf_model_id, hf_repo_license
 
 
@@ -222,11 +228,14 @@ _FAMILIES: tuple[_Family, ...] = (
     # Wonder3D: deferred indefinitely (v0.44.0 decision).
 )
 
-_DEFAULT_FAMILY = _Family(
-    name_hints=(),
+_TRIPOSR_FAMILY = _Family(
+    name_hints=("triposr",),
     runtime_path=_TRIPOSR_RUNTIME_PATH,
     pip_extras=_TRIPOSR_PIP_EXTRAS,
 )
+# Every family with a runtime. A repo matching none of them is refused:
+# Wonder3D, InstantMesh and friends must not fall back to TripoSR.
+_ALL_FAMILIES: tuple[_Family, ...] = (*_FAMILIES, _TRIPOSR_FAMILY)
 
 
 def _matches_hint(name: str, hint: str) -> bool:
@@ -243,33 +252,24 @@ def _matches_hint(name: str, hint: str) -> bool:
     return bool(pattern.search(name))
 
 
-def _family_for(repo_id: str) -> _Family:
-    """Pick the family by name-hint match; fall back to TripoSR."""
-    name = repo_id.lower()
+def _family_for(repo_id: str) -> _Family | None:
+    """The family whose name hint matches the repo NAME, else None."""
+    if not isinstance(repo_id, str):
+        return None
+    name = repo_id.rsplit("/", 1)[-1].lower()
     return next(
-        (f for f in _FAMILIES if any(_matches_hint(name, h) for h in f.name_hints)),
-        _DEFAULT_FAMILY,
+        (f for f in _ALL_FAMILIES if any(_matches_hint(name, h) for h in f.name_hints)),
+        None,
     )
 
 
 
-# Repo-name allowlist: only families with a runtime. TripoSR is the default
-# family; the others are the _FAMILIES hints. Wonder3D, InstantMesh and
-# similar have no runtime (they would fall back to TripoSR and fail), so
-# neither their names nor a bare image-to-3d / text-to-3d tag claims a repo.
-_NAME_HINTS = (
-    "triposr",
-    *(hint for family in _FAMILIES for hint in family.name_hints),
-)
 # Search queries these tags, then keeps only repos the sniff would claim.
 _TAG_HINTS = ("image-to-3d", "text-to-3d")
 
 
 def _is_known_family(repo_id: str) -> bool:
-    if not isinstance(repo_id, str):
-        return False
-    name = repo_id.rsplit("/", 1)[-1].lower()
-    return any(_matches_hint(name, hint) for hint in _NAME_HINTS)
+    return _family_for(repo_id) is not None
 
 
 def _download_hunyuan_bundle(
@@ -310,10 +310,17 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     The per-family registry (_FAMILIES) selects the runtime by repo-name
     substring match. Current families: Shap-E (text-to-3D),
     TRELLIS (image-to-3D, installed SDK), Hunyuan3D-2 (both
-    directions, installed SDK). Unknown repos fall through to
-    TripoSR (image-to-3D) via _DEFAULT_FAMILY.
+    directions, installed SDK), TripoSR (image-to-3D). Any other repo
+    raises ResolverError: curated pulls name the modality and skip the
+    sniff, so this is the gate that keeps Wonder3D and friends from
+    falling back to the TripoSR runtime.
     """
     family = _family_for(repo_id)
+    if family is None:
+        raise ResolverError(
+            f"no 3d/generation runtime for {repo_id!r}: muse serves TripoSR, "
+            f"Shap-E, TRELLIS and Hunyuan3D repos only"
+        )
     revision = hf_commit_revision(info)
     is_hunyuan = family.runtime_path == _HUNYUAN3D_RUNTIME_PATH
 
