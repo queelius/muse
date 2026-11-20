@@ -3046,3 +3046,51 @@ class TestEvictionWindowRetryable:
         # must not leak (a leaked marker would make every future capacity
         # 503 spuriously retryable forever).
         assert d._evicting == {}
+
+
+class TestTryAcquireLoaded:
+    """The gateway's hot fast path takes a refcount only for a plainly
+    resident model, and changes nothing in every refused state."""
+
+    def _director(self):
+        director = LoadDirector(
+            enable_fn=lambda model: 9001,
+            disable_fn=lambda model: None,
+            memory_probe=_make_probe(), cpu_budget_gb=8.0, cpu_headroom_gb=0.0,
+        )
+        director.warmup("m", manifest=_manifest(1.0))
+        return director
+
+    def test_resident_model_takes_a_refcount(self):
+        director = self._director()
+        before = director.loaded["m"].last_touched_at
+        assert director.try_acquire_loaded("m") == 9001
+        assert director.loaded["m"].refcount == 1
+        assert director.loaded["m"].last_touched_at >= before
+
+    def test_unknown_model_is_refused(self):
+        director = self._director()
+        assert director.try_acquire_loaded("other") is None
+        assert "other" not in director.loaded
+
+    @pytest.mark.parametrize("state", [
+        "blocked", "failed_rollback", "evicting", "transition",
+    ])
+    def test_refused_states_change_nothing(self, state):
+        from muse.cli_impl.load_director import EvictingReservation
+
+        director = self._director()
+        entry = director.loaded["m"]
+        touched = entry.last_touched_at
+        with director.lock:
+            if state == "blocked":
+                director._blocked_models.add("m")
+            elif state == "failed_rollback":
+                director._failed_rollbacks.add("m")
+            elif state == "evicting":
+                director._evicting["m"] = EvictingReservation()
+            else:
+                director._worker_transitions["m"] = object()
+        assert director.try_acquire_loaded("m") is None
+        assert entry.refcount == 0
+        assert entry.last_touched_at == touched
