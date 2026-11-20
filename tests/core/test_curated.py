@@ -197,6 +197,35 @@ def test_load_curated_rejects_non_commit_code_revision():
         assert load_curated() == []
 
 
+def test_load_curated_rejects_code_repo_without_code_revision():
+    yaml_text = """
+- id: orphan-code-repo
+  uri: hf://org/x
+  revision: "1111111111111111111111111111111111111111"
+  modality: embedding/text
+  capabilities:
+    trust_remote_code: true
+    code_repo: org/code
+"""
+    with _patch_yaml(yaml_text):
+        assert load_curated() == []
+
+
+def test_load_curated_rejects_non_repo_code_repo():
+    yaml_text = """
+- id: bad-code-repo
+  uri: hf://org/x
+  revision: "1111111111111111111111111111111111111111"
+  code_revision: "2222222222222222222222222222222222222222"
+  modality: embedding/text
+  capabilities:
+    trust_remote_code: true
+    code_repo: not-a-repo
+"""
+    with _patch_yaml(yaml_text):
+        assert load_curated() == []
+
+
 def test_load_curated_capabilities_defaults_to_empty_dict():
     yaml_text = """
 - id: minimal

@@ -57,9 +57,58 @@ def test_base_override_wins():
 def test_provenance_items_and_code():
     r = model_revision("m", {"artifact_provenance": [
         {"repo_id": "a/b", "revision": "1" * 40}, {"repo_id": "a/c", "revision": "2" * 40}],
-        "revision": "1" * 40}, {"code_revision": "f" * 40, "hf_repo": "a/b"})
+        "revision": "1" * 40, "code_revision": "f" * 40},
+        {"hf_repo": "a/b", "capabilities": {"code_revision": "f" * 40}})
     assert [c.role for c in r.components] == ["weights", "weights", "code"]
     assert r.artifacts_digest
+
+
+def test_code_revision_from_capabilities_with_code_repo():
+    """Pulls store code_revision in manifest.capabilities (and on the entry);
+    capabilities.code_repo names the auto_map repo that holds the code."""
+    entry = {"revision": "e" * 40, "hf_repo": "nomic-ai/nomic-embed-text-v1.5"}
+    manifest = {"hf_repo": "nomic-ai/nomic-embed-text-v1.5", "capabilities": {
+        "trust_remote_code": True, "code_revision": "7" * 40,
+        "code_repo": "nomic-ai/nomic-bert-2048"}}
+    r = model_revision("nomic-embed-text-v1.5", entry, manifest)
+    assert [(c.role, c.repo, c.revision) for c in r.components] == [
+        ("weights", "nomic-ai/nomic-embed-text-v1.5", "e" * 40),
+        ("code", "nomic-ai/nomic-bert-2048", "7" * 40)]
+    assert r.artifacts_digest is not None
+
+
+def test_code_revision_from_entry_defaults_to_primary_repo():
+    entry = {"revision": "e" * 40, "hf_repo": "o/r", "code_revision": "7" * 40}
+    r = model_revision("m", entry, {"hf_repo": "o/r"})
+    assert r.components[-1] == provenance.ArtifactComponent("code", "o/r", "7" * 40)
+
+
+def test_hex_fields_reject_trailing_newline():
+    r = model_revision("m", {"revision": "a" * 40 + "\n"}, {})
+    assert r.revision is None
+
+
+def test_lora_base_matched_by_repo_case_insensitively():
+    catalog = {"flux2-klein-4b": {
+        "revision": "b" * 40, "hf_repo": "black-forest-labs/flux.2-klein-4b"}}
+    r = model_revision(
+        "lora", {"revision": "1" * 40, "hf_repo": "o/lora"},
+        {"capabilities": {"lora_adapter": True,
+                          "base_model": "hf://black-forest-labs/FLUX.2-klein-4B@main"}},
+        catalog)
+    assert r.components[1].revision == "b" * 40
+    assert r.components[1].repo == "black-forest-labs/flux.2-klein-4b"
+
+
+def test_lora_base_matched_by_persisted_manifest_repo():
+    catalog = {"k": {"revision": "b" * 40,
+                     "manifest": {"hf_repo": "Black-Forest-Labs/FLUX.2-klein-4B"}}}
+    r = model_revision(
+        "lora", {"revision": "1" * 40, "hf_repo": "o/lora"},
+        {"capabilities": {"lora_adapter": True,
+                          "base_model": "black-forest-labs/FLUX.2-klein-4B"}},
+        catalog)
+    assert r.components[1].revision == "b" * 40
 
 
 def test_fingerprint_format():

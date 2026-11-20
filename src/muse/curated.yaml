@@ -310,6 +310,8 @@
   quality_tier: good
   capabilities:
     trust_remote_code: true
+    # The repo that code_revision pins (provenance's code component).
+    code_repo: nomic-ai/nomic-bert-2048
     memory_gb: 1.0
 
 # ---------- audio/speech (TTS) ----------

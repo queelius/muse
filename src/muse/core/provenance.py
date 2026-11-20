@@ -2,7 +2,7 @@
 
 A model's primary revision is the exact HF commit its weights were pulled
 at. Models that combine several artifacts (a LoRA over a base model,
-multi-repo pulls, pinned code) also carry a component list and a short
+multi-repo pulls, pinned remote code) also carry a component list and a short
 digest over it, so a downstream pipeline can pin the full weight set.
 A weightless model (`weights: "none"`) has no revision; its one `code`
 component carries `revision="muse-<running version>"` and the digest is the
@@ -23,9 +23,11 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+from muse.core.hf_repo import catalog_entries_for_repo
+from muse.core.resolvers import COMMIT_RE
+
 _SNAP = re.compile(r"/snapshots/([0-9a-f]{40})(?:/|$)")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,7 @@ class ModelRevision:
 
 
 def _hex40(value: Any) -> str | None:
-    return value if isinstance(value, str) and _HEX40.match(value) else None
+    return value if isinstance(value, str) and COMMIT_RE.fullmatch(value) else None
 
 
 def _primary(entry: Mapping, manifest: Mapping) -> str | None:
@@ -72,11 +74,8 @@ def _base_component(entry, manifest, catalog) -> ArtifactComponent | None:
         return None
     base_entry = (catalog or {}).get(base)
     if not isinstance(base_entry, Mapping):
-        base_entry = next(
-            (e for e in (catalog or {}).values()
-             if isinstance(e, Mapping) and e.get("hf_repo") == base),
-            None,
-        )
+        matches = catalog_entries_for_repo(base, catalog or {})
+        base_entry = matches[0][1] if matches else None
     if isinstance(base_entry, Mapping):
         stored = base_entry.get("manifest")
         base_manifest = stored if isinstance(stored, Mapping) else {}
@@ -103,7 +102,7 @@ def _weightless_revision(model_id: str, entry: Mapping) -> ModelRevision:
         for item in prov:
             if (isinstance(item, Mapping) and item.get("kind") == "code"
                     and isinstance(item.get("source_sha256"), str)
-                    and _SHA256.match(item["source_sha256"])):
+                    and _SHA256.fullmatch(item["source_sha256"])):
                 payload = f"{item['source_sha256']}:{version}"
                 digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
                 break
@@ -128,9 +127,14 @@ def model_revision(model_id: str, entry: Mapping, manifest: Mapping,
                     "weights", item["repo_id"], _hex40(item.get("revision"))))
     if not components and repo:
         components.append(ArtifactComponent("weights", repo, primary))
-    code = _hex40(manifest.get("code_revision"))
+    caps = manifest.get("capabilities")
+    caps = caps if isinstance(caps, Mapping) else {}
+    # Pulls persist the pin both on the entry and in manifest.capabilities.
+    code = _hex40(entry.get("code_revision")) or _hex40(caps.get("code_revision"))
     if code:
-        components.append(ArtifactComponent("code", repo, code))
+        # The code lives in the auto_map repo when it differs from the
+        # primary one (capabilities.code_repo).
+        components.append(ArtifactComponent("code", _str(caps.get("code_repo")) or repo, code))
     base = _base_component(entry, manifest, catalog)
     if base is not None:
         components.append(base)

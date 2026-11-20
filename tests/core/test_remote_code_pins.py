@@ -47,3 +47,10 @@ def test_sdk_backed_3d_entries_do_not_claim_transformers_remote_code():
     entries = {entry.id: entry for entry in load_curated()}
     for model_id in ("trellis-image", "hunyuan3d-2"):
         assert not entries[model_id].capabilities.get("trust_remote_code")
+
+
+def test_curated_code_revision_entries_name_their_code_repo():
+    """Provenance labels the pinned code component with capabilities.code_repo."""
+    entries = {entry.id: entry for entry in load_curated()}
+    assert entries["nomic-embed-text-v1.5"].capabilities.get("code_repo") == (
+        "nomic-ai/nomic-bert-2048")

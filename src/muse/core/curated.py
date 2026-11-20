@@ -28,7 +28,8 @@ bundled entries since those carry their own MANIFEST.
 
 Resolver entries that enable `trust_remote_code` must also declare a full
 immutable `revision`; `code_revision` pins an external repository referenced
-by Transformers `auto_map`.
+by Transformers `auto_map`, and `capabilities.code_repo` (which requires
+`code_revision`) names that repository for provenance.
 
 The list is loaded once at import and cached. Restart muse to pick up
 edits to the YAML (matches the rest of muse's "static at startup"
@@ -170,6 +171,18 @@ def _entry_from_dict(d: dict) -> CuratedEntry:
             f"entry {d['id']!r}: 'code_revision' requires "
             "capabilities.trust_remote_code: true"
         )
+    code_repo = caps.get("code_repo")
+    if code_repo is not None:
+        if code_revision is None:
+            raise ValueError(
+                f"entry {d['id']!r}: capabilities.code_repo requires 'code_revision'"
+            )
+        if (not isinstance(code_repo, str) or code_repo.count("/") != 1
+                or not all(code_repo.split("/"))):
+            raise ValueError(
+                f"entry {d['id']!r}: capabilities.code_repo must be an "
+                "'org/name' HF repo id"
+            )
     if bundled and any(name in d for name in NOTE_FIELDS):
         raise ValueError(
             f"entry {d['id']!r}: bundled entries take summary/strengths/"
