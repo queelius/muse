@@ -8,11 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from muse.cli_impl.refresh import (
-    MODALITY_EXTRAS,
     RefreshResult,
-    _infer_extras,
     _muse_repo_root,
-    _pip_target_args,
     _select_targets,
     refresh_one,
     run_refresh,
@@ -47,49 +44,32 @@ def _make_python_path(tmp_path: Path, name: str) -> str:
     return str(p)
 
 
-class TestInferExtras:
-    def test_known_modality_returns_mapped_extras(self):
-        assert _infer_extras("audio/speech") == ["audio"]
-        assert _infer_extras("image/generation") == ["images"]
-        assert _infer_extras("embedding/text") == ["embeddings"]
-
-    def test_unknown_modality_returns_empty(self):
-        assert _infer_extras("totally/unknown") == []
-
-    def test_modality_with_no_extras_returns_empty(self):
-        assert _infer_extras("text/rerank") == []
-        assert _infer_extras("audio/alignment") == []
-
-
 class TestPipTargetArgs:
-    def test_editable_flag_when_source_tree(self):
-        with patch(
-            "muse.cli_impl.refresh._muse_repo_root",
-            return_value=Path("/src/muse"),
-        ):
-            args = _pip_target_args(["audio"])
-        assert args == ["-e", "/src/muse[server,audio]"]
+    """Refresh installs exactly what `muse pull` installs (ruling R15)."""
 
-    def test_pypi_dist_when_no_source_tree(self):
-        """M2: on a PyPI install of museq there is no pyproject.toml in any
-        parent of __file__, so `_muse_repo_root()` returns None and refresh
-        must install the published `museq` distribution (no -e, no bogus
-        cwd path that would editable-install whatever project sits in the
-        current directory)."""
-        with patch(
-            "muse.cli_impl.refresh._muse_repo_root", return_value=None,
-        ), patch(
-            "muse.core.catalog_pull.importlib_metadata.version", return_value="1.2.3",
-        ):
-            args = _pip_target_args(["images", "embeddings"])
-        assert args == ["museq[server,images,embeddings]==1.2.3"]
-        assert "-e" not in args
+    def test_editable_flag_when_source_tree(self, tmp_catalog, tmp_path):
+        py = _make_python_path(tmp_path, "x")
+        _seed_catalog({"x": {"python_path": py, "enabled": True}})
+        manifest = {"modality": "audio/speech", "pip_extras": ()}
+        with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
+             patch("muse.core.catalog_pull._muse_repo_root",
+                   return_value=Path("/src/muse")), \
+             patch("muse.cli_impl.refresh.run_owned_command") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            refresh_one("x")
+        assert mock_run.call_args_list[0].args[0][5:] == ["-e", "/src/muse[server]"]
+
+    def test_matches_the_pull_install_args(self):
+        from muse.core.catalog_pull import _muse_server_install_args
+        from muse.cli_impl import refresh
+
+        assert refresh._muse_server_install_args is _muse_server_install_args
 
     def test_refresh_one_installs_museq_from_pypi_when_not_source_tree(
         self, tmp_catalog, tmp_path,
     ):
         """End-to-end: a wheel/PyPI install refresh must shell out to
-        `pip install --upgrade museq[server,audio]` with no -e flag."""
+        `pip install --upgrade museq[server]` with no -e flag."""
         py = _make_python_path(tmp_path, "x")
         _seed_catalog({
             "x": {
@@ -99,7 +79,7 @@ class TestPipTargetArgs:
         })
         manifest = {"modality": "audio/speech", "pip_extras": ()}
         with patch("muse.cli_impl.refresh.get_manifest", return_value=manifest), \
-             patch("muse.cli_impl.refresh._muse_repo_root", return_value=None), \
+             patch("muse.core.catalog_pull._muse_repo_root", return_value=None), \
              patch(
                  "muse.core.catalog_pull.importlib_metadata.version",
                  return_value="1.2.3",
@@ -110,7 +90,8 @@ class TestPipTargetArgs:
         assert result.state == "ok"
         cmd = mock_run.call_args_list[0].args[0]
         assert cmd[:5] == [py, "-m", "pip", "install", "--upgrade"]
-        assert cmd[5:] == ["museq[server,audio]==1.2.3"]
+        # No modality extras: a pull never installs museq[server].
+        assert cmd[5:] == ["museq[server]==1.2.3"]
         assert "-e" not in cmd
 
 
@@ -135,14 +116,14 @@ class TestRefreshOne:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = refresh_one("kokoro-82m")
         assert result.state == "ok"
-        # Two calls: museq[server,audio] then pip_extras
+        # Two calls: museq[server] then pip_extras
         assert mock_run.call_count == 2
         first_cmd = mock_run.call_args_list[0].args[0]
         assert first_cmd[0] == py
         assert first_cmd[1:5] == ["-m", "pip", "install", "--upgrade"]
         assert first_cmd[5] == "-e"
         target = first_cmd[6]
-        assert "[server,audio]" in target
+        assert target.endswith("[server]")
 
     def test_appends_pip_extras_in_second_call(self, tmp_catalog, tmp_path):
         py = _make_python_path(tmp_path, "x")
@@ -190,7 +171,7 @@ class TestRefreshOne:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = refresh_one("x", no_extras=True)
         assert result.state == "ok"
-        # Only ONE call (the museq[server,audio] one); extras call skipped
+        # Only ONE call (the museq[server] one); extras call skipped
         assert mock_run.call_count == 1
         mock_sources.assert_not_called()
 
@@ -432,7 +413,7 @@ class TestRefreshOne:
              patch("muse.cli_impl.refresh.run_owned_command") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             refresh_one("x")
-        # Only the museq[server,audio] call; no extras pass.
+        # Only the museq[server] call; no extras pass.
         assert mock_run.call_count == 1
 
 
@@ -730,23 +711,6 @@ class TestRunRefresh:
         assert "line6" in captured.out
         # First line was clipped (only last 5 shown)
         assert "line1" not in captured.out
-
-
-class TestModalityExtrasMap:
-    def test_all_modality_keys_have_list_values(self):
-        for k, v in MODALITY_EXTRAS.items():
-            assert isinstance(v, list), f"{k} maps to non-list {type(v)}"
-
-    def test_modalities_with_extras_are_mapped(self):
-        """Sanity: modalities that need a muse extra have a row; the rest
-        fall through to [] and need none."""
-        for mod in (
-            "audio/speech",
-            "image/generation",
-            "embedding/text",
-            "video/generation",
-        ):
-            assert MODALITY_EXTRAS[mod]
 
 
 def test_muse_repo_root_finds_pyproject():

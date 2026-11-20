@@ -677,7 +677,7 @@ muse models enable <id> / disable <id>
 muse models set-device <id> cuda               # operator device pin (overrides manifest device)
 muse models set-device <id> --clear            # remove the pin
 muse models remove <id>
-muse models refresh <id>                       # re-install muse[server,extras] into one venv
+muse models refresh <id>                       # re-install museq[server] + pip_extras (what pull installs)
 muse models refresh --all                      # all pulled venvs, alphabetical
 muse models refresh --enabled                  # only enabled venvs
 muse models refresh <id> --no-extras           # skip the model's pip_extras (only refresh muse[server])
