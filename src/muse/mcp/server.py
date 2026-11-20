@@ -388,7 +388,7 @@ class MCPServer:
                     watcher.cancel()
 
     def build_http_app(self, *, admin_token: str | None = None) -> Any:
-        """Build (but don't run) the Starlette app for HTTP+SSE mode.
+        """Build (but don't run) the Starlette app for Streamable HTTP mode.
 
         Factored out so tests can mount the app on a TestClient without
         actually launching uvicorn. The session manager runs as a
@@ -476,7 +476,7 @@ class MCPServer:
         *,
         admin_token: str | None = None,
     ) -> None:
-        """Drive the MCP server over HTTP+SSE via uvicorn."""
+        """Drive the MCP server over Streamable HTTP via uvicorn."""
         import uvicorn
 
         from muse.cli_impl.serve_util import shutdown_grace_seconds

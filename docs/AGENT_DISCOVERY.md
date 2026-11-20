@@ -13,12 +13,17 @@ All are public (no token), read-only, and never trigger a model load.
 | Endpoint | Returns |
 |---|---|
 | `GET /` | Pointer document: links to `/v1/capabilities`, `/openapi.json`, `/llms.txt`, `/v1/models`. Not proxied to a worker. |
-| `GET /v1/capabilities` | The main document: `server` (version, node, links, MCP install line), `modalities[]` (summary, `use_for`, `not_for`, routes with request/response content types, an example, the MCP tool name, file fields), and `models[]` (id, modality, license, `revision`, `components`, one-line `summary`, `strengths`, `limits`, `quality_tier` of best/good/draft, filtered capability flags, memory estimate, and live state: loaded, last cold-load seconds, queue depth, `unservable_reason`). Only enabled models are listed. |
+| `GET /v1/capabilities` | The main document: `server` (version, node, links, MCP install line), `modalities[]` (summary, `use_for`, `not_for`, routes with request/response content types, an example, the MCP tool name, file fields, and `model_optional`), and `models[]` (id, modality, license, `revision`, `components`, one-line `summary`, `strengths`, `limits`, `quality_tier` of best/good/draft, filtered capability flags, memory estimate, and live state: loaded, last cold-load seconds, queue depth, `unservable_reason`). Only enabled models are listed. |
 | `GET /v1/capabilities?modality=audio/speech` | The same document narrowed to one modality. `?model=<id>` narrows to one model. An unknown value is a 404. |
 | `GET /openapi.json` | Complete OpenAPI for every inference route (alignments, vectorize, systemone and the rest), generated from the same declarations. |
-| `GET /llms.txt` | A short markdown page rendered from the capabilities document, for agents that read `llms.txt`. |
+| `GET /llms.txt` | A short markdown page in the llmstxt.org shape, rendered from the capabilities document: an H1, a one-line summary, the workflow (pick a modality, read `?modality=` / `?model=`, call with `model`, expect a cold load when a model is not `loaded`), absolute links, the MCP install line, each modality that has an enabled model (linked to its filtered document, with routes, `model optional` marks, and every model's tier, live state and summary), and an `Optional` section naming the modalities with no model enabled here. |
 | `GET /.well-known/muse.json` | Same pointer document as `/`, at a well-known path. |
 | `GET /v1/models` | Unchanged OpenAI-shape list, plus a `revision` field per model. |
+
+A route with `model_optional: true` (its package lists it in
+`MODEL_OPTIONAL_PATHS`) accepts a request without `model`: the gateway uses
+the first enabled model of that modality (pixelize, autotile, translate,
+`/languages`, alignment, audio quality, vectorize). Other routes need `model`.
 
 `quality_tier` is absolute within a modality across bundled and curated
 models, so an agent can pick the best model for a task without a table of ids.
@@ -72,8 +77,13 @@ tool result (below).
 1. Register the local MCP program (only the server URL is needed):
 
    ```bash
-   claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp
+   claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]>=0.70" muse mcp
    ```
+
+   The capabilities document's `server.mcp.install` gives this line with the
+   server's own minor version as the floor (unpinned for a dev build), so
+   uvx does not reuse an older cached museq. At initialize the server sends
+   `instructions`: the describe, pick a model, call, read files workflow.
 
 2. Call `muse_describe`: returns the capabilities document for the live
    server. Narrowed by `modality` or `model`, it comes back inline. Unfiltered
@@ -81,9 +91,12 @@ tool result (below).
    to a file and the result is an inline index: per modality its summary,
    tool names and model ids; per model its id, modality, license,
    quality_tier, summary and loaded state.
-3. Call `muse_speak` with `model`, `input` and `out_path`. The result is
-   `{path, sha256, model, revision}` for the written file. Pass
-   `preview: true` on image tools to also get one inline 512 px PNG.
+3. Call `muse_speak` with `model`, `input` and `out_path`. The result is a
+   short text block, a `resource_link` per written file, and
+   `structuredContent` `{model, revision, artifacts, files: [{path, sha256,
+   mime, bytes, ...}], response}`, where `response` is the JSON body with
+   media replaced by file paths. Pass `preview: true` on image tools to also
+   get one inline 512 px PNG.
 
 `muse mcp` is a thin local HTTP client. It reads `/openapi.json` and
 `/v1/capabilities` (cached 30 s) and generates one tool per inference route,
@@ -94,7 +107,13 @@ are listed (never stale generated tools). The server advertises
 `tools.listChanged` and notifies a session once when the tool set changes
 (including the server coming up after the client connected), so clients
 re-list. A `model` argument is a string whose description lists the serving
-models, not an enum, so a model enabled mid-session is accepted. Behaviour:
+models, not an enum, so a model enabled mid-session is accepted; on a
+`model_optional` route it is not required. Every tool has a `title` and
+annotations: inference tools are non-destructive and closed-world (read-only
+when they write no media file), `muse_describe` and the admin read tools are
+read-only, `muse_remove_model` and `muse_disable_model` are destructive, and
+`muse_search_models` / `muse_pull_model` are open-world (Hugging Face Hub).
+`muse mcp --http` serves Streamable HTTP at `/mcp` (stateless). Behaviour:
 
 - Media outputs are written to files and returned as path, sha256, model and
   revision, never inline bytes. `out_path` names the file; otherwise a

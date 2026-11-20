@@ -96,7 +96,7 @@ def test_document_shape_and_filters():
             "capabilities": "/v1/capabilities", "llms_txt": "/llms.txt",
         },
         "mcp": {
-            "install": 'uvx --from "museq[mcp]" muse mcp',
+            "install": 'uvx --from "museq[mcp]>=1.2" muse mcp',
             "env": {"MUSE_SERVER": "http://box:8000"},
         },
     }
@@ -254,10 +254,89 @@ def test_llms_txt_lists_modalities_and_links():
     assert "/llms.txt" not in text.split("\n", 1)[0]
     assert "audio/speech" in text and "Text-to-speech." in text
     assert "POST /v1/audio/speech" in text
-    assert "audio/transcription" in text and "POST /v1/audio/transcriptions" in text
+    assert "audio/transcription" in text
     assert "kokoro-82m" in text
     assert 'MUSE_SERVER=http://box:8000' in text
     assert "museq[mcp]" in text
+
+
+def _sections(text):
+    out, name = {}, None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            name = line[3:]
+            out[name] = []
+        elif name:
+            out[name].append(line)
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def test_llms_txt_follows_llmstxt_shape():
+    """H1, one blockquote summary, H2 link lists, an Optional section."""
+    text = render_llms_txt(_doc([(_facts(), _state())]))
+    lines = text.splitlines()
+    assert lines[0] == "# muse"
+    assert lines[2].startswith("> ") and not lines[3].startswith(">")
+    sections = _sections(text)
+    assert list(sections)[-1] == "Optional"
+    # Links are absolute: llms.txt is often fetched and read out of context.
+    assert "[Capabilities](http://box:8000/v1/capabilities)" in text
+    assert "](/" not in text
+
+
+def test_llms_txt_states_the_workflow():
+    text = render_llms_txt(_doc([(_facts(), _state())]))
+    head = text.split("## ", 1)[0]
+    for needle in ("?modality=", "?model=", "loaded", "cold", "model"):
+        assert needle in head, needle
+
+
+def test_llms_txt_modalities_link_to_their_filtered_document():
+    text = render_llms_txt(_doc([(_facts(), _state(last_cold_load_seconds=4.5))]))
+    mods = _sections(text)["Modalities"]
+    assert ("- [audio/speech](http://box:8000/v1/capabilities?modality=audio/speech):"
+            " Text-to-speech.") in mods
+    # Each enabled model: tier, live state and summary.
+    assert "kokoro-82m (good; cold, last load 4.5 s): Fast TTS." in mods
+
+
+def test_llms_txt_marks_loaded_and_unservable_models():
+    loaded = render_llms_txt(_doc([(_facts(), _state(loaded=True))]))
+    assert "kokoro-82m (good; loaded)" in loaded
+    broken = render_llms_txt(_doc([(_facts(), _state(unservable_reason="too big"))]))
+    assert "kokoro-82m (good; unservable: too big)" in broken
+
+
+def test_llms_txt_moves_modalities_without_models_to_optional():
+    text = render_llms_txt(_doc([(_facts(), _state())]))
+    sections = _sections(text)
+    assert "audio/transcription" not in sections["Modalities"]
+    assert "audio/transcription" in sections["Optional"]
+    assert "POST /v1/audio/transcriptions" not in text
+
+
+def test_llms_txt_marks_model_optional_routes():
+    discovery = {"audio/speech": {**DISCOVERY["audio/speech"], "routes": [
+        {**DISCOVERY["audio/speech"]["routes"][0], "model_optional": True}]}}
+    doc = build_document(server=SERVER, discovery=discovery,
+                         models=[(_facts(), _state())])
+    assert "`POST /v1/audio/speech` (openai:audio.speech; model optional)" in \
+        render_llms_txt(doc)
+
+
+def test_llms_txt_mcp_section_says_outputs_are_files():
+    mcp = _sections(render_llms_txt(_doc([(_facts(), _state())])))["MCP"]
+    assert 'uvx --from "museq[mcp]>=1.2" muse mcp' in mcp
+    assert "file" in mcp
+
+
+def test_mcp_install_pins_the_server_release_line():
+    assert server_block(version="0.70.1", node="n", base_url="u")["mcp"]["install"] \
+        == 'uvx --from "museq[mcp]>=0.70" muse mcp'
+    # A local or dev build may not be on PyPI: no pin.
+    for version in ("0.71.0.dev0", "0.70.1+local", "?"):
+        assert server_block(version=version, node="n", base_url="u")["mcp"][
+            "install"] == 'uvx --from "museq[mcp]" muse mcp'
 
 
 def test_worker_app_serves_capabilities(tmp_path, monkeypatch):
@@ -297,3 +376,11 @@ def test_worker_app_serves_capabilities(tmp_path, monkeypatch):
     bad = client.get("/v1/capabilities", params={"model": "nope"})
     assert bad.status_code == 404
     assert bad.json()["error"]["code"] == "not_found"
+
+
+def test_llms_txt_keeps_unservable_reasons_short():
+    reason = "model files are missing; re-run `muse pull kokoro-82m` " + "x" * 200
+    text = render_llms_txt(_doc([(_facts(), _state(unservable_reason=reason))]))
+    assert "kokoro-82m (good; unservable: model files are missing): Fast TTS." in text
+    long = render_llms_txt(_doc([(_facts(), _state(unservable_reason="y" * 300))]))
+    assert "y" * 78 not in long and "..." in long

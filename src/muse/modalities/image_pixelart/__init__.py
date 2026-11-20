@@ -45,14 +45,14 @@ MODEL_OPTIONAL_PATHS = ("/v1/images/pixelize", "/v1/images/autotile")
 DISCOVERY = {
     "summary": (
         "Deterministic pixel-art tools (CPU, no weights). Pixelize snaps an image "
-        "onto a pixel grid with a hard palette and binary alpha. For generated "
-        "sprites pass target_size (64x64 for items and tiles, 96x96 for "
-        "characters): AI 'pixel art' has no consistent grid, so grid=auto "
-        "usually finds none and keeps every pixel. grid=auto is for real pixel "
-        "art that was upscaled. Autotile turns a fill texture (or an RPG Maker A2 block) "
-        "into an A2 block, a 47-tile blob sheet and Godot 4 / Tiled tilesets; "
-        "the MCP tool defaults to the zip bundle so the tileset files keep "
-        "pointing at <name>_blob47.png once unzipped."
+        "onto a pixel grid with a hard palette and binary alpha. Generated "
+        "sprites (e.g. from klein-pixel-art) have no consistent grid, so pass "
+        "target_size (64x64 for items and tiles, 96x96 for characters); "
+        "grid=auto is for real pixel art that was upscaled. A 4x4 walk sheet "
+        "(klein-pixel-walk) takes sheet=4x4 grid=4 palette=auto:24 for 32x32 "
+        "frames. Autotile turns a fill texture (or an RPG Maker A2 block) into "
+        "an A2 block, a 47-tile blob sheet and Godot 4 / Tiled tilesets (the "
+        "MCP tool returns them as one zip so the tilesets' file references hold)."
     ),
     "use_for": [
         "cleaning up generated pixel art (grid snap, palette, hard alpha)",

@@ -502,11 +502,11 @@ def mcp(
         bool,
         typer.Option(
             "--http/--stdio",
-            help="HTTP+SSE mode instead of stdio (default: stdio for desktop apps)",
+            help="Streamable HTTP mode instead of stdio (default: stdio for desktop apps)",
         ),
     ] = False,
     port: Annotated[
-        int, typer.Option(help="port for HTTP+SSE mode"),
+        int, typer.Option(help="port for Streamable HTTP mode"),
     ] = 8088,
     server: Annotated[
         Optional[str],

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from muse.core.model_notes import ModelNotes, model_notes
 from muse.core.provenance import ModelRevision
 
 MCP_INSTALL = 'uvx --from "museq[mcp]" muse mcp'
+_RELEASE = re.compile(r"(\d+)\.(\d+)\.\d+")
 # The env var the local MCP program reads to find this server (a value we
 # hand the agent, not one muse reads here).
 MCP_SERVER_ENV = "MUSE_SERVER"
@@ -121,12 +123,26 @@ def node_name(state: Any) -> str:
     return socket.gethostname()
 
 
+def mcp_install(version: str) -> str:
+    """The `muse mcp` install command for a server at ``version``.
+
+    A release version pins the MCP client to at least its minor line
+    (``museq[mcp]>=0.70``): uvx otherwise reuses whatever older museq it
+    cached, which may predate DISCOVERY keys the server sends. A dev or
+    local version may not be on PyPI, so it gets no pin.
+    """
+    m = _RELEASE.fullmatch(version or "")
+    if not m:
+        return MCP_INSTALL
+    return f'uvx --from "museq[mcp]>={m.group(1)}.{m.group(2)}" muse mcp'
+
+
 def server_block(*, version: str, node: str, base_url: str) -> dict:
     return {
         "version": version,
         "node": node,
         "links": dict(LINKS),
-        "mcp": {"install": MCP_INSTALL, "env": {MCP_SERVER_ENV: base_url}},
+        "mcp": {"install": mcp_install(version), "env": {MCP_SERVER_ENV: base_url}},
     }
 
 
@@ -245,41 +261,111 @@ def filter_document(
     return {k: out[k] for k in order}
 
 
+def _model_line(entry: dict) -> str:
+    """``id (tier; state): summary`` for one enabled model."""
+    state = "loaded" if entry.get("loaded") else "cold"
+    seconds = entry.get("last_cold_load_seconds")
+    if not entry.get("loaded") and isinstance(seconds, (int, float)):
+        state += f", last load {seconds:g} s"
+    if entry.get("unservable_reason"):
+        # The first clause ("model files are missing"); the full reason is in
+        # the capabilities document.
+        reason = str(entry["unservable_reason"]).split(";")[0].strip()
+        if len(reason) > 80:
+            reason = reason[:77].rstrip() + "..."
+        state = f"unservable: {reason}"
+    tier = entry.get("quality_tier") or "untiered"
+    summary = entry.get("summary")
+    return f"{entry['id']} ({tier}; {state})" + (f": {summary}" if summary else "")
+
+
 def render_llms_txt(doc: dict) -> str:
-    """A short markdown page (llms.txt) generated from the document."""
+    """The llms.txt page (llmstxt.org shape) generated from the document.
+
+    H1, a one-line blockquote, the workflow, then H2 link lists: discovery
+    links, MCP, the modalities that have an enabled model (each linked to
+    its filtered capabilities document, with routes and models), and an
+    Optional section naming the modalities with no model enabled here.
+    Links are absolute when the base URL is known, since llms.txt is often
+    read out of context.
+    """
     server = doc.get("server") or {}
     links = server.get("links") or LINKS
     mcp = server.get("mcp") or {}
-    base = (mcp.get("env") or {}).get(MCP_SERVER_ENV) or "http://host:8000"
+    known = (mcp.get("env") or {}).get(MCP_SERVER_ENV)
+    base = known or "http://host:8000"
+    root = known.rstrip("/") if known else ""
     install = mcp.get("install") or MCP_INSTALL
+    caps = root + links["capabilities"]
+    by_id = {m.get("id"): m for m in doc.get("models") or [] if isinstance(m, dict)}
+    mods = [m for m in doc.get("modalities") or [] if isinstance(m, dict)]
+    served = [m for m in mods if m.get("models")]
+    idle = [m["modality"] for m in mods if not m.get("models")]
+
     lines = [
         "# muse",
         "",
-        f"> A multi-modality generation server (muse {server.get('version', '?')},"
-        f" node {server.get('node', '?')}). Read {links['capabilities']} first:"
-        " it lists every modality, model, route and current cost as JSON.",
+        f"> Self-hosted multi-modality generation server (muse"
+        f" {server.get('version', '?')}, node {server.get('node', '?')}):"
+        " speech, transcription, chat, images, pixel art, 3D, video, embeddings"
+        " and more over one HTTP API, OpenAI-compatible where OpenAI has a route.",
+        "",
+        "How to use it: pick a modality below, read its entry with"
+        f" `{links['capabilities']}?modality=<tag>` (what it is for and not for,"
+        " request examples, and each model's summary, limits and quality_tier),"
+        f" or one model with `?model=<id>`; then POST to the route with that"
+        " `model`. Routes marked \"model optional\" use the modality's first"
+        " enabled model when `model` is omitted. A model that is not `loaded`"
+        " (cold) loads on its first request, which can take seconds to minutes;"
+        " later requests are fast. Request and response schemas are in"
+        f" `{links['openapi']}`. Every response names the model and revision in"
+        " `X-Muse-Model` / `X-Muse-Model-Revision`.",
         "",
         "## Discovery",
         "",
-        f"- [Capabilities]({links['capabilities']}): modalities, models, routes,"
-        " revisions and live state; filter with ?modality= or ?model=",
-        f"- [OpenAPI]({links['openapi']}): request and response schemas for every route",
-        f"- [Models]({links['models']}): OpenAI-compatible model list",
+        f"- [Capabilities]({caps}): JSON for every modality, model, route and"
+        " live state; filter with ?modality= or ?model=",
+        f"- [OpenAPI]({root}{links['openapi']}): request and response schemas"
+        " for every route",
+        f"- [Models]({root}{links['models']}): OpenAI-compatible model list with"
+        " `loaded`",
         "",
         "## MCP",
+        "",
+        "For agents with MCP (Claude Code, Claude Desktop): one tool per route"
+        " plus `muse_describe`; media outputs are written to local files and"
+        " returned as paths with sha256, never inline.",
         "",
         f"`claude mcp add muse -e MUSE_SERVER={base} -- {install}`",
         "",
         "## Modalities",
         "",
     ]
-    for m in doc.get("modalities") or []:
+    if not served:
+        lines.append("- No model is enabled on this server yet.")
+    for m in served:
+        tag = m["modality"]
         summary = m.get("summary") or "(no description)"
-        lines.append(f"- **{m['modality']}**: {summary}")
+        lines.append(f"- [{tag}]({caps}?modality={tag}): {summary}")
         for r in m.get("routes") or []:
-            compat = f" ({r['compat']})" if r.get("compat") else ""
-            lines.append(f"  - `{r['method']} {r['path']}`{compat}")
-        ids = m.get("models") or []
-        lines.append(f"  - models: {', '.join(ids) if ids else 'none enabled'}")
+            notes = [r["compat"]] if r.get("compat") else []
+            if r.get("model_optional"):
+                notes.append("model optional")
+            note = f" ({'; '.join(notes)})" if notes else ""
+            lines.append(f"  - `{r['method']} {r['path']}`{note}")
+        for mid in m.get("models") or []:
+            entry = by_id.get(mid)
+            lines.append(f"  - model {_model_line(entry) if entry else mid}")
+    lines += [
+        "",
+        "## Optional",
+        "",
+    ]
+    if idle:
+        lines.append(
+            "- Supported by muse, no model enabled here (an operator can"
+            " `muse pull` one): " + ", ".join(idle))
+    lines.append(f"- [Full capabilities document]({caps}): includes strengths,"
+                 " limits, capabilities and revisions for every model")
     lines.append("")
     return "\n".join(lines)

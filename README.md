@@ -670,11 +670,11 @@ muse serve
 
 ## MCP server (since v0.29.0)
 
-`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as structured tools: `muse_describe`, inference tools generated from the server's own OpenAPI and capabilities document, and 11 admin tools (gated by `MUSE_ADMIN_TOKEN`). Install with `claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]" muse mcp`. See `docs/AGENT_DISCOVERY.md`. Stdio mode is the default (for desktop apps); HTTP+SSE mode (`--http --port 8088`) is available for remote / web embedders.
+`muse mcp` runs a Model Context Protocol server that exposes muse to LLM clients (Claude Desktop, Cursor, etc.) as structured tools: `muse_describe`, inference tools generated from the server's own OpenAPI and capabilities document, and 11 admin tools (gated by `MUSE_ADMIN_TOKEN`). Install with `claude mcp add muse -e MUSE_SERVER=http://host:8000 -- uvx --from "museq[mcp]>=0.70" muse mcp` (the server's `/llms.txt` prints this line for itself). On connect it sends instructions describing the workflow; every tool carries a title and read-only / destructive hints. See `docs/AGENT_DISCOVERY.md`. Stdio mode is the default (for desktop apps); Streamable HTTP mode (`--http --port 8088`) is available for remote / web embedders.
 
 ```bash
 muse mcp                                  # stdio mode
-muse mcp --http --port 8088               # HTTP+SSE
+muse mcp --http --port 8088               # Streamable HTTP
 muse mcp --filter inference               # only inference tools (no admin)
 muse mcp --filter admin                   # only admin tools (control panel)
 muse mcp --server http://other:8000       # connect to a remote muse server
@@ -687,7 +687,7 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
   "mcpServers": {
     "muse": {
       "command": "uvx",
-      "args": ["--from", "museq[mcp]", "muse", "mcp"],
+      "args": ["--from", "museq[mcp]>=0.70", "muse", "mcp"],
       "env": {
         "MUSE_SERVER": "http://localhost:8000",
         "MUSE_MCP_OUTPUT_DIR": "/Users/you/muse-output",
