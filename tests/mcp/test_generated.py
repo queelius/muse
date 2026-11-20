@@ -648,3 +648,22 @@ def test_mcp_defaults_kept_when_the_route_publishes_no_schema():
     caps, openapi = _defaults_docs({"response_format": "zip"}, with_schema=False)
     [gen] = generate_tools(caps, openapi)
     assert gen.defaults == {"response_format": "zip"}
+
+
+def test_http_url_input_fetch_gets_a_long_total_deadline(monkeypatch):
+    """A *_url input may be up to MAX_INPUT_BYTES (256 MB); net_fetch's
+    default 120 s whole-fetch deadline is too short, so MCP passes 1800 s."""
+    import muse.core.net_fetch as net_fetch
+    from muse.mcp import generated
+
+    seen = {}
+
+    def fake_fetch(url, *, max_bytes, **kwargs):
+        seen.update(kwargs, max_bytes=max_bytes)
+        return b"RIFFxxxx"
+
+    monkeypatch.setattr(net_fetch, "fetch_url_bytes", fake_fetch)
+    name, data, _ = generated._fetch_input("https://example.com/a.wav", "file")
+    assert (name, data) == ("a.wav", b"RIFFxxxx")
+    assert seen["max_bytes"] == generated.MAX_INPUT_BYTES
+    assert seen["total_timeout"] == 1800

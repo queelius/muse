@@ -62,6 +62,9 @@ logger = logging.getLogger(__name__)
 DESCRIBE = "muse_describe"
 LARGE_JSON_CHARS = 20_000
 MAX_INPUT_BYTES = 256 * 1024 * 1024
+# Whole-fetch deadline for *_url inputs: net_fetch's 120 s default is too
+# short for a body of up to MAX_INPUT_BYTES.
+INPUT_FETCH_TOTAL_TIMEOUT = 1800.0
 _REF = "#/components/schemas/"
 # Response headers surfaced as keys in ``response``.
 DATA_HEADERS = {
@@ -398,7 +401,9 @@ def _fetch_input(url: str, field_name: str) -> tuple[str, bytes, str]:
 
     from muse.core.net_fetch import fetch_url_bytes
 
-    data = fetch_url_bytes(url, max_bytes=MAX_INPUT_BYTES)
+    data = fetch_url_bytes(
+        url, max_bytes=MAX_INPUT_BYTES, total_timeout=INPUT_FETCH_TOTAL_TIMEOUT,
+    )
     name = os.path.basename(urllib.parse.urlparse(url).path) or field_name
     return name, data, mimetypes.guess_type(name)[0] or "application/octet-stream"
 
