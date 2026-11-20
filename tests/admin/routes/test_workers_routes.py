@@ -79,15 +79,65 @@ class TestRestartWorker:
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "worker_not_found"
 
-    def test_no_process_returns_409(self, client, headers):
-        spec = WorkerSpec(
-            models=["x"], python_path="/p", port=9001,
-        )
+    def test_dead_process_less_worker_is_revived(self, client, headers):
+        """R11: a worker that exhausted its restart budget has no process
+        and status "dead"; the monitor skips dead specs. The route revives
+        it (status unhealthy, budget reset) so the monitor respawns it."""
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.status = "dead"
+        spec.restart_count = 10
+        spec.failure_count = 3
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["signal"] is None and body["revived"] is True
+        assert body["restart_count_reset"] is True
+        assert spec.status == "unhealthy"
+        assert spec.restart_count == 0 and spec.failure_count == 0
+
+    def test_process_less_worker_without_dead_status_is_revived(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
         # process is None by default
         set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
         r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        assert spec.status == "unhealthy"
+
+    def test_process_less_worker_mid_transition_returns_409(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.job_id = "owning-op"
+        spec.status = "dead"
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
         assert r.status_code == 409
-        assert r.json()["error"]["code"] == "worker_not_running"
+        assert r.json()["error"]["code"] == "worker_busy"
+        assert spec.status == "dead"
+
+    def test_exited_process_is_revived_not_409(self, client, headers):
+        """A process that already exited cannot be signalled; the spec is
+        revived instead so the monitor's next tick respawns it."""
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.process = MagicMock(pid=4242)
+        spec.process.poll.return_value = 1
+        spec.status = "dead"
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["revived"] is True
+        assert spec.status == "unhealthy"
+        spec.process.terminate.assert_not_called()
+
+    def test_signalled_dead_worker_status_is_revived(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.process = MagicMock(pid=4242)
+        spec.process.poll.return_value = None
+        spec.status = "dead"
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["signal"] == "SIGTERM"
+        assert spec.status == "unhealthy"
 
     def test_terminate_called_and_200_returned(self, client, headers):
         spec = WorkerSpec(
