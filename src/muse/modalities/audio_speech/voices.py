@@ -22,7 +22,7 @@ from typing import Mapping
 
 import numpy as np
 
-from muse.core import securefs
+from muse.core import config, securefs
 from muse.modalities.audio_speech.protocol import (
     UnknownVoiceError,
     VoiceError,
@@ -37,6 +37,30 @@ MAX_TRANSCRIPT_CHARS = 1000
 
 _WAV = "reference.wav"
 _JSON = "voice.json"
+
+
+def _muse_home() -> Path:
+    """Return the muse config directory, creating it if needed."""
+    home = Path(config.get("paths.home")).expanduser()
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def voice_store_root(model_id: str) -> Path:
+    """Where a model's VoiceStore lives (``<paths.home>/voices/<model_id>``).
+
+    Not created here: the store creates it mode 0700 on first save, and
+    rejects a group/other-writable directory such as ``voices_dir`` makes
+    under a permissive umask.
+    """
+    return Path(config.get("paths.home")).expanduser() / "voices" / model_id
+
+
+def voices_dir(model_id: str) -> Path:
+    """Return the voice storage directory for a model, creating it if needed."""
+    d = _muse_home() / "voices" / model_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 @dataclass(frozen=True)
@@ -90,6 +114,35 @@ def _load(name: str, wav_path: Path, json_path: Path, *, read_only: bool) -> Sto
 def load_bundled_voice(name: str, wav_path: Path, json_path: Path) -> StoredVoice:
     """Load a read-only voice shipped alongside a model script."""
     return _load(name, Path(wav_path), Path(json_path), read_only=True)
+
+
+def read_voice_audio(stored: StoredVoice) -> np.ndarray:
+    """Return a stored voice's reference audio as 1-D float32 in [-1, 1].
+
+    Opens ``audio_path`` without following symlinks and refuses a file whose
+    identity no longer matches ``stored.identity`` (replaced since ``get``),
+    so the waveform always pairs with the transcript it was loaded with.
+    """
+    try:
+        data, wav_id = _read_file(stored.audio_path)
+    except OSError as exc:  # FileNotFoundError included: replaced or deleted
+        raise VoiceUnreadableError(f"voice {stored.name!r} cannot be read") from exc
+    if wav_id != stored.identity[0]:
+        raise VoiceUnreadableError(f"voice {stored.name!r} changed while loading")
+    try:
+        with wave.open(io.BytesIO(data), "rb") as w:
+            if (w.getnchannels() != 1 or w.getsampwidth() != 2
+                    or w.getframerate() != stored.sample_rate):
+                raise VoiceUnreadableError(
+                    f"voice {stored.name!r} is not mono 16-bit "
+                    f"{stored.sample_rate} Hz audio")
+            frames = w.readframes(w.getnframes())
+    except (wave.Error, EOFError) as exc:
+        raise VoiceUnreadableError(f"voice {stored.name!r} audio is unreadable") from exc
+    audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if audio.size == 0:
+        raise VoiceUnreadableError(f"voice {stored.name!r} audio is empty")
+    return audio
 
 
 def _wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
@@ -160,6 +213,13 @@ class VoiceStore:
         with self._lock:
             d = self._saved_dir(name)
             return _load(name, d / _WAV, d / _JSON, read_only=False)
+
+    def get_with_audio(self, name: str) -> tuple[StoredVoice, np.ndarray]:
+        """``get`` plus the reference waveform, read under the store lock so
+        an in-process save or delete cannot land between the two reads."""
+        with self._lock:
+            stored = self.get(name)
+            return stored, read_voice_audio(stored)
 
     # -- writing -----------------------------------------------------------
 

@@ -17,6 +17,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 REQUIRED_RUNTIME_FILES = (
     "muse/curated.yaml",
     "muse/chat_formats.yaml",
+    "muse/modalities/audio_speech/data/narrator.wav",
+    "muse/modalities/audio_speech/data/narrator.json",
 )
 
 

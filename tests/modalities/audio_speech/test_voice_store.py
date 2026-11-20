@@ -220,3 +220,48 @@ def test_permission_error_on_entry_is_voice_unreadable(tmp_path, monkeypatch):
         store.names()
     with pytest.raises(VoiceUnreadableError):
         store.get("a")
+
+
+def test_get_with_audio_round_trips_the_waveform(tmp_path):
+    store = VoiceStore(tmp_path)
+    audio = _secs()
+    store.save("grimbold", audio, 24000, "Hello.")
+    stored, wave_back = store.get_with_audio("grimbold")
+    assert stored.transcript == "Hello."
+    assert wave_back.dtype == np.float32 and wave_back.shape == audio.shape
+    assert np.max(np.abs(wave_back - audio)) < 1e-4
+
+
+def test_read_voice_audio_refuses_a_replaced_file(tmp_path):
+    from muse.modalities.audio_speech.voices import read_voice_audio
+
+    store = VoiceStore(tmp_path)
+    store.save("grimbold", _secs(), 24000, "Hello.")
+    stale = store.get("grimbold")
+    store.save("grimbold", _secs(3.0), 24000, "New.", overwrite=True)
+    with pytest.raises(VoiceUnreadableError):
+        read_voice_audio(stale)
+
+
+def test_read_voice_audio_refuses_a_non_mono_wav(tmp_path):
+    from muse.modalities.audio_speech.voices import read_voice_audio
+
+    store = VoiceStore(tmp_path)
+    v = store.save("grimbold", _secs(), 24000, "Hello.")
+    with wave.open(str(v.audio_path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\0\0" * 2 * 24000)
+    with pytest.raises(VoiceUnreadableError):
+        read_voice_audio(store.get("grimbold"))
+
+
+def test_voice_store_root_does_not_create(tmp_path, monkeypatch):
+    from muse.modalities.audio_speech.voices import voice_store_root, voices_dir
+
+    monkeypatch.setenv("MUSE_HOME", str(tmp_path / "home"))
+    root = voice_store_root("m")
+    assert root == tmp_path / "home" / "voices" / "m"
+    assert not root.exists()
+    assert voices_dir("m") == root and root.is_dir()

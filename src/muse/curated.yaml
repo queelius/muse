@@ -325,6 +325,12 @@
 - id: supertonic-3
   bundled: true
 
+- id: qwen3-tts-1.7b-voicedesign
+  bundled: true
+
+- id: qwen3-tts-0.6b-base
+  bundled: true
+
 # ---------- image/generation ----------
 
 - id: sd-turbo

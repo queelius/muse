@@ -121,6 +121,8 @@ include = ["muse*"]
 # so future per-modality yaml/json assets are picked up automatically.
 [tool.setuptools.package-data]
 "*" = ["*.yaml", "*.json"]
+# The bundled `narrator` reference voice for qwen3-tts-0.6b-base.
+"muse.modalities.audio_speech" = ["data/*.wav", "data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

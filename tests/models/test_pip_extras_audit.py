@@ -47,6 +47,7 @@ MODULE_TO_PYPI: dict[str, str] = {
     "acestep": "ace-step",
     "trimesh": "trimesh",
     "tsr": "tsr",
+    "qwen_tts": "qwen-tts",
 }
 
 # Top-level module names that the audit should skip:

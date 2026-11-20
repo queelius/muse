@@ -1,6 +1,8 @@
 __pycache__/
 test.py
 *.wav
+# Bundled reference voices ship as package data.
+!src/muse/modalities/audio_speech/data/*.wav
 dist/
 *.egg-info/
 .venv/

@@ -1,27 +1,14 @@
 import logging
 import time
-from pathlib import Path
 
 import torch
 from transformers import LogitsProcessorList, RepetitionPenaltyLogitsProcessor, TemperatureLogitsWarper, TopPLogitsWarper
 
-from muse.core import config
+# Re-exported: these live in the torch-free voices module so model scripts
+# can import them without pulling torch/transformers in.
+from muse.modalities.audio_speech.voices import _muse_home, voices_dir  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-
-def _muse_home() -> Path:
-    """Return the muse config directory, creating it if needed."""
-    home = Path(config.get("paths.home")).expanduser()
-    home.mkdir(parents=True, exist_ok=True)
-    return home
-
-
-def voices_dir(model_id: str) -> Path:
-    """Return the voice storage directory for a model, creating it if needed."""
-    d = _muse_home() / "voices" / model_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def _token_entropy(logits):

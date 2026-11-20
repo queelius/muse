@@ -38,6 +38,7 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "lora_scale", "lora_scale_factor", "reference_runtime", "image_processor_overrides", "window_seconds", "num_beams",
     "temperature", "probabilities", "calibration", "confidence",
     "revision", "adapter_model_subdir", "base_model_revision", "base_model_subdir", "dtype",
+    "mode", "default_instructions",
 })
 
 
