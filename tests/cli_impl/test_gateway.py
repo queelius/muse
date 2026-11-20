@@ -744,16 +744,26 @@ class TestAggregation:
 
         assert r.status_code == 200
         body = r.json()
-        assert body["status"] == "degraded"
+        # One bad poll is not an outage: the monitor's verdict decides.
+        assert body["status"] == "ok"
         assert "soprano-80m" in body["models"]
         assert "sd-turbo" not in body["models"]
 
     def test_health_degraded_when_any_worker_down(self):
+        """Down = the monitor saw its threshold of failed checks (it is
+        restarting the worker) or gave up on it."""
+        from muse.cli_impl.supervisor import _FAILURE_THRESHOLD
+
         routes = [
             WorkerRoute("soprano-80m", "http://127.0.0.1:9001"),
             WorkerRoute("sd-turbo", "http://127.0.0.1:9002"),
         ]
         app = _gateway(routes)
+        spec = next(
+            w for w in app.state.routes_state.workers if w.port == 9002
+        )
+        spec.status = "unhealthy"
+        spec.failure_count = _FAILURE_THRESHOLD
         client = TestClient(app)
 
         with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_client_cls:

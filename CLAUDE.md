@@ -338,7 +338,8 @@ and respawns it with exponential backoff (1s, 2s, 4s, ..., capped at
 30s). After 10 unsuccessful restart attempts the worker is marked
 dead and the director forgets its models (`LoadDirector.forget_worker`),
 so the next request cold-loads a replacement instead of getting 502s;
-/health reports "degraded" while any worker is dead or unhealthy, and
+/health reports "degraded" while any worker is dead or unhealthy past
+the 3-check failure threshold (one missed poll is not an outage), and
 /v1/models lists the model as `loaded: false`. `supervisor.revive_worker`
 (the admin restart route) gives only such a monitor-exhausted spec a fresh
 budget; a spec retained dead after an unproven teardown stays dead.

@@ -198,6 +198,38 @@ def test_health_reports_degraded_while_a_worker_is_dead():
     assert row["loaded"] is False
 
 
+@pytest.mark.parametrize("status, failures, poll_ok, expected", [
+    ("running", 0, True, "ok"),
+    ("unhealthy", 1, True, "ok"),          # one failed monitor poll: not down
+    ("running", 0, False, "ok"),           # one failed gateway poll: not down
+    ("unhealthy", sup._FAILURE_THRESHOLD, True, "degraded"),
+    ("dead", 0, True, "degraded"),
+])
+def test_health_counts_only_dead_or_threshold_unhealthy_workers(
+    status, failures, poll_ok, expected,
+):
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    state.director.acquire(MODEL, manifest={
+        "capabilities": {"device": "cpu", "memory_gb": 1.0},
+    })
+    state.director.release(MODEL)
+    spec = state.workers[0]
+    spec.status = status
+    spec.failure_count = failures
+    app = build_gateway(state=state)
+
+    async def get(self, url, **_kw):
+        if not poll_ok:
+            raise httpx.ConnectError("blip")
+        return httpx.Response(200, json={
+            "status": "ok", "modalities": ["audio/speech"], "models": [MODEL],
+        })
+
+    with patch("muse.cli_impl.gateway.httpx.AsyncClient.get", get):
+        assert TestClient(app).get("/health").json()["status"] == expected
+
+
 def test_retained_process_keeps_accounting_but_stops_routing():
     """A dead spec whose process could not be released still holds memory:
     keep it accounted but blocked until a cleanup teardown succeeds."""

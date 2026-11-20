@@ -670,9 +670,14 @@ def build_gateway(
             results = await asyncio.gather(
                 *[_one(u) for u in worker_urls], return_exceptions=True,
             )
+        state = app.state.routes_state
         for body in results:
             if body is None or isinstance(body, BaseException):
-                any_down = True
+                # With a supervisor, the monitor's verdict below decides
+                # (one missed poll is not an outage); a static gateway has
+                # only this poll to go on.
+                if state is None:
+                    any_down = True
                 continue
             raw_modalities = body.get("modalities", [])
             raw_models = body.get("models", [])
@@ -684,13 +689,19 @@ def build_gateway(
                 models.update(
                     value for value in raw_models if isinstance(value, str)
                 )
-        # A worker the monitor is restarting or has given up on is down
-        # too; it is not in the routing table, so nothing above polled it.
-        state = app.state.routes_state
+        # A worker is down once the monitor has given up on it or has seen
+        # it fail its threshold of consecutive health checks (it is then
+        # restarting); a single failed check is not an outage.
         if state is not None:
+            from muse.cli_impl.supervisor import _FAILURE_THRESHOLD
+
             with state.lock:
                 if any(
-                    getattr(spec, "status", None) in ("dead", "unhealthy")
+                    getattr(spec, "status", None) == "dead"
+                    or (
+                        getattr(spec, "status", None) == "unhealthy"
+                        and getattr(spec, "failure_count", 0) >= _FAILURE_THRESHOLD
+                    )
                     for spec in state.workers
                 ):
                     any_down = True
