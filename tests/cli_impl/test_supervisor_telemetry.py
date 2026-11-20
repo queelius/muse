@@ -173,6 +173,24 @@ class TestInitTelemetry:
             assert _shutdown_telemetry(state) is True
             config.reset_config()
 
+    def test_prunes_once_at_startup(self, tmp_path, monkeypatch):
+        """A supervisor restarted within the hour must still prune."""
+        monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+        config.reset_config()
+        state = SupervisorState()
+        state.director = types.SimpleNamespace(loaded={}, in_flight_loads={})
+        pruned = threading.Event()
+        from muse.observability.store import TelemetryStore
+        monkeypatch.setattr(
+            TelemetryStore, "prune", lambda self, before: pruned.set(),
+        )
+        try:
+            _init_telemetry(state)
+            assert pruned.wait(5.0)
+        finally:
+            assert _shutdown_telemetry(state) is True
+            config.reset_config()
+
     def test_tracks_and_joins_every_owned_telemetry_thread(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
         config.reset_config()

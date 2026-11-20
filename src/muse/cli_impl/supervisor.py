@@ -2694,11 +2694,15 @@ def _init_telemetry(state: SupervisorState) -> None:
         retention_days = config.get("telemetry.retention_days")
 
         def _prune_loop() -> None:
-            while not state.stop_event.wait(3600):
+            # Prune at startup too: a supervisor restarted within the hour
+            # would otherwise never prune.
+            while True:
                 try:
                     store.prune(time.time() - float(retention_days) * 86400)
                 except Exception:
                     logger.warning("telemetry prune failed", exc_info=True)
+                if state.stop_event.wait(3600):
+                    return
 
         prune_thread = threading.Thread(
             target=_prune_loop,
