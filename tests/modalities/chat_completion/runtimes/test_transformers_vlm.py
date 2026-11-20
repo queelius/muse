@@ -295,8 +295,8 @@ def test_supports_multi_image_flag_propagates():
 
 
 def test_chat_stream_yields_chunks_then_final_finish_reason():
-    """The streamer yields chat chunks per-token, with a final empty-delta
-    chunk carrying finish_reason='stop'."""
+    """An assistant-role delta first, then one chunk per token, then a final
+    empty-delta chunk carrying finish_reason='stop'."""
     import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
     _wire_runtime(mod)
 
@@ -309,12 +309,13 @@ def test_chat_stream_yields_chunks_then_final_finish_reason():
         model_id="m", hf_repo="x", device="cpu",
     )
     chunks = list(runtime.chat_stream([{"role": "user", "content": "x"}]))
-    assert len(chunks) == 4
-    assert chunks[0].delta == {"content": "he"}
-    assert chunks[1].delta == {"content": "llo"}
-    assert chunks[2].delta == {"content": " world"}
-    assert chunks[3].finish_reason == "stop"
-    assert chunks[3].delta == {}
+    assert len(chunks) == 5
+    assert chunks[0].delta == {"role": "assistant"}
+    assert chunks[1].delta == {"content": "he"}
+    assert chunks[2].delta == {"content": "llo"}
+    assert chunks[3].delta == {"content": " world"}
+    assert chunks[4].finish_reason == "stop"
+    assert chunks[4].delta == {}
 
 
 def test_chat_stream_calls_streamer_end_when_generate_raises():
@@ -406,3 +407,89 @@ def test_chat_stream_thread_is_daemon():
     assert all(t.daemon for t in captured_threads), (
         "chat_stream's generate thread must be daemon=True"
     )
+
+
+class _QueueStreamer:
+    """Minimal TextIteratorStreamer stand-in fed by the fake generate()."""
+
+    def __init__(self, *args, **kwargs):
+        import queue
+        self._q = queue.Queue()
+        self.ended = False
+
+    def put_token(self, token):
+        self._q.put(token)
+
+    def end(self):
+        self.ended = True
+        self._q.put(None)
+
+    def __iter__(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            yield item
+
+
+def _endless_generate(streamers, generate_running, finished):
+    import time
+
+    def _generate(**kwargs):
+        streamer = kwargs["streamer"]
+        streamers.append(streamer)
+        criteria = kwargs["stopping_criteria"]
+        generate_running.set()
+        try:
+            for _ in range(10_000):
+                if any(bool(c(_ids_tensor(1), None)) for c in criteria):
+                    return
+                streamer.put_token("tok")
+                time.sleep(0.001)
+        finally:
+            finished.set()
+    return _generate
+
+
+def test_chat_stream_close_stops_and_joins_generate():
+    """I1: closing the stream (client disconnect) must stop generate() and
+    wait for it, so the route never releases the inference lock while the
+    model is still generating."""
+    import threading
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+    mod.torch.full = lambda size, value, **kw: value
+    mod.TextIteratorStreamer = _QueueStreamer
+
+    runtime = mod.HFVisionLanguageModel(model_id="m", hf_repo="x", device="cpu")
+    streamers: list = []
+    running, finished = threading.Event(), threading.Event()
+    runtime._model.generate = _endless_generate(streamers, running, finished)
+
+    stream = runtime.chat_stream([{"role": "user", "content": "x"}])
+    next(stream)
+    next(stream)
+    stream.close()
+    assert finished.is_set(), "generate() was still running after close()"
+
+
+def test_chat_stream_first_delta_carries_assistant_role():
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+    fake_streamer = MagicMock()
+    fake_streamer.__iter__ = MagicMock(return_value=iter(["hi"]))
+    mod.TextIteratorStreamer = MagicMock(return_value=fake_streamer)
+    runtime = mod.HFVisionLanguageModel(model_id="m", hf_repo="x", device="cpu")
+    chunks = list(runtime.chat_stream([{"role": "user", "content": "x"}]))
+    assert chunks[0].delta == {"role": "assistant"}
+    assert [c.delta for c in chunks[1:]] == [{"content": "hi"}, {}]
+
+
+def test_seed_does_not_leak_into_global_rng():
+    """A per-request seed must not reseed the process-global RNG for good."""
+    import muse.modalities.chat_completion.runtimes.transformers_vlm as mod
+    _wire_runtime(mod)
+    runtime = mod.HFVisionLanguageModel(model_id="m", hf_repo="x", device="cpu")
+    runtime.chat([{"role": "user", "content": "x"}], seed=7)
+    mod.torch.random.fork_rng.assert_called()
+    mod.torch.manual_seed.assert_called_with(7)
