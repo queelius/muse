@@ -11,8 +11,9 @@ live on internal ports (9001+). The gateway:
   4. Aggregates /v1/models and /health across all workers
   5. Mounts /v1/admin/* with bearer-token auth
 
-Every inference request calls `state.director.acquire` for its worker
-port; release fires exactly once on completion, for buffered and
+Every inference request takes a director refcount for its worker port
+(`try_acquire_loaded` for a resident model, else `acquire`); the port comes
+from the director, never from `state.workers`. Release fires exactly once on completion, for buffered and
 streaming responses alike. `/v1/models` and `/health` fan out to the
 running workers in `state.workers`.
 
@@ -1124,6 +1125,9 @@ def _cold_model_needs_servability_check(director: Any, model_id: str) -> bool:
 
 
 _manifest_preparations: dict[tuple, asyncio.Task] = {}
+# model id -> (key, (manifest, revision headers)) for resident models; the
+# key carries the catalog file version, so any catalog write invalidates it.
+_hot_preparations: dict[str, tuple[tuple, tuple[dict, list]]] = {}
 
 
 async def _prepare_director_manifest(
@@ -1198,11 +1202,16 @@ async def _route_via_director(
          corrupt and no last-known-good cache exists) -> 503
          catalog_unavailable, so a corrupt catalog degrades to a clean
          OpenAI-shaped error instead of an uncaught 500.
-      3. Call `state.director.acquire(model_id, manifest=...)`. This may
-         block on cold load + eviction. On `OperationError` (the director's
-         user-facing failure type, e.g. model_too_large_for_device), map
-         to the corresponding HTTP status. Other exceptions propagate to
-         FastAPI's default 500 path.
+         A resident model with no stamp reuses the manifest and revision
+         headers cached for the current catalog version (the hot path).
+      3. Take a concurrency-gate slot, then the refcount: a resident model
+         via `director.try_acquire_loaded` on the loop, else
+         `state.director.acquire(model_id, manifest=...)` off the loop,
+         coalesced per model, inside the capacity wait. It may block on
+         cold load + eviction. An `OperationError` (the director's
+         user-facing failure type, e.g. model_too_large_for_device) maps to
+         its HTTP status; any other exception becomes 503
+         model_load_failed.
       4. On a successful acquire, forward the request to the returned port.
          The release call MUST fire on completion regardless of outcome.
          Buffered responses release before returning. Streaming responses
@@ -1253,36 +1262,67 @@ async def _route_via_director(
         unservable_reason is not None
         or _cold_model_needs_servability_check(state.director, model_id)
     )
-    # Native placement can require a bounded interpreter query. Keep both
-    # validation and backfill off-loop, with one task per model/configuration
-    # so concurrent HTTP waiters do not occupy one executor thread each.
-    try:
-        unservable_reason, manifest = await _prepare_director_manifest(
-            state, model_id, catalog_entry, check_servability=needs_servability_check,
+    # Hot fast path (a resident model with no stamp): the manifest the
+    # director would size from and the revision headers are cached per
+    # catalog version, so a hot request does no thread hops for them, and
+    # the refcount is taken on the loop by try_acquire_loaded below.
+    # Loose test doubles (no real `loaded` dict) always take the full path.
+    hot = (
+        not needs_servability_check
+        and isinstance(getattr(state.director, "loaded", None), dict)
+    )
+    hot_key = None
+    prepared = None
+    if hot:
+        hot_key = (
+            _catalog_file_key(), id(state), id(state.director), state.device,
+            tuple(sorted(_director_capacity_knobs(state.director).items())),
         )
-    except KeyError:
-        return error_response(
-            404, "model_not_found",
-            f"model {model_id!r} is not in the catalog",
+        cached = _hot_preparations.get(model_id)
+        if cached is not None and cached[0] == hot_key:
+            prepared = cached[1]
+    if prepared is not None:
+        manifest, rev_headers = prepared
+    else:
+        # Native placement can require a bounded interpreter query. Keep
+        # both validation and backfill off-loop, with one task per
+        # model/configuration so concurrent HTTP waiters do not occupy one
+        # executor thread each.
+        try:
+            unservable_reason, manifest = await _prepare_director_manifest(
+                state, model_id, catalog_entry, check_servability=needs_servability_check,
+            )
+        except KeyError:
+            return error_response(
+                404, "model_not_found",
+                f"model {model_id!r} is not in the catalog",
+            )
+        except CatalogError as exc:
+            logger.error(
+                "manifest preparation for %r failed: catalog is unavailable: %s",
+                model_id, exc,
+            )
+            return error_response(
+                503,
+                "catalog_unavailable",
+                f"model catalog is temporarily unavailable: {exc}",
+            )
+        except RuntimeError as exc:
+            unservable_reason = str(exc)
+        if unservable_reason is not None:
+            return error_response(
+                503,
+                "model_unservable",
+                f"model {model_id!r} cannot be served: {unservable_reason}",
+            )
+
+        # Resolve the revision BEFORE taking a gate slot or director
+        # refcount: a cancel during this await must not leak either.
+        rev_headers = revision_headers(
+            await asyncio.to_thread(lookup_revision, model_id)
         )
-    except CatalogError as exc:
-        logger.error(
-            "manifest preparation for %r failed: catalog is unavailable: %s",
-            model_id, exc,
-        )
-        return error_response(
-            503,
-            "catalog_unavailable",
-            f"model catalog is temporarily unavailable: {exc}",
-        )
-    except RuntimeError as exc:
-        unservable_reason = str(exc)
-    if unservable_reason is not None:
-        return error_response(
-            503,
-            "model_unservable",
-            f"model {model_id!r} cannot be served: {unservable_reason}",
-        )
+        if hot and hot_key[0] is not None:
+            _hot_preparations[model_id] = (hot_key, (manifest, rev_headers))
 
     # 3. Queueing (spec 2026-07-08). ONE deadline covers the concurrency-gate
     # wait + the capacity wait + all retries. queue_timeout_seconds == 0
@@ -1295,12 +1335,6 @@ async def _route_via_director(
     # queue delay with load time. gate_wait_seconds and
     # capacity_wait_seconds are each measured tightly around their own
     # await below, not via a single wall-clock span across this whole block.
-    # Resolve the revision BEFORE taking a gate slot or director refcount: a
-    # cancel during this await must not leak either (nothing is held yet).
-    rev_headers = revision_headers(
-        await asyncio.to_thread(lookup_revision, model_id)
-    )
-
     queued_ms = 0.0
     queue_budget = config.get("server.queue_timeout_seconds") or 0.0
     queue_t0 = time.monotonic()
@@ -1356,11 +1390,15 @@ async def _route_via_director(
     # event loop. _acquire_coalesced elects ONE loader per cold model
     # (#319). _acquire_with_capacity_wait parks on a retryable capacity 503
     # until a release/eviction fires capacity_notifier or the deadline lapses.
+    fast_port = state.director.try_acquire_loaded(model_id) if hot else None
     try:
-        worker_port, capacity_wait_seconds = await _acquire_with_capacity_wait(
-            lambda: _acquire_coalesced(state, model_id, manifest),
-            state.capacity_notifier, deadline=deadline, model_id=model_id,
-        )
+        if fast_port is not None:
+            worker_port, capacity_wait_seconds = fast_port, 0.0
+        else:
+            worker_port, capacity_wait_seconds = await _acquire_with_capacity_wait(
+                lambda: _acquire_coalesced(state, model_id, manifest),
+                state.capacity_notifier, deadline=deadline, model_id=model_id,
+            )
     except QueueTimeout:
         _release_slot()
         return error_response(

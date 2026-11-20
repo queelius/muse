@@ -554,6 +554,30 @@ class LoadDirector:
                 initial_refcount=initial_refcount,
             )
 
+    def try_acquire_loaded(self, model_id: str) -> int | None:
+        """The gateway's hot fast path: bump a resident entry, never load.
+
+        Returns the worker port after taking a refcount when ``model_id``
+        is resident and nothing else (block, eviction, worker transition)
+        owns it; otherwise None and changes nothing, and the caller takes
+        the full ``acquire`` path, which reports the precise state. Never
+        does I/O, so it is safe to call on the event loop.
+        """
+        with self.lock:
+            if (
+                model_id in self._blocked_models
+                or model_id in self._failed_rollbacks
+                or model_id in self._evicting
+                or model_id in self._worker_transitions
+            ):
+                return None
+            entry = self.loaded.get(model_id)
+            if entry is None:
+                return None
+            entry.refcount += 1
+            entry.last_touched_at = time.monotonic()
+            return entry.worker_port
+
     def release(self, model_id: str) -> None:
         """Decrement refcount + bump last_touched_at.
 
@@ -1031,6 +1055,24 @@ class LoadDirector:
             listener()
         except Exception:  # noqa: BLE001
             logger.warning("capacity_listener raised; ignoring", exc_info=True)
+
+    def status(self) -> dict[str, dict[str, Any]]:
+        """Snapshot of currently-loaded models (test introspection).
+
+        Each value is `{"loaded": True, "worker_port", "last_touched_at",
+        "refcount"}`. Models not currently loaded are absent. No production
+        caller: /v1/models and the admin routes read `loaded` directly.
+        """
+        with self.lock:
+            return {
+                mid: {
+                    "loaded": True,
+                    "worker_port": e.worker_port,
+                    "last_touched_at": e.last_touched_at,
+                    "refcount": e.refcount,
+                }
+                for mid, e in self.loaded.items()
+            }
 
     def observed_peak(
         self,

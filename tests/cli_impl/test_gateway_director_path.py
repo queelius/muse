@@ -1,9 +1,15 @@
-"""A worker the monitor gives up on must stop being "hot" (review I1).
+"""Gateway + LoadDirector + monitor regressions on the real request path.
+
+I1: a worker the monitor gives up on must stop being "hot".
 
 Before the fix the monitor marked the spec dead but the LoadDirector kept
 its LoadEntry, so every request was forwarded to the dead port and got a
 502 forever (each release() refreshed last_touched_at, so the idle sweeper
 never reclaimed it), while /health kept reporting "ok".
+
+I4: /v1/models and /health enrichment runs off the event loop.
+M3: a hot request skips manifest preparation, revision lookup and the
+off-loop acquire.
 
 These tests drive the real gateway, the real LoadDirector and the real
 monitor loop; only the worker process and the HTTP hop are faked.
@@ -329,3 +335,88 @@ def test_a_retained_dead_spec_is_never_revived():
 
     state.director = None
     assert sup.revive_worker(state, spec) is True
+
+
+# --- hot fast path (M3) -----------------------------------------------------
+
+
+def _hot_client(state):
+    app = build_gateway(state=state)
+    return TestClient(app)
+
+
+def test_hot_requests_skip_preparation_and_the_off_loop_acquire():
+    from muse.cli_impl import gateway as gw
+
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    body = {"model": MODEL, "input": "hi"}
+    real_backfill = gw.backfill_manifest_memory
+    real_revision = gw.lookup_revision
+    counts = {"backfill": 0, "revision": 0}
+
+    def backfill(*a, **kw):
+        counts["backfill"] += 1
+        return real_backfill(*a, **kw)
+
+    def revision(*a, **kw):
+        counts["revision"] += 1
+        return real_revision(*a, **kw)
+
+    with patch("muse.cli_impl.gateway._forward", _fake_forward(state)), \
+         patch("muse.cli_impl.gateway.backfill_manifest_memory", backfill), \
+         patch("muse.cli_impl.gateway.lookup_revision", revision), \
+         patch.object(state.director, "acquire",
+                      wraps=state.director.acquire) as acquire:
+        client = _hot_client(state)
+        assert client.post("/v1/audio/speech", json=body).status_code == 200  # cold
+        assert client.post("/v1/audio/speech", json=body).status_code == 200  # hot, fills cache
+        after_fill = dict(counts)
+        for _ in range(3):
+            assert client.post("/v1/audio/speech", json=body).status_code == 200
+    assert counts == after_fill
+    assert acquire.call_count == 1  # only the cold load went off-loop
+    assert state.director.loaded[MODEL].refcount == 0
+
+
+def test_hot_cache_is_invalidated_by_a_catalog_write():
+    from muse.cli_impl import gateway as gw
+    from muse.core.catalog import _read_catalog, _write_catalog
+
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    body = {"model": MODEL, "input": "hi"}
+    real_backfill = gw.backfill_manifest_memory
+    calls = []
+
+    def backfill(*a, **kw):
+        calls.append(1)
+        return real_backfill(*a, **kw)
+
+    with patch("muse.cli_impl.gateway._forward", _fake_forward(state)), \
+         patch("muse.cli_impl.gateway.backfill_manifest_memory", backfill):
+        client = _hot_client(state)
+        client.post("/v1/audio/speech", json=body)
+        client.post("/v1/audio/speech", json=body)
+        before = len(calls)
+        client.post("/v1/audio/speech", json=body)
+        assert len(calls) == before
+        catalog = dict(_read_catalog())
+        catalog[MODEL] = dict(catalog[MODEL], device_override="cpu")
+        time.sleep(0.01)
+        _write_catalog(catalog)
+        client.post("/v1/audio/speech", json=body)
+    assert len(calls) == before + 1
+
+
+def test_evicted_between_check_and_acquire_falls_back_to_a_full_load():
+    state = SupervisorState(workers=[], device="cpu")
+    ports = _wire(state)
+    body = {"model": MODEL, "input": "hi"}
+    with patch("muse.cli_impl.gateway._forward", _fake_forward(state)):
+        client = _hot_client(state)
+        client.post("/v1/audio/speech", json=body)
+        with patch.object(state.director, "try_acquire_loaded", return_value=None):
+            r = client.post("/v1/audio/speech", json=body)
+    assert r.status_code == 200
+    assert ports == [9100]  # the full acquire found it hot again
