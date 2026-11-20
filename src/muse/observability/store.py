@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS events (
     stream INTEGER,
     free_vram_gb REAL,
     free_ram_gb REAL,
-    gpu_used_gb REAL,
     loaded_count INTEGER,
     in_flight_count INTEGER,
     modality TEXT
@@ -183,6 +182,7 @@ class TelemetryStore:
         return {"metric": metric, "points": points}
 
     def summary_counts(self) -> dict:
+        """Total event count. Kept for tests and diagnostics; no route uses it."""
         with self._lock:
             self._require_open_locked()
             (total,) = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()

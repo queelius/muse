@@ -17,7 +17,9 @@ The SSE logs endpoint is a special case: `EventSource` cannot set a
 custom Authorization header, so it cannot use `require_dashboard_auth`
 as a dependency. Instead the dashboard JS first mints a short-lived
 ticket via the header-gated `POST /v1/telemetry/logs-ticket`, then opens
-the `EventSource` with that ticket in the query string. The logs route
+the `EventSource` with that ticket in the query string (and mints a new
+one when the browser closes the stream, e.g. a reconnect after the
+ticket's TTL). The logs route
 itself checks the ticket (or, for curl-style clients, an Authorization
 header) inline before opening the stream. The admin token itself never
 rides a URL.
@@ -26,7 +28,12 @@ rides a URL.
 SupervisorState in production, or a SimpleNamespace in tests) exposing:
   state.telemetry_store  -- a TelemetryStore
   state.log_hub          -- a LogHub
-  state.director.loaded  -- dict[str, LoadEntry-like]
+  state.director.loaded  -- dict[str, LoadEntry-like] (refcount summed
+                            into the summary's in-flight request count,
+                            which excludes requests waiting on a cold
+                            load or a capacity wait)
+  state.director.in_flight_loads -- cold loads in progress
+  state.concurrency_gate (optional) -- a ConcurrencyGate (queue depths)
   state.node_url / state.node_id (optional) -- a stable node identifier
 """
 from __future__ import annotations
@@ -100,6 +107,12 @@ async def _stream_model_logs(hub, model_id: str, request: Request):
         hub.unsubscribe(model_id, q)
 
 
+def _refcount(entry) -> int:
+    """A LoadEntry's live refcount, 0 when absent or malformed."""
+    value = getattr(entry, "refcount", 0)
+    return value if type(value) is int and value > 0 else 0
+
+
 def _loaded_entry_dict(model_id: str, entry, queue_depth: int | None = None) -> dict:
     """Project a LoadEntry into the wire shape.
 
@@ -148,7 +161,12 @@ def build_dashboard_router(state) -> APIRouter:
                 )
                 for model_id, entry in director.loaded.items()
             ]
-            in_flight = len(getattr(director, "in_flight_loads", {}) or {})
+            # Requests between director.acquire and release each hold one
+            # refcount on a loaded model (warmup holds none).
+            holding = sum(
+                _refcount(entry) for entry in director.loaded.values()
+            )
+            in_flight_loads = len(getattr(director, "in_flight_loads", {}) or {})
         loaded_ids = {entry["model_id"] for entry in loaded}
         # #331: waiters parked on a model during its own cold start are in
         # the gate but NOT in director.loaded -- exactly when the queue is
@@ -158,11 +176,17 @@ def build_dashboard_router(state) -> APIRouter:
             for model_id, depth in sorted(depths.items())
             if depth > 0 and model_id not in loaded_ids
         ]
+        # `in_flight` is in-flight REQUESTS at this gateway: requests holding
+        # a model (refcounts) plus requests parked on a concurrency gate
+        # (which take their refcount only after the gate admits them). It
+        # excludes requests waiting on a cold load or a capacity wait.
+        # Federation balances on it. `in_flight_loads` counts cold loads.
         return {
             "node": _node_id(state),
             "loaded": loaded,
             "queued": queued,
-            "in_flight": in_flight,
+            "in_flight": holding + sum(depths.values()),
+            "in_flight_loads": in_flight_loads,
             "dropped_events": get_recorder().dropped,
         }
 
@@ -298,6 +322,7 @@ DASHBOARD_HTML = """<title>muse dashboard</title>
     document.getElementById("counters").textContent =
       "node=" + data.node +
       " in_flight=" + data.in_flight +
+      " loading=" + data.in_flight_loads +
       " dropped_events=" + data.dropped_events;
   }
 
@@ -381,31 +406,66 @@ DASHBOARD_HTML = """<title>muse dashboard</title>
     pollTimer = setInterval(pollAll, POLL_MS);
   }
 
+  var LOG_RETRY_MIN_MS = 1000;
+  var LOG_RETRY_MAX_MS = 30000;
+  var logRetryMs = LOG_RETRY_MIN_MS;
+  var logRetryTimer = null;
+
+  function scheduleLogReconnect() {
+    // A reconnect after the ticket TTL gets a 401 and the browser closes
+    // the EventSource for good, so mint a fresh ticket and reopen it.
+    if (logRetryTimer) { return; }
+    setStatus("log stream closed; reconnecting in " + (logRetryMs / 1000) + "s");
+    logRetryTimer = setTimeout(function () {
+      logRetryTimer = null;
+      connectLogs();
+    }, logRetryMs);
+    logRetryMs = Math.min(logRetryMs * 2, LOG_RETRY_MAX_MS);
+  }
+
   function connectLogs() {
     var modelId = document.getElementById("log-model-id").value || "default";
-    if (logSource) { logSource.close(); }
+    if (logRetryTimer) { clearTimeout(logRetryTimer); logRetryTimer = null; }
+    if (logSource) { logSource.close(); logSource = null; }
     fetch("/v1/telemetry/logs-ticket", { method: "POST", headers: authHeaders() })
       .then(function (r) {
-        if (!r.ok) { throw new Error("logs-ticket " + r.status); }
+        if (!r.ok) {
+          var err = new Error("logs-ticket " + r.status);
+          err.auth = (r.status === 401 || r.status === 403 || r.status === 503);
+          throw err;
+        }
         return r.json();
       })
       .then(function (data) {
         var url = "/v1/telemetry/logs/" + encodeURIComponent(modelId) +
           "?ticket=" + encodeURIComponent(data.ticket);
-        logSource = new EventSource(url);
+        var source = new EventSource(url);
+        logSource = source;
         var panel = document.getElementById("log-panel");
-        logSource.onmessage = function (ev) {
+        source.onopen = function () {
+          logRetryMs = LOG_RETRY_MIN_MS;
+        };
+        source.onmessage = function (ev) {
           var line = document.createElement("div");
           line.textContent = ev.data;
           panel.appendChild(line);
           panel.scrollTop = panel.scrollHeight;
         };
-        logSource.onerror = function () {
-          setStatus("log stream error");
+        source.onerror = function () {
+          if (source !== logSource) { return; }
+          if (source.readyState === EventSource.CLOSED) {
+            scheduleLogReconnect();
+          } else {
+            setStatus("log stream error; retrying");
+          }
         };
       })
-      .catch(function () {
-        setStatus("log auth failed");
+      .catch(function (e) {
+        if (e && e.auth) {
+          setStatus("log auth failed");
+        } else {
+          scheduleLogReconnect();
+        }
       });
   }
 
@@ -415,7 +475,10 @@ DASHBOARD_HTML = """<title>muse dashboard</title>
     startPolling();
   });
 
-  document.getElementById("log-connect-btn").addEventListener("click", connectLogs);
+  document.getElementById("log-connect-btn").addEventListener("click", function () {
+    logRetryMs = LOG_RETRY_MIN_MS;
+    connectLogs();
+  });
 
   var existing = getToken();
   if (existing) {

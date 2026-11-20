@@ -111,6 +111,10 @@ class NodeRegistry:
             self._fetch = partial(_default_fetch, timeout=_timeout)
         self._lock = threading.Lock()
         self._states: list[NodeState] = []
+        # url -> model ids from that node's last REACHABLE poll. Kept across
+        # failed polls so the coordinator can tell "temporarily unavailable"
+        # (503) from "no node serves this" (404).
+        self._last_listed: dict[str, frozenset[str]] = {}
         self._task: asyncio.Task | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -178,6 +182,9 @@ class NodeRegistry:
                 states.append(result)
         with self._lock:
             self._states = states
+            for state in states:
+                if state.reachable:
+                    self._last_listed[state.spec.url] = frozenset(state.models)
 
     def snapshot(self) -> list[NodeState]:
         """Return the cached states (empty list before the first refresh).
@@ -186,11 +193,34 @@ class NodeRegistry:
         with self._lock:
             return list(self._states)
 
-    def node_by_url(self, url: str) -> NodeSpec | None:
-        for spec in self._nodes:
-            if spec.url == url:
-                return spec
-        return None
+    def was_listed(self, model_id: str) -> bool:
+        """Whether any node listed `model_id` in its last reachable poll.
+
+        True even when that node is unreachable now, so a request for the
+        model is retryable (503) rather than unknown (404).
+        """
+        with self._lock:
+            return any(model_id in ids for ids in self._last_listed.values())
+
+    def mark_unreachable(self, url: str) -> None:
+        """Mark one node unreachable in the cache after a connect failure.
+
+        Later requests skip the node until the next poll re-derives its
+        state, instead of each paying a connect failure first. Its last
+        listing (`was_listed`) is kept.
+        """
+        with self._lock:
+            self._states = [
+                NodeState(
+                    spec=state.spec,
+                    reachable=False,
+                    models={},
+                    in_flight=None,
+                    last_poll_ts=state.last_poll_ts,
+                )
+                if state.spec.url == url else state
+                for state in self._states
+            ]
 
     def start(self) -> bool:
         """Launch the background refresh loop once. One

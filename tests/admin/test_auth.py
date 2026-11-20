@@ -235,3 +235,44 @@ class TestVerifyAdminToken:
             assert exc.value.detail["error"]["code"] == "admin_disabled"
         finally:
             config.reset_config()
+
+
+class TestCheckBearer:
+    """The shared, fastapi-free bearer check behind admin and dashboard auth."""
+
+    @pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER", "bEaReR"])
+    def test_scheme_is_case_insensitive(self, client, monkeypatch, scheme):
+        monkeypatch.setenv(ADMIN_TOKEN_ENV, "secret")
+        r = client.get("/protected", headers={"Authorization": f"{scheme} secret"})
+        assert r.status_code == 200
+
+    def test_pure_helper_raises_typed_errors(self):
+        from muse.admin.auth import BearerAuthError, check_bearer
+
+        kwargs = dict(closed_code="c", closed_message="closed", invalid_message="bad")
+        cases = [
+            ("  \n", "Bearer x", 503, "c"),
+            ("tok", None, 401, "missing_token"),
+            ("tok", "Basic tok", 401, "missing_token"),
+            ("tok", "Bearertok", 401, "missing_token"),
+            ("tok", "Bearer nope", 403, "invalid_token"),
+        ]
+        for expected, header, status, code in cases:
+            with pytest.raises(BearerAuthError) as exc:
+                check_bearer(header, expected=expected, **kwargs)
+            assert (exc.value.status, exc.value.code) == (status, code)
+        assert check_bearer("bearer tok", expected="tok\n", **kwargs) is None
+
+    def test_pure_helper_imports_without_fastapi(self):
+        """MCP's light install has no fastapi, so check_bearer must import
+        without it (verify_admin_token is the only fastapi-bound name)."""
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; sys.modules['fastapi'] = None\n"
+            "from muse.admin.auth import check_bearer\n"
+            "check_bearer('Bearer t', expected='t', closed_code='c',"
+            " closed_message='m', invalid_message='i')\n"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)

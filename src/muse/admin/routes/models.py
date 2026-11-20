@@ -4,6 +4,7 @@ Endpoints (all under /v1/admin):
 
   POST  /models/{id}/enable      async; spawns or joins worker
   POST  /models/{id}/disable     sync; unloads from worker
+  POST  /models/{id}/warmup      sync; loads via the director, no refcount
   POST  /models/{id}/probe       async; runs measure
   POST  /models/_/pull           async; runs `muse pull <identifier>`
                                  (the `_` placeholder is a documented stub
@@ -12,6 +13,7 @@ Endpoints (all under /v1/admin):
   DELETE /models/{id}            sync; catalog removal (?purge=bool)
   GET   /models/{id}/status      sync; merged catalog + worker view
 
+Bodies are validated before any job starts (400 invalid_parameter).
 All routes return JSON with the OpenAI envelope on errors: an
 OperationError raised by an operation is rendered by the handler that
 `muse.admin.errors.install_admin_error_handler` registers. Async ops
@@ -43,6 +45,13 @@ from muse.cli_impl.supervisor import (
 )
 from muse.core.catalog import _read_catalog, known_models
 from muse.core.errors import error_response
+
+
+_PROBE_DEVICES = ("auto", "cpu", "cuda", "mps")
+
+
+def _invalid(message: str) -> JSONResponse:
+    return error_response(400, "invalid_parameter", message)
 
 
 def _accepted(job: Job) -> JSONResponse:
@@ -102,8 +111,17 @@ def build_models_router() -> APIRouter:
                 404, "model_not_found", f"unknown model {model_id!r}",
             )
         body = body or {}
-        no_inference = bool(body.get("no_inference", False))
+        # Validate synchronously: a bad value would otherwise be accepted
+        # with 202 and fail inside the job (click's device enum exits 2),
+        # and bool("false") is True.
+        no_inference = body.get("no_inference", False)
+        if type(no_inference) is not bool:
+            return _invalid("`no_inference` must be a boolean")
         device = body.get("device")
+        if device is not None and device not in _PROBE_DEVICES:
+            return _invalid(
+                "`device` must be one of " + ", ".join(_PROBE_DEVICES),
+            )
         return _accepted(launch_async(
             probe_model,
             op_name="probe",
@@ -121,11 +139,17 @@ def build_models_router() -> APIRouter:
         {"identifier": "hf://..."} so resolver URIs don't have to be
         path-encoded. If the body is missing/empty, the path id is
         used directly (works for bundled-script ids and curated aliases
-        without `://`).
+        without `://`). A present `identifier` must be a non-empty
+        string: `{"identifier": ""}` is a 400, not a fallback to the path
+        (omit the key or send null for that).
         """
         store = get_default_store()
         body = body or {}
-        identifier = body.get("identifier") or model_id
+        identifier = body.get("identifier")
+        if identifier is None:
+            identifier = model_id
+        elif not isinstance(identifier, str) or not identifier.strip():
+            return _invalid("`identifier` must be a non-empty string")
         if not identifier or identifier == "_":
             return error_response(
                 400,
@@ -188,7 +212,6 @@ def build_models_router() -> APIRouter:
             "worker_uptime_seconds": _get_uptime(spec),
             "worker_status": spec.status if spec is not None else None,
             "restart_count": spec.restart_count if spec is not None else 0,
-            "last_error": None,
             "unservable_reason": reason,
             "measurements": entry.get("measurements") or {},
         }

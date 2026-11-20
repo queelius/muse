@@ -54,3 +54,13 @@ def test_federate_passes_cli_nodes_through(monkeypatch, tmp_path):
     assert seen["host"] == "0.0.0.0"
     assert seen["port"] == 8100
     assert seen["config_path"] is None
+
+
+def test_federate_duplicate_node_names_exit_2(monkeypatch, tmp_path):
+    monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
+    cfg.reset_config()
+    r = runner.invoke(
+        app, ["federate", "--node", "x=http://a:8000", "--node", "x=http://b:8000"],
+    )
+    assert r.exit_code == 2
+    assert "duplicate federation node name" in r.output

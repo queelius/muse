@@ -193,6 +193,31 @@ class TestJobStore:
             f"per-thread timeout regression?"
         )
 
+    def test_spawn_process_strips_the_admin_token_from_the_child_env(
+        self, monkeypatch,
+    ):
+        """R10: admin children (muse pull runs pip sdist builds and Hub
+        code) never inherit MUSE_ADMIN_TOKEN, even if a caller passes it."""
+        monkeypatch.setenv("MUSE_ADMIN_TOKEN", "do-not-leak")
+        store = JobStore()
+        job = store.create(op="pull", model_id="m")
+        process = MagicMock()
+        process.pid = 4242
+        process.poll.return_value = 0
+
+        with patch("muse.admin.jobs.subprocess.Popen", return_value=process) as popen, \
+             patch("muse.admin.jobs.os.getpgid", return_value=4242), \
+             patch("muse.admin.jobs.os.getpgrp", return_value=31337), \
+             patch("muse.admin.jobs.register_process", return_value="r"), \
+             patch("muse.admin.jobs.os.killpg"), \
+             patch("muse.admin.jobs.unregister_process"):
+            store.spawn_process(
+                job.job_id, ["muse", "pull", "m"],
+                env={"MUSE_ADMIN_TOKEN": "also-not"},
+            )
+            assert "MUSE_ADMIN_TOKEN" not in popen.call_args.kwargs["env"]
+            store.release_process(job.job_id, process)
+
     def test_spawn_process_registers_validated_isolated_group(self):
         store = JobStore()
         job = store.create(op="pull", model_id="m")

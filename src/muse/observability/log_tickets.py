@@ -12,9 +12,11 @@ that ticket in the query string instead. A leaked ticket in a log line
 is useless once its TTL elapses.
 
 The ticket is REUSABLE within its TTL (not single-use): `EventSource`
-auto-reconnects on transient network blips, and a single-use ticket
-would force a re-mint on every reconnect, which is unnecessary friction
-for a credential that already expires quickly on its own. It is also
+auto-reconnects on transient network blips, and a reconnect inside the
+TTL reuses the same ticket. A reconnect AFTER the TTL gets a 401, which
+makes the browser close the `EventSource` for good; the dashboard JS
+handles that by minting a fresh ticket and reopening the stream with
+backoff. It is also
 unscoped -- it authorizes the logs SSE surface generally, not one
 specific model_id -- because the admin token itself is all-or-nothing,
 so a per-model ticket would not narrow the actual privilege boundary.
@@ -24,10 +26,12 @@ import-light so it can be constructed without pulling in fastapi.
 """
 from __future__ import annotations
 
-import secrets
 import math
+import secrets
 import threading
 import time
+
+from muse.observability._lifecycle import finite_number, positive_int
 
 DEFAULT_MAX_TICKETS = 4096
 
@@ -47,21 +51,10 @@ class LogTicketStore:
         *,
         max_tickets: int = DEFAULT_MAX_TICKETS,
     ) -> None:
-        if (
-            isinstance(ttl_seconds, bool)
-            or not isinstance(ttl_seconds, (int, float))
-            or not math.isfinite(ttl_seconds)
-            or ttl_seconds < 0
-        ):
-            raise ValueError("ttl_seconds must be a finite non-negative number")
-        if (
-            isinstance(max_tickets, bool)
-            or not isinstance(max_tickets, int)
-            or max_tickets <= 0
-        ):
-            raise ValueError("max_tickets must be a positive integer")
-        self._ttl_seconds = float(ttl_seconds)
-        self._max_tickets = max_tickets
+        self._ttl_seconds = finite_number(
+            ttl_seconds, "ttl_seconds", allow_zero=True,
+        )
+        self._max_tickets = positive_int(max_tickets, "max_tickets")
         self._tickets: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -83,7 +76,9 @@ class LogTicketStore:
                 # grow process memory without bound.
                 self._tickets.pop(next(iter(self._tickets)))
             self._tickets[ticket] = expiry
-        return ticket, int(self._ttl_seconds)
+        # Round up: a sub-second TTL (the setting allows 0.5s) must not
+        # report expires_in 0 for a ticket that is still valid.
+        return ticket, math.ceil(self._ttl_seconds)
 
     def validate(self, ticket: str | None) -> bool:
         """True iff `ticket` exists and has not expired.

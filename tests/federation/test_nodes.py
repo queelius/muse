@@ -7,7 +7,7 @@ from muse.federation.nodes import NodeSpec, load_nodes
 
 def test_cli_nodes_plain_and_named():
     nodes = load_nodes(cli_nodes=["http://a:8000/", "b=http://b:8000"])
-    assert nodes[0] == NodeSpec(url="http://a:8000", name="a", token=None)  # trailing slash stripped, name from host
+    assert nodes[0] == NodeSpec(url="http://a:8000", name="a:8000", token=None)  # trailing slash stripped, name from host:port
     assert nodes[1] == NodeSpec(url="http://b:8000", name="b", token=None)
 
 
@@ -66,7 +66,7 @@ def test_yaml_empty_token_normalizes_to_none(tmp_path):
     path.write_text("nodes:\n  - {url: https://host.example/base/, token: ''}\n")
 
     assert load_nodes(config_path=path) == [
-        NodeSpec(url="https://host.example/base", name="host.example", token=None)
+        NodeSpec(url="https://host.example/base", name="host.example:443", token=None)
     ]
 
 
@@ -86,3 +86,24 @@ def test_yaml_rejects_malformed_node_list_shape(tmp_path, document):
 
     with pytest.raises(ValueError, match="federation .*nodes|federation node entry"):
         load_nodes(config_path=path)
+
+
+def test_default_names_include_the_port_so_same_host_nodes_differ():
+    nodes = load_nodes(cli_nodes=["http://box:8000", "http://box:8001"])
+    assert [n.name for n in nodes] == ["box:8000", "box:8001"]
+
+
+def test_default_name_uses_scheme_port_when_url_has_none():
+    nodes = load_nodes(cli_nodes=["http://box", "https://box"])
+    assert [n.name for n in nodes] == ["box:80", "box:443"]
+
+
+def test_default_name_brackets_ipv6_hosts():
+    assert load_nodes(cli_nodes=["http://[::1]:8000"])[0].name == "[::1]:8000"
+
+
+def test_duplicate_node_names_are_rejected(tmp_path):
+    p = tmp_path / "federation.yaml"
+    p.write_text("nodes:\n  - {url: http://b:8000, name: alpha}\n")
+    with pytest.raises(ValueError, match="duplicate federation node name 'alpha'"):
+        load_nodes(cli_nodes=["alpha=http://a:8000"], config_path=p)

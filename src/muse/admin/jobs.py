@@ -206,6 +206,9 @@ class JobStore:
         identity and ensuring it is not this process's own group. On other
         platforms the Popen object remains the positive ownership token and
         shutdown falls back to signalling that child directly.
+
+        The child environment never carries MUSE_ADMIN_TOKEN, even when
+        the caller's ``env`` names it.
         """
         with self._lock:
             if self._shutting_down:
@@ -224,6 +227,9 @@ class JobStore:
             # authoritative outer process group instead of escaping into a
             # nested session that JobStore cannot drain.
             child_env[_MANAGED_JOB_GROUP_ENV] = "1"
+            # Admin children run pip builds and Hub code; none needs the
+            # admin token, which often also authenticates other nodes (R10).
+            child_env.pop("MUSE_ADMIN_TOKEN", None)
             popen_kwargs["env"] = child_env
 
             popen_kwargs.update(new_process_group_kwargs(

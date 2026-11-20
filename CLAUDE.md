@@ -220,8 +220,8 @@ authoritative first:
    auto-detect.
 2. **manifest `capabilities.device` pin** (model-author affinity) -- a
    value other than `"auto"` overrides the `--device` flag. Heavy
-   GPU-only models declare `"cuda"`; the lone CPU-only model
-   (`supertonic-3`, ONNX) declares `"cpu"`.
+   GPU-only models declare `"cuda"`; the CPU-only models
+   (`supertonic-3`, ONNX, and the weightless `pixel-tools`) declare `"cpu"`.
 3. **`--device` server flag** (`muse serve --device ...`, default
    `auto`), folded into the runtime kwargs.
 4. **`"auto"`** -- the runtime's `select_device` picks cuda if available,
@@ -231,8 +231,8 @@ authoritative first:
 declares `device: "auto"` so it lands on the GPU automatically on a GPU
 host and on CPU on a CPU-only host -- generally faster, and safe because
 lazy-load + LRU/idle eviction size the live working set to fit VRAM. Only
-`supertonic-3` stays pinned `cpu` (its ONNX runtime ignores a cuda
-device). `set-device` is catalog state: it takes effect on the model's
+`supertonic-3` (its ONNX runtime ignores a cuda device) and `pixel-tools`
+(CPU-only Pillow/numpy) stay pinned `cpu`. `set-device` is catalog state: it takes effect on the model's
 **next cold load**, so evict or restart an already-resident worker to
 apply it.
 
@@ -423,10 +423,14 @@ per-model override (idle-timeout is the canonical example: global
 
 ## Admin REST API
 
-`muse.admin/` provides eleven endpoints under `/v1/admin/*` for runtime
+`muse.admin/` provides twelve endpoints under `/v1/admin/*` for runtime
 model control. Admin is closed-by-default: every request returns 503
 `admin_disabled` until `MUSE_ADMIN_TOKEN` is set in the supervisor's
-environment, after which `Authorization: Bearer <token>` is required.
+environment, after which `Authorization: Bearer <token>` is required (scheme
+case-insensitive). `muse.admin.auth.check_bearer` is the one fastapi-free
+bearer check; the dashboard uses it too. Bad bodies or path params are 400
+`invalid_parameter` envelopes, never a 202 job that fails later (pull with
+`{"identifier": ""}` is now a 400; omit it to use the path id).
 
 Endpoints:
 
@@ -434,12 +438,13 @@ Endpoints:
 |---|---|---|
 | `POST /v1/admin/models/{id}/enable` | async (202+job_id) | spawn or restart-in-place |
 | `POST /v1/admin/models/{id}/disable` | sync | unload + catalog flip |
+| `POST /v1/admin/models/{id}/warmup` | sync (blocks on the load) | load via the director without a refcount |
 | `POST /v1/admin/models/{id}/probe` | async | run `muse models probe` in venv |
 | `POST /v1/admin/models/_/pull` | async | run `muse pull <body.identifier>` |
 | `DELETE /v1/admin/models/{id}?purge=bool` | sync | refuses 409 if loaded |
 | `GET /v1/admin/models/{id}/status` | sync | merged catalog + worker view |
 | `GET /v1/admin/workers` | sync | list workers + pid/uptime/restarts |
-| `POST /v1/admin/workers/{port}/restart` | sync | SIGTERM; monitor handles bringup |
+| `POST /v1/admin/workers/{port}/restart` | sync | SIGTERM; monitor handles bringup; revives a dead worker (status unhealthy, restart budget reset) only if its models are still in `director.loaded`, else 409 `worker_not_revivable` |
 | `GET /v1/admin/memory` | sync | psutil + pynvml + per-model breakdown (incl. live `refcount` when a director is bound) |
 | `GET /v1/admin/jobs/{job_id}` | sync | one job; 404 once reaped |
 | `GET /v1/admin/jobs` | sync | recent jobs newest-first |
@@ -451,7 +456,9 @@ State management:
   `get_supervisor_state()`. The auto-restart monitor reads
   `state.workers` directly so admin mutations show up on the next tick.
 - `JobStore` (in `muse.admin.jobs`) is an in-memory map of async jobs
-  with 10-minute retention (lazy reap on every list call). Each
+  with 10-minute retention (lazy reap on every list call). Job children
+  never inherit `MUSE_ADMIN_TOKEN`; subprocess output is kept once, in
+  `log_lines` (`result` is `{op, returncode}`). Each
   enable/pull/probe spawns a daemon thread tracked by the JobStore;
   `get_default_store().shutdown()` joins them on gateway exit.
 - One global RLock guards SupervisorState mutations; per-model locks
@@ -500,8 +507,11 @@ emitted only after a successful teardown. Settings: `telemetry.*` (docs/CONFIG.m
 in front of unmodified `muse serve` nodes (`muse.federation` plus `muse.cli_impl.federation`).
 It polls each node's `/v1/models` (and, with a per-node token, `/v1/telemetry/summary`) on a
 background interval and routes each request by model locality: nodes listing the model, loaded
-first, then lowest `in_flight`, else round-robin; one retry on connect/timeout failure, never
-mid-stream. It refuses to start with zero nodes. The registry starts in the ASGI lifespan, so
+first, then lowest `in_flight` (in-flight requests; a node without telemetry is "unknown" and ties
+with the lowest), else round-robin; one retry on connect failure, never mid-stream. Default node
+names are `host:port` and must be unique. No candidate is 404, or a retryable 503 before the first
+poll, with no reachable node, or when a now-unreachable node listed the model. It refuses to start
+with zero nodes. The registry starts in the ASGI lifespan, so
 plain `TestClient(app).get` tests never start it. Details: `docs/INTERNALS.md`; design:
 `docs/superpowers/specs/2026-07-04-federation-design.md`.
 
@@ -761,7 +771,7 @@ Commits follow Conventional Commits with a scope (`feat(pixelart): ...`,
   `image` URLs to reach internal services), `MUSE_IMAGE_INPUT_MAX_BYTES` / `limits.image_input_max_bytes`
   (per-request size cap for image uploads and data URLs; default 10485760 /
   10MB; read per-call so changes take effect without a server restart).
-- **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; manual restart via `Ctrl+C` + `muse serve` is required to reset the counter.
+- **Auto-restart is always on.** No --no-autorestart flag in this iteration. Workers that can't stay up through 10 restart attempts are marked dead; `POST /v1/admin/workers/{port}/restart` revives one (or restart `muse serve`).
 - **Enable/disable is catalog state; loaded/unloaded is runtime state (v0.40.0+).** The two are decoupled. `enabled: true` means "in service; allowed to lazy-load." `loaded` (visible via `/v1/models` and `muse models list`'s `enabled_loaded` glyph) means "currently resident on a worker." LRU eviction unloads without disabling; `muse models warmup` loads without bumping refcount. Operator-driven `muse models enable/disable` flips the catalog bit and (when the supervisor is running with `MUSE_ADMIN_TOKEN`) syncs runtime state via `enable_model` / `disable_model`; lazy-load and eviction paths use `load_model_into_worker` / `unload_model_from_worker` which skip the catalog flip.
 - **Tool-use asymmetry (known landmine).** llama-cpp-python's `chatml-function-calling` handler parses tool calls *out* of a model's response into structured `tool_calls`, but does NOT format tool *result* messages (role=`tool`) back to the model in a way Qwen's chat template always recognizes. The muse-side contract is correct (verified by `tests/modalities/chat_completion/test_routes_messages_passthrough.py`); the asymmetry is upstream. Larger models (Qwen3.5-9B+) tolerate it in context; smaller models (Qwen3.5-4B) often ignore the tool result and give a generic "I don't have access to tools" reply. Tracked by `tests/integration/test_remote_tools.py::test_observe_tool_result_content_influences_next_response` (xfail-style watchdog). Upstream: [abetlen/llama-cpp-python#2063](https://github.com/abetlen/llama-cpp-python/issues/2063).
 - **The `model` field in chat responses is the catalog id**, not the GGUF filesystem path. `LlamaCppModel._dict_to_chat_result` and `_dict_to_chat_chunk` override `response["model"]` with the muse catalog id (not the `resp.get("model") or fallback` pattern that lets llama-cpp's internal `model_path` win). Applies to both non-streaming responses and every streaming chunk.

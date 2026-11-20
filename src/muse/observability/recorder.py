@@ -10,12 +10,12 @@ the caller or losing more than the one event.
 from __future__ import annotations
 
 import logging
-import math
 import queue
 import threading
 import time
 from typing import Any
 
+from muse.observability._lifecycle import finite_number, join_bounded, positive_int
 from muse.observability.events import event_to_row
 from muse.observability.store import TelemetryStore
 
@@ -35,25 +35,10 @@ class TelemetryRecorder:
         flush_interval: float = 0.5,
         stop_timeout: float = _DEFAULT_STOP_TIMEOUT,
     ) -> None:
-        if isinstance(max_queue, bool) or not isinstance(max_queue, int) or max_queue <= 0:
-            raise ValueError("max_queue must be a positive integer")
-        if (
-            isinstance(flush_interval, bool)
-            or not isinstance(flush_interval, (int, float))
-            or not math.isfinite(flush_interval)
-            or flush_interval <= 0
-        ):
-            raise ValueError("flush_interval must be a positive finite number")
-        if (
-            isinstance(stop_timeout, bool)
-            or not isinstance(stop_timeout, (int, float))
-            or not math.isfinite(stop_timeout)
-            or stop_timeout <= 0
-        ):
-            raise ValueError("stop_timeout must be a positive finite number")
+        positive_int(max_queue, "max_queue")
         self._store = store
-        self._flush_interval = float(flush_interval)
-        self._stop_timeout = float(stop_timeout)
+        self._flush_interval = finite_number(flush_interval, "flush_interval")
+        self._stop_timeout = finite_number(stop_timeout, "stop_timeout")
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max_queue)
         self.dropped = 0
         # Guards `dropped` increments: record() is called from arbitrary
@@ -150,27 +135,13 @@ class TelemetryRecorder:
             with self._record_lock:
                 self._stop_event.set()
             thread = self._thread
-            if thread is threading.current_thread():
-                logger.warning("telemetry recorder cannot join its own flush thread")
+            if not join_bounded(
+                thread, self._stop_timeout,
+                label="telemetry recorder flush", logger=logger,
+            ):
                 return False
-            if thread is not None:
-                try:
-                    thread.join(timeout=self._stop_timeout)
-                except RuntimeError:
-                    if thread.is_alive() is True:
-                        logger.warning(
-                            "could not join telemetry recorder flush thread",
-                            exc_info=True,
-                        )
-                        return False
-                if thread.is_alive() is True:
-                    logger.warning(
-                        "telemetry recorder flush thread did not stop within %.1fs",
-                        self._stop_timeout,
-                    )
-                    return False
-                if self._thread is thread:
-                    self._thread = None
+            if thread is not None and self._thread is thread:
+                self._thread = None
             # Final drain so nothing queued is silently lost on shutdown.
             try:
                 self.flush()

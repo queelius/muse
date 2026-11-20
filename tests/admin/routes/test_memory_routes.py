@@ -687,3 +687,42 @@ def test_memory_listing_never_reaps_an_unpinnable_leader(unpinnable, monkeypatch
         assert exited.returncode is None  # never polled, never reaped
     finally:
         exited.wait(timeout=10.0)
+
+
+class TestMpsAndSinglePass:
+    def _mps_model(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import muse.admin.routes.memory as mem
+
+        monkeypatch.setattr(mem, "known_models", lambda: {
+            "mac-model": SimpleNamespace(extra={"device": "mps", "memory_gb": 3.0}),
+        })
+        monkeypatch.setattr(mem, "_read_catalog", lambda: {
+            "mac-model": {"measurements": {
+                "mps": {"weights_bytes": 1024**3, "peak_bytes": 2 * 1024**3},
+            }},
+        })
+        spec = WorkerSpec(models=["mac-model"], python_path="/p", port=9001)
+        set_supervisor_state(SupervisorState(workers=[spec], device="auto"))
+        return mem
+
+    def test_mps_model_is_listed_on_the_cpu_side(self, monkeypatch):
+        """mps pools against host RAM; the GPU section is pynvml-only, so an
+        mps model must appear under CPU, with its own mps measurements."""
+        mem = self._mps_model(monkeypatch)
+        cpu_side = mem._per_model_breakdown("cpu", "cpu")
+        assert [r["model_id"] for r in cpu_side] == ["mac-model"]
+        assert cpu_side[0]["peak_gb"] == 2.0
+        assert mem._per_model_breakdown("cuda", "gpu") == []
+
+    def test_memory_route_reads_the_catalog_once(
+        self, client, headers, monkeypatch,
+    ):
+        mem = self._mps_model(monkeypatch)
+        calls = []
+        real = mem._read_catalog
+        monkeypatch.setattr(mem, "_read_catalog", lambda: calls.append(1) or real())
+        r = client.get("/v1/admin/memory", headers=headers)
+        assert r.status_code == 200
+        assert len(calls) == 1

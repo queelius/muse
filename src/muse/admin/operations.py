@@ -1385,8 +1385,8 @@ def _run_subprocess_into_job(
 
     The child is killed after `timeout` seconds.
 
-    On success: state=done, log_lines populated, result contains the op
-    name + return code + stdout. On failure: state=failed, error has the
+    On success: state=done, log_lines populated (stdout then stderr), result
+    contains the op name + return code. On failure: state=failed, error has the
     return code + stderr. Pipes are drained concurrently throughout the run,
     so neither a noisy child nor the serialized Job payload can grow memory
     without bound.
@@ -1439,11 +1439,9 @@ def _run_subprocess_into_job(
             store.update(
                 job.job_id, state="done",
                 log_lines=log_lines,
-                result={
-                    "op": success_op,
-                    "returncode": 0,
-                    "stdout": stdout,
-                },
+                # stdout is already in log_lines; repeating it here doubled
+                # every job record (GET /v1/admin/jobs returns them all).
+                result={"op": success_op, "returncode": 0},
             )
         else:
             store.update(

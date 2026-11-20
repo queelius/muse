@@ -197,12 +197,14 @@ worker spawning is unchanged from a pre-telemetry `muse serve`.
 history is pruned. `telemetry.log_buffer_kb` sizes each model's
 per-worker stdout ring buffer (KB, not lines).
 `telemetry.sample_interval_seconds` is how often the background sampler
-records a `sample` event (free VRAM/RAM, loaded/in-flight counts).
+records a `sample` event (free VRAM/RAM, loaded models, in-flight cold
+loads).
 `telemetry.log_ticket_ttl_seconds` is how long a short-lived SSE
 log-stream ticket (minted via `POST /v1/telemetry/logs-ticket`) stays
 valid; the dashboard's `EventSource` client uses one of these instead of
-putting the admin token in the URL. See the "Observability" section of
-`CLAUDE.md` for the full event model and endpoint surface.
+putting the admin token in the URL, and mints a fresh one when a
+reconnect after expiry closes the stream. See the "Observability" section
+of `docs/INTERNALS.md` for the full event model and endpoint surface.
 
 ### federation (coordinator: `muse federate`)
 
@@ -214,7 +216,7 @@ putting the admin token in the URL. See the "Observability" section of
 | `federation.config_file` | `MUSE_FEDERATION_CONFIG` | null |
 
 `federation.refresh_interval_seconds` is how often the coordinator's
-background task polls each node's `/v1/models` + `/health` (+ gated
+background task polls each node's `/v1/models` (+ gated
 `/v1/telemetry/summary` if a per-node token is configured) and refreshes
 its cached routing snapshot. `federation.forward_timeout_seconds` bounds
 each request the coordinator forwards to a node; it defaults high

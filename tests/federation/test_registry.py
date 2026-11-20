@@ -299,3 +299,33 @@ async def test_close_failure_reaches_every_waiter_and_resets_lifecycle_state():
     assert reg._task is None
     assert reg._close_task is None
     assert reg._closing is False
+
+
+def test_mark_unreachable_and_was_listed_survive_a_failed_poll():
+    import asyncio
+
+    from muse.federation.nodes import NodeSpec
+    from muse.federation.registry import NodeRegistry
+
+    up = {"ok": True}
+
+    async def fetch(url, token):
+        if up["ok"]:
+            return ({"data": [{"id": "m1", "loaded": True}]}, None)
+        return (None, None)
+
+    reg = NodeRegistry([NodeSpec("http://a:8000", "a")], refresh_interval=1, fetch=fetch)
+    asyncio.run(reg.refresh_once())
+    assert reg.was_listed("m1") and not reg.was_listed("m2")
+
+    reg.mark_unreachable("http://a:8000")
+    (state,) = reg.snapshot()
+    assert state.reachable is False and state.models == {}
+
+    up["ok"] = False
+    asyncio.run(reg.refresh_once())
+    assert reg.was_listed("m1")  # the last successful listing is remembered
+
+    up["ok"] = True
+    asyncio.run(reg.refresh_once())
+    assert reg.snapshot()[0].reachable is True

@@ -450,8 +450,8 @@ clean subprocess and asserts `"fastapi" not in sys.modules`.
 (`muse.observability.store.TelemetryStore`), with columns
 `EVENT_COLUMNS` (`muse.observability.events`): `ts`, `type`, plus every
 field any event type might carry (`model_id`, `pool`, `gb`,
-`latency_ms`, `status`, `reason`, `cold_load_seconds`, `stream`,
-`free_vram_gb`, `free_ram_gb`, `gpu_used_gb`, `loaded_count`,
+`latency_ms`, `queued_ms`, `status`, `reason`, `cold_load_seconds`,
+`stream`, `free_vram_gb`, `free_ram_gb`, `loaded_count`,
 `in_flight_count`, `modality`) -- unset fields are `NULL`, not one
 table per event type. `event_to_row(type, ts, **fields)` builds the
 full row and raises `ValueError` on an unknown field name (a typo'd
@@ -461,7 +461,10 @@ column). Four event types are recorded today: `model_load` and
 `gb`/`cold_load_seconds`), `request` (from the gateway's forwarding
 path, `latency_ms`/`status`/`stream`/`modality`), and `sample` (from
 `Sampler`, a periodic snapshot of `free_vram_gb`/`free_ram_gb`/
-`loaded_count`/`in_flight_count`). `TelemetryStore.series(metric,
+`loaded_count`/`in_flight_count`, where the supervisor feeds
+`in_flight_count` the number of in-flight COLD LOADS). The retired
+`gpu_used_gb` column was never written; old databases keep it as a
+nullable column and inserts name their columns, so they still work. `TelemetryStore.series(metric,
 since_ts, bucket_seconds)` buckets rows into a fixed set of named
 metrics (`request_rate`, `latency`, `vram`, `ram`, `load_evict`); v1
 latency is avg+max per bucket, not exact percentiles.
@@ -491,8 +494,10 @@ daemon reader thread (`_pump_worker_logs`) that tees each line to both
 the aggregate supervisor stdout and `hub.append(model_id, line)`. When
 telemetry is disabled `log_hub` stays `None` and workers spawn exactly
 as before (no reader thread, no behavior change). `LogHub` also fans
-out live lines to subscriber queues for the SSE tail; `snapshot(id)`
-returns the buffered history for a late-connecting client.
+out live lines to subscriber queues for the SSE tail;
+`subscribe_with_snapshot(id)` returns the buffered history and a live
+queue atomically for a late-connecting client (`snapshot(id)` is a plain
+copy kept for tests and diagnostics).
 
 **`/dashboard` + telemetry endpoints.** `build_dashboard_router(state)`
 (lazily imported, see above) mounts:
@@ -501,7 +506,12 @@ returns the buffered history for a late-connecting client.
   configured yet) and prompts the browser for a token before hitting
   any gated endpoint, storing it in `sessionStorage`.
 - `GET /v1/telemetry/summary` -- gated JSON: currently loaded models
-  (`model_id`/`pool`/`gb`/`last_used`), `in_flight` count,
+  (`model_id`/`pool`/`gb`/`last_used`/`queue_depth`), cold-start
+  `queued` models, `in_flight` (in-flight REQUESTS: director refcounts
+  plus gate-parked waiters; federation balances on it. It excludes
+  requests waiting on a cold load or a capacity wait, which hold neither
+  a refcount nor a gate queue slot),
+  `in_flight_loads` (cold loads in progress),
   `dropped_events`, and a federation-forward `node` id (`state.node_url`
   or `state.node_id` if set, else `socket.gethostname()`) so a future
   multi-node aggregator can tell which box a summary came from.
@@ -534,12 +544,16 @@ stream (`EventSource` cannot set custom headers), which instead
 authenticates with a short-lived, random ticket
 (`telemetry.log_ticket_ttl_seconds`, default 60s) minted from the
 header-gated `POST /v1/telemetry/logs-ticket`. The ticket is reusable
-within its TTL (not single-use, so `EventSource` auto-reconnect keeps
-working) and unscoped (it authorizes the logs SSE surface generally,
+within its TTL (not single-use, so `EventSource` auto-reconnect inside
+the TTL keeps working; a reconnect after it 401s, the browser closes the
+stream, and the dashboard JS mints a new ticket and reopens it with
+backoff) and unscoped (it authorizes the logs SSE surface generally,
 matching the admin token's own all-or-nothing scope). So the admin
 token itself never rides a URL, and a leaked ticket in an access log
-is useless once its TTL elapses. Comparison is `secrets.compare_digest`;
-the token is never echoed in an error message or log line.
+is useless once its TTL elapses. The check is `muse.admin.auth.check_bearer`
+(shared with the admin API: case-insensitive `Bearer` scheme, exact
+credential, `secrets.compare_digest`); the token is never echoed in an
+error message or log line.
 
 **Config.** Five `telemetry.*` settings (see "Configuration" above and
 `docs/CONFIG.md`): `telemetry.enabled` (`MUSE_TELEMETRY_ENABLED`,
@@ -588,7 +602,10 @@ structurally a sibling of the existing single-host gateway in
 and `extract_model_from_request`).
 
 **Node membership (static, v1).** Nodes come from two merged sources,
-CLI entries winning on url collision:
+CLI entries winning on url collision. A node's default name is
+`host:port` (the scheme's port when the url has none), so two nodes on
+one host differ; duplicate names are rejected and `muse federate` exits 2
+on an invalid node list:
 - `--node http://host:8000` or `--node name=http://host:8000` (repeatable).
 - A yaml file, `nodes: [{url, name?, token?}, ...]`. Default location is
   `<catalog_dir>/federation.yaml` when it exists and neither `--config`
@@ -603,12 +620,18 @@ every node concurrently on a background interval
 (`federation.refresh_interval_seconds`, default 3.0s) and caches a
 `NodeState` snapshot per node: `GET <node>/v1/models` (reachability +
 per-model `loaded`) and (only if that node has a
-configured token) `GET <node>/v1/telemetry/summary` for `in_flight`.
+configured token) `GET <node>/v1/telemetry/summary` for `in_flight`
+(the node's in-flight requests).
 Route handlers read the cache via `.snapshot()`, so routing is a fast
 local lookup, never a per-request fan-out. A node whose poll fails is
 marked unreachable and skipped by the router until it recovers
 (per-node failure isolation: one bad node never aborts the refresh for
-the others).
+the others). A connect failure while forwarding also marks the node
+unreachable in the cache (`mark_unreachable`) until the next poll, which
+hides ALL of that node's models from routing, `/v1/models` and `/health`
+until that poll succeeds. The
+registry remembers each node's model list from its last reachable poll
+(`was_listed`).
 
 **Routing policy (model-locality, v1).** `muse.federation.router.select_node`
 is a pure function over the cached snapshot:
@@ -616,9 +639,15 @@ is a pure function over the cached snapshot:
    model.
 2. Prefer loaded: among candidates, those with the model currently
    `loaded` win over those that would have to cold-load it.
-3. Tie-break: lowest `in_flight` (from telemetry, if a token is
-   configured for that node), else round-robin over the tied set.
-4. No candidate -> 404 `model_not_available` (OpenAI-shape).
+3. Tie-break: lowest `in_flight` (in-flight requests from the node's
+   telemetry, if a token is configured for that node), else round-robin
+   over the tied set. An unknown `in_flight` (no token) is "no
+   information", not "infinitely busy": it ties with the lowest known
+   value, so a token-less node is never starved.
+4. No candidate -> 404 `model_not_available` (OpenAI-shape), except a
+   retryable 503 `no_node_available` before the first poll lands, when no
+   node is reachable, or when a now-unreachable node listed the model in
+   its last reachable poll.
 
 Deferred to v2: hardware-aware routing (route a big model to the node
 whose GPU actually fits it), true queue-depth/latency-aware routing,
@@ -633,16 +662,20 @@ clients).
 from the request body/query (the same logic the single-host gateway
 uses), asks `select_node`, and forwards via the shared `_forward`
 helper (buffered + SSE relay, unchanged). A forward that fails at
-connect/timeout (never mid-stream -- once a `StreamingResponse` starts,
-the relay is on its own) retries ONCE against a different candidate for
-the same model; if no other candidate exists, or the retry also fails,
-the coordinator returns 502 `no_node_available`.
+connect time (`ConnectError`/`ConnectTimeout`; never mid-stream -- once
+a `StreamingResponse` starts, the relay is on its own) retries ONCE
+against a different candidate for the same model; if no other candidate
+exists, or the retry also fails, the coordinator returns 502
+`no_node_available`. A read timeout (the node accepted the request) is a
+504 `node_timeout` without failover.
 
 **Aggregated read endpoints**, mounted before the catch-all so they are
 never shadowed:
 - `GET /v1/models` -- OpenAI-shape union of model ids across reachable
   nodes, each annotated with `loaded` (true if loaded on ANY node) and
   `nodes` (which node names carry it).
+- `GET /v1/capabilities` -- the nodes' discovery documents merged, each
+  document matched to its node by position (not name).
 - `GET /health` -- `"ok"` if at least one node is reachable, else
   `"degraded"`; per-node reachability/model-count/in_flight breakdown
   in the body.
@@ -650,7 +683,7 @@ never shadowed:
   reachable state, loaded model list, in_flight (if known), and
   last-poll age in seconds.
 
-**Config** (three settings under the `federation.*` group in
+**Config** (four settings under the `federation.*` group in
 `muse.core.config.SETTINGS`; see "Configuration" above and
 `docs/CONFIG.md`):
 - `federation.refresh_interval_seconds` (`MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS`,
@@ -658,6 +691,10 @@ never shadowed:
 - `federation.forward_timeout_seconds` (`MUSE_FEDERATION_FORWARD_TIMEOUT_SECONDS`,
   default `300.0`) -- per-request timeout when forwarding to a node
   (long, since generation requests can run for minutes).
+- `federation.poll_timeout_seconds` (`MUSE_FEDERATION_POLL_TIMEOUT_SECONDS`,
+  default `10.0`) -- per-node timeout for each
+  background poll (above a node's own aggregation timeout, so a briefly
+  slow node is not dropped from routing).
 - `federation.config_file` (`MUSE_FEDERATION_CONFIG`, default unset) --
   explicit path to the node-list yaml, overriding the
   `<catalog_dir>/federation.yaml` default-if-exists lookup.

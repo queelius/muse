@@ -457,3 +457,37 @@ async def test_stream_model_logs_streams_live_lines_and_unsubscribes_on_close():
     # still run the `finally: hub.unsubscribe(...)` cleanup.
     await gen.aclose()
     assert not hub._subscribers.get("m")
+
+
+def test_summary_in_flight_counts_requests_not_cold_loads(client_with_token):
+    """`in_flight` is in-flight REQUESTS (requests holding a director
+    refcount plus requests parked on a concurrency gate), the load signal
+    federation balances on. Cold loads in progress are a separate key."""
+    from muse.cli_impl.queueing import ConcurrencyGate
+
+    state = client_with_token.state_ref
+    state.director.loaded = {
+        "a": SimpleNamespace(pool="cpu", memory_gb=1.0, last_touched_at=0.0, refcount=2),
+        "b": SimpleNamespace(pool="cpu", memory_gb=1.0, last_touched_at=0.0, refcount=0),
+    }
+    state.director.in_flight_loads = {"c": object()}
+    gate = ConcurrencyGate()
+    gate._caps["a"] = 1
+    gate._sems["a"] = asyncio.Semaphore(1)
+    gate._entered["a"] = 4  # 3 parked
+    state.concurrency_gate = gate
+
+    body = client_with_token.get(
+        "/v1/telemetry/summary", headers={"Authorization": "Bearer t"}
+    ).json()
+    assert body["in_flight"] == 5
+    assert body["in_flight_loads"] == 1
+
+
+def test_log_tail_remints_a_ticket_when_the_stream_closes():
+    """After the ticket TTL a reconnect 401s and the browser closes the
+    EventSource for good; the page must mint a fresh ticket and reopen."""
+    from muse.observability.dashboard import DASHBOARD_HTML
+
+    assert "EventSource.CLOSED" in DASHBOARD_HTML
+    assert "scheduleLogReconnect" in DASHBOARD_HTML

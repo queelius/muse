@@ -2,9 +2,10 @@
 
 GET /v1/admin/memory returns aggregate CPU/GPU usage plus a per-model
 breakdown derived from each enabled model's `measurements` block in
-catalog.json. The breakdown is grouped by device:
-  - GPU: models whose effective device is cuda/mps -> read measurements.cuda
-  - CPU: models whose effective device is cpu -> read measurements.cpu
+catalog.json. The breakdown is grouped by device, computed once per request:
+  - GPU: models whose effective device is cuda -> read measurements.cuda
+  - CPU: models whose effective device is cpu or mps -> read
+    measurements.cpu (measurements.mps for an mps model)
 
 A model declaring device="auto" (the default for CUDA-safe bundled
 models) is resolved to the side it actually loads on, mirroring the
@@ -57,8 +58,9 @@ def build_memory_router() -> APIRouter:
 
     @router.get("/memory")
     def memory_status():
-        gpu = _gpu_summary()
-        cpu = _cpu_summary()
+        rows = _breakdowns()
+        gpu = _gpu_summary(rows["gpu"])
+        cpu = _cpu_summary(rows["cpu"])
         return {
             "gpu": gpu,
             "cpu": cpu,
@@ -205,12 +207,20 @@ def _resolve_auto_side() -> str:
         return "cpu"
 
 
-def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict]:
-    """Return [{model_id, weights_gb, peak_gb}] for currently loaded models
-    whose capabilities.device matches the target side (CPU vs GPU).
+def _breakdowns() -> dict[str, list[dict]]:
+    """Per-model rows for currently loaded (or cold-start queued) models,
+    split into the "gpu" and "cpu" sides in ONE pass.
 
-    `device_key` is the measurements.<key> bucket (cuda/auto/mps/cpu).
-    `target_device_label` is "cpu" or "gpu" for capability-side filtering.
+    One pass per request: the catalog, `known_models`, worker liveness and
+    the auto-device verdict (NVML or torch) are each read once, not once
+    per side and per model.
+
+    Side: the director's resident pool when the model is loaded there,
+    else the manifest device, with "auto" resolved like the runtime's
+    select_device. "cpu" and "mps" are the CPU side (mps pools against host
+    RAM and the GPU summary is pynvml/CUDA-only); everything else is GPU.
+    Measurements: the model's own bucket ("mps" for an mps model, else
+    "cuda"/"cpu" by side), falling back to "auto".
     """
     catalog = _read_catalog()
     catalog_known = known_models()
@@ -230,32 +240,36 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
         queued_only = {
             m for m, d in depths.items() if d > 0 and m not in loaded
         }
-    out: list[dict] = []
+    auto_side: str | None = None
+    out: dict[str, list[dict]] = {"gpu": [], "cpu": []}
     for model_id in sorted(loaded | queued_only):
         entry = catalog.get(model_id) or {}
-        cap_device = "auto"
-        if model_id in catalog_known:
-            cap_device = (catalog_known[model_id].extra or {}).get("device", "auto")
-        cap_device = (cap_device or "auto").lower()
+        extra = (
+            (catalog_known[model_id].extra or {}) if model_id in catalog_known
+            else {}
+        )
+        declared = (extra.get("device", "auto") or "auto").lower()
         if model_id in resident_pools:
-            cap_device = resident_pools[model_id]
-        elif cap_device == "auto":
+            device = resident_pools[model_id]
+        elif declared == "auto":
             # Resolve to the side this model actually loads on so an
             # auto-device model is accounted under GPU on a GPU host and
             # CPU on a CPU-only host (mirrors runtime select_device).
-            cap_device = "cpu" if _resolve_auto_side() == "cpu" else "cuda"
-        on_cpu = cap_device == "cpu"
-        if target_device_label == "gpu" and on_cpu:
-            continue
-        if target_device_label == "cpu" and not on_cpu:
-            continue
+            if auto_side is None:
+                auto_side = _resolve_auto_side()
+            device = "cpu" if auto_side == "cpu" else "cuda"
+        else:
+            device = declared
+        side = "cpu" if device in ("cpu", "mps") else "gpu"
+        if declared == "mps":
+            bucket = "mps"
+        else:
+            bucket = "cpu" if side == "cpu" else "cuda"
         measurements = entry.get("measurements") or {}
-        m = measurements.get(device_key) or measurements.get("auto") or {}
+        m = measurements.get(bucket) or measurements.get("auto") or {}
         weights_b = m.get("weights_bytes") or 0
         peak_b = m.get("peak_bytes") or 0
-        annotation = (catalog_known[model_id].extra or {}).get("memory_gb") if (
-            model_id in catalog_known
-        ) else None
+        annotation = extra.get("memory_gb") if model_id in catalog_known else None
         record: dict = {"model_id": model_id}
         if weights_b:
             record["weights_gb"] = round(weights_b / (1024**3), 3)
@@ -272,11 +286,20 @@ def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict
             record["queue_depth"] = depths.get(model_id, 0)
         if model_id in queued_only:
             record["loaded"] = False
-        out.append(record)
+        out[side].append(record)
     return out
 
 
-def _gpu_summary() -> dict | None:
+def _per_model_breakdown(device_key: str, target_device_label: str) -> list[dict]:
+    """One side ("gpu" or "cpu") of `_breakdowns()`.
+
+    `device_key` is kept for callers; the measurements bucket is now
+    chosen per model (see `_breakdowns`).
+    """
+    return _breakdowns()[target_device_label]
+
+
+def _gpu_summary(models: list[dict]) -> dict | None:
     try:
         import pynvml  # type: ignore
     except ImportError:
@@ -293,7 +316,7 @@ def _gpu_summary() -> dict | None:
                 "used_gb": round(used_gb, 2),
                 "total_gb": round(total_gb, 2),
                 "headroom_gb": round(total_gb - used_gb, 2),
-                "models": _per_model_breakdown("cuda", "gpu"),
+                "models": models,
             }
         finally:
             pynvml.nvmlShutdown()
@@ -302,7 +325,7 @@ def _gpu_summary() -> dict | None:
         return None
 
 
-def _cpu_summary() -> dict | None:
+def _cpu_summary(models: list[dict]) -> dict | None:
     try:
         import psutil  # type: ignore
     except ImportError:
@@ -314,7 +337,7 @@ def _cpu_summary() -> dict | None:
         return {
             "used_gb": round(used_gb, 2),
             "total_gb": round(total_gb, 2),
-            "models": _per_model_breakdown("cpu", "cpu"),
+            "models": models,
         }
     except Exception as e:  # noqa: BLE001
         logger.debug("psutil failed: %s", e)
