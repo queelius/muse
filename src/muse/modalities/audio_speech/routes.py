@@ -28,7 +28,9 @@ from muse.modalities.audio_speech.pronunciations import (
     PronunciationError, SpokenText, match_pronunciations, parse_pronunciations,
     pronunciations_digest, render_spoken,
 )
-from muse.modalities.audio_speech.protocol import TimestampsUnavailableError
+from muse.modalities.audio_speech.protocol import (
+    TimestampsUnavailableError, UnknownVoiceError, VoiceUnreadableError,
+)
 from muse.modalities.audio_speech.word_timing import TimedSpan, assemble_words
 from muse.core.errors import error_response
 from muse.modalities._common.streaming import threaded_sse_response
@@ -65,6 +67,13 @@ class SpeechRequest(BaseModel):
     speed: float = 1.0
     align: bool = False
     timestamps: bool = False
+    instructions: str | None = Field(
+        default=None, max_length=4096,
+        description=(
+            "Natural-language description of the voice to design (timbre, age, "
+            "accent, manner). Only on models with `supports_instructions`."
+        ),
+    )
     # Keep raw values so our parser returns the pronunciation-specific 400.
     pronunciations: SkipValidation[list | None] = Field(
         default=None,
@@ -115,6 +124,11 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
         if req.timestamps and not capabilities.get("supports_word_timestamps"):
             return _timestamps_not_supported()
+        if _instructions(req) is not None and not capabilities.get("supports_instructions"):
+            return error_response(
+                400, "instructions_not_supported",
+                "This model does not support `instructions`",
+            )
 
         spoken = SpokenText(req.input)
         pronunciations = None
@@ -152,6 +166,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             }
 
         if req.stream:
+            # Resolve the voice before the SSE response starts so an unknown
+            # or unreadable voice is a plain JSON error. The hook may read
+            # the voice store, so it runs off the event loop.
+            check_voice = getattr(model, "check_voice", None)
+            if callable(check_voice):
+                try:
+                    await asyncio.to_thread(check_voice, req.voice)
+                except (UnknownVoiceError, VoiceUnreadableError) as exc:
+                    return _voice_error_response(exc)
             headers = _provenance_headers(model, req, {}, pronunciations)
             return await _stream(model, req, spoken=spoken.text, headers=headers)
         return await _non_stream(model, req, spoken, pronunciations)
@@ -167,8 +190,29 @@ def _timestamps_not_supported() -> Response:
     )
 
 
+def _instructions(req: SpeechRequest) -> str | None:
+    """The request's instructions, or None when absent or blank."""
+    if req.instructions is None or not req.instructions.strip():
+        return None
+    return req.instructions
+
+
+def _voice_error_response(exc: Exception) -> Response:
+    if isinstance(exc, UnknownVoiceError):
+        return error_response(400, exc.code, str(exc))
+    logger.error("stored voice unreadable: %s", exc, exc_info=exc)
+    return error_response(
+        500, "voice_unreadable",
+        "the requested voice could not be read; see server logs",
+    )
+
+
 def _voice(model, req: SpeechRequest, metadata: dict) -> str | None:
-    return metadata.get("voice") or req.voice or getattr(model, "default_voice", None)
+    # A backend that reports its own voice (even None) is authoritative, so a
+    # model that ignores `voice` does not echo the client's value.
+    if "voice" in metadata:
+        return metadata["voice"]
+    return req.voice or getattr(model, "default_voice", None)
 
 
 def _provenance_headers(
@@ -191,6 +235,8 @@ async def _non_stream(
     def _synth():
         with model._inference_lock:
             kwargs = {"voice": req.voice, "speed": req.speed, "align": req.align}
+            if _instructions(req) is not None:
+                kwargs["instructions"] = req.instructions
             if req.timestamps:
                 kwargs["timestamps"] = True
             result = model.synthesize(spoken.text, **kwargs)
@@ -209,6 +255,8 @@ async def _non_stream(
         if req.timestamps:
             return _timestamps_not_supported()
         raise
+    except (UnknownVoiceError, VoiceUnreadableError) as exc:
+        return _voice_error_response(exc)
 
     try:
         body, media = await asyncio.to_thread(
@@ -276,11 +324,14 @@ async def _stream(
     model, req: SpeechRequest, *, spoken: str,
     headers: dict[str, str],
 ) -> EventSourceResponse:
+    extra = {}
+    if _instructions(req) is not None:
+        extra["instructions"] = req.instructions
     return threaded_sse_response(
         headers=headers,
         lock=model._inference_lock,
         open_stream=lambda: model.synthesize_stream(
-            spoken, voice=req.voice, speed=req.speed,
+            spoken, voice=req.voice, speed=req.speed, **extra,
         ),
         # Look float_to_pcm16 up at call time so tests can patch it.
         encode=lambda chunk: {

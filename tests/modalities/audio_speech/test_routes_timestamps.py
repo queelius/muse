@@ -261,7 +261,12 @@ def test_language_without_native_timestamps_returns_400(setup_client):
 ])
 def test_voice_header_resolves_provenance(setup_client, actual, requested, default, expected):
     model, make = setup_client
-    model.metadata["voice"] = actual
+    # A missing key falls back to the request/default voice; a present None
+    # would mean "this model used no voice" (see test_routes_instructions).
+    if actual is None:
+        model.metadata.pop("voice", None)
+    else:
+        model.metadata["voice"] = actual
     model.default_voice = default
     response = post(make(), voice=requested, timestamps=True)
     assert response.status_code == 200
@@ -301,7 +306,10 @@ def test_plain_backend_value_error_is_not_timestamp_rejection(setup_client, time
 @pytest.mark.parametrize("source", ["request", "metadata"])
 def test_unsafe_voice_omits_header(setup_client, voice, mode, source):
     model, make = setup_client
-    model.metadata["voice"] = voice if source == "metadata" else None
+    if source == "metadata":
+        model.metadata["voice"] = voice
+    else:
+        model.metadata.pop("voice", None)
     # Streams have no result metadata; exercise their request voice in either case.
     requested = voice if source == "request" or mode == "stream" else None
     response = post(make(), voice=requested, timestamps=mode == "timestamps", stream=mode == "stream")
