@@ -420,6 +420,7 @@ def _model_memory_display(
     a whole listing; None asks the host for this row.
     """
     from muse.cli_impl.supervisor import _measurement_key, memory_estimate
+    from muse.core.placement import effective_device
 
     if auto_cuda is None:
         auto_cuda = _host_auto_cuda_once()
@@ -430,7 +431,7 @@ def _model_memory_display(
     needs_host = declared in ("auto", "") or pinned == "auto"
     auto_cuda_available = auto_cuda() if needs_host else None
     estimate = memory_estimate(entry, auto_cuda_available=auto_cuda_available)
-    device = str(entry.get("device_override") or estimate.device).lower()
+    device = effective_device(entry.get("device_override"), estimate.device, None)
     pool = (
         _measurement_key(device, auto_cuda())
         if device in ("auto", "") else device

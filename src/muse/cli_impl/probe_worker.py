@@ -228,7 +228,8 @@ def run_probe_worker(*, model_id: str, device: str, run_inference: bool) -> int:
 def _resolve_device(
     requested: str, entry, override: str | None = None, *, gpu_layers_override: int | None = None,
 ) -> str:
-    """Mirror catalog.load_backend's device resolution, most authoritative first.
+    """Mirror catalog.load_backend's device resolution (tiers 1-3 are
+    `muse.core.placement.effective_device`), most authoritative first.
 
       1. catalog device_override (operator `muse models set-device` pin)
       2. manifest capabilities.device pin (!= "auto")
@@ -243,14 +244,11 @@ def _resolve_device(
     stay in lockstep with load_backend or the probe measures the wrong
     memory pool and records a bogus peak.
     """
-    cap = entry.extra.get("device")
-    if override:
-        chosen = override
-    elif cap and cap != "auto":
-        chosen = cap
-    else:
-        chosen = requested
-    from muse.core.placement import is_native_gguf, native_gpu_backend, native_gpu_offload, native_placement
+    from muse.core.placement import (
+        effective_device, is_native_gguf, native_gpu_backend, native_gpu_offload,
+        native_placement,
+    )
+    chosen = effective_device(override, entry.extra.get("device"), requested)
     if is_native_gguf({"backend_path": getattr(entry, "backend_path", "")}):
         layers = int(
             gpu_layers_override if gpu_layers_override is not None

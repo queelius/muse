@@ -1852,7 +1852,9 @@ def memory_estimate(
             return MemoryEstimate(False, 0.0, device)
         measured_gb = None
         if measurements:
-            placed = str(catalog_entry.get("device_override") or device).lower()
+            from muse.core.placement import effective_device
+
+            placed = effective_device(catalog_entry.get("device_override"), device, None)
             measured_gb = _measurement_gb(
                 measurements.get(_measurement_key(placed, auto_cuda_available)),
             )
@@ -2439,7 +2441,9 @@ def backfill_manifest_memory(
             out_caps["memory_gb"] = gb
             out["capabilities"] = out_caps
 
-    from muse.core.placement import is_native_gguf, resolve_model_placement
+    from muse.core.placement import (
+        effective_device, is_native_gguf, resolve_model_placement,
+    )
     if is_native_gguf(manifest):
         if not resolve_placement:
             return out
@@ -2452,24 +2456,19 @@ def backfill_manifest_memory(
         out["capabilities"] = out_caps
         return out
 
+    # Hand the director the device load_backend will use (one rule,
+    # `effective_device`); a manifest pin is already in place.
     override = (entry or {}).get("device_override")
-    if override:
+    manifest_device = (out.get("capabilities", {}) or {}).get("device")
+    device = effective_device(override, manifest_device, supervisor_device)
+    if override or (
+        str(manifest_device or "auto").lower() in ("", "auto") and device != "auto"
+    ):
         if out is manifest:
             out = dict(out)
         out_caps = dict(out.get("capabilities", {}) or {})
-        out_caps["device"] = override
+        out_caps["device"] = device
         out["capabilities"] = out_caps
-    else:
-        manifest_device = str(
-            (out.get("capabilities", {}) or {}).get("device") or "auto"
-        ).lower()
-        requested = str(supervisor_device or "auto").lower()
-        if manifest_device in ("", "auto") and requested not in ("", "auto"):
-            if out is manifest:
-                out = dict(out)
-            out_caps = dict(out.get("capabilities", {}) or {})
-            out_caps["device"] = requested
-            out["capabilities"] = out_caps
 
     return out
 
