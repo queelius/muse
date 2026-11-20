@@ -44,31 +44,6 @@ class LogLevel(str, Enum):
     ERROR = "ERROR"
 
 
-class AdminActionOutcome(str, Enum):
-    """Three-way result of `_try_admin_action`.
-
-    - SUCCESS: the admin API handled the action; caller returns (exit 0).
-    - FAILED: the admin API was consulted and the action definitively
-      failed (job finished non-done, or a non-503 AdminClientError);
-      caller raises `typer.Exit(2)`.
-    - TIMEOUT: a distinguished FAILED sub-case -- the async job's status
-      poll timed out before reaching a terminal state. This is genuinely
-      ambiguous (the job may still complete server-side), so it is NOT
-      folded into FAILED; callers raise `typer.Exit(3)` to give operators
-      a distinct signal from a hard failure.
-    - NOT_HANDLED: no admin token configured, the admin API cannot be
-      connected to, or it reports admin_disabled -- caller falls
-      through to the catalog-only path exactly as if no admin API
-      existed. A request that connected but did not complete (e.g. a
-      read timeout) is TIMEOUT, never NOT_HANDLED.
-    """
-
-    SUCCESS = "success"
-    FAILED = "failed"
-    TIMEOUT = "timeout"
-    NOT_HANDLED = "not_handled"
-
-
 class Device(str, Enum):
     auto = "auto"
     cpu = "cpu"
@@ -355,102 +330,12 @@ def pull(
     fails, the pull exits 1 and the model is left installed but disabled.
     `--no-probe` opts out for cross-device scenarios.
     """
-    from muse.core.catalog import (
-        ModelIdConflictError,
-        ModelInUseError,
-        _validate_model_id_for_fs,
-        pull as _pull,
+    from muse.cli_impl.pull_cmd import run_pull
+    rc = run_pull(
+        identifier, no_probe=no_probe, verbose=verbose, base=base, model_id=model_id,
     )
-    from muse.core.venv import install_output_mode
-    # Always register the HF resolver before dispatching. The arg may
-    # be a URI directly, OR a curated alias that expands to a URI
-    # inside pull(); the old conditional "only import when :// is in
-    # the arg" missed the second case and crashed with "no resolver
-    # for scheme 'hf'". Importing is near-free (heavy huggingface_hub
-    # imports happen on actual resolve(), not on module import).
-    import muse.core.resolvers_hf  # noqa: F401  (registers HFResolver on import)
-
-    if model_id is not None:
-        if "://" not in identifier:
-            typer.echo(
-                "error: --id only applies to resolver URIs (hf://...)", err=True,
-            )
-            raise typer.Exit(2)
-        try:
-            _validate_model_id_for_fs(model_id)
-        except ValueError as e:
-            typer.echo(f"error: {e}", err=True)
-            raise typer.Exit(2)
-
-    with install_output_mode(verbose=verbose):
-        try:
-            pulled_id = _pull(identifier, base_override=base, model_id=model_id)
-        except KeyError as e:
-            typer.echo(f"error: {e}", err=True)
-            raise typer.Exit(2)
-        except (ModelIdConflictError, ModelInUseError) as e:
-            typer.echo(f"error: {e}", err=True)
-            raise typer.Exit(2)
-        except Exception as e:  # noqa: BLE001
-            # A gated/private HF repo pulled without auth raises a deep
-            # huggingface_hub error whose uncaught traceback is ~200 lines
-            # of noise. Translate the recognized access failures into a
-            # one-line actionable message; re-raise anything else so real
-            # bugs still surface with a full traceback.
-            from muse.cli_impl.pull_errors import friendly_pull_error
-            msg = friendly_pull_error(identifier, e)
-            if msg is None:
-                raise
-            typer.echo(msg, err=True)
-            raise typer.Exit(1)
-        typer.echo(f"pulled {identifier}")
-
-        if no_probe:
-            return
-
-        # Probe-on-pull: a successful pull means the model loads and runs a
-        # representative inference. A failed probe leaves the weights and
-        # venv in place (a retry needs no re-download) but disables the model.
-        try:
-            from muse.cli_impl.probe import run_probe
-            rc = run_probe(
-                model_id=pulled_id, no_inference=False, device=None, as_json=False,
-            )
-        except Exception as e:  # noqa: BLE001
-            typer.echo(f"error: probe-on-pull failed: {e}", err=True)
-            rc = 5
-        if rc != 0:
-            _fail_pull_probe(pulled_id)
-            raise typer.Exit(1)
-
-
-def _fail_pull_probe(model_id: str) -> None:
-    """Disable a model whose post-pull probe failed and say how to recover."""
-    from muse.core.catalog import _read_catalog, set_enabled
-
-    try:
-        installed = model_id in _read_catalog()
-    except Exception:  # noqa: BLE001
-        installed = False
-    if not installed:
-        typer.echo(
-            "error: the pull finished but its post-pull probe could not run; "
-            "run `muse models probe <id>` to verify the model before serving it",
-            err=True,
-        )
-        return
-    try:
-        set_enabled(model_id, False)
-        state = "has been disabled"
-    except Exception as e:  # noqa: BLE001
-        state = f"could not be disabled ({e})"
-    typer.echo(
-        f"error: {model_id} was installed but failed its post-pull probe, so it "
-        f"{state}. Fix the cause above, then run `muse models probe {model_id}` "
-        f"and `muse models enable {model_id}`. (Pulling for another device? "
-        f"Use --no-probe.)",
-        err=True,
-    )
+    if rc:
+        raise typer.Exit(rc)
 
 
 @app.command("search")
@@ -672,33 +557,10 @@ def models_info(
     `muse models info <id>` matches the rows surfaced by
     `muse models list` symmetrically.
     """
-    from muse.core.catalog import _read_catalog, known_models
-    from muse.cli_impl.models_info_display import format_curated_info, format_info
-    from muse.core.curated import load_curated
-
-    catalog_known = known_models()
-    if model_id in catalog_known:
-        catalog_data = _read_catalog().get(model_id, {}) or {}
-        online_status = _probe_online_worker_status(model_id)
-        typer.echo(format_info(
-            model_id,
-            catalog_known=catalog_known,
-            catalog_data=catalog_data,
-            online_status=online_status,
-        ))
-        return
-
-    # Fall through: maybe it's a curated-only recommendation that
-    # hasn't been pulled. Render a minimal info card from the YAML.
-    curated_match = next(
-        (c for c in load_curated() if c.id == model_id), None,
-    )
-    if curated_match is not None:
-        typer.echo(format_curated_info(curated_match))
-        return
-
-    typer.echo(f"error: unknown model {model_id!r}", err=True)
-    raise typer.Exit(2)
+    from muse.cli_impl.admin_actions import run_models_info
+    rc = run_models_info(model_id)
+    if rc:
+        raise typer.Exit(rc)
 
 
 @models_app.command("remove")
@@ -716,14 +578,10 @@ def models_remove(
     ] = False,
 ) -> None:
     """Unregister a model from the catalog."""
-    from muse.core.catalog import CatalogError, remove
-    try:
-        remove(model_id, purge=purge)
-    except CatalogError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-    suffix = " (purged unshared Muse-owned files)" if purge else ""
-    typer.echo(f"removed {model_id} from catalog{suffix}")
+    from muse.cli_impl.pull_cmd import run_remove
+    rc = run_remove(model_id, purge=purge)
+    if rc:
+        raise typer.Exit(rc)
 
 
 @models_app.command("enable")
@@ -754,26 +612,10 @@ def models_disable(
 
 def _set_model_enabled(model_id: str, enabled: bool) -> None:
     """Shared body of `models enable` / `models disable`."""
-    action = "enable" if enabled else "disable"
-    outcome = _try_admin_action(action, model_id)
-    if outcome is AdminActionOutcome.SUCCESS:
-        return
-    if outcome is AdminActionOutcome.FAILED:
-        raise typer.Exit(2)
-    if outcome is AdminActionOutcome.TIMEOUT:
-        raise typer.Exit(3)
-    # NOT_HANDLED: no admin token / admin unreachable / admin disabled
-    # (503) -- fall through to the catalog-only path exactly as today.
-
-    from muse.core.catalog import set_enabled
-    try:
-        set_enabled(model_id, enabled)
-    except KeyError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-    typer.echo(
-        f"{action}d {model_id} (catalog only; a running supervisor applies it on the next request)"
-    )
+    from muse.cli_impl.admin_actions import set_model_enabled
+    rc = set_model_enabled(model_id, enabled)
+    if rc:
+        raise typer.Exit(rc)
 
 
 @models_app.command("set-device")
@@ -802,35 +644,12 @@ def models_set_device(
     apply it to an already-resident worker, evict it (idle/memory pressure)
     or restart the supervisor.
     """
-    from muse.core.catalog import set_device_override
-
-    if clear:
-        target = None
-    elif device is None:
-        typer.echo(
-            "error: provide a device (auto|cpu|cuda|mps) or pass --clear",
-            err=True,
-        )
-        raise typer.Exit(2)
-    else:
-        target = device.value
-
-    try:
-        set_device_override(model_id, target)
-    except (KeyError, ValueError) as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-
-    if target is None:
-        typer.echo(
-            f"cleared device override for {model_id} "
-            "(takes effect on next cold load)"
-        )
-    else:
-        typer.echo(
-            f"set {model_id} device override -> {target} "
-            "(takes effect on next cold load)"
-        )
+    from muse.cli_impl.pull_cmd import run_set_device
+    rc = run_set_device(
+        model_id, device.value if device is not None else None, clear=clear,
+    )
+    if rc:
+        raise typer.Exit(rc)
 
 
 @models_app.command("set-gpu-layers")
@@ -885,58 +704,10 @@ def models_set_gpu_layers(
     supervisor. Run `muse models probe <id>` after pinning so admission
     sizing measures the split's real (smaller) VRAM peak.
     """
-    from muse.core.catalog import known_models, set_gpu_layers_override
-
-    given = (n is not None, all_layers, clear)
-    if sum(given) != 1:
-        typer.echo(
-            "error: provide exactly one of a layer count (int >= 0), "
-            "--all, or --clear",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    if clear:
-        target = None
-    elif all_layers:
-        target = -1
-    else:
-        target = n
-
-    if target is not None:
-        entry = known_models().get(model_id)
-        # entry is None (unknown / never-pulled model): skip the GGUF
-        # capability check here and fall through to set_gpu_layers_override
-        # below, whose KeyError produces the uniform "not pulled" error
-        # instead of the misleading "is not a GGUF model" refusal.
-        if entry is not None:
-            capabilities = entry.extra or {}
-            if not capabilities.get("gguf_file"):
-                typer.echo(
-                    f"error: {model_id!r} is not a GGUF model (no "
-                    "capabilities.gguf_file); n_gpu_layers only applies to "
-                    "llama.cpp runtimes and would be silently ignored",
-                    err=True,
-                )
-                raise typer.Exit(2)
-
-    try:
-        set_gpu_layers_override(model_id, target)
-    except (KeyError, ValueError) as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(2)
-
-    if target is None:
-        typer.echo(
-            f"cleared gpu-layers pin for {model_id} "
-            "(takes effect on next cold load)"
-        )
-    else:
-        typer.echo(
-            f"set {model_id} gpu layers -> {target} "
-            "(takes effect on next cold load; run `muse models probe "
-            f"{model_id}` to re-measure VRAM)"
-        )
+    from muse.cli_impl.pull_cmd import run_set_gpu_layers
+    rc = run_set_gpu_layers(model_id, n, all_layers=all_layers, clear=clear)
+    if rc:
+        raise typer.Exit(rc)
 
 
 @models_app.command("warmup")
@@ -966,46 +737,10 @@ def models_warmup(
     command exits non-zero with a clear error rather than silently
     succeeding.
     """
-    try:
-        client = _admin_client(timeout=timeout)
-    except Exception as e:  # noqa: BLE001
-        typer.echo(f"error: admin client unavailable: {e}", err=True)
-        raise typer.Exit(2)
-    if client is None:
-        typer.echo(
-            "error: warmup requires a running `muse serve` with MUSE_ADMIN_TOKEN set",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    from muse.admin.client import AdminClientError
-    try:
-        # Pass the per-call timeout explicitly: cold loads take 10-60s
-        # for typical models and longer (5+ min) for large diffusion or
-        # video models. The constructor default (30s) would routinely
-        # truncate; the CLI knob lets operators tune up.
-        out = client.warmup(model_id, timeout=timeout)
-    except AdminClientError as e:
-        if e.status == 503 and e.code == "admin_disabled":
-            typer.echo(
-                "error: warmup requires a running `muse serve` with MUSE_ADMIN_TOKEN set",
-                err=True,
-            )
-            raise typer.Exit(2)
-        typer.echo(f"error: {e.message}", err=True)
-        raise typer.Exit(1)
-    except Exception as e:  # noqa: BLE001
-        typer.echo(
-            f"error: warmup requires a running `muse serve`; could not reach supervisor ({e})",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    port = out.get("worker_port") if isinstance(out, dict) else None
-    if port:
-        typer.echo(f"warmed up {model_id} (worker port {port})")
-    else:
-        typer.echo(f"warmed up {model_id}")
+    from muse.cli_impl.admin_actions import run_warmup
+    rc = run_warmup(model_id, timeout=timeout)
+    if rc:
+        raise typer.Exit(rc)
 
 
 @models_app.command("probe")
@@ -1151,159 +886,6 @@ def config_unset(
     """Remove one setting from config.yaml so it falls back to env/default."""
     from muse.cli_impl.config_cmd import run_unset
     raise typer.Exit(run_unset(key) or 0)
-
-
-# Admin-API helpers ---------------------------------------------------------
-
-
-def _admin_client(timeout: float):
-    """An AdminClient when an admin token is configured, else None.
-
-    The import is deferred (and may raise ImportError on an install
-    without the server extras' httpx) so `muse --help` stays light.
-    """
-    from muse.core import config
-    if not config.get("admin.token"):
-        return None
-    from muse.admin.client import AdminClient
-    return AdminClient(timeout=timeout)
-
-
-def _probe_online_worker_status(model_id: str) -> dict | None:
-    """Best-effort lookup of live worker status.
-
-    Prefers the admin API (rich worker pid / uptime / restart detail)
-    when MUSE_ADMIN_TOKEN is set and the supervisor is reachable. Falls
-    back to the PUBLIC /v1/models endpoint, which reports loaded state
-    without a token, so `muse models info` shows loaded/not-loaded for
-    anyone who can reach the server. Returns None only when nothing is
-    reachable; the caller then shows the offline "unreachable" view.
-
-    Shapes:
-      - admin:  the /v1/admin/models/{id}/status dict (loaded + worker_*).
-      - public: {"loaded": bool, "detail_source": "public"}.
-      - None:   nothing reachable.
-    """
-    admin = _probe_admin_worker_status(model_id)
-    if admin is not None:
-        return admin
-    return _public_loaded_status(model_id)
-
-
-def _probe_admin_worker_status(model_id: str) -> dict | None:
-    """Admin-API worker status, or None without a token / on any failure."""
-    try:
-        client = _admin_client(timeout=2.0)
-        return client.status(model_id) if client is not None else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _public_loaded_status(model_id: str) -> dict | None:
-    """Loaded state from the public /v1/models endpoint (no admin token).
-
-    Returns {"loaded": bool, "detail_source": "public"} when the server
-    is reachable, else None. A reachable server that does not list the
-    model reports loaded=False (reachable, not resident).
-    """
-    from muse.cli_impl.runtime_state import fetch_public_models, loaded_ids
-    data = fetch_public_models()
-    if data is None:
-        return None
-    # Reuse loaded_ids so `muse models info` and `muse models list` answer
-    # "is this loaded?" with the SAME predicate (strict `loaded is True`).
-    return {"loaded": model_id in loaded_ids(data), "detail_source": "public"}
-
-
-def _try_admin_action(action: str, model_id: str) -> AdminActionOutcome:
-    """Try the admin-API path for enable/disable.
-
-    Returns an `AdminActionOutcome` (see its docstring for the meaning
-    of each value). Callers must NOT collapse this back to a bool: a
-    FAILED or TIMEOUT outcome means the admin API WAS consulted and the
-    action did not cleanly succeed, which is different from NOT_HANDLED
-    (no admin token / unreachable / 503 admin_disabled), where falling
-    through to the catalog-only path is correct.
-    """
-    try:
-        # Disable is synchronous and includes the worker teardown (up to a
-        # TERM grace plus KILL), so it gets far more than enable's 202.
-        client = _admin_client(timeout=5.0 if action == "enable" else 60.0)
-    except Exception:  # noqa: BLE001
-        return AdminActionOutcome.NOT_HANDLED
-    if client is None:
-        return AdminActionOutcome.NOT_HANDLED
-    from muse.admin.client import AdminClientError
-    try:
-        if action == "enable":
-            out = client.enable(model_id)
-            job_id = out.get("job_id")
-            if not job_id:
-                # client.enable() didn't raise, so the admin API already
-                # accepted the request; a missing/empty job_id is a
-                # degenerate but still-successful response shape. Treat
-                # it as handled so the caller does NOT fall through to
-                # the catalog-only fallback (which would both re-do the
-                # mutation and print a misleading "catalog only" message).
-                typer.echo(f"enabled {model_id} (admin API accepted)")
-                return AdminActionOutcome.SUCCESS
-            typer.echo(f"enable job submitted: {job_id}")
-            try:
-                final = client.wait(job_id, timeout=120.0, poll=0.5)
-                if final.get("state") == "done":
-                    port = (final.get("result") or {}).get("worker_port")
-                    msg = f"enabled {model_id}"
-                    if port:
-                        msg += f" (worker port {port})"
-                    typer.echo(msg)
-                    return AdminActionOutcome.SUCCESS
-                typer.echo(
-                    f"error: enable failed: {final.get('error')}", err=True,
-                )
-                return AdminActionOutcome.FAILED
-            except TimeoutError:
-                typer.echo(
-                    f"warning: enable still running; poll job {job_id} for status",
-                    err=True,
-                )
-                return AdminActionOutcome.TIMEOUT
-        elif action == "disable":
-            out = client.disable(model_id)
-            typer.echo(f"disabled {model_id}")
-            if out.get("worker_terminated"):
-                typer.echo(f"  worker on port {out.get('worker_port')} stopped")
-            elif out.get("worker_port"):
-                remaining = out.get("remaining_models_in_worker") or []
-                typer.echo(
-                    f"  worker on port {out['worker_port']} restarted; "
-                    f"remaining models: {', '.join(remaining)}"
-                )
-            return AdminActionOutcome.SUCCESS
-    except AdminClientError as e:
-        # Only "no admin API configured" falls back. Every other refusal
-        # (worker_shutdown_incomplete, server_shutting_down, ...) is the
-        # live supervisor answering; editing the catalog behind it is wrong.
-        if e.code == "admin_disabled":
-            return AdminActionOutcome.NOT_HANDLED
-        typer.echo(f"error: {e.message}", err=True)
-        return AdminActionOutcome.FAILED
-    except Exception as e:  # noqa: BLE001
-        import httpx
-        if isinstance(e, (ConnectionError, httpx.ConnectError, httpx.ConnectTimeout)):
-            typer.echo(
-                f"warning: admin API unreachable ({e}); falling back to catalog-only update",
-                err=True,
-            )
-            return AdminActionOutcome.NOT_HANDLED
-        # The request reached the supervisor (or may have): the action may
-        # still complete there, so neither report success nor fall back.
-        typer.echo(
-            f"warning: {action} request to the admin API did not complete "
-            f"({e}); check `muse models info {model_id}`",
-            err=True,
-        )
-        return AdminActionOutcome.TIMEOUT
-    return AdminActionOutcome.NOT_HANDLED
 
 
 def main(argv: list[str] | None = None) -> int:
