@@ -13,16 +13,15 @@ ModelNotFoundError; 400 returns error_response() so the bare
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.inference import cap, check_text_batch, run_locked
 from muse.modalities.text_rerank.codec import encode_rerank_response
 
 
@@ -34,22 +33,12 @@ MODALITY = "text/rerank"
 logger = logging.getLogger(__name__)
 
 
-# Defaults are conservative. A request with documents=10000 can OOM the
-# worker by trying to materialize a giant batch of pairs. Caps are
-# tunable via env so power users with big GPUs can lift them.
-#
-# Read per-request via muse.core.config so changes take effect without
-# a restart (matches the text_classification / text_translation pattern).
-def _max_documents() -> int:
-    return config.get("limits.rerank_max_documents")
-
-
-def _max_query_chars() -> int:
-    return config.get("limits.rerank_max_query_chars")
-
-
-def _max_doc_chars() -> int:
-    return config.get("limits.rerank_max_doc_chars")
+# Finite caps: a request with documents=10000 could OOM the worker
+# materializing pairs. Tunable via env / config.yaml; read per request with
+# config.get_positive.
+_MAX_DOCUMENTS_KEY = "limits.rerank_max_documents"
+_MAX_QUERY_CHARS_KEY = "limits.rerank_max_query_chars"
+_MAX_DOC_CHARS_KEY = "limits.rerank_max_doc_chars"
 
 
 class _RerankRequest(BaseModel):
@@ -69,7 +58,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", "query must not be empty",
             )
-        max_query_chars = _max_query_chars()
+        max_query_chars = cap(_MAX_QUERY_CHARS_KEY)
         if len(req.query) > max_query_chars:
             return error_response(
                 400, "invalid_parameter",
@@ -79,13 +68,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return error_response(
                 400, "invalid_parameter", "documents must be a non-empty list",
             )
-        max_documents = _max_documents()
-        if len(req.documents) > max_documents:
-            return error_response(
-                400, "invalid_parameter",
-                f"documents batch size {len(req.documents)} exceeds "
-                f"MUSE_RERANK_MAX_DOCUMENTS={max_documents}",
-            )
         empty_idx = next(
             (i for i, s in enumerate(req.documents) if not s), None,
         )
@@ -94,42 +76,23 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_parameter",
                 f"documents[{empty_idx}] must not be empty",
             )
-        max_doc_chars = _max_doc_chars()
-        too_long = next(
-            (i for i, s in enumerate(req.documents) if len(s) > max_doc_chars),
-            None,
+        invalid = check_text_batch(
+            req.documents, field="documents",
+            max_batch_key=_MAX_DOCUMENTS_KEY, max_chars_key=_MAX_DOC_CHARS_KEY,
         )
-        if too_long is not None:
-            return error_response(
-                400, "invalid_parameter",
-                f"documents[{too_long}] exceeds "
-                f"MUSE_RERANK_MAX_DOC_CHARS={max_doc_chars}",
-            )
+        if invalid is not None:
+            return invalid
 
         backend = registry.get_or_404(MODALITY, req.model)
 
         effective_id = backend.model_id
 
-        # backend.rerank is sync (cross-encoder predict); offload so a
-        # slow inference doesn't block sibling /health, /v1/models, or
-        # other in-flight requests on the same worker. Per-backend lock
-        # serializes calls into one model without blocking siblings on
-        # the same worker (H2 fix, v0.45.7).
-        def _rerank():
-            with backend._inference_lock:
-                return backend.rerank(req.query, req.documents, req.top_n)
-
-        try:
-            results = await asyncio.to_thread(_rerank)
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("rerank failed")
-            return error_response(
-                500, "internal_error",
-                "rerank backend failed; see server logs",
-            )
+        results = await run_locked(
+            backend, lambda: backend.rerank(req.query, req.documents, req.top_n),
+            label="rerank", message="rerank backend failed; see server logs",
+        )
+        if isinstance(results, JSONResponse):
+            return results
         body = encode_rerank_response(
             results,
             model_id=effective_id,

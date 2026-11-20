@@ -4,32 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-
-class AudioAlignmentDurationExceededError(ValueError):
-    """Decoded audio exceeds the amount of work allowed for one request."""
-
-    def __init__(
-        self,
-        *,
-        maximum_seconds: float,
-        actual_seconds: float | None = None,
-    ) -> None:
-        self.maximum_seconds = float(maximum_seconds)
-        self.actual_seconds = (
-            None if actual_seconds is None else float(actual_seconds)
-        )
-        detail = (
-            f" ({self.actual_seconds:.3f}s received)"
-            if self.actual_seconds is not None
-            else ""
-        )
-        super().__init__(
-            f"audio duration exceeds {self.maximum_seconds:.3f}s{detail}"
-        )
+from muse.modalities._common.audio_decode import (
+    AudioDecodeError,
+    AudioDurationExceededError,
+)
 
 
-class AudioAlignmentDecodeError(ValueError):
-    """The uploaded payload could not be decoded as supported audio."""
+# The shared decoder's typed errors, under this modality's public names.
+AudioAlignmentDurationExceededError = AudioDurationExceededError
+AudioAlignmentDecodeError = AudioDecodeError
 
 
 class UnsupportedAlignmentLanguageError(ValueError):

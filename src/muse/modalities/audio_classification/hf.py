@@ -1,11 +1,14 @@
 """HF resolver plugin for audio/classification.
 
 Sniffs `audio-classification` tag with repo-name fallback for known
-audio classifier families. Priority 110 (same slot as audio/embedding,
-image/cv).
+audio classifier families. Priority 110 (the same tier as image/cv and
+embedding/text; audio/embedding is 105). Name hints are matched against
+whole hyphen/slash-delimited tokens, so "ast-" matches `MIT/ast-...` but not
+"fast-", "podcast-" or "contrast-".
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -38,14 +41,20 @@ _NAME_HINTS = (
     "audioset",
     "yamnet",
 )
+# Each hint must start a name token (after the org slash or a separator).
+_NAME_HINT_RE = re.compile(
+    r"(?:^|[/_.-])(?:" + "|".join(re.escape(h) for h in _NAME_HINTS) + ")"
+)
 
 
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
     if "audio-classification" in tags:
         return True
-    repo_id = (getattr(info, "id", "") or "").lower()
-    return any(h in repo_id for h in _NAME_HINTS)
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return False
+    return _NAME_HINT_RE.search(repo_id.lower()) is not None
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

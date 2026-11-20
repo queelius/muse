@@ -88,21 +88,6 @@ def _ensure_deps() -> None:
             logger.debug("TranslationRuntime: transformers unavailable: %s", e)
 
 
-def _resolve_dtype(dtype: str) -> Any:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return dtype_for_name(dtype, torch)
-
-
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
-def _set_inference_mode(model: Any) -> None:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    set_inference_mode(model)
-
-
 class TranslationRuntime:
     """Generic seq2seq translation runtime with per-family dispatch."""
 
@@ -143,7 +128,7 @@ class TranslationRuntime:
             else:
                 raise
 
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._dtype = dtype
 
         src = local_dir or hf_repo
@@ -152,13 +137,13 @@ class TranslationRuntime:
             self._family, src, self._device, dtype,
         )
         self._tokenizer = AutoTokenizer.from_pretrained(src)
-        torch_dtype = _resolve_dtype(dtype)
+        torch_dtype = dtype_for_name(dtype, torch_module=torch)
         kwargs: dict[str, Any] = {}
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype
         self._model = AutoModelForSeq2SeqLM.from_pretrained(src, **kwargs)
         self._model = self._model.to(self._device)
-        _set_inference_mode(self._model)
+        set_inference_mode(self._model)
 
     def translate(
         self, texts: list[str], *, source: str, target: str

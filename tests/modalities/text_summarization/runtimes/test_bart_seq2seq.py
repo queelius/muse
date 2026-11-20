@@ -11,6 +11,10 @@ from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
     VALID_LENGTHS,
     BartSeq2SeqRuntime,
 )
+import muse.modalities.text_summarization.runtimes.bart_seq2seq as _runtime_module
+from muse.core.runtime_helpers import (
+    dtype_for_name, select_device, set_inference_mode,
+)
 
 
 def _fake_tensor(seq_len: int):
@@ -276,20 +280,14 @@ def test_runtime_raises_when_transformers_missing():
 
 def test_select_device_auto_falls_back_to_cpu_with_no_torch():
     with patch.object(bart_mod, "torch", None):
-        from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-            _select_device,
-        )
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_picks_cuda():
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     with patch.object(bart_mod, "torch", fake_torch):
-        from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-            _select_device,
-        )
-        assert _select_device("auto") == "cuda"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cuda"
 
 
 def test_select_device_auto_picks_mps_when_cuda_absent():
@@ -297,26 +295,17 @@ def test_select_device_auto_picks_mps_when_cuda_absent():
     fake_torch.cuda.is_available.return_value = False
     fake_torch.backends.mps.is_available.return_value = True
     with patch.object(bart_mod, "torch", fake_torch):
-        from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-            _select_device,
-        )
-        assert _select_device("auto") == "mps"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "mps"
 
 
 def test_select_device_explicit_passes_through():
     with patch.object(bart_mod, "torch", MagicMock()):
-        from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-            _select_device,
-        )
-        assert _select_device("cuda:1") == "cuda:1"
+        assert select_device("cuda:1", torch_module=_runtime_module.torch) == "cuda:1"
 
 
 def test_resolve_dtype_returns_none_without_torch():
     with patch.object(bart_mod, "torch", None):
-        from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-            _resolve_dtype,
-        )
-        assert _resolve_dtype("float16") is None
+        assert dtype_for_name("float16", torch_module=_runtime_module.torch) is None
 
 
 def test_resolve_dtype_maps_known_strings():
@@ -325,39 +314,30 @@ def test_resolve_dtype_maps_known_strings():
     fake_torch.bfloat16 = "BF16_TENSOR"
     fake_torch.float32 = "FP32_TENSOR"
     with patch.object(bart_mod, "torch", fake_torch):
-        from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-            _resolve_dtype,
-        )
-        assert _resolve_dtype("float16") == "FP16_TENSOR"
-        assert _resolve_dtype("fp16") == "FP16_TENSOR"
-        assert _resolve_dtype("bfloat16") == "BF16_TENSOR"
-        assert _resolve_dtype("bf16") == "BF16_TENSOR"
-        assert _resolve_dtype("float32") == "FP32_TENSOR"
-        assert _resolve_dtype("fp32") == "FP32_TENSOR"
+        assert dtype_for_name("float16", torch_module=_runtime_module.torch) == "FP16_TENSOR"
+        assert dtype_for_name("fp16", torch_module=_runtime_module.torch) == "FP16_TENSOR"
+        assert dtype_for_name("bfloat16", torch_module=_runtime_module.torch) == "BF16_TENSOR"
+        assert dtype_for_name("bf16", torch_module=_runtime_module.torch) == "BF16_TENSOR"
+        assert dtype_for_name("float32", torch_module=_runtime_module.torch) == "FP32_TENSOR"
+        assert dtype_for_name("fp32", torch_module=_runtime_module.torch) == "FP32_TENSOR"
         # Unknown string falls back to float32 (safe default).
-        assert _resolve_dtype("unknown_dtype") == "FP32_TENSOR"
+        assert dtype_for_name("unknown_dtype", torch_module=_runtime_module.torch) == "FP32_TENSOR"
 
 
 def test_set_inference_mode_calls_eval_when_method_present():
-    """Calling _set_inference_mode on a model with .eval should invoke it."""
-    from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-        _set_inference_mode,
-    )
+    """Calling set_inference_mode on a model with .eval should invoke it."""
     m = MagicMock()
-    _set_inference_mode(m)
+    set_inference_mode(m)
     m.eval.assert_called_once()
 
 
 def test_set_inference_mode_no_op_when_method_missing():
-    from muse.modalities.text_summarization.runtimes.bart_seq2seq import (
-        _set_inference_mode,
-    )
 
     class NoEval:
         pass
 
     # Must not raise; nothing to call.
-    _set_inference_mode(NoEval())
+    set_inference_mode(NoEval())
 
 
 def test_summarize_passes_input_ids_to_generate():

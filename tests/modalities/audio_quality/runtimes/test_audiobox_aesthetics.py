@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from muse.modalities.audio_quality.decoding import AudioWindow
+from muse.modalities._common.audio_decode import AudioWindow
 from muse.modalities.audio_quality.runtimes import (
     audiobox_aesthetics as runtime_module,
 )

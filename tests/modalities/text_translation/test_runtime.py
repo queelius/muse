@@ -14,6 +14,10 @@ from muse.modalities.text_translation.runtimes.hf_translation import (
     _family_for,
 )
 from muse.modalities.text_translation.runtimes.nllb_codes import ISO_TO_FLORES
+import muse.modalities.text_translation.runtimes.hf_translation as _runtime_module
+from muse.core.runtime_helpers import (
+    dtype_for_name, select_device, set_inference_mode,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -383,28 +387,19 @@ def test_runtime_raises_when_transformers_missing():
 
 def test_select_device_auto_falls_back_to_cpu_with_no_torch():
     with patch.object(hf_mod, "torch", None):
-        from muse.modalities.text_translation.runtimes.hf_translation import (
-            _select_device,
-        )
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_picks_cuda():
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     with patch.object(hf_mod, "torch", fake_torch):
-        from muse.modalities.text_translation.runtimes.hf_translation import (
-            _select_device,
-        )
-        assert _select_device("auto") == "cuda"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cuda"
 
 
 def test_set_inference_mode_calls_eval_when_method_present():
-    from muse.modalities.text_translation.runtimes.hf_translation import (
-        _set_inference_mode,
-    )
     m = MagicMock()
-    _set_inference_mode(m)
+    set_inference_mode(m)
     m.eval.assert_called_once()
 
 

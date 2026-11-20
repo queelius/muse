@@ -2,11 +2,11 @@
 
 Pure functions: numpy audio array + sample_rate + channels -> bytes.
 
-WAV uses stdlib `wave`; always available.
-FLAC uses `soundfile` (already in museq[audio] for Kokoro).
-MP3 / Opus go through `pydub` + `ffmpeg`. Lazy-imported and
-swappable; if either dep is missing, raises UnsupportedFormatError so
-the route layer can convert to a clean 400 envelope.
+WAV uses stdlib `wave` via the shared `_common.audio_codec` writer; always
+available. FLAC uses `soundfile` (already in museq[audio] for Kokoro).
+Opus uses the shared owned-ffmpeg encoder (the same one audio/speech
+uses); MP3 goes through `pydub` + `ffmpeg`. A missing dependency raises
+UnsupportedFormatError so the route layer can return a clean 400.
 
 The audio array shape is `(samples,)` for mono or `(samples, channels)`
 for multi-channel. Codec normalizes both into the right interleaved
@@ -16,20 +16,19 @@ from __future__ import annotations
 
 import io
 import shutil
-import wave
 from typing import Any
 
 import numpy as np
 
+from muse.modalities._common.audio_codec import (
+    FfmpegUnavailableError,
+    pcm16_wav_bytes,
+    wav_bytes_to_opus,
+)
+
 
 class UnsupportedFormatError(Exception):
     """Raised when a response_format requires deps that aren't installed."""
-
-
-def _to_int16_pcm(audio: np.ndarray) -> np.ndarray:
-    """Convert float32 [-1, 1] audio to int16 PCM samples."""
-    scaled = np.clip(audio, -1.0, 1.0) * 32768.0
-    return np.clip(scaled, -32768, 32767).astype(np.int16)
 
 
 def _normalize_shape(audio: np.ndarray, channels: int) -> np.ndarray:
@@ -65,20 +64,7 @@ def encode_wav(
     audio shape: (samples,) for mono OR (samples, channels) for multi.
     Always available (stdlib `wave`).
     """
-    a = _normalize_shape(audio, channels)
-    pcm = _to_int16_pcm(a)
-    if channels > 1:
-        # Interleave: wave expects bytes laid out frame-by-frame.
-        pcm_bytes = pcm.tobytes()  # numpy is C-contiguous: row-major
-    else:
-        pcm_bytes = pcm.tobytes()
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(channels)
-        w.setsampwidth(2)
-        w.setframerate(sample_rate)
-        w.writeframes(pcm_bytes)
-    return buf.getvalue()
+    return pcm16_wav_bytes(_normalize_shape(audio, channels), sample_rate, channels)
 
 
 def encode_flac(
@@ -113,11 +99,19 @@ def encode_mp3(
 def encode_opus(
     audio: np.ndarray, sample_rate: int, channels: int = 1,
 ) -> bytes:
-    """Encode Opus (OGG container) via pydub.
+    """Encode Opus (OGG container) with the shared owned-ffmpeg encoder.
 
-    Raises UnsupportedFormatError when pydub or ffmpeg is missing.
+    Raises UnsupportedFormatError when ffmpeg is missing; any other
+    encoding failure raises AudioFormatError.
     """
-    return _wav_to(audio, sample_rate, channels, fmt="opus")
+    wav = encode_wav(audio, sample_rate, channels)
+    try:
+        return wav_bytes_to_opus(wav)
+    except FfmpegUnavailableError as exc:
+        raise UnsupportedFormatError(
+            "opus response_format requires ffmpeg on PATH; "
+            "install ffmpeg or use wav/flac"
+        ) from exc
 
 
 def _wav_to(
@@ -140,9 +134,6 @@ def _wav_to(
     out = io.BytesIO()
     if fmt == "mp3":
         seg.export(out, format="mp3", bitrate="128k")
-    elif fmt == "opus":
-        # pydub uses ffmpeg for opus inside an OGG container.
-        seg.export(out, format="opus", bitrate="64k")
     else:
         raise ValueError(f"_wav_to: unknown fmt {fmt!r}")
     return out.getvalue()

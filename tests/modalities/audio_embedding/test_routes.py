@@ -208,6 +208,9 @@ def test_embeddings_rejects_aggregate_bytes(monkeypatch):
     monkeypatch.setattr(
         "muse.modalities.audio_embedding.routes._MAX_TOTAL_UPLOAD_BYTES", 5,
     )
+    monkeypatch.setattr(
+        "muse.modalities.audio_embedding.routes._max_upload_bytes", lambda: 4,
+    )
     backend = _fake_backend(_fake_result(n_clips=2))
     client = _make_client(backend)
     r = client.post(
@@ -369,5 +372,18 @@ def test_embeddings_explicit_model_field_resolves():
         "/v1/audio/embeddings",
         files={"file": ("a.wav", b"FAKEWAV", "audio/wav")},
         data={"model": "mert-v1-95m"},
+    )
+    assert r.status_code == 200
+
+
+def test_aggregate_cap_never_undercuts_the_per_file_cap(monkeypatch):
+    """A per-file cap above the 64 MiB aggregate floor must take effect."""
+    from muse.modalities.audio_embedding import routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_MAX_TOTAL_UPLOAD_BYTES", 8)
+    monkeypatch.setattr(routes_mod, "_max_upload_bytes", lambda: 100)
+    client = _make_client(_fake_backend(_fake_result()))
+    r = client.post(
+        "/v1/audio/embeddings",
+        files={"file": ("a.wav", b"x" * 50, "audio/wav")},
     )
     assert r.status_code == 200

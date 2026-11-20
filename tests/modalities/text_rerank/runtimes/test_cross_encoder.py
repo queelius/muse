@@ -8,6 +8,10 @@ from muse.modalities.text_rerank import RerankResult
 from muse.modalities.text_rerank.runtimes.cross_encoder import (
     CrossEncoderRuntime,
 )
+import muse.modalities.text_rerank.runtimes.cross_encoder as _runtime_module
+from muse.core.runtime_helpers import (
+    dtype_for_name, select_device, set_inference_mode,
+)
 
 
 def _patched_runtime(predict_return):
@@ -135,13 +139,11 @@ def test_runtime_raises_when_sentence_transformers_missing():
 
 def test_select_device_auto_falls_back_to_cpu_with_no_torch():
     with patch.object(ce_mod, "torch", None):
-        from muse.modalities.text_rerank.runtimes.cross_encoder import _select_device
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_picks_cuda():
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     with patch.object(ce_mod, "torch", fake_torch):
-        from muse.modalities.text_rerank.runtimes.cross_encoder import _select_device
-        assert _select_device("auto") == "cuda"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cuda"

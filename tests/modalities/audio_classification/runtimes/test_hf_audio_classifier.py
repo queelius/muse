@@ -101,3 +101,18 @@ def test_manifest_hint_false_does_not_clobber_config():
         model_id="m", hf_repo="x", device="cpu", multi_label=False,
     )
     assert runtime._multi_label is True
+
+
+@pytest.mark.parametrize("kwargs, expected", [({}, 60.0), ({"max_duration_seconds": 5}, 5.0)])
+def test_classify_bounds_decoded_duration(kwargs, expected):
+    """I7: classification decodes at most max_duration_seconds of audio."""
+    import muse.modalities.audio_classification.runtimes.hf_audio_classifier as mod
+    import numpy as np
+    _wire_basic_runtime(mod)
+    mod.librosa.load.return_value = (np.zeros(16, dtype=np.float32), 16000)
+    runtime = mod.HFAudioClassifier(model_id="m", hf_repo="x", device="cpu", **kwargs)
+    try:
+        runtime.classify("clip.wav")
+    except Exception:  # noqa: BLE001 - the mocked model output is not real
+        pass
+    assert mod.librosa.load.call_args.kwargs["duration"] == expected

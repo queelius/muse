@@ -129,8 +129,8 @@ class HFKeypointRuntime:
                 "`muse pull` or install `transformers>=4.46.0` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
-        self._dtype = _resolve_dtype(dtype)
+        self._device = select_device(device, torch_module=torch)
+        self._dtype = dtype_for_name(dtype, torch_module=torch)
         src = local_dir or hf_repo
         with LoadTimer(f"loading keypoint model from {src}", logger):
             config = AutoConfig.from_pretrained(src)
@@ -374,14 +374,6 @@ class HFKeypointRuntime:
             except (TypeError, ValueError):
                 continue
         return out
-
-
-def _select_device(device: str) -> str:
-    return select_device(device, torch_module=torch)
-
-
-def _resolve_dtype(dtype: str):
-    return dtype_for_name(dtype, torch_module=torch)
 
 
 def _is_vitpose_config(config: Any) -> bool:

@@ -28,8 +28,19 @@ _RUNTIME_PATH = "muse.modalities.embedding_text.runtimes.sentence_transformers:S
 _PIP_EXTRAS = ("torch>=2.1.0", "sentence-transformers>=5.0.0")
 
 
+def _is_reranker(info, tags) -> bool:
+    """sentence-transformers v4+ tags CrossEncoder repos with the library
+    name too; those belong to text/rerank (priority 115, sniffed after us)."""
+    if "cross-encoder" in tags or "text-ranking" in tags:
+        return True
+    repo_id = getattr(info, "id", "")
+    return isinstance(repo_id, str) and "rerank" in repo_id.lower()
+
+
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
+    if _is_reranker(info, tags):
+        return False
     if "sentence-transformers" in tags:
         return True
     siblings = [s.rfilename for s in getattr(info, "siblings", [])]

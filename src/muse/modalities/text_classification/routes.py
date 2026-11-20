@@ -28,16 +28,15 @@ ModelNotFoundError; 400 returns error_response() so the bare
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.inference import cap, check_text_batch, run_locked
 from muse.modalities.text_classification.codec import (
     encode_classifications, encode_moderations,
     _resolve_safe_labels, _resolve_threshold,
@@ -51,28 +50,32 @@ MODALITY = "text/classification"
 logger = logging.getLogger(__name__)
 
 
-# Defaults are conservative; tunable via env so a power user with a
-# big GPU and a known-safe pipeline can lift them, and a sysadmin
-# fronting a public muse can tighten them. The point isn't a perfect
-# limit, just a finite one: without these, a single curl with
-# `input: [...]` can OOM the worker by trying to materialize a
-# multi-million-string batch. Code paths that hit these caps return
-# 400 so the client knows the request was rejected (vs. silently
-# truncated).
-#
-# Read per-request via muse.core.config so changes via env take effect
-# immediately and so tests that patch env don't need to reload the
-# module. Matches the v0.34.0 MUSE_IMAGE_INPUT_MAX_BYTES pattern.
-def _max_batch() -> int:
-    return config.get("limits.moderations_max_batch")
+# Finite caps (tunable via env / config.yaml, read per request) so one
+# request cannot OOM the worker with a multi-million-string batch; a
+# request over a cap gets a 400 rather than being truncated.
+_MAX_BATCH_KEY = "limits.moderations_max_batch"
+_MAX_CHARS_KEY = "limits.moderations_max_chars_per_item"
+_MAX_LABELS_KEY = "limits.classifications_max_labels"
+
+# Zero-shot runs one NLI forward pass per (input, label) pair under the
+# model lock; bound the product, not just each factor.
+MAX_ZERO_SHOT_PAIRS = 16_384
 
 
-def _max_chars_per_item() -> int:
-    return config.get("limits.moderations_max_chars_per_item")
-
-
-def _max_candidate_labels() -> int:
-    return config.get("limits.classifications_max_labels")
+def _validate_input(value: str | list[str]) -> JSONResponse | None:
+    if isinstance(value, str) and not value:
+        return error_response(
+            400, "invalid_parameter", "input must not be empty",
+        )
+    if isinstance(value, list) and (not value or any(not s for s in value)):
+        return error_response(
+            400, "invalid_parameter",
+            "input must be a non-empty string or list of non-empty strings",
+        )
+    items = [value] if isinstance(value, str) else value
+    return check_text_batch(
+        items, max_batch_key=_MAX_BATCH_KEY, max_chars_key=_MAX_CHARS_KEY,
+    )
 
 
 class _ModerationsRequest(BaseModel):
@@ -106,35 +109,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"threshold must be in [0, 1]; got {req.threshold}",
             )
 
-        if isinstance(req.input, str) and not req.input:
-            return error_response(
-                400, "invalid_parameter", "input must not be empty",
-            )
-        if isinstance(req.input, list) and (
-            not req.input or any(not s for s in req.input)
-        ):
-            return error_response(
-                400, "invalid_parameter",
-                "input must be a non-empty string or list of non-empty strings",
-            )
-
-        items = [req.input] if isinstance(req.input, str) else req.input
-        if len(items) > _max_batch():
-            return error_response(
-                400, "invalid_parameter",
-                f"input batch size {len(items)} exceeds "
-                f"MUSE_MODERATIONS_MAX_BATCH={_max_batch()}",
-            )
-        too_long = next(
-            (i for i, s in enumerate(items) if len(s) > _max_chars_per_item()),
-            None,
-        )
-        if too_long is not None:
-            return error_response(
-                400, "invalid_parameter",
-                f"input[{too_long}] exceeds "
-                f"MUSE_MODERATIONS_MAX_CHARS_PER_ITEM={_max_chars_per_item()}",
-            )
+        invalid = _validate_input(req.input)
+        if invalid is not None:
+            return invalid
 
         backend = registry.get_or_404(MODALITY, req.model)
 
@@ -146,28 +123,29 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         capabilities = registry.capabilities(MODALITY, effective_id)
         threshold = _resolve_threshold(req.threshold, capabilities)
         safe_labels = _resolve_safe_labels(capabilities)
-
-        # backend.classify is sync (transformers pipeline); offload to a
-        # thread so a slow inference doesn't block the event loop and
-        # starve sibling /health, /v1/models, or other in-flight
-        # moderation requests on the same worker. Per-backend lock
-        # serializes calls into one model without blocking siblings on
-        # the same worker (added in v0.34.0 Task A).
-        def _call_moderation():
-            with backend._inference_lock:
-                return backend.classify(req.input)
-
-        try:
-            results = await asyncio.to_thread(_call_moderation)
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("moderations classify failed")
+        # A zero-shot pipeline has no classify(); say so instead of a 500.
+        # A manifest that omits the flag (older pulls) still dispatches.
+        if capabilities.get("supports_classification") is False:
             return error_response(
-                500, "internal_error",
-                "moderation backend failed; see server logs",
+                400, "classification_not_supported",
+                f"model {effective_id!r} declares "
+                f"supports_classification=False (a zero-shot model); use "
+                f"/v1/text/classifications with candidate_labels",
             )
+        if not hasattr(backend, "classify"):
+            return error_response(
+                400, "classification_not_supported",
+                f"model {effective_id!r}'s runtime has no classify() method; "
+                f"use /v1/text/classifications with candidate_labels",
+            )
+
+        results = await run_locked(
+            backend, lambda: backend.classify(req.input),
+            label="moderations classify",
+            message="moderation backend failed; see server logs",
+        )
+        if isinstance(results, JSONResponse):
+            return results
         body = encode_moderations(
             results, model_id=effective_id, threshold=threshold,
             safe_labels=safe_labels,
@@ -176,36 +154,10 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
 
     @router.post("/v1/text/classifications")
     async def classifications(req: _ClassificationsRequest):
-        # Input validation mirrors /v1/moderations.
-        if isinstance(req.input, str) and not req.input:
-            return error_response(
-                400, "invalid_parameter", "input must not be empty",
-            )
-        if isinstance(req.input, list) and (
-            not req.input or any(not s for s in req.input)
-        ):
-            return error_response(
-                400, "invalid_parameter",
-                "input must be a non-empty string or list of non-empty strings",
-            )
-
-        items = [req.input] if isinstance(req.input, str) else req.input
-        if len(items) > _max_batch():
-            return error_response(
-                400, "invalid_parameter",
-                f"input batch size {len(items)} exceeds "
-                f"MUSE_MODERATIONS_MAX_BATCH={_max_batch()}",
-            )
-        too_long = next(
-            (i for i, s in enumerate(items) if len(s) > _max_chars_per_item()),
-            None,
-        )
-        if too_long is not None:
-            return error_response(
-                400, "invalid_parameter",
-                f"input[{too_long}] exceeds "
-                f"MUSE_MODERATIONS_MAX_CHARS_PER_ITEM={_max_chars_per_item()}",
-            )
+        invalid = _validate_input(req.input)
+        if invalid is not None:
+            return invalid
+        n_items = 1 if isinstance(req.input, str) else len(req.input)
 
         # Validate candidate_labels shape if present.
         if req.candidate_labels is not None:
@@ -220,12 +172,19 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     400, "invalid_parameter",
                     "candidate_labels must contain non-empty strings",
                 )
-            if len(req.candidate_labels) > _max_candidate_labels():
+            max_labels = cap(_MAX_LABELS_KEY)
+            if len(req.candidate_labels) > max_labels:
                 return error_response(
                     400, "invalid_parameter",
                     f"candidate_labels count {len(req.candidate_labels)} "
-                    f"exceeds MUSE_CLASSIFICATIONS_MAX_LABELS="
-                    f"{_max_candidate_labels()}",
+                    f"exceeds MUSE_CLASSIFICATIONS_MAX_LABELS={max_labels}",
+                )
+            pairs = n_items * len(req.candidate_labels)
+            if pairs > MAX_ZERO_SHOT_PAIRS:
+                return error_response(
+                    400, "invalid_parameter",
+                    f"inputs x candidate_labels = {pairs} exceeds the "
+                    f"zero-shot work limit of {MAX_ZERO_SHOT_PAIRS} pairs",
                 )
 
         # Resolve the backend.
@@ -258,26 +217,18 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"its runtime does not support classify_zero_shot",
                 )
 
-            def _call_zs():
-                with backend._inference_lock:
-                    return backend.classify_zero_shot(
-                        req.input,
-                        candidate_labels=req.candidate_labels,
-                        multi_label=req.multi_label,
-                    )
-
-            try:
-                results = await asyncio.to_thread(_call_zs)
-            except Exception:  # noqa: BLE001
-                # Log the real exception server-side but never leak it to
-                # the client: str(e) can carry internal filesystem paths,
-                # CUDA driver text, or other backend-implementation detail.
-                logger.exception("classify_zero_shot failed")
-                return error_response(
-                    500, "internal_error",
-                    "zero-shot classification backend failed; "
-                    "see server logs",
-                )
+            results = await run_locked(
+                backend,
+                lambda: backend.classify_zero_shot(
+                    req.input,
+                    candidate_labels=req.candidate_labels,
+                    multi_label=req.multi_label,
+                ),
+                label="classify_zero_shot",
+                message=(
+                    "zero-shot classification backend failed; see server logs"
+                ),
+            )
         else:
             if not capabilities.get("supports_classification"):
                 return error_response(
@@ -287,21 +238,13 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"or use a fine-tuned classifier",
                 )
 
-            def _call_cls():
-                with backend._inference_lock:
-                    return backend.classify(req.input)
-
-            try:
-                results = await asyncio.to_thread(_call_cls)
-            except Exception:  # noqa: BLE001
-                # Log the real exception server-side but never leak it to
-                # the client: str(e) can carry internal filesystem paths,
-                # CUDA driver text, or other backend-implementation detail.
-                logger.exception("classify failed")
-                return error_response(
-                    500, "internal_error",
-                    "classification backend failed; see server logs",
-                )
+            results = await run_locked(
+                backend, lambda: backend.classify(req.input),
+                label="classify",
+                message="classification backend failed; see server logs",
+            )
+        if isinstance(results, JSONResponse):
+            return results
 
         body = encode_classifications(
             results, model_id=effective_id, top_k=req.top_k,

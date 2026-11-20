@@ -21,6 +21,7 @@ non-None.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -152,16 +153,13 @@ class HFVisionLanguageModel:
 
         prompt_len = int(inputs["input_ids"].shape[-1])
 
-        seed = kwargs.get("seed")
-        if seed is not None and torch is not None:
-            torch.manual_seed(int(seed))
-
         gen_kwargs: dict[str, Any] = {"max_new_tokens": max_new}
         for key in ("temperature", "top_p"):
             if kwargs.get(key) is not None:
                 gen_kwargs[key] = kwargs[key]
 
-        outputs = self._model.generate(**inputs, **gen_kwargs)
+        with _seeded(kwargs.get("seed"), self._device):
+            outputs = self._model.generate(**inputs, **gen_kwargs)
         # outputs shape is [batch, total_seq_len]; outputs[0] is the full
         # generated sequence for the first (only) batch element.
         # Slice off the prompt to get completion tokens only.
@@ -206,18 +204,20 @@ class HFVisionLanguageModel:
             skip_special_tokens=True,
         )
 
-        seed = kwargs.get("seed")
-        if seed is not None and torch is not None:
-            torch.manual_seed(int(seed))
-
+        # Closing this generator (client disconnect) sets `stop`; generate()
+        # checks it every step and the thread is joined before the caller
+        # can release the inference lock.
+        stop = threading.Event()
         gen_kwargs: dict[str, Any] = {
             "max_new_tokens": max_new, "streamer": streamer,
+            "stopping_criteria": _stopping_criteria(stop),
         }
         for key in ("temperature", "top_p"):
             if kwargs.get(key) is not None:
                 gen_kwargs[key] = kwargs[key]
 
         generate_inputs = {**inputs, **gen_kwargs}
+        seed = kwargs.get("seed")
 
         # Capture exceptions from the generate thread so they can be
         # re-raised by the caller (H6 fix). On transformers >= 4.40,
@@ -228,7 +228,8 @@ class HFVisionLanguageModel:
 
         def _generate_with_cleanup() -> None:
             try:
-                self._model.generate(**generate_inputs)
+                with _seeded(seed, self._device):
+                    self._model.generate(**generate_inputs)
             except Exception as e:  # noqa: BLE001
                 exc_holder.append(e)
             finally:
@@ -238,20 +239,27 @@ class HFVisionLanguageModel:
         thread.start()
 
         chunk_id = f"chatcmpl-{int(time.time() * 1000)}"
-        for token in streamer:
+        try:
             yield ChatChunk(
-                id=chunk_id,
-                model_id=self.model_id,
-                created=int(time.time()),
-                choice_index=0,
-                delta={"content": token},
-                finish_reason=None,
+                id=chunk_id, model_id=self.model_id, created=int(time.time()),
+                choice_index=0, delta={"role": "assistant"}, finish_reason=None,
             )
-        thread.join()
+            for token in streamer:
+                yield ChatChunk(
+                    id=chunk_id,
+                    model_id=self.model_id,
+                    created=int(time.time()),
+                    choice_index=0,
+                    delta={"content": token},
+                    finish_reason=None,
+                )
+        finally:
+            stop.set()
+            thread.join()
         # Re-raise after the streamer is fully drained and thread joined.
         # This ensures no partial output is left dangling; the exception
-        # propagates to chat_completion/routes.py's _producer, which
-        # forwards it to the SSE error event.
+        # propagates to the route's stream producer, which forwards it to
+        # the SSE error event.
         if exc_holder:
             raise exc_holder[0]
         yield ChatChunk(
@@ -262,6 +270,46 @@ class HFVisionLanguageModel:
             delta={},
             finish_reason="stop",
         )
+
+
+class _StopOnEvent:
+    """generate() stopping criterion that fires once `event` is set."""
+
+    def __init__(self, event: threading.Event) -> None:
+        self._event = event
+
+    def __call__(self, input_ids: Any, scores: Any, **_: Any) -> Any:
+        return torch.full(
+            (input_ids.shape[0],), self._event.is_set(),
+            dtype=torch.bool, device=input_ids.device,
+        )
+
+
+def _stopping_criteria(event: threading.Event) -> Any:
+    criterion = _StopOnEvent(event)
+    try:
+        from transformers import StoppingCriteriaList
+    except Exception:  # noqa: BLE001
+        return [criterion]
+    return StoppingCriteriaList([criterion])
+
+
+def _seeded(seed: Any, device: str) -> Any:
+    """Seed one generation without reseeding the process-global RNG for good.
+
+    `fork_rng` restores the CPU (and the CUDA device's) RNG state on exit.
+    """
+    if seed is None or torch is None:
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _ctx():
+        # `device` is already resolved, so "cuda" means CUDA is present.
+        devices = [torch.cuda.current_device()] if str(device).startswith("cuda") else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(int(seed))
+            yield
+    return _ctx()
 
 
 def _prepare_inputs(messages: list[dict], processor: Any) -> tuple[str, list]:

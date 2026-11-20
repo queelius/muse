@@ -11,9 +11,22 @@ fallback is presented as measured. `pronunciations` keeps respellings or IPA
 separate from display text. Kokoro native times come from its English pipeline
 (`lang_code`, always "a" in muse today), so non-English voices get timings from
 English G2P; models without native timings and streaming timestamps return 400. Legacy
-`align` / `X-Alignment` remains Soprano paragraph timing. Qwen3-ASR returns
+`align` / `X-Alignment` remains Soprano paragraph timing. `stream: true`
+returns base64 PCM16 SSE chunks, so it rejects `response_format: opus` (400
+`format_not_streamable`) and `align` (400 `alignment_not_streamable`) instead
+of dropping them. Speech and chat streaming share
+`muse.modalities._common.streaming.threaded_sse_response`, which starts
+the producer thread on the body's first iteration and, from the response's
+own `__call__`, always sets the cancel flag and closes the generator when
+the response ends (sse_starlette leaves a generator paused at `yield` when
+the client leaves mid-send, and would otherwise rely on GC). A body that
+never started still runs `on_finish`, which closes chat's decoded images. Qwen3-ASR returns
 transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
 `vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.
+Qwen3-ASR validates `language` before decoding and decodes at most
+`limits.asr_max_duration_seconds` (`MUSE_ASR_MAX_DURATION_SECONDS`, default
+600 s); longer audio returns 413 (it used to inherit alignment's 300 s
+default silently).
 For pronunciation checks omit `prompt`, whose context biases the listener.
 
 `audio/quality` is muse's twenty-first modality. `POST
@@ -60,6 +73,18 @@ context before moving inputs to the device. Confidence calculation selects
 timestamp-marker logits before its float32 softmax, avoiding a full-sequence
 probability tensor. Only the typed `AudioAlignmentDecodeError` emitted at the
 TorchCodec boundary maps to HTTP 415; model alignment failures remain 500s.
+
+TorchCodec decoding for alignment, audio/quality and Qwen3-ASR lives in one
+module, `muse.modalities._common.audio_decode` (`decode_audio`,
+`WindowedAudio`). It raises typed errors: `AudioDecodeError` (undecodable
+upload, 415; `AudioAlignmentDecodeError` is an alias),
+`AudioDurationExceededError` (413) and `AudioDecoderUnavailableError` (a
+missing TorchCodec/FFmpeg, 500). Routes catch only those types. The
+message heuristic `_common.uploads.looks_like_audio_decode_error` remains
+only for libraries that raise untyped errors (faster-whisper's PyAV,
+librosa, soundfile): it matches decoder exception class names and
+decoder-specific phrases, never bare "decode"/"ffmpeg"/"torchcodec", and
+never an ImportError.
 
 `decision/evaluation` is muse's twenty-fourth modality (docs/DECISIONS.md).
 `POST /v1/systemone` takes `{model, state, questions}` (a text-only subset of
@@ -109,6 +134,16 @@ where the worker owns admission, or a freed gateway slot could put two
 runs on one backend.
 PROBE_DEFAULTS runs one Choice, Score and Noul question. No per-model
 inference authorization exists in muse, so there is no 403 path.
+
+Text routes (`/v1/moderations`, `/v1/text/classifications`, `/v1/embeddings`,
+`/v1/rerank`, `/v1/summarize`, `/v1/translate`) share
+`muse.modalities._common.inference`: `run_locked` runs the backend call
+off-loop under its `_inference_lock` and turns a failure into an opaque 500,
+and `check_text_batch` applies the batch and per-item caps. Every cap is read
+per request with `config.get_positive`, so 0 or a bad value falls back to
+the setting's default rather than rejecting every request (the same holds
+for `MUSE_ASR_MAX_MB`). Zero-shot classification also bounds inputs x
+`candidate_labels` at 16,384 NLI pairs per request (400 `invalid_parameter`).
 
 `text/rerank` is muse's first Cohere-compat modality (rather than
 OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is
@@ -223,9 +258,15 @@ priority 105, and serves it via `AudioEmbeddingRuntime` over
 `_extract_embeddings` dispatch picks the right pooling per
 architecture: CLAP `audio_embeds` > pooler_output > MERT/wav2vec
 `last_hidden_state.mean(dim=1)` (mean-pool over time). Per-file size
-cap via `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` (default 50MB); duration
-cap via `MUSE_AUDIO_EMBEDDINGS_MAX_SECONDS` (default 60s; runtime
-truncates after decode).
+cap via `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` (default 50MB), and an aggregate
+cap of max(64 MiB, the per-file cap) across up to 32 files. Duration is
+bounded per model by `capabilities.max_duration_seconds` (default 60s):
+librosa stops decoding there (`duration=`), so a long file is never fully
+materialized. audio/classification takes the same capability (default
+60s). The four upload routes (alignment, classification, quality,
+embedding) resolve the model before reading the upload, so an unknown
+model 404s without reading up to 50 MB, and `run_on_spooled_upload` writes
+the temp file on the worker thread.
 
 `audio/generation` is muse's first modality with TWO URL routes mounted
 on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same
@@ -301,4 +342,4 @@ CPU offload (v0.52.1) is a per-model capability, not a bool: `capabilities.cpu_o
 
 `3d/generation` (v0.41.0 through v0.45.0) hosts four concrete runtimes under one MIME tag, dispatched per-family via `_family_for(repo_id)` in `model_3d_generation/hf.py`. `TripoSRRuntime` (v0.41.0+) is the bundled default for image-to-3D. `ShapERuntime` (v0.43.0+) wraps `diffusers.ShapEPipeline` for text-to-3D; it follows the deferred-imports pattern (module-level sentinels for `torch`, `ShapEPipeline`, `trimesh`; `_ensure_deps()` populates them lazily). `TRELLISRuntime` (v0.44.0+) wraps Microsoft's TRELLIS SDK via `transformers` AutoPipeline with `trust_remote_code=True` for image-to-3D. `Hunyuan3DRuntime` (v0.45.0+) is the fourth runtime and the first to support BOTH image-to-3D and text-to-3D from one model; it wraps Tencent's `hy3dgen` SDK with `trust_remote_code=True`. Internally, text-to-3D is a two-stage pipeline: text generates an image via `HunyuanDiTPipeline`, then the image is lifted to a mesh via `Hunyuan3DDiTFlowMatchingPipeline`. The `_Family.trust_remote_code` flag flows into the synthesized manifest's `capabilities.trust_remote_code`, which the runtime constructor reads via the kwargs splat. The per-family dispatch adds one `_Family` constant plus one dispatch branch in `_family_for` plus one runtime file under `runtimes/` per new runtime. Shap-E is text-only: the curated `shap-e` entry declares `supports_image_to_3d: False` and `supports_text_to_3d: True`; a request to `/v1/3d/from-image` with `model=shap-e` returns 400 before the runtime is invoked. TRELLIS is image-only: the curated entry (renamed from `trellis-text-image` to `trellis-image` in v0.44.0) declares `supports_text_to_3d: False`. Hunyuan3D-2 declares both flags True. GLB output flows through the existing codec: `trimesh.Trimesh` assembles vertices and faces from the pipeline output, then `mesh.export(file_type="glb")` yields the bytes. A companion `_pip_extras_for(runtime_path)` helper mirrors the dispatch shape so each runtime's venv installs only the deps it needs. After v0.45.0, task #108 is closed. Wonder3D is deferred indefinitely (multi-view plus NeuS reconstruction does not fit muse's one-pipeline-call runtime model).
 
-`chat/completion` (v0.42.0+) accepts vision-language models via the OpenAI multimodal `messages` shape: `content: [{type: text}, {type: image_url, image_url: {url: ...}}]`. The route's pre-dispatch step (`_decode_image_parts` in `routes.py`) walks `messages`, validates capability flags (`supports_vision`, `supports_multi_image`) on the loaded model, decodes each `image_url` via the existing `decode_image_input` helper (data URLs + `http(s)://` with SSRF guard), and rewrites the part to a muse-internal `{type: image, image: <PIL.Image>}` shape before calling the backend's `chat()` / `chat_stream()`. Capability mismatches return 400 `vision_not_supported` or `too_many_images`; bad images return 400 `invalid_image`. The runtime is `HFVisionLanguageModel` (`muse.modalities.chat_completion.runtimes.transformers_vlm`); bundled default is `smolvlm-256m-instruct` (~500MB, CPU-runnable). Curated extends with SmolVLM-Instruct, Qwen2-VL-2B/7B, and LLaVA-1.5-7B.
+`chat/completion` (v0.42.0+) accepts vision-language models via the OpenAI multimodal `messages` shape: `content: [{type: text}, {type: image_url, image_url: {url: ...}}]`. The route's pre-dispatch step (`_decode_image_parts` in `routes.py`) walks `messages`, validates capability flags (`supports_vision`, `supports_multi_image`) on the loaded model, decodes each `image_url` via the existing `decode_image_input` helper (data URLs + `http(s)://` with SSRF guard), and rewrites the part to a muse-internal `{type: image, image: <PIL.Image>}` shape before calling the backend's `chat()` / `chat_stream()`. Capability mismatches return 400 `vision_not_supported` or `too_many_images`; bad images return 400 `invalid_image`. The runtime is `HFVisionLanguageModel` (`muse.modalities.chat_completion.runtimes.transformers_vlm`); bundled default is `smolvlm-256m-instruct` (~500MB, CPU-runnable). Curated extends with SmolVLM-Instruct, Qwen2-VL-2B/7B, and LLaVA-1.5-7B. Its stream opens with an `{"role": "assistant"}` delta; closing the stream (client disconnect) sets a stopping criterion and joins the `generate()` thread before the route releases the model lock, and a request `seed` runs under `torch.random.fork_rng` so it never reseeds the process RNG.

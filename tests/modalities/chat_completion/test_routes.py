@@ -547,3 +547,158 @@ async def test_cancelled_stream_stops_waiting_for_inference_lock():
         assert model._inference_lock.locked()
     finally:
         model._inference_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_before_first_event_releases_inference_lock():
+    """C1 regression: a client that disconnects while the response start is
+    still being sent must not leave the producer holding the model lock.
+
+    The ASGI driver below delivers the request body, then `http.disconnect`
+    straight away, and its `send` yields (as the worker's HTTP middleware
+    memory stream does). sse_starlette cancels the response before the event
+    generator ever runs, so any cleanup living only in that generator's
+    `finally` never fires.
+    """
+    import asyncio
+    import threading
+    import time
+
+    stop = threading.Event()
+
+    class _EndlessStreamModel:
+        model_id = "endless-chat"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+
+        def chat(self, messages, **kwargs):
+            raise NotImplementedError
+
+        def chat_stream(self, messages, **kwargs):
+            while not stop.is_set():
+                yield ChatChunk(
+                    id="e", model_id=self.model_id, created=0,
+                    choice_index=0, delta={"content": "x"},
+                    finish_reason=None,
+                )
+
+    model = _EndlessStreamModel()
+    reg = ModalityRegistry()
+    reg.register("chat/completion", model)
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+
+    body = json.dumps({
+        "model": model.model_id,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+    }).encode()
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        await asyncio.sleep(0.01)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions", "root_path": "", "query_string": b"",
+        "headers": [(b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode())],
+        "client": ("test", 1), "server": ("test", 80),
+    }
+    try:
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
+        deadline = time.monotonic() + 1.0
+        while model._inference_lock.locked() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert not model._inference_lock.locked(), (
+            "producer kept the inference lock after an early disconnect"
+        )
+    finally:
+        stop.set()
+
+
+@pytest.mark.parametrize("disconnect_after", [1, 2])
+@pytest.mark.asyncio
+async def test_disconnect_after_first_events_releases_inference_lock(disconnect_after):
+    """Disconnect after the first body chunk(s) while `send` is still in
+    progress: the lock must be released within ~1 s without gc.collect()."""
+    import asyncio
+    import gc
+    import threading
+    import time
+
+    stop = threading.Event()
+
+    class _EndlessStreamModel:
+        model_id = "endless-chat"
+
+        def __init__(self):
+            self._inference_lock = threading.Lock()
+
+        def chat(self, messages, **kwargs):
+            raise NotImplementedError
+
+        def chat_stream(self, messages, **kwargs):
+            while not stop.is_set():
+                time.sleep(0.001)
+                yield ChatChunk(
+                    id="e", model_id=self.model_id, created=0,
+                    choice_index=0, delta={"content": "x"}, finish_reason=None,
+                )
+
+    model = _EndlessStreamModel()
+    reg = ModalityRegistry()
+    reg.register("chat/completion", model)
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+    body = json.dumps({
+        "model": model.model_id,
+        "messages": [{"role": "user", "content": "hi"}], "stream": True,
+    }).encode()
+    gone = asyncio.Event()
+    delivered = False
+    sent = 0
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        nonlocal sent
+        if message["type"] == "http.response.body" and message.get("body"):
+            sent += 1
+            if sent >= disconnect_after:
+                gone.set()
+        await asyncio.sleep(0.05)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions", "root_path": "", "query_string": b"",
+        "headers": [(b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode())],
+        "client": ("test", 1), "server": ("test", 80),
+    }
+    gc.disable()
+    try:
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
+        deadline = time.monotonic() + 1.0
+        while model._inference_lock.locked() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert not model._inference_lock.locked(), (
+            "producer kept the inference lock after a mid-stream disconnect"
+        )
+    finally:
+        gc.enable()
+        stop.set()

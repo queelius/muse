@@ -35,6 +35,8 @@ from muse.modalities.decision_evaluation.validation import MAX_BODY_BYTES, parse
 # MODALITY defined locally to avoid the __init__ circular import;
 # sibling modalities all do this.
 MODALITY = "decision/evaluation"
+# Must equal the literal CONCURRENCY_CEILING in __init__.py (AST-read by
+# the gateway, so it cannot be imported from here); a test checks it.
 MAX_CONCURRENCY = 1
 MAX_QUEUE_DEPTH = 32
 

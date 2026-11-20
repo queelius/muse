@@ -49,11 +49,6 @@ def _ensure_deps() -> None:
             logger.debug("animatediff: MotionAdapter unavailable: %s", e)
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
 class AnimateDiffRuntime:
     """AnimateDiff runtime backed by AnimateDiffPipeline + MotionAdapter.
 
@@ -98,7 +93,7 @@ class AnimateDiffRuntime:
         self._default_steps = default_steps
         self._default_guidance = default_guidance
         self._base_model = base_model
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
 
         import muse.modalities.image_animation.runtimes.animatediff as _mod
         _torch = _mod.torch

@@ -17,14 +17,13 @@ a non-str item) is rejected before the handler body ever runs.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
-from muse.core import config
+from muse.modalities._common.inference import cap, run_locked
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
 from muse.modalities.text_translation.codec import (
@@ -87,7 +86,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         # Read per-request (not cached at import time): an operator can
         # change MUSE_TRANSLATE_MAX_CHARS / config.yaml without restarting
         # the worker.
-        max_chars = config.get("limits.translate_max_chars")
+        max_chars = cap("limits.translate_max_chars")
         total_chars = sum(len(t) for t in texts)
         if total_chars > max_chars:
             return error_response(
@@ -120,17 +119,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     _invalid_language_message(req.target, targets),
                 )
 
-        # backend.translate is sync (transformers generate); offload so a
-        # slow inference doesn't block sibling /health, /v1/models, or
-        # other in-flight requests on the same worker. Per-backend lock
-        # serializes calls into one model without blocking siblings on
-        # the same worker (mirrors text_summarization / text_classification).
-        def _translate_call():
-            with backend._inference_lock:
-                return backend.translate(texts, source=req.source, target=req.target)
-
         try:
-            result = await asyncio.to_thread(_translate_call)
+            result = await run_locked(
+                backend,
+                lambda: backend.translate(texts, source=req.source, target=req.target),
+                label="translate",
+                message="translation backend failed; see server logs",
+                passthrough=(UnsupportedLanguageError,),
+            )
         except UnsupportedLanguageError as e:
             # Belt and suspenders: the pre-dispatch check above catches
             # the common case, but a runtime (e.g. opus-mt's fixed pair,
@@ -141,17 +137,8 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 400, "invalid_language",
                 _invalid_language_message(e.code, valid),
             )
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side (torch/CUDA/path detail
-            # is operationally useful) but never leak it to the client:
-            # str(e) can carry internal filesystem paths, CUDA driver
-            # text, or other backend-implementation detail that has no
-            # business in an external-facing error body.
-            logger.exception("translate failed")
-            return error_response(
-                500, "internal_error",
-                "translation backend failed; see server logs",
-            )
+        if isinstance(result, JSONResponse):
+            return result
 
         body = shape_response(result.texts, scalar=scalar)
         return JSONResponse(content=body)

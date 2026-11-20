@@ -7,7 +7,7 @@ from muse.modalities.audio_alignment import (
     AudioAlignmentDecodeError,
     AudioAlignmentDurationExceededError,
 )
-from muse.modalities.audio_alignment import decoding
+from muse.modalities._common import audio_decode as decoding
 
 
 def _decoder(

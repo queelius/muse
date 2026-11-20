@@ -69,8 +69,51 @@ def test_upload_suffix():
 def test_decode_error_heuristic():
     assert looks_like_audio_decode_error(RuntimeError("PyAV InvalidDataError"))
     assert looks_like_audio_decode_error(RuntimeError("audioread.NoBackendError"))
-    assert looks_like_audio_decode_error(RuntimeError("TorchCodec failed"))
     assert not looks_like_audio_decode_error(RuntimeError("GPU out of memory"))
+
+
+class InvalidDataError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("exc", [
+    InvalidDataError("[Errno 1094995529] whatever"),
+    RuntimeError("Error opening 'x.wav': Format not recognised."),
+    RuntimeError("Invalid data found when processing input"),
+])
+def test_decode_error_heuristic_accepts_decoder_rejections(exc):
+    assert looks_like_audio_decode_error(exc)
+
+
+def test_decode_error_heuristic_matches_subclasses():
+    class EOFDecodeError(InvalidDataError):
+        pass
+
+    assert looks_like_audio_decode_error(EOFDecodeError("x"))
+
+
+def test_decode_error_heuristic_follows_the_cause_chain():
+    try:
+        try:
+            raise InvalidDataError("bad")
+        except InvalidDataError as inner:
+            raise RuntimeError("transcription failed") from inner
+    except RuntimeError as outer:
+        assert looks_like_audio_decode_error(outer)
+
+
+@pytest.mark.parametrize("exc", [
+    RuntimeError(
+        "TorchCodec audio decoder is unavailable; run `muse pull` and "
+        "ensure FFmpeg shared libraries are installed"
+    ),
+    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    RuntimeError("Error in decoder layer 3"),
+    ModuleNotFoundError("No module named 'soundfile'"),
+])
+def test_decode_error_heuristic_rejects_server_faults(exc):
+    """I2: a missing dependency or a model error is a 500, not a 415."""
+    assert not looks_like_audio_decode_error(exc)
 
 
 async def test_spooled_upload_passes_path_and_removes_file():
@@ -128,3 +171,28 @@ async def test_cancelled_request_keeps_file_until_backend_finishes():
         await asyncio.sleep(0.01)
     assert seen["readable"] == b"audio"
     assert not os.path.exists(seen["path"])
+
+
+async def test_spooled_upload_writes_the_body_off_the_event_loop(monkeypatch):
+    import asyncio
+    import builtins
+    from muse.modalities._common import uploads
+
+    on_loop = []
+    real_open = builtins.open
+
+    def _open(path, mode="r", *args, **kwargs):
+        if "w" in mode:
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+    got = await uploads.run_on_spooled_upload(
+        b"abc", lambda p: real_open(p, "rb").read(), suffix=".wav",
+    )
+    assert got == b"abc"
+    assert on_loop == [False]

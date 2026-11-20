@@ -90,11 +90,6 @@ def _ensure_deps() -> None:
             logger.debug("diffusers runtime: AutoPipelineForInpainting unavailable: %s", e)
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
 class DiffusersText2ImageModel:
     """Text-to-image runtime backed by diffusers.AutoPipelineForText2Image.
 
@@ -154,7 +149,7 @@ class DiffusersText2ImageModel:
         self.default_size = tuple(default_size)
         self._default_steps = default_steps
         self._default_guidance = default_guidance
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         # Stash for lazy img2img / inpaint pipeline loads (same checkpoint + dtype).
         # For LoRA entries self._src is the ADAPTER source; the pipeline
         # itself loads from the resolved BASE below.

@@ -184,10 +184,10 @@ def test_empty_file_returns_400_envelope():
 def test_payload_too_large_returns_413_envelope(monkeypatch):
     """File exceeding MUSE_ASR_MAX_MB returns the 413 envelope.
 
-    Set the cap to 0 MB so any non-empty file overflows without
-    needing to actually read 100 MB in the test.
+    Shrink the byte cap so a tiny file overflows without reading 100 MB.
     """
-    monkeypatch.setenv("MUSE_ASR_MAX_MB", "0")
+    from muse.modalities.audio_transcription import routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_max_upload_bytes", lambda: 4)
     backend = MagicMock()
     backend.transcribe.return_value = _fake_result()
     client = _make_client(backend)
@@ -202,6 +202,20 @@ def test_payload_too_large_returns_413_envelope(monkeypatch):
     assert "error" in body
     assert "detail" not in body
     assert body["error"]["code"] == "payload_too_large"
+
+
+def test_zero_upload_cap_falls_back_to_default(monkeypatch):
+    """R7: MUSE_ASR_MAX_MB=0 is invalid and falls back to the default
+    instead of rejecting every upload with 413."""
+    monkeypatch.setenv("MUSE_ASR_MAX_MB", "0")
+    backend = MagicMock()
+    backend.transcribe.return_value = _fake_result()
+    r = _make_client(backend).post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", b"anything", "audio/wav")},
+        data={"model": "whisper-tiny"},
+    )
+    assert r.status_code == 200
 
 
 def test_backend_decoder_error_returns_415_envelope():
@@ -279,13 +293,13 @@ def test_transcript_only_capability_gates(path, fields, code):
     ('duration', 413, 'payload_too_large'),
 ])
 def test_qwen_decoder_failures_keep_error_envelope(error, expected_status, code):
-    from muse.modalities.audio_alignment.protocol import (
-        AudioAlignmentDecodeError, AudioAlignmentDurationExceededError,
+    from muse.modalities._common.audio_decode import (
+        AudioDecodeError, AudioDurationExceededError,
     )
     backend = MagicMock()
     backend.transcribe.side_effect = (
-        AudioAlignmentDecodeError('invalid audio') if error == 'decode'
-        else AudioAlignmentDurationExceededError(maximum_seconds=300)
+        AudioDecodeError('invalid audio') if error == 'decode'
+        else AudioDurationExceededError(maximum_seconds=300)
     )
     r = _make_client(backend).post(
         '/v1/audio/transcriptions', files={'file': ('a.wav', b'audio', 'audio/wav')},
@@ -308,3 +322,18 @@ def test_invalid_language_only_maps_typed_error(typed):
     assert response.status_code == (400 if typed else 500)
     if typed:
         assert response.json()["error"]["code"] == "invalid_language"
+
+
+def test_missing_decoder_dependency_is_a_500_not_a_415():
+    """I2: Qwen3-ASR's "TorchCodec audio decoder is unavailable" error is a
+    broken venv (500), not an unsupported upload (415)."""
+    backend = MagicMock()
+    backend.transcribe.side_effect = RuntimeError(
+        "TorchCodec audio decoder is unavailable; run `muse pull` and "
+        "ensure FFmpeg shared libraries are installed"
+    )
+    r = _make_client(backend).post(
+        '/v1/audio/transcriptions', files={'file': ('a.wav', b'audio', 'audio/wav')},
+        data={'model': 'whisper-tiny'},
+    )
+    assert r.status_code == 500

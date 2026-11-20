@@ -67,16 +67,6 @@ def _ensure_deps() -> None:
             logger.debug("SAM2Runtime: transformers unavailable: %s", e)
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
-def _resolve_dtype(dtype: str) -> Any:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return dtype_for_name(dtype, torch)
-
-
 def _bbox_area(mask: Any) -> tuple[tuple[int, int, int, int], int]:
     """Compute COCO bbox ``(x, y, w, h)`` and area for a 2D mask.
 
@@ -319,7 +309,7 @@ class SAM2Runtime:
         self._supports_point_prompts = bool(supports_point_prompts)
         self._supports_box_prompts = bool(supports_box_prompts)
         self._supports_automatic = bool(supports_automatic)
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._dtype = dtype
 
         src = local_dir or hf_repo
@@ -328,7 +318,7 @@ class SAM2Runtime:
             src, model_id, self._device, dtype,
         )
 
-        torch_dtype = _resolve_dtype(dtype)
+        torch_dtype = dtype_for_name(dtype, torch_module=torch)
         kwargs: dict = {}
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype

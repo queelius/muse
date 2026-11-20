@@ -68,7 +68,7 @@ class FasterWhisperModel:
                 "install `faster-whisper` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         if compute_type is None:
             compute_type = "float16" if self._device == "cuda" else "int8"
         src = local_dir or hf_repo
@@ -122,6 +122,3 @@ class FasterWhisperModel:
         )
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)

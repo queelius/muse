@@ -3,7 +3,7 @@
 Tag-based sniff with two-way dispatch:
 
   - Repos tagged `zero-shot-classification` (or whose name suggests
-    NLI: 'zero-shot', 'mnli', 'nli', 'xnli') resolve to the
+    NLI: 'zero-shot', or an 'mnli'/'xnli'/'nli' name token) resolve to the
     HFZeroShotPipeline runtime with supports_zero_shot=True.
   - Repos tagged `text-classification` (or whose name suggests
     sentiment / classification heads, after the zero-shot check
@@ -18,6 +18,7 @@ Loaded via single-file import; no relative imports.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -42,6 +43,17 @@ _ZERO_SHOT_RUNTIME = (
 )
 _PIP_EXTRAS = ("transformers>=4.36.0", "torch>=2.1.0")
 
+# NLI-checkpoint names: "zero-shot"/"zeroshot" anywhere, or an (m|x|a|s)nli
+# name token. A bare "nli" substring would match "online" or "unlimited".
+_NLI_NAME_RE = re.compile(r"zero-?shot|(?:^|[/_.-])[a-z]?nli(?:$|[/_.-])")
+
+
+def _nli_name(info) -> bool:
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return False
+    return _NLI_NAME_RE.search(repo_id.lower()) is not None
+
 
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
@@ -49,10 +61,7 @@ def _sniff(info) -> bool:
         return True
     # Some NLI checkpoints ship under generic 'text-classification' or
     # without our preferred tags but the repo name makes intent clear.
-    repo_id = (getattr(info, "id", "") or "").lower()
-    if any(s in repo_id for s in ("zero-shot", "mnli", "nli", "xnli")):
-        return True
-    return False
+    return _nli_name(info)
 
 
 def _is_zero_shot(info) -> bool:
@@ -65,8 +74,7 @@ def _is_zero_shot(info) -> bool:
     tags = getattr(info, "tags", None) or []
     if "zero-shot-classification" in tags:
         return True
-    repo_id = (getattr(info, "id", "") or "").lower()
-    return any(s in repo_id for s in ("zero-shot", "mnli", "nli", "xnli"))
+    return _nli_name(info)
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

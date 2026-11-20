@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+import muse.modalities._common.gguf as gguf_common
+
 
 @pytest.mark.parametrize("device", ["cpu", "auto"])
 def test_cpu_only_runtime_disables_gpu_layers(tmp_path, monkeypatch, device):
@@ -368,8 +370,8 @@ def test_cuda_runtime_is_prepared_before_import(tmp_path, monkeypatch, kw, cpu_o
     calls = []
     fake_llama = MagicMock()
     monkeypatch.setattr(runtime, "Llama", None)
-    monkeypatch.setattr(runtime, "prepare_llama_cpp", lambda **k: calls.append(k))
-    monkeypatch.setattr(runtime, "native_gpu_offload", lambda: False)
+    monkeypatch.setattr(gguf_common, "prepare_llama_cpp", lambda **k: calls.append(k))
+    monkeypatch.setattr(gguf_common, "native_gpu_offload", lambda: False)
     monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=fake_llama))
     runtime.LlamaCppModel(model_id="t", hf_repo="t/m", local_dir=str(local_dir), gguf_file=gguf, **kw)
     assert calls == [{"cpu_only": cpu_only}]

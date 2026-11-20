@@ -20,8 +20,11 @@ from muse.modalities.image_segmentation.protocol import (
 from muse.modalities.image_segmentation.runtimes.sam2_runtime import (
     SAM2Runtime,
     _bbox_area,
-    _select_device,
     _segment_with,
+)
+import muse.modalities.image_segmentation.runtimes.sam2_runtime as _runtime_module
+from muse.core.runtime_helpers import (
+    dtype_for_name, select_device, set_inference_mode,
 )
 
 
@@ -135,25 +138,25 @@ def test_bbox_area_full_mask():
     assert area == 20
 
 
-# ---------------- _select_device ----------------
+# ---------------- select_device ----------------
 
 
 def test_select_device_explicit_value_passes_through():
     fake = _patched_torch()
     with patch.object(sam_mod, "torch", fake):
-        assert _select_device("cuda") == "cuda"
-        assert _select_device("cpu") == "cpu"
+        assert select_device("cuda", torch_module=_runtime_module.torch) == "cuda"
+        assert select_device("cpu", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_falls_to_cpu_without_cuda():
     fake = _patched_torch()
     with patch.object(sam_mod, "torch", fake):
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_returns_cpu_when_torch_none():
     with patch.object(sam_mod, "torch", None):
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 # ---------------- constructor ----------------

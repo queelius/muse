@@ -8,23 +8,24 @@ Two call shapes:
     reads from the queue and serializes to SSE `data:` lines plus a
     final `data: [DONE]` sentinel.
 
-Thread + queue pattern matches the audio.speech streaming code so we
-do not buffer tokens on the server. Every token dispatches as produced.
+The producer thread is the shared `_common.streaming` helper (also used by
+audio/speech), started on the first iteration of the response body, so we
+do not buffer tokens on the server and an early disconnect cannot strand
+the producer holding the model lock. Every token dispatches as produced.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import threading
 from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
-from sse_starlette.sse import EventSourceResponse
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.streaming import threaded_sse_response
 from muse.modalities._native_offload import run_native_offload
 from muse.modalities.chat_completion.codec import (
     DONE_SENTINEL,
@@ -290,10 +291,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def chat_completions(req: ChatCompletionRequest):
         model = registry.get_or_404(MODALITY, req.model)
 
-        # Derive effective_id the same way image_generation does: prefer
-        # the model's own model_id attr; fall back to the request field or
-        # the literal default marker.
-        effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+        # The registry keys every model by its model_id, so the resolved
+        # model's id is what answered (req.model may have been None).
+        effective_id = model.model_id
 
         # Read capability flags from the registry manifest (NOT instance
         # attrs) so resolver-pulled VLMs whose capabilities live in the
@@ -374,92 +374,28 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     close_decoded_images(decoded_images)
             return result_to_openai_dict(result, system_fingerprint=fingerprint)
 
-        queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_DEPTH)
-        loop = asyncio.get_running_loop()
-        queue_slots = threading.Semaphore(_STREAM_QUEUE_DEPTH)
-        cancelled = threading.Event()
+        def _error_event() -> dict:
+            # A structured mid-stream failure without backend paths, driver
+            # text, or secrets.
+            payload = {"error": {
+                "code": "internal_error",
+                "message": "chat streaming backend failed; see server logs",
+                "type": "server_error",
+            }}
+            return {"event": "error", "data": json.dumps(payload)}
 
-        def _enqueue(item: object) -> bool:
-            # The producer runs in a native thread and cannot await an
-            # asyncio.Queue. A matching semaphore bounds scheduled+queued
-            # items; the async consumer releases one slot per get().
-            while not cancelled.is_set():
-                if not queue_slots.acquire(timeout=0.1):
-                    continue
-                if cancelled.is_set():
-                    queue_slots.release()
-                    return False
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, item)
-                except RuntimeError:
-                    queue_slots.release()
-                    return False
-                return True
-            return False
-
-        def _producer():
-            # Acquire the per-model inference lock for the ENTIRE stream.
-            # A single GPU model cannot run two generations concurrently;
-            # holding the lock across the full stream serializes requests
-            # to one model without blocking siblings on the same worker.
-            # Lock is released in the finally block, which fires on normal
-            # completion, client disconnect, or exception (H2 fix).
-            lock_acquired = False
-            try:
-                while not cancelled.is_set():
-                    if model._inference_lock.acquire(
-                        timeout=_STREAM_POLL_SECONDS,
-                    ):
-                        lock_acquired = True
-                        break
-                if not lock_acquired or cancelled.is_set():
-                    return
-                for chunk in model.chat_stream(messages, **kwargs):
-                    if not _enqueue(chunk):
-                        break
-            except Exception as e:
-                logger.exception("chat_stream backend failed")
-                _enqueue(e)
-            finally:
-                if lock_acquired:
-                    model._inference_lock.release()
-                close_decoded_images(decoded_images)
-                _enqueue(None)
-
-        producer = threading.Thread(target=_producer, daemon=True)
-        try:
-            producer.start()
-        except BaseException:
-            close_decoded_images(decoded_images)
-            raise
-
-        async def _events():
-            try:
-                while True:
-                    item = await queue.get()
-                    queue_slots.release()
-                    if item is None:
-                        yield {"data": DONE_SENTINEL}
-                        return
-                    if isinstance(item, Exception):
-                        # Preserve a structured mid-stream failure without
-                        # exposing backend paths, driver text, or secrets.
-                        err_payload = {"error": {
-                            "code": "internal_error",
-                            "message": "chat streaming backend failed; see server logs",
-                            "type": "server_error",
-                        }}
-                        yield {"event": "error", "data": json.dumps(err_payload)}
-                        yield {"data": DONE_SENTINEL}
-                        return
-                    yield {"data": chunk_to_sse_data(item, system_fingerprint=fingerprint)}
-            finally:
-                # EventSourceResponse closes this generator on disconnect.
-                # Wake a producer blocked on the bounded queue; the backend
-                # generator is allowed to observe cancellation at its next
-                # yielded chunk and release the inference lock in `finally`.
-                cancelled.set()
-
-        return EventSourceResponse(_events())
+        return threaded_sse_response(
+            lock=model._inference_lock,
+            open_stream=lambda: model.chat_stream(messages, **kwargs),
+            encode=lambda chunk: {
+                "data": chunk_to_sse_data(chunk, system_fingerprint=fingerprint),
+            },
+            done_events=({"data": DONE_SENTINEL},),
+            error_event=_error_event,
+            label="chat",
+            queue_depth=_STREAM_QUEUE_DEPTH,
+            poll_seconds=_STREAM_POLL_SECONDS,
+            on_finish=lambda: close_decoded_images(decoded_images),
+        )
 
     return router

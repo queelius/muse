@@ -109,7 +109,7 @@ class SentenceTransformerModel:
                 "install `sentence-transformers` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         src = local_dir or hf_repo
         logger.info(
             "loading SentenceTransformer from %s (device=%s, trust_remote_code=%s)",
@@ -186,6 +186,3 @@ def _count_tokens(model: Any, texts: list[str]) -> int:
         return 0
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)

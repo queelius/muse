@@ -83,6 +83,7 @@ class HFAudioClassifier:
         device: str = "auto",
         dtype: str = "fp32",
         multi_label: bool | None = None,
+        max_duration_seconds: float = 60.0,
         **_: Any,
     ) -> None:
         _ensure_deps()
@@ -102,8 +103,10 @@ class HFAudioClassifier:
                 "`librosa` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
-        self._dtype = _resolve_dtype(dtype)
+        # Audio past this is never decoded (capabilities.max_duration_seconds).
+        self._max_duration_seconds = float(max_duration_seconds)
+        self._device = select_device(device, torch_module=torch)
+        self._dtype = dtype_for_name(dtype, torch_module=torch)
         src = local_dir or hf_repo
         with LoadTimer(f"loading audio classifier from {src}", logger):
             self._extractor = AutoFeatureExtractor.from_pretrained(src)
@@ -137,10 +140,11 @@ class HFAudioClassifier:
 
     def classify(self, audio_path: str) -> list[AudioClassificationResult]:
         """Classify one audio file. Returns a length-1 list."""
-        # librosa.load resamples to the model's expected rate and
-        # downmixes to mono.
+        # librosa.load resamples to the model's expected rate, downmixes
+        # to mono and stops decoding at the duration cap.
         waveform, _sr = librosa.load(
             audio_path, sr=self._sampling_rate, mono=True,
+            duration=self._max_duration_seconds,
         )
         inputs = self._extractor(
             waveform,
@@ -169,9 +173,3 @@ class HFAudioClassifier:
         )]
 
 
-def _select_device(device: str) -> str:
-    return select_device(device, torch_module=torch)
-
-
-def _resolve_dtype(dtype: str):
-    return dtype_for_name(dtype, torch_module=torch)
