@@ -89,3 +89,21 @@ def test_unsupported_language_is_typed(runtime):
     with pytest.raises(InvalidLanguageError, match="unsupported Qwen3-ASR language"):
         backend.transcribe(path, language="klingon")
     processor.apply_chat_template.assert_not_called()
+
+
+def test_duration_cap_is_a_registry_setting(monkeypatch):
+    """limits.asr_max_duration_seconds is a real Setting row (env
+    MUSE_ASR_MAX_DURATION_SECONDS, default 600), read live per request."""
+    from muse.core import config as _config
+    from muse.modalities.audio_transcription.runtimes import qwen3_asr as _mod
+
+    setting = _config.SETTINGS_BY_KEY["limits.asr_max_duration_seconds"]
+    assert setting.env == "MUSE_ASR_MAX_DURATION_SECONDS"
+    assert setting.type == "opt_float"
+    assert setting.default == 600.0
+    assert setting.minimum == 0
+    monkeypatch.setenv("MUSE_ASR_MAX_DURATION_SECONDS", "42")
+    assert _mod._max_duration_seconds() == 42.0
+    monkeypatch.setenv("MUSE_ASR_MAX_DURATION_SECONDS", "0")
+    assert _mod._max_duration_seconds() == 600.0
+    assert not hasattr(_mod, "_DEFAULT_MAX_DURATION_SECONDS")

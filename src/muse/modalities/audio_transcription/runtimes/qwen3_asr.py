@@ -38,18 +38,9 @@ _LANGUAGES = {
 }
 
 
-_DURATION_KEY = 'limits.asr_max_duration_seconds'
-_DEFAULT_MAX_DURATION_SECONDS = 600.0
-
-
 def _max_duration_seconds() -> float:
-    """Decoded-duration cap per request (MUSE_ASR_MAX_DURATION_SECONDS).
-
-    Falls back to 600 s until the setting row exists in muse.core.config.
-    """
-    if _DURATION_KEY not in config.SETTINGS_BY_KEY:
-        return _DEFAULT_MAX_DURATION_SECONDS
-    return float(config.get_positive(_DURATION_KEY))
+    """Decoded-duration cap per request (MUSE_ASR_MAX_DURATION_SECONDS)."""
+    return float(config.get_positive("limits.asr_max_duration_seconds"))
 
 
 def _ensure_deps() -> None:

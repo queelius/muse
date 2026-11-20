@@ -155,6 +155,7 @@ A snapshot of the defaults:
 | `limits.audio_alignment_max_text_chars` | `MUSE_AUDIO_ALIGNMENT_MAX_TEXT_CHARS` | 50000 |
 | `limits.audio_embeddings_max_bytes` | `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` | 52428800 (50 MB) |
 | `limits.asr_max_mb` | `MUSE_ASR_MAX_MB` | 100 |
+| `limits.asr_max_duration_seconds` | `MUSE_ASR_MAX_DURATION_SECONDS` | 600.0 |
 | `limits.embeddings_max_batch` | `MUSE_EMBEDDINGS_MAX_BATCH` | 2048 |
 | `limits.embeddings_max_chars_per_item` | `MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM` | 100000 |
 | `limits.image_embeddings_max_batch` | `MUSE_IMAGE_EMBEDDINGS_MAX_BATCH` | 64 |
