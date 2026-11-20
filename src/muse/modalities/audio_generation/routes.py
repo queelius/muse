@@ -15,10 +15,12 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.inference import run_locked
 from muse.modalities.audio_generation.codec import (
     UnsupportedFormatError,
     content_type_for,
@@ -82,7 +84,7 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
     """
     model = registry.get_or_404(MODALITY, req.model)
 
-    effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+    effective_id = model.model_id
     capabilities = registry.capabilities(MODALITY, effective_id)
     cap_key = "supports_music" if kind == "music" else "supports_sfx"
     if not capabilities.get(cap_key, True):
@@ -91,32 +93,27 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
             f"model {effective_id!r} does not support {kind} generation",
         )
 
-    def _call():
-        with model._inference_lock:
-            kwargs = {
-                "duration": req.duration,
-                "seed": req.seed,
-                "steps": req.steps,
-                "guidance": req.guidance,
-                "negative_prompt": req.negative_prompt,
-                "lyrics": req.lyrics,
-            }
-            return model.generate(req.prompt, **kwargs)
+    result = await run_locked(
+        model,
+        lambda: model.generate(
+            req.prompt,
+            duration=req.duration,
+            seed=req.seed,
+            steps=req.steps,
+            guidance=req.guidance,
+            negative_prompt=req.negative_prompt,
+            lyrics=req.lyrics,
+        ),
+        label=f"audio/generation {kind} call",
+        message="audio generation backend failed; see server logs",
+    )
+    if isinstance(result, JSONResponse):
+        return result
 
+    # Encoding (pydub/ffmpeg, soundfile FLAC) runs off-loop but outside the
+    # model lock: up to 240 s of stereo audio would otherwise stall /health.
     try:
-        result = await asyncio.to_thread(_call)
-    except Exception:  # noqa: BLE001
-        # Log the real exception server-side but never leak it to the
-        # client: str(e) can carry internal filesystem paths, CUDA
-        # driver text, or other backend-implementation detail.
-        logger.exception("audio/generation %s call failed", kind)
-        return error_response(
-            500, "internal_error",
-            "audio generation backend failed; see server logs",
-        )
-
-    try:
-        body = _encode(req.response_format, result)
+        body = await asyncio.to_thread(_encode, req.response_format, result)
     except UnsupportedFormatError as e:
         return error_response(400, "invalid_parameter", str(e))
 

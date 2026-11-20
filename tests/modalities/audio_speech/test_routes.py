@@ -313,3 +313,32 @@ async def test_stream_encoding_error_is_structured_and_sanitized(monkeypatch):
     )
     assert "secret encoder state" not in events[0]["data"]
     assert model.closed.is_set()
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("fmt", ["wav", "opus"])
+def test_encoding_runs_off_the_event_loop(client, monkeypatch, fmt):
+    """I6: WAV and the ffmpeg Opus transcode must not block the loop."""
+    seen = []
+    real_wav = routes_mod.audio_to_wav_bytes
+
+    def _wav(audio, sr):
+        seen.append(_on_event_loop())
+        return real_wav(audio, sr)
+
+    def _opus(wav):
+        seen.append(_on_event_loop())
+        return b"OggS"
+
+    monkeypatch.setattr(routes_mod, "audio_to_wav_bytes", _wav)
+    monkeypatch.setattr(routes_mod, "wav_bytes_to_opus", _opus)
+    r = client.post("/v1/audio/speech", json={"input": "hi", "response_format": fmt})
+    assert r.status_code == 200
+    assert seen and not any(seen)

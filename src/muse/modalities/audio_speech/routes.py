@@ -211,7 +211,9 @@ async def _non_stream(
         raise
 
     try:
-        wav = audio_to_wav_bytes(result.audio, result.sample_rate)
+        body, media = await asyncio.to_thread(
+            _encode, result, req.response_format,
+        )
     except AudioFormatError:
         # Log the real exception server-side but never leak it to the
         # client: str(e) can carry internal filesystem paths, CUDA
@@ -221,18 +223,6 @@ async def _non_stream(
             500, "encoding_failed",
             "audio encoding backend failed; see server logs",
         )
-
-    if req.response_format == "opus":
-        try:
-            body = wav_bytes_to_opus(wav)
-            media = "audio/ogg"
-        except AudioFormatError:
-            logger.warning("opus encoding unavailable; falling back to wav")
-            body = wav
-            media = "audio/wav"
-    else:
-        body = wav
-        media = "audio/wav"
 
     metadata = result.metadata or {}
     headers = _provenance_headers(model, req, metadata, pronunciations)
@@ -264,6 +254,22 @@ async def _non_stream(
         return JSONResponse(payload, headers=headers)
 
     return Response(content=body, media_type=media, headers=headers)
+
+
+def _encode(result, response_format: str) -> tuple[bytes, str]:
+    """WAV, then the ffmpeg Opus transcode when asked; runs off-loop.
+
+    Opus falls back to WAV when ffmpeg cannot produce it. A WAV failure
+    raises AudioFormatError.
+    """
+    wav = audio_to_wav_bytes(result.audio, result.sample_rate)
+    if response_format != "opus":
+        return wav, "audio/wav"
+    try:
+        return wav_bytes_to_opus(wav), "audio/ogg"
+    except AudioFormatError:
+        logger.warning("opus encoding unavailable; falling back to wav")
+        return wav, "audio/wav"
 
 
 async def _stream(

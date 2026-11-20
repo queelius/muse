@@ -122,13 +122,27 @@ def test_encode_mp3_raises_when_ffmpeg_missing(monkeypatch):
             encode_mp3(_mono(), 44100, channels=1)
 
 
-def test_encode_opus_raises_when_pydub_missing():
-    with patch(
-        "muse.modalities.audio_generation.codec._try_import_pydub",
-        return_value=None,
-    ):
-        with pytest.raises(UnsupportedFormatError, match="pydub"):
-            encode_opus(_mono(), 44100, channels=1)
+def test_encode_opus_raises_unsupported_when_ffmpeg_missing(monkeypatch):
+    import muse.modalities._common.audio_codec as shared
+    monkeypatch.setattr(shared.shutil, "which", lambda _: None)
+    with pytest.raises(UnsupportedFormatError, match="ffmpeg"):
+        encode_opus(_mono(), 44100, channels=1)
+
+
+def test_encode_opus_uses_the_shared_ffmpeg_encoder(monkeypatch):
+    """D3: one Opus encoder for speech and generation (stereo works too)."""
+    import wave
+    import muse.modalities.audio_generation.codec as codec
+    seen = {}
+
+    def _fake_opus(wav_bytes):
+        with wave.open(io.BytesIO(wav_bytes)) as w:
+            seen["channels"] = w.getnchannels()
+        return b"OggS-fake"
+
+    monkeypatch.setattr(codec, "wav_bytes_to_opus", _fake_opus)
+    assert encode_opus(_stereo(), 44100, channels=2) == b"OggS-fake"
+    assert seen["channels"] == 2
 
 
 def test_encode_mp3_calls_pydub_when_available(monkeypatch):
@@ -160,34 +174,6 @@ def test_encode_mp3_calls_pydub_when_available(monkeypatch):
     assert captured["format"] == "mp3"
     assert captured["bitrate"] == "128k"
     assert captured["wav_len"] > 0
-
-
-def test_encode_opus_calls_pydub_when_available(monkeypatch):
-    captured = {}
-
-    class FakeSegment:
-        @classmethod
-        def from_wav(cls, buf):
-            return cls()
-
-        def export(self, out, *, format, bitrate):
-            captured["format"] = format
-            captured["bitrate"] = bitrate
-            out.write(b"FAKEOPUS")
-
-    fake_pydub = type("p", (), {"AudioSegment": FakeSegment})
-    monkeypatch.setattr(
-        "muse.modalities.audio_generation.codec._try_import_pydub",
-        lambda: fake_pydub,
-    )
-    monkeypatch.setattr(
-        "muse.modalities.audio_generation.codec.shutil.which",
-        lambda _: "/usr/bin/ffmpeg",
-    )
-    out = encode_opus(_mono(), 44100, channels=1)
-    assert out == b"FAKEOPUS"
-    assert captured["format"] == "opus"
-    assert captured["bitrate"] == "64k"
 
 
 def test_unsupported_format_error_is_exception_subclass():

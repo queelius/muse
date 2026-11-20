@@ -365,3 +365,25 @@ def test_music_generate_called_under_inference_lock():
     assert backend.lock_was_held, (
         "backend.generate was called without holding _inference_lock"
     )
+
+
+def test_encoding_runs_off_the_event_loop(monkeypatch):
+    """I6: pydub/ffmpeg/soundfile encoding must not block the worker loop."""
+    import asyncio
+    from muse.modalities.audio_generation import routes as routes_mod
+
+    seen = []
+
+    def _encode(fmt, result):
+        try:
+            asyncio.get_running_loop()
+            seen.append(True)
+        except RuntimeError:
+            seen.append(False)
+        return b"RIFF"
+
+    monkeypatch.setattr(routes_mod, "_encode", _encode)
+    client = _make_client(_fake_backend())
+    r = client.post("/v1/audio/music", json={"prompt": "x"})
+    assert r.status_code == 200
+    assert seen == [False]

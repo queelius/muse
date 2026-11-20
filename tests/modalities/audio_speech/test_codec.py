@@ -71,10 +71,10 @@ def test_wav_bytes_to_opus_uses_owned_bounded_ffmpeg():
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     with patch(
-        "muse.modalities.audio_speech.codec.shutil.which",
+        "muse.modalities._common.audio_codec.shutil.which",
         return_value="/usr/bin/ffmpeg",
     ), patch(
-        "muse.modalities.audio_speech.codec.run_owned_command",
+        "muse.modalities._common.audio_codec.run_owned_command",
         side_effect=fake_run,
     ):
         opus_data = wav_bytes_to_opus(wav_data)
@@ -84,7 +84,7 @@ def test_wav_bytes_to_opus_uses_owned_bounded_ffmpeg():
 
 
 def test_wav_bytes_to_opus_raises_when_ffmpeg_missing(monkeypatch):
-    import muse.modalities.audio_speech.codec as codec_module
+    import muse.modalities._common.audio_codec as codec_module
     monkeypatch.setattr(codec_module.shutil, "which", lambda x: None)
     with pytest.raises(AudioFormatError, match="ffmpeg not found"):
         wav_bytes_to_opus(b"fake wav data")
@@ -92,10 +92,10 @@ def test_wav_bytes_to_opus_raises_when_ffmpeg_missing(monkeypatch):
 
 def test_wav_bytes_to_opus_maps_owned_timeout():
     with patch(
-        "muse.modalities.audio_speech.codec.shutil.which",
+        "muse.modalities._common.audio_codec.shutil.which",
         return_value="/usr/bin/ffmpeg",
     ), patch(
-        "muse.modalities.audio_speech.codec.run_owned_command",
+        "muse.modalities._common.audio_codec.run_owned_command",
         side_effect=subprocess.TimeoutExpired("ffmpeg", 60),
     ):
         with pytest.raises(AudioFormatError, match="timed out after 60s"):
@@ -107,10 +107,10 @@ def test_wav_bytes_to_opus_maps_nonzero_exit():
         ["ffmpeg"], 1, "", "bad codec /private/path",
     )
     with patch(
-        "muse.modalities.audio_speech.codec.shutil.which",
+        "muse.modalities._common.audio_codec.shutil.which",
         return_value="/usr/bin/ffmpeg",
     ), patch(
-        "muse.modalities.audio_speech.codec.run_owned_command",
+        "muse.modalities._common.audio_codec.run_owned_command",
         return_value=failed,
     ):
         with pytest.raises(AudioFormatError, match="ffmpeg failed: bad codec"):

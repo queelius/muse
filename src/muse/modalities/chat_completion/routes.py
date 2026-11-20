@@ -292,10 +292,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def chat_completions(req: ChatCompletionRequest):
         model = registry.get_or_404(MODALITY, req.model)
 
-        # Derive effective_id the same way image_generation does: prefer
-        # the model's own model_id attr; fall back to the request field or
-        # the literal default marker.
-        effective_id = getattr(model, "model_id", None) or (req.model or "<default>")
+        # The registry keys every model by its model_id, so the resolved
+        # model's id is what answered (req.model may have been None).
+        effective_id = model.model_id
 
         # Read capability flags from the registry manifest (NOT instance
         # attrs) so resolver-pulled VLMs whose capabilities live in the
