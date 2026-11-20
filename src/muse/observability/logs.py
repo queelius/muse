@@ -12,6 +12,8 @@ import collections
 import queue
 import threading
 
+from muse.observability._lifecycle import positive_int
+
 # Bounds a stalled subscriber's queue to this many buffered lines. A
 # healthy consumer (the SSE tail polls its queue every 250ms, see
 # dashboard.py) drains far faster than workers emit, so this only bites
@@ -41,20 +43,14 @@ class LogHub:
     - append(model_id, line): buffer the line (evicting oldest lines once the
       running byte count exceeds buffer_bytes) then publish it to every
       subscriber for that model_id.
-    - snapshot(model_id): a point-in-time copy of the current buffer.
+    - snapshot(model_id): a point-in-time copy of the current buffer (for
+      tests and diagnostics; the SSE route uses subscribe_with_snapshot).
     - subscribe_with_snapshot(model_id)/unsubscribe(model_id, q): live-tail
       registration, atomically paired with the buffered history.
-    - drop(model_id): remove a model's buffer and all its subscribers.
     """
 
     def __init__(self, *, buffer_bytes: int = 65536) -> None:
-        if (
-            isinstance(buffer_bytes, bool)
-            or not isinstance(buffer_bytes, int)
-            or buffer_bytes <= 0
-        ):
-            raise ValueError("buffer_bytes must be a positive integer")
-        self._buffer_bytes = buffer_bytes
+        self._buffer_bytes = positive_int(buffer_bytes, "buffer_bytes")
         self._lock = threading.Lock()
         self._buffers: dict[str, collections.deque] = {}
         self._byte_counts: dict[str, int] = {}
@@ -114,9 +110,3 @@ class LogHub:
                 subscribers.discard(q)
                 if not subscribers:
                     self._subscribers.pop(model_id, None)
-
-    def drop(self, model_id: str) -> None:
-        with self._lock:
-            self._buffers.pop(model_id, None)
-            self._byte_counts.pop(model_id, None)
-            self._subscribers.pop(model_id, None)

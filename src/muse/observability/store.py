@@ -183,6 +183,7 @@ class TelemetryStore:
         return {"metric": metric, "points": points}
 
     def summary_counts(self) -> dict:
+        """Total event count. Kept for tests and diagnostics; no route uses it."""
         with self._lock:
             self._require_open_locked()
             (total,) = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()

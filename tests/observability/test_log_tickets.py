@@ -127,3 +127,10 @@ def test_concurrent_mint_and_validate_does_not_raise():
         t.join()
 
     assert not errors
+
+
+def test_sub_second_ttl_reports_a_nonzero_expires_in():
+    from muse.observability.log_tickets import LogTicketStore
+
+    _, expires_in = LogTicketStore(0.5).mint()
+    assert expires_in == 1
