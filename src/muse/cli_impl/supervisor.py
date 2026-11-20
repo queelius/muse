@@ -1763,15 +1763,37 @@ def _measurement_key(device: str, auto_cuda_available: "bool | None") -> str:
     return normalized
 
 
-def _declared_or_measured(
-    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
-) -> tuple[bool | None, float, str]:
-    """Tier 1 of the sizing ladder: the entry's own estimate.
+@dataclass(frozen=True)
+class MemoryEstimate:
+    """Tier 1 of the sizing ladder for one catalog entry.
 
-    Returns (True, gb, device) for a usable `capabilities.memory_gb` or
-    probe measurement, (False, 0.0, device) for a malformed declaration
-    (which must not be replaced by a fallback), and (None, 0.0, device)
-    when the entry has neither.
+    ``status`` is True for a usable estimate, False for a malformed
+    `capabilities.memory_gb` (which must not be replaced by a fallback),
+    None when the entry has neither a declaration nor a measurement.
+    ``source`` says which number won: "declared" or "measured".
+    """
+
+    status: bool | None
+    gb: float
+    device: str
+    source: str | None = None
+
+
+def memory_estimate(
+    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
+) -> MemoryEstimate:
+    """The entry's own size: max(declared memory_gb, measured peak).
+
+    One precedence for admission, servability, `muse models list` and
+    `muse models info` (ruling R13). A declared `capabilities.memory_gb` is a
+    floor: a probe or lazy-load measurement for the pool the model loads
+    into raises it, so estimates self-heal upward. Only the resolved pool's
+    measurement counts against a declaration ("auto" resolves to the pool
+    `auto_uses_cuda` picks; None asks the live host), so a stale
+    cross-device probe never re-sizes a declared model. With no declaration
+    the resolved pool's measurement is preferred, else any device's (whose
+    recorded device is then adopted, so a bundled GPU model probed on cuda
+    is sized against the cuda pool).
     """
     manifest = catalog_entry.get("manifest", {}) or {}
     if not isinstance(manifest, dict):
@@ -1785,68 +1807,65 @@ def _declared_or_measured(
     measurements = catalog_entry.get("measurements", {}) or {}
     if not isinstance(measurements, dict):
         measurements = {}
-    # Probe records key by the resolved device (e.g. "cpu" / "cuda")
-    # so we look up by the same key; "auto" by the pool it resolves to on
-    # this host (`_measurement_key`), and only when there is a measurement
-    # to pick (no host query for a declared or unmeasured entry).
-    measurement_key = (
-        _measurement_key(device, auto_cuda_available)
-        if measurements and declared is None else device
-    )
-    measurement = measurements.get(measurement_key) or {}
-    if not isinstance(measurement, dict):
-        measurement = {}
-    measured = measurement.get("peak_bytes")
-    if measured is not None and device in ("auto", ""):
-        # Report the pool the measurement belongs to, as the cross-device
-        # recovery below does.
-        device = str(measurement.get("device") or measurement_key).lower()
-
-    # Bundled models have no persisted manifest in catalog.json, so `device`
-    # falls back to "cpu" above even when the probe ran on cuda. If the
-    # manifest-derived device has no measurement but the catalog has one for
-    # another device, use it and adopt the measurement's own recorded device
-    # so the capacity check below picks the right memory pool. Without this,
-    # `muse models probe` never clears a bundled GPU model's "no memory
-    # estimate" flag (the probe writes measurements.cuda; the lookup reads
-    # measurements.cpu).
-    #
-    # Gate on `declared is None`: this recovery only matters when there is no
-    # declared memory_gb (the bundled-model case). A model that DOES declare
-    # memory_gb already trusts its manifest device below, so we must not let a
-    # stale cross-device measurement (e.g. a CPU probe of a declared-cuda model
-    # pulled with --no-probe) overwrite that device and mis-size the GPU model
-    # against the CPU pool.
-    if measured is None and declared is None:
-        for dev_key, rec in measurements.items():
-            if not isinstance(rec, dict):
-                continue
-            peak = rec.get("peak_bytes")
-            if peak:
-                measured = peak
-                device = str(rec.get("device") or dev_key).lower() or device
-                break
 
     if declared is not None:
-        if not isinstance(declared, bool):
-            try:
-                declared_gb = float(declared)
-            except (TypeError, ValueError):
-                declared_gb = math.nan
-            if math.isfinite(declared_gb) and declared_gb >= 0.0:
-                return True, declared_gb, device
-        # An explicit malformed declaration must not be silently replaced by
-        # a smaller on-disk fallback while the unchanged manifest continues
-        # to hand the bad value to the director.
-        return False, 0.0, device
-    if measured is not None and not isinstance(measured, bool):
+        if isinstance(declared, bool):
+            return MemoryEstimate(False, 0.0, device)
         try:
-            measured_gb = float(measured) / (1024 ** 3)
+            declared_gb = float(declared)
         except (TypeError, ValueError):
-            measured_gb = math.nan
-        if math.isfinite(measured_gb) and measured_gb > 0.0:
-            return True, measured_gb, device
-    return None, 0.0, device
+            declared_gb = math.nan
+        if not (math.isfinite(declared_gb) and declared_gb >= 0.0):
+            # An explicit malformed declaration must not be silently
+            # replaced by a smaller on-disk fallback while the unchanged
+            # manifest continues to hand the bad value to the director.
+            return MemoryEstimate(False, 0.0, device)
+        measured_gb = None
+        if measurements:
+            placed = str(catalog_entry.get("device_override") or device).lower()
+            measured_gb = _measurement_gb(
+                measurements.get(_measurement_key(placed, auto_cuda_available)),
+            )
+        if measured_gb is not None and measured_gb > declared_gb:
+            return MemoryEstimate(True, measured_gb, device, "measured")
+        return MemoryEstimate(True, declared_gb, device, "declared")
+
+    # Probe records key by the resolved device (e.g. "cpu" / "cuda"), so
+    # look up by the same key; "auto" by the pool it resolves to on this
+    # host, and only when there is a measurement to pick (no host query
+    # for an unmeasured entry).
+    measurement_key = (
+        _measurement_key(device, auto_cuda_available) if measurements else device
+    )
+    measurement = measurements.get(measurement_key)
+    measured_gb = _measurement_gb(measurement)
+    if measured_gb is not None:
+        if device in ("auto", ""):
+            # Report the pool the measurement belongs to.
+            device = str(measurement.get("device") or measurement_key).lower()
+        return MemoryEstimate(True, measured_gb, device, "measured")
+
+    # Bundled models have no persisted manifest in catalog.json, so `device`
+    # falls back to "auto" above even when the probe ran on cuda. If the
+    # resolved pool has no measurement but another device does, use it and
+    # adopt the measurement's own recorded device so the capacity check
+    # picks the right memory pool. Without this, `muse models probe` never
+    # clears a bundled GPU model's "no memory estimate" flag.
+    for dev_key, rec in measurements.items():
+        gb = _measurement_gb(rec)
+        if gb is not None:
+            device = str(rec.get("device") or dev_key).lower() or device
+            return MemoryEstimate(True, gb, device, "measured")
+    return MemoryEstimate(None, 0.0, device)
+
+
+def _declared_or_measured(
+    catalog_entry: dict, *, auto_cuda_available: "bool | None" = None,
+) -> tuple[bool | None, float, str]:
+    """Tier 1 of the sizing ladder as (status, gb, device); see
+    `memory_estimate`."""
+    estimate = memory_estimate(catalog_entry, auto_cuda_available=auto_cuda_available)
+    return estimate.status, estimate.gb, estimate.device
 
 
 def _repo_key(repo: Any) -> str | None:
@@ -1980,10 +1999,10 @@ def _has_memory_data(
 
     Sizing ladder, in order of preference (CLAUDE.md "Lazy load + LRU
     eviction" uses the same numbering):
-      1. `manifest.capabilities.memory_gb` annotation (hand-set or
-         from a script's MANIFEST), else
-         `measurements.<device>.peak_bytes` from a probe run / self-healed
-         lazy-load observation.
+      1. the larger of the `manifest.capabilities.memory_gb` annotation
+         (hand-set or from a script's MANIFEST) and the
+         `measurements.<pool>.peak_bytes` from a probe run / self-healed
+         lazy-load observation (`memory_estimate`).
       2. for a manifest with `capabilities.base_model` (a LoRA adapter),
          the base catalog entry's probe measurement (this entry's pool
          first) or declared memory_gb, the base found by muse id or by
@@ -2338,7 +2357,8 @@ def backfill_manifest_memory(
        ("fits anywhere", never evicting). We fill it from the sizing ladder
        (`_has_memory_data`: probe measurement, else the muse-id base's
        estimate for a manifest with base_model, else on-disk weights size).
-       An explicit declared `memory_gb` always wins.
+       A declared `memory_gb` is a floor that a larger measurement for the
+       model's pool raises (`memory_estimate`).
 
     2. **device** -- An operator `set-device` pin (catalog `device_override`)
        decides where the worker actually loads, mirroring load_backend's
@@ -2361,7 +2381,18 @@ def backfill_manifest_memory(
     out = manifest
     caps = manifest.get("capabilities", {}) or {}
 
-    if entry is not None and caps.get("memory_gb") is None:
+    if entry is not None and caps.get("memory_gb") is not None:
+        # A declaration is a floor: a larger measurement for the pool the
+        # model loads into wins (`memory_estimate`), so probes and observed
+        # peaks reach admission and eviction too. A malformed declaration
+        # passes through for the director to reject.
+        estimate = memory_estimate(dict(entry, manifest=manifest))
+        if estimate.status and estimate.source == "measured":
+            out = dict(out)
+            out_caps = dict(caps)
+            out_caps["memory_gb"] = estimate.gb
+            out["capabilities"] = out_caps
+    elif entry is not None:
         gb: float | None = None
         # A manifest layered on a base (a LoRA adapter) is sized from its
         # muse-id base's estimate when it has no probe measurement of its

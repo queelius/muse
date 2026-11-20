@@ -2195,7 +2195,8 @@ class TestBackfillManifestMemory:
         # Input is not mutated (copy semantics).
         assert "memory_gb" not in manifest["capabilities"]
 
-    def test_declared_memory_wins(self, tmp_catalog):
+    def test_declared_memory_is_a_floor(self, tmp_catalog):
+        """A smaller measurement never shrinks a declaration (R13)."""
         from muse.cli_impl.supervisor import backfill_manifest_memory
 
         _seed_catalog({
@@ -2215,6 +2216,34 @@ class TestBackfillManifestMemory:
         out = backfill_manifest_memory(manifest, "declared")
 
         assert out["capabilities"]["memory_gb"] == 2.0
+
+    def test_larger_measurement_raises_a_declaration(self, tmp_catalog):
+        """Probes and observed peaks self-heal a declared model upward (R13):
+        a 3 GB declaration with a 9 GB cuda measurement sizes to 9 GB."""
+        from muse.cli_impl.supervisor import _has_memory_data, backfill_manifest_memory
+
+        entry = {
+            "python_path": "/v/bin/python",
+            "enabled": True,
+            "measurements": {
+                "cuda": {"peak_bytes": 9 * 1024 ** 3, "device": "cuda"},
+                "cpu": {"peak_bytes": 20 * 1024 ** 3, "device": "cpu"},
+            },
+        }
+        _seed_catalog({"declared": entry})
+        manifest = {
+            "model_id": "declared",
+            "capabilities": {"device": "cuda", "memory_gb": 3.0},
+        }
+
+        out = backfill_manifest_memory(manifest, "declared")
+
+        # Only the pool the model loads into counts, never the cpu probe.
+        assert out["capabilities"]["memory_gb"] == pytest.approx(9.0)
+        assert manifest["capabilities"]["memory_gb"] == 3.0
+        assert _has_memory_data(dict(entry, manifest=manifest)) == (
+            True, pytest.approx(9.0), "cuda",
+        )
 
     def test_noop_when_no_measurement(self, tmp_catalog):
         from muse.cli_impl.supervisor import backfill_manifest_memory

@@ -267,6 +267,14 @@ def format_info(
             if probed_at:
                 line += f" (probed {probed_at[:10]})"
             lines.append(line)
+        # The number admission actually uses: the larger of the annotation
+        # and the measurement for the model's pool (same as `models list`).
+        from muse.cli_impl.models_list import _model_memory_display
+        sized, _gb, _label = _model_memory_display(
+            entry.extra or {}, catalog_data if is_pulled else None,
+        )
+        if sized != "-":
+            lines.append(f"  admission size:  {sized}")
 
     # Capabilities
     extra = entry.extra or {}

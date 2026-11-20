@@ -21,6 +21,14 @@ from muse.cli_impl.models_list import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_host_gpu_query(monkeypatch):
+    """Memory display resolves `auto` models; never ask the host's GPU."""
+    monkeypatch.setattr(
+        "muse.cli_impl.supervisor._host_auto_uses_cuda", lambda: False,
+    )
+
+
 @pytest.fixture
 def sample_rows():
     return [
@@ -115,15 +123,44 @@ def test_filter_rows_compose(sample_rows):
 # Memory display ----------------------------------------------------------
 
 
-def test_memory_display_prefers_measured_over_annotation():
+def test_memory_display_shows_the_larger_measurement():
+    extra = {"device": "cuda", "memory_gb": 2.0}
+    catalog = {"measurements": {"cuda": {"peak_bytes": 1024**3 * 3}}}
+    s, gb, device = _model_memory_display(extra, catalog)
+    assert gb == 3.0  # measured exceeds the annotation, so it wins
+    assert device == "GPU"
+    assert s == "3.0 GB GPU"
+    assert "~" not in s, "measured values should not have ~ prefix"
+
+
+def test_memory_display_keeps_an_annotation_above_the_measurement():
+    """Same precedence as admission: max(declared, measured) (R13)."""
     extra = {"device": "cuda", "memory_gb": 5.0}
     catalog = {"measurements": {"cuda": {"peak_bytes": 1024**3 * 3}}}
     s, gb, device = _model_memory_display(extra, catalog)
-    assert gb == 3.0  # measured wins
-    assert device == "GPU"
-    assert "GB GPU" in s
-    assert s == "3.0 GB GPU"
-    assert "~" not in s, "measured values should not have ~ prefix"
+    assert gb == 5.0
+    assert s == "~5.0 GB GPU"
+
+
+def test_memory_display_auto_on_a_cpu_host_reads_the_cpu_bucket():
+    """M5: auto models on a CPU-only host size against host RAM."""
+    extra = {"device": "auto", "memory_gb": 1.0}
+    catalog = {"measurements": {
+        "cpu": {"peak_bytes": 1024**3 * 2, "device": "cpu"},
+        "cuda": {"peak_bytes": 1024**3 * 7, "device": "cuda"},
+    }}
+    s, gb, device = _model_memory_display(extra, catalog)
+    assert (s, gb, device) == ("2.0 GB CPU", 2.0, "CPU")
+
+
+def test_memory_display_honors_a_device_override():
+    extra = {"device": "cuda", "memory_gb": 1.0}
+    catalog = {
+        "device_override": "cpu",
+        "measurements": {"cpu": {"peak_bytes": 1024**3 * 4, "device": "cpu"}},
+    }
+    s, gb, device = _model_memory_display(extra, catalog)
+    assert (s, gb, device) == ("4.0 GB CPU", 4.0, "CPU")
 
 
 def test_memory_display_falls_back_to_annotation():
