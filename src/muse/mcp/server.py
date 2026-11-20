@@ -406,7 +406,7 @@ class MCPServer:
         prominent WARNING log so operators know the endpoint is open.
         """
         import contextlib
-        import secrets as _secrets
+        import json as _json
 
         try:
             from mcp.server.streamable_http_manager import (
@@ -438,25 +438,27 @@ class MCPServer:
 
         async def handle_streamable_http(scope, receive, send):
             if token:
-                # Minimal bearer-token middleware: read the Authorization header
-                # directly from the ASGI scope without pulling in all of FastAPI.
+                # The admin API's bearer check (fastapi-free), read straight
+                # from the ASGI scope: case-insensitive scheme, constant-time
+                # compare, a token that is never echoed.
+                from muse.admin import auth as admin_auth
+
                 headers = dict(scope.get("headers", []))
-                auth = headers.get(b"authorization", b"").decode("latin-1")
-                if not auth.startswith("Bearer "):
-                    resp = Response(
-                        content='{"error":{"code":"missing_token","message":"Authorization: Bearer <token> required"}}',
-                        status_code=401,
-                        media_type="application/json",
+                header = headers.get(b"authorization", b"").decode("latin-1")
+                try:
+                    admin_auth.check_bearer(
+                        header or None,
+                        expected=token,
+                        closed_code="mcp_auth_closed",
+                        closed_message="MCP token not configured",
+                        invalid_message="Bad MCP token",
                     )
-                    await resp(scope, receive, send)
-                    return
-                presented = auth[len("Bearer "):]
-                if not _secrets.compare_digest(
-                    presented.encode("utf-8"), token.encode("utf-8"),
-                ):
+                except admin_auth.BearerAuthError as e:
                     resp = Response(
-                        content='{"error":{"code":"invalid_token","message":"Bad MCP token"}}',
-                        status_code=403,
+                        content=_json.dumps(
+                            {"error": {"code": e.code, "message": e.message}},
+                        ),
+                        status_code=e.status,
                         media_type="application/json",
                     )
                     await resp(scope, receive, send)

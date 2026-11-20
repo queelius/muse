@@ -132,6 +132,30 @@ class TestHttpAuth:
         assert resp.status_code == 403
         assert resp.json()["error"]["code"] == "invalid_token"
 
+    def test_bearer_scheme_is_case_insensitive(self, mcp_server):
+        """The shared muse.admin.auth.check_bearer matches the scheme
+        case-insensitively (RFC 7235), like the admin API."""
+        app = mcp_server.build_http_app(admin_token="correct-token")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/mcp", headers={"Authorization": "bearer correct-token"})
+        assert resp.status_code not in (401, 403)
+
+    def test_uses_the_shared_bearer_check(self, mcp_server, monkeypatch):
+        import muse.admin.auth as admin_auth
+
+        calls = []
+        real = admin_auth.check_bearer
+
+        def spy(*a, **kw):
+            calls.append(kw.get("expected"))
+            return real(*a, **kw)
+
+        monkeypatch.setattr(admin_auth, "check_bearer", spy)
+        app = mcp_server.build_http_app(admin_token="correct-token")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            client.get("/mcp", headers={"Authorization": "Bearer wrong"})
+        assert calls == ["correct-token"]
+
     def test_configured_token_is_trimmed_like_admin_auth(self, mcp_server):
         app = mcp_server.build_http_app(admin_token=" correct-token\n")
         with TestClient(app, raise_server_exceptions=False) as client:
