@@ -45,6 +45,13 @@ from muse.core.catalog import _read_catalog, known_models
 from muse.core.errors import error_response
 
 
+_PROBE_DEVICES = ("auto", "cpu", "cuda", "mps")
+
+
+def _invalid(message: str) -> JSONResponse:
+    return error_response(400, "invalid_parameter", message)
+
+
 def _accepted(job: Job) -> JSONResponse:
     """202 envelope for a launched async job; clients poll /jobs/{id}."""
     return JSONResponse(
@@ -102,8 +109,17 @@ def build_models_router() -> APIRouter:
                 404, "model_not_found", f"unknown model {model_id!r}",
             )
         body = body or {}
-        no_inference = bool(body.get("no_inference", False))
+        # Validate synchronously: a bad value would otherwise be accepted
+        # with 202 and fail inside the job (click's device enum exits 2),
+        # and bool("false") is True.
+        no_inference = body.get("no_inference", False)
+        if type(no_inference) is not bool:
+            return _invalid("`no_inference` must be a boolean")
         device = body.get("device")
+        if device is not None and device not in _PROBE_DEVICES:
+            return _invalid(
+                "`device` must be one of " + ", ".join(_PROBE_DEVICES),
+            )
         return _accepted(launch_async(
             probe_model,
             op_name="probe",
@@ -125,7 +141,11 @@ def build_models_router() -> APIRouter:
         """
         store = get_default_store()
         body = body or {}
-        identifier = body.get("identifier") or model_id
+        identifier = body.get("identifier")
+        if identifier is None:
+            identifier = model_id
+        elif not isinstance(identifier, str) or not identifier.strip():
+            return _invalid("`identifier` must be a non-empty string")
         if not identifier or identifier == "_":
             return error_response(
                 400,
@@ -188,7 +208,6 @@ def build_models_router() -> APIRouter:
             "worker_uptime_seconds": _get_uptime(spec),
             "worker_status": spec.status if spec is not None else None,
             "restart_count": spec.restart_count if spec is not None else 0,
-            "last_error": None,
             "unservable_reason": reason,
             "measurements": entry.get("measurements") or {},
         }

@@ -393,3 +393,73 @@ class TestAuthRequired:
             assert r.status_code == 503
         finally:
             config.reset_config()
+
+
+class TestRequestValidation:
+    """Bad admin bodies are 400 OpenAI envelopes up front, never a 202 job
+    that fails later or FastAPI's bare {"detail": [...]} 422."""
+
+    @pytest.fixture
+    def known(self, tmp_catalog, monkeypatch):
+        _seed_catalog({
+            "kokoro-82m": {
+                "pulled_at": "...", "hf_repo": "k", "local_dir": "/k",
+                "venv_path": "/v", "python_path": "/v/bin/python",
+                "enabled": True,
+            },
+        })
+        launched = []
+
+        def fake_launch(op, **kwargs):
+            from muse.admin.jobs import Job
+            launched.append(kwargs)
+            return Job(job_id="x", op="probe", model_id=kwargs["model_id"])
+
+        monkeypatch.setattr("muse.admin.routes.models.launch_async", fake_launch)
+        set_supervisor_state(SupervisorState(workers=[], device="cpu"))
+        return launched
+
+    @pytest.mark.parametrize("body", [
+        {"device": "gpu"},
+        {"device": 5},
+        {"no_inference": "false"},
+        {"no_inference": 1},
+    ])
+    def test_probe_rejects_bad_fields(self, client, headers, known, body):
+        r = client.post(
+            "/v1/admin/models/kokoro-82m/probe", headers=headers, json=body,
+        )
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "invalid_parameter"
+        assert known == []
+
+    def test_probe_accepts_null_device_and_strict_bools(
+        self, client, headers, known,
+    ):
+        r = client.post(
+            "/v1/admin/models/kokoro-82m/probe", headers=headers,
+            json={"no_inference": False, "device": None},
+        )
+        assert r.status_code == 202
+        assert known[0]["no_inference"] is False and known[0]["device"] is None
+
+    @pytest.mark.parametrize("identifier", [["x"], 5, "", "   "])
+    def test_pull_rejects_non_string_identifier(
+        self, client, headers, known, identifier,
+    ):
+        r = client.post(
+            "/v1/admin/models/_/pull", headers=headers,
+            json={"identifier": identifier},
+        )
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "invalid_parameter"
+        assert known == []
+
+    def test_non_object_body_is_an_openai_400(self, client, headers, known):
+        r = client.post(
+            "/v1/admin/models/kokoro-82m/probe", headers=headers, json=[1],
+        )
+        assert r.status_code == 400
+        body = r.json()
+        assert "detail" not in body
+        assert body["error"]["code"] == "invalid_parameter"

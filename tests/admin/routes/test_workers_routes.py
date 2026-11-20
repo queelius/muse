@@ -139,3 +139,21 @@ class TestRestartWorker:
         assert spec.restart_count == 0
         assert spec.failure_count == 0
         spec.process.terminate.assert_called_once()
+
+
+def test_non_integer_port_is_an_openai_400(monkeypatch):
+    from muse.admin.errors import install_admin_error_handler
+
+    app = FastAPI()
+    app.include_router(
+        build_workers_router(), prefix="/v1/admin",
+        dependencies=[Depends(verify_admin_token)],
+    )
+    install_admin_error_handler(app)
+    monkeypatch.setenv(ADMIN_TOKEN_ENV, "test-token")
+    r = TestClient(app).post(
+        "/v1/admin/workers/abc/restart",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
