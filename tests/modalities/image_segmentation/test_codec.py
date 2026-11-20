@@ -106,16 +106,17 @@ def test_rle_runs_constant_masks_match_reference(value):
 
 
 def test_rle_encode_is_vectorised_for_large_masks():
-    """A noisy 2048x2048 mask took ~0.5 s per mask in the per-pixel loop."""
+    """A 2048x2048 block mask took ~0.22 s per mask in the per-pixel loop
+    (the vectorised encoder takes a few ms; the bound leaves CI headroom)."""
     import time
 
-    rng = np.random.default_rng(0)
-    arr = (rng.random((2048, 2048)) > 0.5).astype(np.uint8)
+    arr = np.zeros((2048, 2048), dtype=np.uint8)
+    arr[100:1500, 300:1800] = 1
     t0 = time.perf_counter()
     rle = codec.encode_mask_rle(arr)
     elapsed = time.perf_counter() - t0
     np.testing.assert_array_equal(codec.decode_mask_rle(rle), arr.astype(bool))
-    assert elapsed < 0.4, elapsed
+    assert elapsed < 0.15, elapsed
 
 
 def test_rle_round_trip_all_zeros():

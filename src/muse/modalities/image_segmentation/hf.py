@@ -1,31 +1,28 @@
 """HF resolver plugin for promptable segmenters (SAM / SAM-2 family).
 
-Sniffs HF repos whose tags include ``mask-generation`` or
-``image-segmentation``. Synthesizes a manifest with capabilities
-inferred from repo name patterns:
+The one runtime, ``SAM2Runtime``, loads ``AutoModelForMaskGeneration``,
+so the sniff claims only repos that model class can serve: any repo
+tagged ``mask-generation``, plus ``image-segmentation``-tagged repos
+whose name is a SAM-family token (``sam``, ``sam2``, ``sam-...``).
+Semantic/panoptic segmenters (SegFormer, Mask2Former, OneFormer,
+BiRefNet, DETR-panoptic) and CLIPSeg are not claimed: they would
+install and then fail to load. Capabilities by repo-name pattern:
 
   - ``*sam2-hiera-tiny*``: small (40MB), points + boxes + auto.
   - ``*sam2-hiera-base*``: balanced (150MB).
   - ``*sam2-hiera-large*``: best quality (225MB).
   - ``*sam-*``: original SAM family.
-  - ``*clipseg*``: text-prompted segmentation; flips supports_*
-    flags (text on, points/boxes/auto off).
   - fallback: conservative defaults preferring point + box prompts.
 
-Priority 110: equal to image/animation, but the
-``mask-generation`` / ``image-segmentation`` tag-set is unique to
+Priority 110: equal to image/animation; the tag-set is unique to
 segmenters so collisions with i2i upscalers (priority 105) do not
 arise in practice.
-
-CLIPSeg has a different runtime backbone (CLIP encoder + ViT decoder
-plus text conditioning) but presents the same wire shape; the
-``supports_text_prompts`` capability gate steers requests away from
-SAM-style models without a runtime change.
 
 Loaded via single-file import; no relative imports.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -81,15 +78,6 @@ def _infer_capabilities(repo_id: str) -> dict[str, Any]:
             "supports_box_prompts": True,
             "supports_automatic": True,
         }
-    if "clipseg" in rid:
-        return {
-            "max_masks": 16,
-            "memory_gb": 0.6,
-            "supports_text_prompts": True,
-            "supports_point_prompts": False,
-            "supports_box_prompts": False,
-            "supports_automatic": False,
-        }
     if "sam-" in rid or rid.endswith("/sam"):
         return {
             "max_masks": 64,
@@ -109,9 +97,17 @@ def _infer_capabilities(repo_id: str) -> dict[str, Any]:
     }
 
 
+_SAM_NAME_RE = re.compile(r"(?:^|[-_.])sam2?(?=$|[-_.])")
+
+
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
-    return "mask-generation" in tags or "image-segmentation" in tags
+    if "mask-generation" in tags:
+        return True
+    if "image-segmentation" not in tags:
+        return False
+    name = (getattr(info, "id", "") or "").rsplit("/", 1)[-1].lower()
+    return _SAM_NAME_RE.search(name) is not None
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

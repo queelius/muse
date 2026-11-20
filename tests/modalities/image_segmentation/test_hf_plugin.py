@@ -53,12 +53,27 @@ def test_sniff_mask_generation_tag():
     assert HF_PLUGIN["sniff"](info) is True
 
 
-def test_sniff_image_segmentation_tag():
-    info = _fake_info(
-        repo_id="CIDAS/clipseg-rd64-refined",
-        tags=["image-segmentation"],
-    )
-    assert HF_PLUGIN["sniff"](info) is True
+def test_sniff_image_segmentation_tag_with_sam_name():
+    for repo_id in ("facebook/sam-vit-base", "someone/SAM2-finetune", "x/sam"):
+        info = _fake_info(repo_id=repo_id, tags=["image-segmentation"])
+        assert HF_PLUGIN["sniff"](info) is True, repo_id
+
+
+def test_sniff_rejects_non_mask_generation_segmenters():
+    """SAM2Runtime loads AutoModelForMaskGeneration only: semantic and
+    panoptic segmenters (and CLIPSeg) would install, then fail to load."""
+    for repo_id in (
+        "nvidia/segformer-b0-finetuned-ade-512-512",
+        "facebook/mask2former-swin-large-coco-panoptic",
+        "facebook/maskformer-swin-base-ade",
+        "shi-labs/oneformer_ade20k_swin_large",
+        "ZhengPeng7/BiRefNet",
+        "facebook/detr-resnet-50-panoptic",
+        "CIDAS/clipseg-rd64-refined",
+        "someone/samurai-segmenter",
+    ):
+        info = _fake_info(repo_id=repo_id, tags=["image-segmentation"])
+        assert HF_PLUGIN["sniff"](info) is False, repo_id
 
 
 def test_sniff_rejects_unrelated_repo():
@@ -137,21 +152,6 @@ def test_resolve_original_sam_family():
     caps = resolved.manifest["capabilities"]
     assert caps["supports_point_prompts"] is True
     assert caps["supports_text_prompts"] is False
-
-
-def test_resolve_clipseg_flips_capability_flags():
-    info = _fake_info(
-        repo_id="CIDAS/clipseg-rd64-refined",
-        tags=["image-segmentation"],
-    )
-    resolved = HF_PLUGIN["resolve"](
-        "CIDAS/clipseg-rd64-refined", None, info,
-    )
-    caps = resolved.manifest["capabilities"]
-    assert caps["supports_text_prompts"] is True
-    assert caps["supports_point_prompts"] is False
-    assert caps["supports_box_prompts"] is False
-    assert caps["supports_automatic"] is False
 
 
 def test_resolve_fallback_capabilities():
