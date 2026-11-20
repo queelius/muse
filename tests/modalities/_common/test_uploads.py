@@ -85,6 +85,13 @@ def test_decode_error_heuristic_accepts_decoder_rejections(exc):
     assert looks_like_audio_decode_error(exc)
 
 
+def test_decode_error_heuristic_matches_subclasses():
+    class EOFDecodeError(InvalidDataError):
+        pass
+
+    assert looks_like_audio_decode_error(EOFDecodeError("x"))
+
+
 def test_decode_error_heuristic_follows_the_cause_chain():
     try:
         try:

@@ -146,7 +146,7 @@ def looks_like_audio_decode_error(exc: BaseException) -> bool:
         seen.add(id(current))
         if isinstance(current, ImportError):
             return False
-        if type(current).__name__ in _DECODE_ERROR_TYPES:
+        if any(cls.__name__ in _DECODE_ERROR_TYPES for cls in type(current).__mro__):
             return True
         message = str(current).lower()
         if any(token in message for token in _DECODE_ERROR_TOKENS):
