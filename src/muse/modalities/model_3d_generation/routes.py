@@ -11,9 +11,9 @@ Two routes share this MIME tag (`3d/generation`):
     `supports_image_to_3d` on the manifest gates the route. Per-request
     size cap via `MUSE_3D_INPUT_MAX_BYTES` (default 20 MiB; over it is
     413 `payload_too_large`, an undecodable upload 400 `invalid_image`).
-    The image reaches the runtime in its decoded mode: TRELLIS and
-    Hunyuan3D use an alpha cutout when there is one, and TripoSR
-    converts to RGB itself.
+    The image reaches the runtime as RGBA when it has transparency (TRELLIS
+    and Hunyuan3D use the alpha cutout) and RGB otherwise (P, L, CMYK,
+    I;16 ... are normalized); TripoSR converts to RGB itself.
 
 Both routes run the backend call and the GLB envelope encoding off the
 event loop under the per-backend `_inference_lock` (auto-attached at
@@ -37,6 +37,18 @@ from muse.modalities.model_3d_generation.codec import encode_3d_response
 
 MODALITY = "3d/generation"
 _BYTES_SETTING = "MUSE_3D_INPUT_MAX_BYTES"
+
+
+def _has_transparency(image) -> bool:
+    return image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or (
+        "transparency" in image.info
+    )
+
+
+def _normalize_mode(image):
+    """RGBA when the image has transparency, else RGB (may be ``image``)."""
+    target = "RGBA" if _has_transparency(image) else "RGB"
+    return image if image.mode == target else image.convert(target)
 
 
 def _max_bytes() -> int:
@@ -160,14 +172,19 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         if seed is not None:
             kwargs["seed"] = seed
 
+        def _call() -> dict:
+            source = _normalize_mode(pil_image)
+            try:
+                results = backend.image_to_3d(source, **kwargs)
+            finally:
+                if source is not pil_image:
+                    source.close()
+            return encode_3d_response(
+                results, model_id=effective_id, response_format=response_format,
+            )
+
         body = await offload_call(
-            lambda: encode_3d_response(
-                backend.image_to_3d(pil_image, **kwargs),
-                model_id=effective_id,
-                response_format=response_format,
-            ),
-            lock=backend._inference_lock,
-            inputs=[pil_image],
+            _call, lock=backend._inference_lock, inputs=[pil_image],
         )
         return JSONResponse(content=body)
 

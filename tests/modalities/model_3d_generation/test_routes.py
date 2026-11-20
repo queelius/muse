@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from muse.core.registry import ModalityRegistry
@@ -623,3 +624,42 @@ def test_image_route_decodes_and_encodes_off_the_event_loop(monkeypatch):
     assert r.status_code == 200, r.text
     assert decoded == [False]
     assert encoded == [False]
+
+
+@pytest.mark.parametrize("mode, transparent, expected", [
+    ("RGBA", False, "RGBA"),
+    ("LA", False, "RGBA"),
+    ("P", True, "RGBA"),
+    ("RGB", False, "RGB"),
+    ("P", False, "RGB"),
+    ("L", False, "RGB"),
+    ("CMYK", False, "RGB"),
+    ("I;16", False, "RGB"),
+])
+def test_image_route_normalizes_mode_keeping_transparency(mode, transparent, expected):
+    """Runtimes get RGB, or RGBA when the image has transparency."""
+    from PIL import Image as PILImage
+    import io as _io
+
+    seen = []
+    backend = _FakeBackend()
+    real = backend.image_to_3d
+
+    def _spy(image, **kwargs):
+        seen.append(image.mode)
+        return real(image, **kwargs)
+
+    backend.image_to_3d = _spy
+    img = PILImage.new(mode, (2, 2))
+    buf = _io.BytesIO()
+    fmt = "TIFF" if mode in ("CMYK", "I;16") else "PNG"
+    if transparent:
+        img.save(buf, format=fmt, transparency=0)
+    else:
+        img.save(buf, format=fmt)
+    r = _client(backend).post(
+        "/v1/3d/from-image",
+        files={"image": ("x.img", buf.getvalue(), "application/octet-stream")},
+    )
+    assert r.status_code == 200, r.text
+    assert seen == [expected]
