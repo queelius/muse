@@ -2115,9 +2115,9 @@ class TestProbeAndPull:
             pull_model("qwen3-9b-q4", store=store, job=job)
 
         assert job.state == "done"
-        assert "stdout truncated" in job.result["stdout"]
-        assert "stdout-head" not in job.result["stdout"]
-        assert job.result["stdout"].endswith("stdout-tail")
+        assert any("stdout truncated" in line for line in job.log_lines)
+        assert not any("stdout-head" in line for line in job.log_lines)
+        assert "stdout-tail" in job.log_lines
         assert any("stderr truncated" in line for line in job.log_lines)
         assert job.log_lines[-1] == "stderr-tail"
         assert len(job.log_lines) <= 2000
@@ -2156,7 +2156,8 @@ class TestProbeAndPull:
             pull_model("qwen3-9b-q4", store=store, job=job)
 
         assert job.state == "done"
-        assert job.result["stdout"] == "stdout-tail"
+        # stdout lives only in log_lines; result is not a second copy.
+        assert job.result == {"op": "pull", "returncode": 0}
         assert job.log_lines == ["stdout-tail", "stderr-tail"]
 
     def test_pathological_line_count_is_bounded_with_marker(
