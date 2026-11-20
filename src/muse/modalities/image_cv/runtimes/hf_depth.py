@@ -96,8 +96,8 @@ class HFDepthRuntime:
             )
         self.model_id = model_id
         self.metric_depth = bool(metric_depth)
-        self._device = _select_device(device)
-        self._dtype = _resolve_dtype(dtype)
+        self._device = select_device(device, torch_module=torch)
+        self._dtype = dtype_for_name(dtype, torch_module=torch)
         src = local_dir or hf_repo
         with LoadTimer(f"loading depth model from {src}", logger):
             self._processor = AutoImageProcessor.from_pretrained(src)
@@ -139,12 +139,3 @@ class HFDepthRuntime:
         )
 
 
-# Thin delegators preserved for test imports (matches sibling runtimes;
-# the meta-test in tests/core/test_runtime_helpers_meta.py flags
-# re-implementations).
-def _select_device(device: str) -> str:
-    return select_device(device, torch_module=torch)
-
-
-def _resolve_dtype(dtype: str):
-    return dtype_for_name(dtype, torch_module=torch)

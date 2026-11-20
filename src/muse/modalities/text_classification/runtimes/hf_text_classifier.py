@@ -70,7 +70,7 @@ class HFTextClassifier:
                 "install `transformers` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._max_length = max_length
 
         src = local_dir or hf_repo
@@ -129,6 +129,3 @@ class HFTextClassifier:
         return results
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)

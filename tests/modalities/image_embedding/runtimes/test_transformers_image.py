@@ -18,10 +18,11 @@ from muse.modalities.image_embedding.runtimes.transformers_image import (
     _detect_dimensions,
     _extract_embeddings,
     _load_processor,
-    _resolve_dtype,
-    _select_device,
-    _set_inference_mode,
     _truncate_and_renormalize,
+)
+import muse.modalities.image_embedding.runtimes.transformers_image as _runtime_module
+from muse.core.runtime_helpers import (
+    dtype_for_name, select_device, set_inference_mode,
 )
 
 
@@ -202,14 +203,14 @@ def test_embed_uses_get_image_features_for_clip_family():
 
 def test_select_device_auto_falls_back_to_cpu_with_no_torch():
     with patch.object(ie_mod, "torch", None):
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_picks_cuda():
     fake_torch = MagicMock()
     fake_torch.cuda.is_available.return_value = True
     with patch.object(ie_mod, "torch", fake_torch):
-        assert _select_device("auto") == "cuda"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cuda"
 
 
 def test_select_device_auto_picks_mps_when_cuda_absent():
@@ -217,17 +218,17 @@ def test_select_device_auto_picks_mps_when_cuda_absent():
     fake_torch.cuda.is_available.return_value = False
     fake_torch.backends.mps.is_available.return_value = True
     with patch.object(ie_mod, "torch", fake_torch):
-        assert _select_device("auto") == "mps"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "mps"
 
 
 def test_select_device_explicit_passes_through():
     with patch.object(ie_mod, "torch", MagicMock()):
-        assert _select_device("cuda:1") == "cuda:1"
+        assert select_device("cuda:1", torch_module=_runtime_module.torch) == "cuda:1"
 
 
 def test_resolve_dtype_returns_none_without_torch():
     with patch.object(ie_mod, "torch", None):
-        assert _resolve_dtype("float16") is None
+        assert dtype_for_name("float16", torch_module=_runtime_module.torch) is None
 
 
 def test_resolve_dtype_maps_known_strings():
@@ -236,19 +237,19 @@ def test_resolve_dtype_maps_known_strings():
     fake_torch.bfloat16 = "BF16"
     fake_torch.float32 = "FP32"
     with patch.object(ie_mod, "torch", fake_torch):
-        assert _resolve_dtype("float16") == "FP16"
-        assert _resolve_dtype("fp16") == "FP16"
-        assert _resolve_dtype("bfloat16") == "BF16"
-        assert _resolve_dtype("bf16") == "BF16"
-        assert _resolve_dtype("float32") == "FP32"
+        assert dtype_for_name("float16", torch_module=_runtime_module.torch) == "FP16"
+        assert dtype_for_name("fp16", torch_module=_runtime_module.torch) == "FP16"
+        assert dtype_for_name("bfloat16", torch_module=_runtime_module.torch) == "BF16"
+        assert dtype_for_name("bf16", torch_module=_runtime_module.torch) == "BF16"
+        assert dtype_for_name("float32", torch_module=_runtime_module.torch) == "FP32"
         # Unknown maps to safe default float32.
-        assert _resolve_dtype("unknown") == "FP32"
+        assert dtype_for_name("unknown", torch_module=_runtime_module.torch) == "FP32"
 
 
 def test_set_inference_mode_invokes_method_when_present():
     """Helper must call the model's inference-switch method when callable."""
     m = MagicMock()
-    _set_inference_mode(m)
+    set_inference_mode(m)
     # Verify the method was called exactly once.
     assert m.eval.call_count == 1
 
@@ -258,7 +259,7 @@ def test_set_inference_mode_safe_when_method_missing():
         pass
 
     # Must not raise.
-    _set_inference_mode(NoEval())
+    set_inference_mode(NoEval())
 
 
 def test_extract_embeddings_clip_branch_returns_image_embeds():

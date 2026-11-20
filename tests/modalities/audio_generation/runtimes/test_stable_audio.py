@@ -14,6 +14,10 @@ from muse.modalities.audio_generation.runtimes.stable_audio import (
     StableAudioRuntime,
     _normalize_pipeline_output,
 )
+import muse.modalities.audio_generation.runtimes.stable_audio as _runtime_module
+from muse.core.runtime_helpers import (
+    dtype_for_name, select_device, set_inference_mode,
+)
 
 
 def _patched_runtime(audios_return=None, *, sample_rate=44100, **runtime_kwargs):
@@ -321,29 +325,20 @@ def test_generate_handles_bare_batched_torch_tensor_output():
 
 def test_select_device_auto_with_no_torch_returns_cpu():
     with patch.object(sa_mod, "torch", None):
-        from muse.modalities.audio_generation.runtimes.stable_audio import (
-            _select_device,
-        )
-        assert _select_device("auto") == "cpu"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cpu"
 
 
 def test_select_device_auto_picks_cuda_when_available():
     fake = MagicMock()
     fake.cuda.is_available.return_value = True
     with patch.object(sa_mod, "torch", fake):
-        from muse.modalities.audio_generation.runtimes.stable_audio import (
-            _select_device,
-        )
-        assert _select_device("auto") == "cuda"
+        assert select_device("auto", torch_module=_runtime_module.torch) == "cuda"
 
 
 def test_select_device_explicit_passes_through():
     with patch.object(sa_mod, "torch", MagicMock()):
-        from muse.modalities.audio_generation.runtimes.stable_audio import (
-            _select_device,
-        )
-        assert _select_device("cpu") == "cpu"
-        assert _select_device("cuda") == "cuda"
+        assert select_device("cpu", torch_module=_runtime_module.torch) == "cpu"
+        assert select_device("cuda", torch_module=_runtime_module.torch) == "cuda"
 
 
 def test_normalize_pipeline_output_mono():

@@ -68,21 +68,6 @@ def _ensure_deps() -> None:
             logger.debug("BartSeq2SeqRuntime: transformers unavailable: %s", e)
 
 
-def _resolve_dtype(dtype: str) -> Any:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return dtype_for_name(dtype, torch)
-
-
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
-def _set_inference_mode(model: Any) -> None:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    set_inference_mode(model)
-
-
 class BartSeq2SeqRuntime:
     """Generic seq2seq summarizer runtime."""
 
@@ -108,7 +93,7 @@ class BartSeq2SeqRuntime:
                 "or install `transformers` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._dtype = dtype
         self._default_length = default_length
         self._default_format = default_format
@@ -120,13 +105,13 @@ class BartSeq2SeqRuntime:
             src, self._device, dtype, max_input_tokens,
         )
         self._tokenizer = AutoTokenizer.from_pretrained(src)
-        torch_dtype = _resolve_dtype(dtype)
+        torch_dtype = dtype_for_name(dtype, torch_module=torch)
         kwargs = {}
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype
         self._model = AutoModelForSeq2SeqLM.from_pretrained(src, **kwargs)
         self._model = self._model.to(self._device)
-        _set_inference_mode(self._model)
+        set_inference_mode(self._model)
 
     def summarize(
         self,

@@ -46,11 +46,6 @@ def _ensure_deps() -> None:
             )
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
 class DiffusersUpscaleRuntime:
     """Image super-resolution runtime backed by diffusers' upscaler pipeline.
 
@@ -94,7 +89,7 @@ class DiffusersUpscaleRuntime:
         )
         self._default_steps = default_steps
         self._default_guidance = default_guidance
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._src = local_dir or hf_repo
         self._dtype = dtype
 

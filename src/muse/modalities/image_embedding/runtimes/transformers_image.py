@@ -66,21 +66,6 @@ def _ensure_deps() -> None:
             logger.debug("ImageEmbeddingRuntime: transformers unavailable: %s", e)
 
 
-def _resolve_dtype(dtype: str) -> Any:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return dtype_for_name(dtype, torch)
-
-
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
-def _set_inference_mode(model: Any) -> None:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    set_inference_mode(model)
-
-
 def _load_processor(src: str) -> Any:
     """Load AutoProcessor; fall back to AutoFeatureExtractor on failure.
 
@@ -201,7 +186,7 @@ class ImageEmbeddingRuntime:
                 "or install `transformers` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._dtype = dtype
         self._image_size = image_size
 
@@ -211,13 +196,13 @@ class ImageEmbeddingRuntime:
             src, self._device, dtype,
         )
         self._processor = _load_processor(src)
-        torch_dtype = _resolve_dtype(dtype)
+        torch_dtype = dtype_for_name(dtype, torch_module=torch)
         kwargs = {}
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype
         self._model = AutoModel.from_pretrained(src, **kwargs)
         self._model = self._model.to(self._device)
-        _set_inference_mode(self._model)
+        set_inference_mode(self._model)
         self.dimensions = _detect_dimensions(self._model)
 
     def embed(

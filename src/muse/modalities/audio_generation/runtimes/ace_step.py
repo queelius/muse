@@ -89,11 +89,6 @@ def _ensure_deps() -> None:
             logger.debug("AceStepRuntime: soundfile unavailable: %s", e)
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
 def _acestep_dtype(name: str) -> str:
     """Map a muse dtype alias to ACE-Step's expected dtype string."""
     return _ACESTEP_DTYPES.get(str(name).lower(), "bfloat16")
@@ -169,7 +164,7 @@ class AceStepRuntime:
                 "`muse pull ace-step-v1-3.5b` to install deps into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._default_duration = default_duration
         self._default_steps = default_steps
         self._default_guidance = default_guidance

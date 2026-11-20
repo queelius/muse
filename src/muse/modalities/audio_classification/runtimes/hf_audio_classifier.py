@@ -105,8 +105,8 @@ class HFAudioClassifier:
         self.model_id = model_id
         # Audio past this is never decoded (capabilities.max_duration_seconds).
         self._max_duration_seconds = float(max_duration_seconds)
-        self._device = _select_device(device)
-        self._dtype = _resolve_dtype(dtype)
+        self._device = select_device(device, torch_module=torch)
+        self._dtype = dtype_for_name(dtype, torch_module=torch)
         src = local_dir or hf_repo
         with LoadTimer(f"loading audio classifier from {src}", logger):
             self._extractor = AutoFeatureExtractor.from_pretrained(src)
@@ -173,9 +173,3 @@ class HFAudioClassifier:
         )]
 
 
-def _select_device(device: str) -> str:
-    return select_device(device, torch_module=torch)
-
-
-def _resolve_dtype(dtype: str):
-    return dtype_for_name(dtype, torch_module=torch)

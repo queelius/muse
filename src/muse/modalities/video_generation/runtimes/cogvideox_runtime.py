@@ -42,11 +42,6 @@ def _ensure_deps() -> None:
             logger.debug("cogvideox: CogVideoXPipeline unavailable: %s", e)
 
 
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
 class CogVideoXRuntime:
     """CogVideoX runtime over diffusers.CogVideoXPipeline.
 
@@ -92,7 +87,7 @@ class CogVideoXRuntime:
         self._default_size = tuple(default_size)
         self._default_steps = default_steps
         self._default_guidance = default_guidance
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
 
         import muse.modalities.video_generation.runtimes.cogvideox_runtime as _mod
         _torch = _mod.torch

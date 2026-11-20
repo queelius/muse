@@ -82,21 +82,6 @@ def _ensure_deps() -> None:
             logger.debug("AudioEmbeddingRuntime: librosa unavailable: %s", e)
 
 
-def _resolve_dtype(dtype: str) -> Any:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return dtype_for_name(dtype, torch)
-
-
-def _select_device(device: str) -> str:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    return select_device(device, torch_module=torch)
-
-
-def _set_inference_mode(model: Any) -> None:
-    """Thin delegator preserved for test imports. Real logic in runtime_helpers."""
-    set_inference_mode(model)
-
-
 def _load_processor(
     src: str, *, trust_remote_code: bool = False, **load_kwargs: Any,
 ) -> Any:
@@ -254,7 +239,7 @@ class AudioEmbeddingRuntime:
                 "or install `librosa` into this venv"
             )
         self.model_id = model_id
-        self._device = _select_device(device)
+        self._device = select_device(device, torch_module=torch)
         self._dtype = dtype
         self._sample_rate = int(sample_rate)
         self._max_duration_seconds = float(max_duration_seconds)
@@ -271,7 +256,7 @@ class AudioEmbeddingRuntime:
         self._processor = _load_processor(
             src, trust_remote_code=self._trust_remote_code, **hub_kwargs,
         )
-        torch_dtype = _resolve_dtype(dtype)
+        torch_dtype = dtype_for_name(dtype, torch_module=torch)
         kwargs: dict[str, Any] = dict(hub_kwargs)
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype
@@ -279,7 +264,7 @@ class AudioEmbeddingRuntime:
             kwargs["trust_remote_code"] = True
         self._model = AutoModel.from_pretrained(src, **kwargs)
         self._model = self._model.to(self._device)
-        _set_inference_mode(self._model)
+        set_inference_mode(self._model)
         detected = _detect_dimensions(self._model)
         if dimensions is not None and dimensions > 0:
             self.dimensions = int(dimensions)
