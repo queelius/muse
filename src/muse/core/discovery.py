@@ -384,20 +384,18 @@ def modality_discovery(dirs: list[Path] | None = None) -> dict[str, dict]:
     declarations are logged and skipped.
 
     Each returned route gains ``model_optional``: true when the same package
-    lists its path in MODEL_OPTIONAL_PATHS (the gateway then picks the
-    modality's first enabled model for a request without ``model``). The
-    result is a copy; the cached declarations are never mutated.
+    lists its path in MODEL_OPTIONAL_PATHS, i.e. exactly when the gateway's
+    default-model seam (`model_optional_paths`) picks the modality's first
+    enabled model for a request without ``model``. The declarations are
+    copied, never mutated.
     """
-    optional: dict[str, set[str]] = {}
-    for tag, value in _declarations("MODEL_OPTIONAL_PATHS", dirs):
-        if isinstance(value, (tuple, list)):
-            optional.setdefault(tag, {p for p in value if isinstance(p, str)})
+    optional = model_optional_paths(dirs)
     out: dict[str, dict] = {}
     for tag, value in _declarations("DISCOVERY", dirs):
         if _valid_discovery(value):
             value = copy.deepcopy(value)
             for route in value["routes"]:
-                route["model_optional"] = route["path"] in optional.get(tag, set())
+                route["model_optional"] = optional.get(route["path"]) == tag
             out[tag] = value
         else:
             logger.warning("ignoring malformed DISCOVERY for %s", tag)

@@ -170,7 +170,6 @@ class MCPServer:
         from muse.mcp.tools import ADMIN_TOOLS
 
         self.client = client
-        self.filter_kind = filter_kind
         self._admin = list(ADMIN_TOOLS) if filter_kind in ("admin", "all") else []
         self._admin_handlers = {e.tool.name: e.handler for e in self._admin}
         self._inference = filter_kind in ("inference", "all")
@@ -186,9 +185,8 @@ class MCPServer:
         self._wire_handlers()
 
     def _instructions(self) -> str:
-        if self._inference and self._admin:
-            return INSTRUCTIONS
-        return _INFERENCE_INSTRUCTIONS if self._inference else _ADMIN_INSTRUCTIONS
+        return ((_INFERENCE_INSTRUCTIONS if self._inference else "")
+                + (_ADMIN_INSTRUCTIONS if self._admin else ""))
 
     # ---- discovery cache ----
 

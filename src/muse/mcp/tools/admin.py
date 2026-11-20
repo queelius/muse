@@ -134,18 +134,18 @@ def _handle_get_jobs(client: MuseClient, args: dict) -> list[dict]:
 # out of service, and pull is destructive too: a re-pull replaces weights and
 # a failed probe leaves a working model disabled. Only the Hub-facing tools
 # (search, pull) reach outside the local muse server.
-_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
-                        idempotentHint=True, openWorldHint=False)
-_READ_WEB = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
-                            idempotentHint=True, openWorldHint=True)
-_PULL = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
-                        idempotentHint=True, openWorldHint=True)
-_ENABLE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
-                          idempotentHint=True, openWorldHint=False)
-_DISABLE = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
-                           idempotentHint=True, openWorldHint=False)
-_REMOVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
-                          idempotentHint=True, openWorldHint=False)
+def _hints(*, read_only: bool = False, destructive: bool = False,
+           hub: bool = False) -> ToolAnnotations:
+    # Every admin tool is safe to repeat.
+    return ToolAnnotations(readOnlyHint=read_only, destructiveHint=destructive,
+                           idempotentHint=True, openWorldHint=hub)
+
+
+_READ = _hints(read_only=True)
+_READ_HUB = _hints(read_only=True, hub=True)
+_CHANGE = _hints()
+_DESTRUCTIVE = _hints(destructive=True)
+_DESTRUCTIVE_HUB = _hints(destructive=True, hub=True)
 
 ADMIN_TOOLS.extend([
     ToolEntry(
@@ -212,7 +212,7 @@ ADMIN_TOOLS.extend([
         tool=Tool(
             name="muse_search_models",
             title="Search pullable models",
-            annotations=_READ_WEB,
+            annotations=_READ_HUB,
             description=(
                 "Search HuggingFace for muse-pullable models matching a "
                 "query. Use this to discover candidate models before "
@@ -251,7 +251,7 @@ ADMIN_TOOLS.extend([
         tool=Tool(
             name="muse_pull_model",
             title="Pull a model",
-            annotations=_PULL,
+            annotations=_DESTRUCTIVE_HUB,
             description=(
                 "Download model weights and install per-model "
                 "dependencies. Long-running: returns a job_id; poll "
@@ -280,7 +280,7 @@ ADMIN_TOOLS.extend([
         tool=Tool(
             name="muse_remove_model",
             title="Remove a model",
-            annotations=_REMOVE,
+            annotations=_DESTRUCTIVE,
             description=(
                 "Remove a model from muse's catalog. Pass purge=true "
                 "to also delete its per-model venv. Refuses to remove "
@@ -308,7 +308,7 @@ ADMIN_TOOLS.extend([
         tool=Tool(
             name="muse_enable_model",
             title="Enable a model",
-            annotations=_ENABLE,
+            annotations=_CHANGE,
             description=(
                 "Enable a pulled model: marks it enabled in the catalog "
                 "and loads it into a worker. Not needed to use an enabled "
@@ -329,7 +329,7 @@ ADMIN_TOOLS.extend([
         tool=Tool(
             name="muse_disable_model",
             title="Disable a model",
-            annotations=_DISABLE,
+            annotations=_DESTRUCTIVE,
             description=(
                 "Disable a model: marks it disabled in the catalog and "
                 "unloads it from its worker, so requests for it fail until "
@@ -349,7 +349,7 @@ ADMIN_TOOLS.extend([
         tool=Tool(
             name="muse_probe_model",
             title="Probe model memory",
-            annotations=_ENABLE,
+            annotations=_CHANGE,
             description=(
                 "Measure a model's VRAM/RAM by loading + running "
                 "representative inference. Long-running: returns "

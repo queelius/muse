@@ -105,7 +105,6 @@ class GeneratedTool:
     name: str
     tool: types.Tool
     route: dict                      # the DISCOVERY route entry
-    modality: str = ""
     required_files: tuple[str, ...] = ()
     fixed: dict = field(default_factory=dict)   # body values always sent
     image_output: bool = False
@@ -274,19 +273,17 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     # against the client's cached schema, so an enum would reject a model
     # enabled mid-session. The server is the authority on unknown ids.
     optional_model = bool(route.get("model_optional"))
-    model_prop = {"type": "string", "minLength": 1, "description": (
+    description = (
         "Model id. Serving now: " + ", ".join(ids) + " (see the list above; "
         "a model enabled later works too)." if ids else
-        "Model id; no enabled model serves this route right now.")}
+        "Model id; no enabled model serves this route right now.")
     if optional_model:
-        model_prop["description"] = (
-            "Optional: omit it and muse uses the first enabled model of this "
-            "modality. " + model_prop["description"])
+        description = ("Optional: omit it and muse uses the first enabled model "
+                       "of this modality. " + description)
+    required = [r for r in required if r != "model"]
     if ids and not optional_model:
         required.append("model")
-    else:
-        required = [r for r in required if r != "model"]
-    props["model"] = model_prop
+    props["model"] = {"type": "string", "minLength": 1, "description": description}
     has_media = _has_media(route)
     props["out_path"] = {"type": "string", "description": (
         "File for the media output, replaced if it exists (later outputs get "
@@ -305,7 +302,7 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
                       inputSchema=schema, outputSchema=OUTPUT_SCHEMA,
                       annotations=_annotations(route, props))
     return GeneratedTool(name=route["mcp_tool"], tool=tool, route=copy.deepcopy(route),
-                         modality=mod["modality"], required_files=tuple(required_files),
+                         required_files=tuple(required_files),
                          fixed=fixed, image_output=image_output, aliases=aliases,
                          defaults=defaults)
 
@@ -433,23 +430,24 @@ def _take_files(gen: GeneratedTool, args: dict, multipart: bool) -> list[tuple]:
             else:
                 parts.extend((f, _fetch_input(u, name)) for u in url)
         elif many:
-            args[name] = ([files.as_data_url(*_read(p, name)) for p in path]
+            args[name] = ([_path_data_url(p, name) for p in path]
                           if path else list(url))
         elif multipart:
             parts.append((name, _read_named(path, name) if path else _fetch_input(url, name)))
         else:
-            args[name] = files.as_data_url(*_read(path, name)) if path else url
+            args[name] = _path_data_url(path, name) if path else url
     return parts
 
 
 def _read_named(path: str, name: str) -> tuple[str, bytes, str]:
+    """``(filename, data, mime)`` for a local path input."""
     data, filename, mime = files.read_input(path, field=name, max_bytes=MAX_INPUT_BYTES)
     return filename, data, mime
 
 
-def _read(path: str, name: str) -> tuple[bytes, str]:
-    data, _, mime = files.read_input(path, field=name, max_bytes=MAX_INPUT_BYTES)
-    return data, mime
+def _path_data_url(path: str, name: str) -> str:
+    _, data, mime = _read_named(path, name)
+    return files.as_data_url(data, mime)
 
 
 def _form(value: Any) -> str | list[str]:

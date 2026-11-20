@@ -261,24 +261,6 @@ def filter_document(
     return {k: out[k] for k in order}
 
 
-def _model_line(entry: dict) -> str:
-    """``id (tier; state): summary`` for one enabled model."""
-    state = "loaded" if entry.get("loaded") else "cold"
-    seconds = entry.get("last_cold_load_seconds")
-    if not entry.get("loaded") and isinstance(seconds, (int, float)):
-        state += f", last load {seconds:g} s"
-    if entry.get("unservable_reason"):
-        # The first clause ("model files are missing"); the full reason is in
-        # the capabilities document.
-        reason = str(entry["unservable_reason"]).split(";")[0].strip()
-        if len(reason) > 80:
-            reason = reason[:77].rstrip() + "..."
-        state = f"unservable: {reason}"
-    tier = entry.get("quality_tier") or "untiered"
-    summary = _one_line(entry.get("summary"), LLMS_SUMMARY_CHARS)
-    return f"{entry['id']} ({tier}; {state})" + (f": {summary}" if summary else "")
-
-
 LLMS_SUMMARY_CHARS = 120
 LLMS_MODELS_PER_MODALITY = 8
 _TIER_ORDER = {"best": 0, "good": 1, "draft": 2}
@@ -286,20 +268,32 @@ _TIER_ORDER = {"best": 0, "good": 1, "draft": 2}
 
 def _one_line(text: Any, limit: int) -> str:
     """``text`` folded onto one line, cut to ``limit`` chars with an ellipsis."""
-    if not isinstance(text, str):
-        return ""
-    flat = " ".join(text.split())
-    if len(flat) <= limit:
-        return flat
-    return flat[:limit - 3].rstrip() + "..."
+    flat = " ".join(text.split()) if isinstance(text, str) else ""
+    return flat if len(flat) <= limit else flat[:limit - 3].rstrip() + "..."
 
 
-def _shown_models(entries: list[dict]) -> list[dict]:
-    """Loaded models first, then by quality tier (best, good, draft,
-    untiered), then id: the ones an agent should try first."""
-    return sorted(entries, key=lambda e: (
-        not e.get("loaded"), _TIER_ORDER.get(e.get("quality_tier"), 3),
-        str(e.get("id"))))
+def _model_line(entry: dict) -> str:
+    """``id (tier; state): summary`` for one enabled model."""
+    if entry.get("unservable_reason"):
+        # Its first clause ("model files are missing"); the full reason is
+        # in the capabilities document.
+        reason = str(entry["unservable_reason"]).split(";")[0]
+        state = f"unservable: {_one_line(reason, 80)}"
+    elif entry.get("loaded"):
+        state = "loaded"
+    else:
+        seconds = entry.get("last_cold_load_seconds")
+        state = "cold" + (f", last load {seconds:g} s"
+                          if isinstance(seconds, (int, float)) else "")
+    tier = entry.get("quality_tier") or "untiered"
+    summary = _one_line(entry.get("summary"), LLMS_SUMMARY_CHARS)
+    return f"{entry['id']} ({tier}; {state})" + (f": {summary}" if summary else "")
+
+
+def _first_to_try(entry: dict) -> tuple:
+    """Sort key: loaded first, then best, good, draft, untiered, then id."""
+    return (not entry.get("loaded"), _TIER_ORDER.get(entry.get("quality_tier"), 3),
+            str(entry.get("id")))
 
 
 def render_llms_txt(doc: dict) -> str:
@@ -378,18 +372,14 @@ def render_llms_txt(doc: dict) -> str:
                 notes.append("model optional")
             note = f" ({'; '.join(notes)})" if notes else ""
             lines.append(f"  - `{r['method']} {r['path']}`{note}")
-        entries = [by_id.get(mid) or {"id": mid} for mid in m.get("models") or []]
-        shown = _shown_models(entries)
-        for entry in shown[:LLMS_MODELS_PER_MODALITY]:
-            lines.append(f"  - model {_model_line(entry)}")
-        if len(shown) > LLMS_MODELS_PER_MODALITY:
-            lines.append(f"  - and {len(shown) - LLMS_MODELS_PER_MODALITY} more"
+        entries = sorted((by_id.get(mid) or {"id": mid} for mid in m["models"]),
+                         key=_first_to_try)
+        lines += [f"  - model {_model_line(e)}"
+                  for e in entries[:LLMS_MODELS_PER_MODALITY]]
+        if len(entries) > LLMS_MODELS_PER_MODALITY:
+            lines.append(f"  - and {len(entries) - LLMS_MODELS_PER_MODALITY} more"
                          f" (see {caps}?modality={tag})")
-    lines += [
-        "",
-        "## Optional",
-        "",
-    ]
+    lines += ["", "## Optional", ""]
     if idle:
         lines.append(
             "- Supported by muse, no model enabled here (an operator can"
