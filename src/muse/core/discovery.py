@@ -17,6 +17,7 @@ a warning log.
 """
 from __future__ import annotations
 
+import copy
 import ast
 import importlib.util
 import logging
@@ -360,10 +361,22 @@ def modality_discovery(dirs: list[Path] | None = None) -> dict[str, dict]:
     a well-formed DISCOVERY literal (what the capabilities document, OpenAPI
     descriptions and generated MCP tools are built from). Malformed
     declarations are logged and skipped.
+
+    Each returned route gains ``model_optional``: true when the same package
+    lists its path in MODEL_OPTIONAL_PATHS (the gateway then picks the
+    modality's first enabled model for a request without ``model``). The
+    result is a copy; the cached declarations are never mutated.
     """
+    optional: dict[str, set[str]] = {}
+    for tag, value in _declarations("MODEL_OPTIONAL_PATHS", dirs):
+        if isinstance(value, (tuple, list)):
+            optional.setdefault(tag, {p for p in value if isinstance(p, str)})
     out: dict[str, dict] = {}
     for tag, value in _declarations("DISCOVERY", dirs):
         if _valid_discovery(value):
+            value = copy.deepcopy(value)
+            for route in value["routes"]:
+                route["model_optional"] = route["path"] in optional.get(tag, set())
             out[tag] = value
         else:
             logger.warning("ignoring malformed DISCOVERY for %s", tag)
