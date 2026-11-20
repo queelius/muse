@@ -70,7 +70,9 @@ def _load(name: str, wav_path: Path, json_path: Path, *, read_only: bool) -> Sto
         sample_rate = int(meta["sample_rate"])
         duration = float(meta["duration_seconds"])
     except FileNotFoundError as exc:
-        raise VoiceUnreadableError(f"voice {name!r} is incomplete: {exc}") from exc
+        raise VoiceUnreadableError(f"voice {name!r} is incomplete") from exc
+    except OSError as exc:
+        raise VoiceUnreadableError(f"voice {name!r} cannot be read") from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise VoiceUnreadableError(f"voice {name!r} metadata is unreadable: {exc}") from exc
     return StoredVoice(
@@ -107,7 +109,7 @@ class VoiceStore:
         self.root = Path(root)
         self._bundled = dict(bundled or {})
         self._max = max_voices
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # re-entrant: save/delete call names()/get()
 
     # -- reading -----------------------------------------------------------
 
@@ -116,36 +118,48 @@ class VoiceStore:
             entries = sorted(self.root.iterdir())
         except (FileNotFoundError, NotADirectoryError):
             return []
+        except OSError as exc:
+            raise VoiceUnreadableError("voices directory cannot be read") from exc
         names = []
         for d in entries:
-            if not NAME_PATTERN.match(d.name) or d.is_symlink() or not d.is_dir():
-                continue
-            if not (d / _WAV).is_file():
-                continue
             try:
+                if not NAME_PATTERN.match(d.name) or d.is_symlink() or not d.is_dir():
+                    continue
+                if not (d / _WAV).is_file():
+                    continue
                 json.loads(_read_file(d / _JSON)[0].decode("utf-8"))
             except (VoiceUnreadableError, FileNotFoundError, ValueError):
                 continue
+            except OSError as exc:
+                raise VoiceUnreadableError("voices directory cannot be read") from exc
             names.append(d.name)
         return names
 
     def names(self) -> list[str]:
-        return sorted(self._bundled) + [
-            n for n in self._saved_names() if n not in self._bundled]
+        with self._lock:
+            return sorted(self._bundled) + [
+                n for n in self._saved_names() if n not in self._bundled]
 
     def _saved_dir(self, name: str) -> Path:
         if not isinstance(name, str) or not NAME_PATTERN.match(name):
             raise UnknownVoiceError(name, self.names())
         d = self.root / name
-        if d.is_symlink() or not d.is_dir():
+        try:
+            missing = d.is_symlink() or not d.is_dir()
+        except OSError as exc:
+            raise VoiceUnreadableError("voices directory cannot be read") from exc
+        if missing:
             raise UnknownVoiceError(name, self.names())
         return d
 
     def get(self, name: str) -> StoredVoice:
         if name in self._bundled:
             return self._bundled[name]
-        d = self._saved_dir(name)
-        return _load(name, d / _WAV, d / _JSON, read_only=False)
+        # Serialised with save/delete so a swap can't expose a missing
+        # directory or pair one version's transcript with another's audio.
+        with self._lock:
+            d = self._saved_dir(name)
+            return _load(name, d / _WAV, d / _JSON, read_only=False)
 
     # -- writing -----------------------------------------------------------
 

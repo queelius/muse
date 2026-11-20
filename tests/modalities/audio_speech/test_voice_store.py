@@ -141,3 +141,82 @@ def test_wav_is_pcm16_full_scale(tmp_path):
         assert w.getsampwidth() == 2 and w.getframerate() == 24000 and w.getnchannels() == 1
         frames = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
     assert frames.max() == 32767
+
+
+def test_get_blocks_while_save_holds_lock(tmp_path):
+    import threading
+    store = VoiceStore(tmp_path)
+    store.save("a", _secs(), 24000, "x")
+    done = threading.Event()
+
+    def reader():
+        store.get("a")
+        done.set()
+
+    with store._lock:
+        t = threading.Thread(target=reader)
+        t.start()
+        assert not done.wait(0.3)
+    t.join(5)
+    assert done.is_set()
+
+
+def test_names_blocks_while_lock_held(tmp_path):
+    import threading
+    store = VoiceStore(tmp_path)
+    done = threading.Event()
+    t = threading.Thread(target=lambda: (store.names(), done.set()))
+    with store._lock:
+        t.start()
+        assert not done.wait(0.3)
+    t.join(5)
+    assert done.is_set()
+
+
+def test_overwrite_failure_rolls_back_old_voice(tmp_path, monkeypatch):
+    import os
+    store = VoiceStore(tmp_path)
+    first = store.save("a", _secs(), 24000, "one")
+    real = os.replace
+    calls = []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) == 2:  # the tmp -> final step
+            raise OSError("boom")
+        return real(src, dst)
+
+    monkeypatch.setattr("muse.modalities.audio_speech.voices.os.replace", flaky)
+    with pytest.raises(OSError):
+        store.save("a", _secs(3.0), 24000, "two", overwrite=True)
+    monkeypatch.undo()
+    assert store.get("a").sha256 == first.sha256
+    assert [p.name for p in tmp_path.iterdir()] == ["a"]
+
+
+def test_permission_error_on_root_is_voice_unreadable(tmp_path, monkeypatch):
+    from pathlib import Path
+    store = VoiceStore(tmp_path)
+
+    def deny(self):
+        raise PermissionError("nope /secret/path")
+
+    monkeypatch.setattr(Path, "iterdir", deny)
+    with pytest.raises(VoiceUnreadableError) as e:
+        store.names()
+    assert str(tmp_path) not in str(e.value)
+
+
+def test_permission_error_on_entry_is_voice_unreadable(tmp_path, monkeypatch):
+    from pathlib import Path
+    store = VoiceStore(tmp_path)
+    store.save("a", _secs(), 24000, "x")
+
+    def deny(self):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(Path, "is_dir", deny)
+    with pytest.raises(VoiceUnreadableError):
+        store.names()
+    with pytest.raises(VoiceUnreadableError):
+        store.get("a")
