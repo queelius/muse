@@ -734,8 +734,8 @@ Commits follow Conventional Commits with a scope (`feat(pixelart): ...`,
 - **FakeModel-pattern tests:** Server and router tests use plain classes that
   satisfy the modality protocol, no real weights. Backend tests also mock
   heavy libs (see `tests/modalities/image_generation/runtimes/test_diffusers.py`).
-- **Registry is a singleton at module level** (`muse.core.registry.registry`),
-  but tests create their own `ModalityRegistry()` instances to avoid coupling.
+- **No registry singleton:** each worker builds its own `ModalityRegistry()`,
+  and tests create their own instances.
 - **Audio is float32 in `[-1, 1]`** at the protocol boundary; codec converts
   to int16 PCM at output. Scaling uses `* 32768` + `np.clip` to reach full
   int16 range `[-32768, 32767]`.

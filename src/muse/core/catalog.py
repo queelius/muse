@@ -75,7 +75,6 @@ from muse.core.catalog_pull import (
 )
 from muse.core.catalog_remove import (
     _other_catalog_path_reference,
-    _owned_weights_purge_path,
     _purge_owned_directory,
     remove,
 )

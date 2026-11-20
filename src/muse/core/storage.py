@@ -19,19 +19,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from muse.core.catalog import (
-    _CATALOG_WRITE_LOCK,
-    _catalog_dir,
+from muse.core.catalog_locks import (
     _model_pull_lock,
     _model_resource_lease,
+    _storage_cache_lock,
+)
+from muse.core.catalog_remove import (
     _owned_weights_purge_path,
     _purge_owned_directory,
-    _read_catalog,
-    _storage_cache_lock,
-    _validate_model_id_for_fs,
+)
+from muse.core.catalog_store import (
+    _CATALOG_WRITE_LOCK,
     CatalogError,
     ModelInUseError,
     StorageBusyError,
+    _catalog_dir,
+    _read_catalog,
+    _validate_model_id_for_fs,
 )
 _VENV_STAGING_RE = re.compile(
     r"^\.(?P<model>[A-Za-z0-9._-]+)\."

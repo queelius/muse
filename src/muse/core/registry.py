@@ -110,15 +110,6 @@ class ModalityRegistry:
         manifest = self.manifest(modality, model_id) or {}
         return manifest.get("capabilities") or {}
 
-    def set_default(self, modality: str, model_id: str) -> None:
-        if model_id not in self._models.get(modality, {}):
-            available = sorted(self._models.get(modality, {}))
-            raise KeyError(
-                f"model {model_id!r} not registered under {modality!r}; "
-                f"available: {available}"
-            )
-        self._defaults[modality] = model_id
-
     def list_models(self, modality: str) -> list[ModelInfo]:
         return [
             ModelInfo(
@@ -142,6 +133,3 @@ class ModalityRegistry:
     def modalities(self) -> list[str]:
         return list(self._models.keys())
 
-
-# Module-level singleton. Modalities register into this at server startup.
-registry = ModalityRegistry()
