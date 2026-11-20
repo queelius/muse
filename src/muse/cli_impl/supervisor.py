@@ -895,17 +895,29 @@ def _adopt_restarted_worker(state: "SupervisorState", spec: WorkerSpec) -> None:
     """Account a restarted worker whose models the director no longer tracks.
 
     Normally a no-op (the director kept its entries through the restart);
-    it matters for a worker revived after being declared dead.
+    it matters for a worker revived after being declared dead. A model whose
+    entry was kept blocked because the dead generation could not be
+    released is settled instead: this restart proved it released.
     """
     director = getattr(state, "director", None)
     adopt = getattr(director, "adopt_worker", None)
     loaded = getattr(director, "loaded", None)
     if adopt is None or not isinstance(loaded, dict):
         return
+    settle = getattr(director, "settle_restarted_worker", None)
     for model_id in list(spec.models):
         with director.lock:
-            if model_id in loaded:
-                continue
+            tracked = model_id in loaded
+        if tracked:
+            if settle is not None:
+                try:
+                    settle(model_id, worker_port=spec.port)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "could not settle restarted worker %r on port %d",
+                        model_id, spec.port, exc_info=True,
+                    )
+            continue
         try:
             manifest = backfill_manifest_memory(
                 get_manifest(model_id), model_id, supervisor_device=state.device,

@@ -342,6 +342,11 @@ so the next request cold-loads a replacement instead of getting 502s;
 /v1/models lists the model as `loaded: false`. `supervisor.revive_worker`
 (the admin restart route) gives only such a monitor-exhausted spec a fresh
 budget; a spec retained dead after an unproven teardown stays dead.
+A dead worker whose process could not be stopped keeps its models
+accounted but blocked (503 `model_cleanup_required`) until an admin-API
+disable retries the teardown or a monitor restart of that spec reaches
+readiness (`LoadDirector.settle_restarted_worker`); a catalog-only disable
+does not clear it.
 The monitor reads the dynamic loaded set from `state.director.loaded`
 on each tick, so admin-driven loads and evictions show up immediately.
 

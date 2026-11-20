@@ -624,7 +624,9 @@ class LoadDirector:
                 raise OperationError(
                     "model_cleanup_required",
                     f"model {model_id!r} has an uncertain worker from a "
-                    "failed load rollback; disable it before enabling",
+                    "failed load rollback; disable it through the admin API "
+                    "before enabling (a catalog-only disable does not clear "
+                    "this), or restart muse serve",
                     status=503,
                     retryable=True,
                 )
@@ -996,6 +998,42 @@ class LoadDirector:
             self._fire_capacity_listener()
         return [claim.model_id for claim in claims] + blocked
 
+    def settle_restarted_worker(self, model_id: str, *, worker_port: int) -> bool:
+        """Lift a stale cleanup block once the monitor restarted its worker.
+
+        ``forget_worker`` keeps a dead worker's entry, blocked as a failed
+        rollback, when its process could not be released. A later monitor
+        restart of that spec on the same port that reaches readiness proves
+        the old generation is gone (a spawn fails closed while it is still
+        held), so that is the cleanup the block was waiting for. The entry
+        is refreshed as idle; the block itself is lifted only when the
+        catalog still has the model enabled (as in ``finish_eviction``).
+        Returns False, changing nothing, for any other entry state.
+        """
+        enabled = self._catalog_enabled(model_id)
+        with self.lock:
+            entry = self.loaded.get(model_id)
+            if (
+                entry is None
+                or entry.worker_port != worker_port
+                or model_id not in self._failed_rollbacks
+                or model_id in self.in_flight_loads
+                or model_id in self._evicting
+                or model_id in self._eviction_claims
+                or model_id in self._worker_transitions
+            ):
+                return False
+            self._failed_rollbacks.discard(model_id)
+            if enabled:
+                self._blocked_models.discard(model_id)
+            now = time.monotonic()
+            entry.refcount = 0
+            entry.last_touched_at = now
+            entry.loaded_at = now
+            self._inflight_epoch += 1
+        self._fire_capacity_listener()
+        return True
+
     def adopt_worker(self, model_id: str, *, worker_port: int, manifest: dict) -> bool:
         """Account a worker the supervisor restarted outside a director load.
 
@@ -1320,7 +1358,9 @@ class LoadDirector:
                 raise OperationError(
                     "model_cleanup_required",
                     f"model {model_id!r} has a worker that could not be "
-                    "cleanly stopped; disable it to retry the cleanup",
+                    "cleanly stopped; disable it through the admin API to "
+                    "retry the cleanup (a catalog-only disable does not "
+                    "clear this), or restart muse serve",
                     status=503,
                     retryable=False,
                 )

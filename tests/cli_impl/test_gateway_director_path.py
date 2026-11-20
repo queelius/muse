@@ -262,6 +262,77 @@ def test_revived_worker_is_adopted_by_the_director():
     assert entry.refcount == 0 and entry.memory_gb == 1.0
 
 
+def test_revived_retained_worker_clears_its_stale_cleanup_block():
+    """A dead spec whose process could not be stopped leaves its model
+    blocked (model_cleanup_required). When that spec is revived and the
+    monitor's restart reaches readiness (a spawn fails closed unless the old
+    generation was released), the block is lifted and the entry refreshed."""
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    state.director.acquire(MODEL, manifest={
+        "capabilities": {"device": "cpu", "memory_gb": 1.0},
+    })
+    state.director.release(MODEL)
+    spec = state.workers[0]
+    spec.status = "dead"
+    spec.restart_exhausted = True
+    sup._reconcile_dead_worker(state, spec)  # process still retained
+    assert MODEL in state.director._failed_rollbacks
+
+    with spec.process_lock:
+        spec.process = None  # the cleanup later succeeded
+    assert sup.revive_worker(state, spec) is True
+
+    def respawn(s, **_kw):
+        s.process = object()
+
+    stop = threading.Event()
+    with patch("muse.cli_impl.supervisor.spawn_worker", side_effect=respawn), \
+         patch("muse.cli_impl.supervisor.wait_for_ready"), \
+         patch("muse.cli_impl.supervisor._worker_process_state_locked",
+               return_value=True), \
+         patch("muse.cli_impl.supervisor.check_worker_health", return_value=True):
+        monitor = threading.Thread(
+            target=sup._monitor_workers, args=(state.workers, stop),
+            kwargs={"interval": 0.01, "state": state}, daemon=True,
+        )
+        monitor.start()
+        deadline = time.monotonic() + 5.0
+        while spec.status != "running" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.05)
+        stop.set()
+        monitor.join(timeout=5.0)
+    assert spec.status == "running"
+    assert MODEL not in state.director._failed_rollbacks
+    assert MODEL not in state.director._blocked_models
+    state.director.acquire(MODEL, manifest={
+        "capabilities": {"device": "cpu", "memory_gb": 1.0},
+    })
+    assert state.director.loaded[MODEL].worker_port == spec.port
+
+
+def test_cleanup_required_message_names_the_admin_disable():
+    """A catalog-only disable does not clear the director's block, so the
+    error must say which disable does."""
+    state = SupervisorState(workers=[], device="cpu")
+    _wire(state)
+    state.director.acquire(MODEL, manifest={
+        "capabilities": {"device": "cpu", "memory_gb": 1.0},
+    })
+    state.director.release(MODEL)
+    spec = state.workers[0]
+    spec.status = "dead"
+    sup._reconcile_dead_worker(state, spec)
+    from muse.admin.operations import OperationError
+    with pytest.raises(OperationError) as exc:
+        state.director.acquire(MODEL, manifest={
+            "capabilities": {"device": "cpu", "memory_gb": 1.0},
+        })
+    assert "admin" in exc.value.message
+    assert "catalog-only" in exc.value.message
+
+
 # --- /v1/models and /health catalog enrichment runs off the loop (I4) ------
 
 
