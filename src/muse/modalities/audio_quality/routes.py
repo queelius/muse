@@ -9,8 +9,8 @@ from fastapi.responses import JSONResponse
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
+from muse.modalities._common.audio_decode import AudioDecodeError
 from muse.modalities._common.uploads import (
-    looks_like_audio_decode_error,
     read_upload,
     run_on_spooled_upload,
     upload_suffix,
@@ -67,14 +67,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 "payload_too_large",
                 str(exc),
             )
-        except Exception as exc:  # noqa: BLE001
-            if looks_like_audio_decode_error(exc):
-                logger.warning("audio quality decode failed", exc_info=True)
-                return error_response(
-                    415,
-                    "unsupported_media_type",
-                    "audio decode failed; provide a supported audio file",
-                )
+        except AudioDecodeError:
+            logger.warning("audio quality decode failed", exc_info=True)
+            return error_response(
+                415,
+                "unsupported_media_type",
+                "audio decode failed; provide a supported audio file",
+            )
+        except Exception:  # noqa: BLE001
             logger.exception("audio quality assessment failed")
             return error_response(
                 500,

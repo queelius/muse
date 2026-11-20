@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from muse.modalities.audio_alignment.decoding import DecodedAudio
+from muse.modalities._common.audio_decode import DecodedAudio
 from muse.modalities.audio_alignment.protocol import (
     UnsupportedAlignmentLanguageError,
 )

@@ -8,9 +8,11 @@
   request (client disconnect) cannot delete the file while the backend
   is still reading it; work cancelled before it started is cleaned up
   through `run_native_offload`'s abandoned-ownership hook.
-- `looks_like_audio_decode_error`: message heuristic for decoder
-  failures (librosa / soundfile / audioread / PyAV / ffmpeg /
-  torchcodec) that routes map to 415.
+- `looks_like_audio_decode_error`: fallback heuristic for decoder
+  failures from libraries that raise untyped errors (librosa / soundfile
+  / audioread / PyAV), which routes map to 415. TorchCodec decoding goes
+  through `_common.audio_decode`, whose typed `AudioDecodeError` routes
+  catch directly.
 """
 from __future__ import annotations
 
@@ -31,17 +33,26 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# Exception class names raised by decoders for undecodable input:
+# PyAV (InvalidDataError), audioread (NoBackendError, DecodeError),
+# soundfile (LibsndfileError).
+_DECODE_ERROR_TYPES = frozenset({
+    "InvalidDataError",
+    "NoBackendError",
+    "DecodeError",
+    "LibsndfileError",
+})
+# Message fragments that only those decoders produce. Deliberately no bare
+# "decode", "ffmpeg", "soundfile" or "torchcodec": those also appear in
+# model errors ("decoder layer") and missing-dependency messages, which are
+# server faults (500), not unsupported media.
 _DECODE_ERROR_TOKENS = (
     "audioread",
-    "decode",            # also matches "decoder"
-    "ffmpeg",
     "format not recognised",
     "format not recognized",
-    "invalid data",
+    "invalid data found",
     "invaliddata",       # PyAV's InvalidDataError class name, lowercased
     "no backend available",
-    "soundfile",
-    "torchcodec",
 )
 
 
@@ -121,6 +132,21 @@ async def run_on_spooled_upload(
 
 
 def looks_like_audio_decode_error(exc: BaseException) -> bool:
-    """True when `exc`'s message reads like an audio decoder failure."""
-    message = str(exc).lower()
-    return any(token in message for token in _DECODE_ERROR_TOKENS)
+    """True when `exc` (or an exception it wraps) is an audio decoder's
+    rejection of its input.
+
+    Missing modules never count: an ImportError is a broken venv.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ImportError):
+            return False
+        if type(current).__name__ in _DECODE_ERROR_TYPES:
+            return True
+        message = str(current).lower()
+        if any(token in message for token in _DECODE_ERROR_TOKENS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from muse.modalities.audio_quality import AudioDurationExceededError
-from muse.modalities.audio_quality import decoding
+from muse.modalities._common import audio_decode as decoding
 
 
 def _decoder(
@@ -188,7 +188,7 @@ def test_probes_past_limit_when_metadata_underreports(monkeypatch):
 def test_empty_decode_fails_clearly(monkeypatch):
     _decoder(monkeypatch, actual_seconds=0)
     reader = decoding.WindowedAudio("empty.wav")
-    with pytest.raises(RuntimeError, match="no samples"):
+    with pytest.raises(decoding.AudioDecodeError, match="no samples"):
         list(reader)
 
 

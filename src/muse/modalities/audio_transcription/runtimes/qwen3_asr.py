@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from muse.core import config
 from muse.core.runtime_helpers import LoadTimer, select_device, set_inference_mode
-from muse.modalities.audio_alignment.decoding import decode_audio
+from muse.modalities._common.audio_decode import decode_audio
 from muse.modalities.audio_transcription.protocol import InvalidLanguageError, Segment, TranscriptionResult
 
 

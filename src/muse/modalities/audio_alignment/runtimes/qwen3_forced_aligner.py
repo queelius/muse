@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from muse.core.runtime_helpers import LoadTimer, select_device, set_inference_mode
-from muse.modalities.audio_alignment.decoding import decode_audio
+from muse.modalities._common.audio_decode import decode_audio
 from muse.modalities.audio_alignment.protocol import (
     AlignmentWord,
     AudioAlignmentResult,

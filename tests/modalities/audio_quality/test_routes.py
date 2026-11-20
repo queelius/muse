@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from muse.core import config
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
+from muse.modalities._common.audio_decode import AudioDecodeError
 from muse.modalities.audio_quality import (
     AudioDurationExceededError,
     AudioQualityResult,
@@ -149,7 +150,7 @@ def test_decoded_duration_limit_returns_413():
 def test_decode_exception_returns_generic_415():
     backend = MagicMock()
     backend.model_id = "broken"
-    backend.assess.side_effect = RuntimeError("decoder leaked /secret/path")
+    backend.assess.side_effect = AudioDecodeError("decoder leaked /secret/path")
     response = _client(backend).post(
         "/v1/audio/quality",
         files={"file": ("clip.wav", b"bad", "audio/wav")},
@@ -169,3 +170,19 @@ def test_backend_exception_returns_generic_500():
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "internal_error"
     assert "private backend detail" not in response.text
+
+
+def test_missing_decoder_dependency_is_a_500_not_a_415():
+    """I2: the runtime's own "decoder is unavailable" error is a server
+    fault, not an unsupported upload."""
+    backend = MagicMock()
+    backend.model_id = "broken"
+    backend.assess.side_effect = RuntimeError(
+        "TorchCodec audio decoder is unavailable; run `muse pull` and "
+        "ensure FFmpeg shared libraries are installed"
+    )
+    response = _client(backend).post(
+        "/v1/audio/quality",
+        files={"file": ("clip.wav", b"bad", "audio/wav")},
+    )
+    assert response.status_code == 500

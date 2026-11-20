@@ -37,8 +37,8 @@ from muse.modalities._common.uploads import (
 )
 from muse.modalities.audio_transcription.codec import encode_transcription
 from muse.modalities.audio_transcription.protocol import InvalidLanguageError
-from muse.modalities.audio_alignment.protocol import (
-    AudioAlignmentDecodeError, AudioAlignmentDurationExceededError,
+from muse.modalities._common.audio_decode import (
+    AudioDecodeError, AudioDurationExceededError,
 )
 
 
@@ -128,16 +128,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             )
         except InvalidLanguageError as e:
             return error_response(400, "invalid_language", str(e))
-        except AudioAlignmentDurationExceededError as e:
+        except AudioDurationExceededError as e:
             return error_response(413, "payload_too_large", str(e))
-        except AudioAlignmentDecodeError:
+        except AudioDecodeError:
             return error_response(
                 415, "unsupported_media_type",
                 "audio decode failed; provide a supported audio file",
             )
         except Exception as e:  # noqa: BLE001
-            # PyAV/ffmpeg decode failures map to 415; the raw exception
-            # text stays in the server log, not the client body.
+            # faster-whisper decodes with PyAV, which raises untyped
+            # errors; the fallback heuristic maps those to 415. The raw
+            # exception text stays in the server log, not the client body.
             if looks_like_audio_decode_error(e):
                 logger.warning(
                     "backend.transcribe raised a decoder-looking exception; "

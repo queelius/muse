@@ -67,6 +67,18 @@ timestamp-marker logits before its float32 softmax, avoiding a full-sequence
 probability tensor. Only the typed `AudioAlignmentDecodeError` emitted at the
 TorchCodec boundary maps to HTTP 415; model alignment failures remain 500s.
 
+TorchCodec decoding for alignment, audio/quality and Qwen3-ASR lives in one
+module, `muse.modalities._common.audio_decode` (`decode_audio`,
+`WindowedAudio`). It raises typed errors: `AudioDecodeError` (undecodable
+upload, 415; `AudioAlignmentDecodeError` is an alias),
+`AudioDurationExceededError` (413) and `AudioDecoderUnavailableError` (a
+missing TorchCodec/FFmpeg, 500). Routes catch only those types. The
+message heuristic `_common.uploads.looks_like_audio_decode_error` remains
+only for libraries that raise untyped errors (faster-whisper's PyAV,
+librosa, soundfile): it matches decoder exception class names and
+decoder-specific phrases, never bare "decode"/"ffmpeg"/"torchcodec", and
+never an ImportError.
+
 `decision/evaluation` is muse's twenty-fourth modality (docs/DECISIONS.md).
 `POST /v1/systemone` takes `{model, state, questions}` (a text-only subset of
 TypeSafe's System One: Choice, Score, Noul; `model` is always required, no

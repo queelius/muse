@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from muse.modalities.audio_alignment.decoding import DecodedAudio
+from muse.modalities._common.audio_decode import DecodedAudio
 from muse.modalities.audio_transcription.protocol import Segment, TranscriptionModel
 
 

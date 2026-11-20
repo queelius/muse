@@ -4,35 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+# Re-exported: the shared decoder raises it for over-long uploads.
+from muse.modalities._common.audio_decode import AudioDurationExceededError  # noqa: F401
+
 
 ScoreDirection = Literal[
     "higher_is_better",
     "lower_is_better",
     "descriptive",
 ]
-
-
-class AudioDurationExceededError(ValueError):
-    """Decoded audio exceeds the amount of work allowed for one request."""
-
-    def __init__(
-        self,
-        *,
-        maximum_seconds: float,
-        actual_seconds: float | None = None,
-    ) -> None:
-        self.maximum_seconds = float(maximum_seconds)
-        self.actual_seconds = (
-            None if actual_seconds is None else float(actual_seconds)
-        )
-        detail = (
-            f" ({self.actual_seconds:.3f}s received)"
-            if self.actual_seconds is not None
-            else ""
-        )
-        super().__init__(
-            f"audio duration exceeds {self.maximum_seconds:.3f}s{detail}"
-        )
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from muse.core.runtime_helpers import LoadTimer, select_device, set_inference_mode
-from muse.modalities.audio_quality.decoding import WindowedAudio
+from muse.modalities._common.audio_decode import WindowedAudio
 from muse.modalities.audio_quality.protocol import (
     AudioQualityResult,
     AudioQualityScore,

@@ -279,13 +279,13 @@ def test_transcript_only_capability_gates(path, fields, code):
     ('duration', 413, 'payload_too_large'),
 ])
 def test_qwen_decoder_failures_keep_error_envelope(error, expected_status, code):
-    from muse.modalities.audio_alignment.protocol import (
-        AudioAlignmentDecodeError, AudioAlignmentDurationExceededError,
+    from muse.modalities._common.audio_decode import (
+        AudioDecodeError, AudioDurationExceededError,
     )
     backend = MagicMock()
     backend.transcribe.side_effect = (
-        AudioAlignmentDecodeError('invalid audio') if error == 'decode'
-        else AudioAlignmentDurationExceededError(maximum_seconds=300)
+        AudioDecodeError('invalid audio') if error == 'decode'
+        else AudioDurationExceededError(maximum_seconds=300)
     )
     r = _make_client(backend).post(
         '/v1/audio/transcriptions', files={'file': ('a.wav', b'audio', 'audio/wav')},
@@ -308,3 +308,18 @@ def test_invalid_language_only_maps_typed_error(typed):
     assert response.status_code == (400 if typed else 500)
     if typed:
         assert response.json()["error"]["code"] == "invalid_language"
+
+
+def test_missing_decoder_dependency_is_a_500_not_a_415():
+    """I2: Qwen3-ASR's "TorchCodec audio decoder is unavailable" error is a
+    broken venv (500), not an unsupported upload (415)."""
+    backend = MagicMock()
+    backend.transcribe.side_effect = RuntimeError(
+        "TorchCodec audio decoder is unavailable; run `muse pull` and "
+        "ensure FFmpeg shared libraries are installed"
+    )
+    r = _make_client(backend).post(
+        '/v1/audio/transcriptions', files={'file': ('a.wav', b'audio', 'audio/wav')},
+        data={'model': 'whisper-tiny'},
+    )
+    assert r.status_code == 500
