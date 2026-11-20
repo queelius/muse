@@ -11,7 +11,8 @@ Wire shape mirrors /v1/embeddings:
 
 Each `input` entry must be a `data:image/...;base64,...` URL or an
 `http(s)://...` URL. The route layer decodes them concurrently (at most
-8 at a time, all within one 60 s deadline) into PIL.Images via the
+8 at a time, all within one 60 s deadline by default; both are
+settings) into PIL.Images via the
 shared `muse.modalities._common.images.decode_image_input`, batches the
 list, and forwards to the registered backend. The response `model` is
 the registry id of the serving model.
@@ -48,8 +49,14 @@ MODALITY = "image/embedding"
 
 # URL inputs are fetched concurrently, bounded, under one overall deadline
 # (each fetch also has its own 30 s timeout).
-_DECODE_CONCURRENCY = 8
-_DECODE_DEADLINE_SECONDS = 60.0
+def _decode_concurrency() -> int:
+    """Inputs decoded at once (MUSE_IMAGE_EMBEDDINGS_DECODE_CONCURRENCY)."""
+    return int(config.get_positive("limits.image_embeddings_decode_concurrency"))
+
+
+def _decode_deadline_seconds() -> float:
+    """Whole-batch decode deadline (MUSE_IMAGE_EMBEDDINGS_DECODE_DEADLINE_SECONDS)."""
+    return float(config.get_positive("limits.image_embeddings_decode_deadline_seconds"))
 
 
 
@@ -96,7 +103,8 @@ async def _decode_all(items: list[str]) -> list[Any]:
     Raises the first input's ImageInputError (or any other exception);
     ImageFetchError when the batch misses the overall deadline.
     """
-    gate = asyncio.Semaphore(_DECODE_CONCURRENCY)
+    gate = asyncio.Semaphore(_decode_concurrency())
+    deadline = _decode_deadline_seconds()
 
     async def _one(item: str) -> Any:
         async with gate:
@@ -120,7 +128,7 @@ async def _decode_all(items: list[str]) -> list[Any]:
 
     try:
         done, pending = await asyncio.wait(
-            tasks, timeout=_DECODE_DEADLINE_SECONDS,
+            tasks, timeout=deadline,
             return_when=asyncio.FIRST_EXCEPTION,
         )
     except BaseException:  # cancelled: the client is gone
@@ -136,7 +144,7 @@ async def _decode_all(items: list[str]) -> list[Any]:
         raise failed.exception()
     raise ImageFetchError(
         f"decoding {len(items)} inputs exceeded the "
-        f"{_DECODE_DEADLINE_SECONDS:g} s deadline"
+        f"{deadline:g} s deadline (MUSE_IMAGE_EMBEDDINGS_DECODE_DEADLINE_SECONDS)"
     )
 
 

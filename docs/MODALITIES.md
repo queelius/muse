@@ -226,9 +226,10 @@ exactly (`{object: "list", data, model, usage}`) so OpenAI SDK clients
 that already consume embeddings can reuse helper code. Each `input`
 entry is a `data:image/...;base64,...` URL or `http(s)://...` URL
 pointing at PNG/JPEG/WEBP; image decoding goes through the shared
-`muse.modalities._common.images.decode_image_input` helper, up to 8
-inputs at a time within one 60 s deadline (a missed deadline is 400
-`invalid_parameter`). The response `model` is the registry id.
+`muse.modalities._common.images.decode_image_input` helper, up to
+`limits.image_embeddings_decode_concurrency` (default 8) inputs at a time
+within one `limits.image_embeddings_decode_deadline_seconds` (default 60 s)
+deadline (a missed deadline is 400 `invalid_parameter`). The response `model` is the registry id.
 The bundled `dinov2-small` (Apache 2.0, 88MB, 384-dim, CPU-friendly)
 is the default; curated additions cover SigLIP2 and CLIP. The HF
 resolver sniffs any repo with an image-feature-extraction-class tag

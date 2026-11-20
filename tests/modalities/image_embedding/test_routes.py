@@ -489,7 +489,7 @@ def test_url_batch_deadline_is_400_and_closes_decoded(monkeypatch):
         return fast
 
     monkeypatch.setattr(routes, "decode_image_input", decode)
-    monkeypatch.setattr(routes, "_DECODE_DEADLINE_SECONDS", 0.1)
+    monkeypatch.setenv("MUSE_IMAGE_EMBEDDINGS_DECODE_DEADLINE_SECONDS", "0.1")
     backend = _fake_backend(_fake_result(n_images=2))
     r = _make_client(backend).post("/v1/images/embeddings", json={
         "input": ["https://example.com/fast", "https://example.com/slow"],
@@ -498,3 +498,32 @@ def test_url_batch_deadline_is_400_and_closes_decoded(monkeypatch):
     assert "deadline" in r.json()["error"]["message"]
     fast.close.assert_called_once_with()
     backend.embed.assert_not_called()
+
+
+def test_decode_concurrency_is_a_setting(monkeypatch):
+    """At most limits.image_embeddings_decode_concurrency inputs decode at
+    once (env MUSE_IMAGE_EMBEDDINGS_DECODE_CONCURRENCY, default 8)."""
+    import asyncio
+
+    from muse.core import config
+    from muse.modalities.image_embedding import routes
+
+    assert config.SETTINGS_BY_KEY[
+        "limits.image_embeddings_decode_concurrency"].default == 8
+    assert config.SETTINGS_BY_KEY[
+        "limits.image_embeddings_decode_deadline_seconds"].default == 60.0
+    monkeypatch.setenv("MUSE_IMAGE_EMBEDDINGS_DECODE_CONCURRENCY", "2")
+    active = peak = 0
+
+    async def decode(value):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return MagicMock()
+
+    monkeypatch.setattr(routes, "decode_image_input", decode)
+    images = asyncio.run(routes._decode_all([f"https://e.com/{i}" for i in range(6)]))
+    assert len(images) == 6
+    assert peak == 2

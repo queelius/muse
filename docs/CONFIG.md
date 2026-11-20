@@ -159,6 +159,8 @@ A snapshot of the defaults:
 | `limits.embeddings_max_batch` | `MUSE_EMBEDDINGS_MAX_BATCH` | 2048 |
 | `limits.embeddings_max_chars_per_item` | `MUSE_EMBEDDINGS_MAX_CHARS_PER_ITEM` | 100000 |
 | `limits.image_embeddings_max_batch` | `MUSE_IMAGE_EMBEDDINGS_MAX_BATCH` | 64 |
+| `limits.image_embeddings_decode_concurrency` | `MUSE_IMAGE_EMBEDDINGS_DECODE_CONCURRENCY` | 8 |
+| `limits.image_embeddings_decode_deadline_seconds` | `MUSE_IMAGE_EMBEDDINGS_DECODE_DEADLINE_SECONDS` | 60.0 |
 | `limits.segmentation_max_input_side` | `MUSE_SEGMENTATION_MAX_INPUT_SIDE` | 2048 |
 | `limits.upscale_max_input_side` | `MUSE_UPSCALE_MAX_INPUT_SIDE` | 1024 |
 | `limits.vectorization_max_input_side` | `MUSE_VECTORIZATION_MAX_INPUT_SIDE` | 2048 |
