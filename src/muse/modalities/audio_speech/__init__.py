@@ -29,12 +29,22 @@ DISCOVERY = {
         "written word (Kokoro only). Models without native timings refuse; "
         "use audio/alignment for those models. Send pronunciations to keep "
         "input as the written text while applying respellings or supported IPA. "
-        "Set align=true for Soprano's paragraph timings in the X-Alignment header."
+        "Set align=true for Soprano's paragraph timings in the X-Alignment header. "
+        "Designed voices: send instructions (a voice description) to a model with "
+        "supports_instructions (qwen3-tts-1.7b-voicedesign). Saved voices: upload a "
+        "reference clip plus its transcript under a name with POST "
+        "/v1/audio/speech/voices on a model with supports_saved_voices "
+        "(qwen3-tts-0.6b-base), then speak with voice=<name>; the same name keeps "
+        "the same voice on every line. Delete with DELETE "
+        "/v1/audio/speech/voices/{name}?model=."
     ),
     "use_for": [
         "narration and voiceover for a video from a written script",
         "spoken audio for a scene, character line or announcement",
         "listing the voices a speech model offers before choosing one",
+        "inventing a character voice from a text description",
+        "giving each game character one consistent voice across many lines: "
+        "design a take, save it as a named voice, then clone it for every line",
     ],
     "not_for": [
         "music or sound effects (use audio/generation)",
