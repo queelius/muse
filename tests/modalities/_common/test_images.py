@@ -152,23 +152,37 @@ async def test_decode_rejects_pixel_bomb_before_raster_load(monkeypatch):
     load.assert_not_called()
 
 
-def test_bytes_to_pil_rejects_decompression_bomb(monkeypatch):
-    """A decompression bomb must surface as ValueError (-> 400), not the raw
-    Image.DecompressionBombError (which would escape to a 500). PIL still
-    blocks the DoS; we only fix the error class."""
-    from PIL import Image
+def _png_header_only(width: int, height: int) -> bytes:
+    """A PNG declaring ``width x height`` with a token IDAT: PIL reads the
+    declared size from the header without allocating the raster."""
+    import struct
+    import zlib
 
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data)) + kind + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b"\x00")) + chunk(b"IEND", b"")
+    )
+
+
+def test_bytes_to_pil_maps_decompression_bomb_to_input_too_large(monkeypatch):
+    """PIL's DecompressionBombError is a pixel-cap failure (413
+    input_too_large), not an undecodable image. A raised max_pixels must
+    not let it escape either."""
     from muse.modalities._common import images as image_input
 
-    # A modest real PNG whose pixel count trips a lowered bomb threshold.
-    buf = io.BytesIO()
-    Image.new("RGB", (64, 64), (1, 2, 3)).save(buf, format="PNG")
-    raw = buf.getvalue()
-
-    # DecompressionBombError fires when pixels > 2 * MAX_IMAGE_PIXELS.
-    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
-    with pytest.raises(ValueError, match="decode"):
-        image_input._bytes_to_pil(raw)
+    raw = _png_header_only(20000, 20000)
+    with pytest.raises(image_input.ImageDimensionsError) as err:
+        image_input._bytes_to_pil(raw, max_pixels=10**12)
+    assert err.value.limit == "pixels"
+    assert err.value.status == 413
+    assert err.value.code == "input_too_large"
 
 
 # ---------------- SSRF: blocked on private/loopback/link-local ----------------

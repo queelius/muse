@@ -408,11 +408,16 @@ def _bytes_to_pil(
         raise ImageDecodeError(
             "image decode failed: unrecognised image format"
         ) from e
-    except (OSError, Image.DecompressionBombError) as e:
-        # DecompressionBombError is a plain Exception (not OSError): a tiny
-        # PNG declaring huge dimensions would otherwise escape as a 500. PIL
-        # still blocks the memory DoS; we only reclassify it as a client
-        # error.
+    except Image.DecompressionBombError as e:
+        # A plain Exception (not OSError): a tiny PNG declaring huge
+        # dimensions would otherwise escape as a 500. PIL still blocks the
+        # memory DoS; it is a pixel-cap failure, not an undecodable image.
+        if img is not None:
+            img.close()
+        raise ImageDimensionsError(
+            f"image too large: {e}", limit="pixels",
+        ) from e
+    except OSError as e:
         if img is not None:
             img.close()
         raise ImageDecodeError(f"image decode failed: {e}") from e
