@@ -1,12 +1,15 @@
 """HF resolver plugin for cross-encoder rerankers.
 
-Sniffs HF repos with the `cross-encoder` tag, OR repos with both the
+Sniffs HF repos with the `cross-encoder` or `text-ranking` tag, OR repos
+with both the
 `text-classification` tag and `rerank` in the repo name (case-insensitive).
 This second branch catches BAAI/bge-reranker-v2-m3 and similar repos
 that ship under text-classification without the dedicated cross-encoder
 tag.
 
-Priority 115: more specific than embedding/text (110); wins over
+Priority 115: sniffed AFTER embedding/text (110; lower runs first), whose
+sniff therefore declines cross-encoder / text-ranking / "rerank" repos
+that also carry the sentence-transformers tag. Sniffed before
 text/classification (200, catch-all).
 
 Loaded via single-file import; no relative imports. See
@@ -36,7 +39,7 @@ _PIP_EXTRAS = ("torch>=2.1.0", "sentence-transformers>=5.0.0")
 
 def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
-    if "cross-encoder" in tags:
+    if "cross-encoder" in tags or "text-ranking" in tags:
         return True
     if "text-classification" in tags:
         repo_id = (getattr(info, "id", "") or "").lower()
