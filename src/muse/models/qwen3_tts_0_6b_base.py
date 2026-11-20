@@ -34,8 +34,12 @@ MANIFEST = {
         "torch>=2.1.0",
         "numpy",
         "qwen-tts==0.1.1",
+        # POST /v1/audio/speech/voices decodes the uploaded reference with
+        # TorchCodec (muse.modalities._common.audio_decode) in this venv.
+        "torchcodec>=0.12",
     ),
-    "system_packages": (),
+    # TorchCodec links ffmpeg's libav at import time.
+    "system_packages": ("ffmpeg",),
     "capabilities": {
         "sample_rate": 24000,
         "device": "auto",

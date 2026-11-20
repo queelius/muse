@@ -272,7 +272,6 @@ def test_manifests_are_well_formed():
         assert m["license"] == "Apache-2.0"
         assert "qwen-tts==0.1.1" in m["pip_extras"]
         assert any(e.startswith("torch") for e in m["pip_extras"])
-        assert m["system_packages"] == ()
         assert m["quality_tier"] == "good"
         for key in ("description", "summary", "strengths", "limits"):
             assert m.get(key), key
@@ -293,6 +292,32 @@ def test_manifests_are_well_formed():
     assert bc["supports_saved_voices"] is True
     assert bc["voice_cloning"] is True
     assert not bc.get("supports_instructions")
+
+
+def test_saved_voice_models_install_the_reference_decoder():
+    """POST /v1/audio/speech/voices decodes the upload with TorchCodec in the
+    model's own venv, so every bundled script that accepts saved voices must
+    install it (and its ffmpeg libraries); the 0.6B Base model once returned
+    500 "audio decoder unavailable" on every save."""
+    from pathlib import Path
+
+    import muse.models
+    from muse.core.discovery import discover_models
+
+    found = discover_models([Path(muse.models.__file__).parent])
+    savers = {mid: d.manifest for mid, d in found.items()
+              if d.manifest.get("capabilities", {}).get("supports_saved_voices")}
+    assert BASE_ID in savers
+    for mid, manifest in savers.items():
+        assert any(e.startswith("torchcodec") for e in manifest["pip_extras"]), mid
+        assert "ffmpeg" in manifest["system_packages"], mid
+
+
+def test_design_model_needs_no_decoder():
+    from muse.models import qwen3_tts_1_7b_voicedesign as design
+
+    assert design.MANIFEST["system_packages"] == ()
+    assert not any(e.startswith("torchcodec") for e in design.MANIFEST["pip_extras"])
 
 
 def test_bundled_narrator_is_packaged():
