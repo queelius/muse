@@ -2,7 +2,7 @@
 
 Bundled default for `text/translation`. ~2GB on disk, MIT license.
 Backs the LibreTranslate-compatible `/v1/translate` route (and
-`/v1/languages`) via `muse.modalities.text_translation`.
+`GET /languages`) via `muse.modalities.text_translation`.
 
 `Model` aliases `TranslationRuntime` directly (the VLM-bundled pattern,
 see `smolvlm_256m_instruct.py`): one generic runtime already serves
