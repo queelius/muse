@@ -33,17 +33,11 @@ twenty-five modalities:
 - **video/generation**: text-to-video via `/v1/video/generations` (wan2-1-t2v-1-3b bundled with sequential CPU offload by default to fit 8-12GB GPUs; Wan / CogVideoX / LTX-Video families via the resolver; narrative clips up to 30s; mp4/webm/frames_b64 output; GPU-required; `cpu_offload` capability (model|sequential) + `vae_tiling`, globally overridable via `server.video_cpu_offload`)
 - **3d/generation**: image-to-3d via `/v1/3d/from-image` and text-to-3d via `/v1/3d/generations` (triposr bundled; TRELLIS, Wonder3D, Hunyuan3D-2, Shap-E via the resolver; Shap-E is text-to-3D only via `diffusers.ShapEPipeline`; GLB output as `data:model/gltf-binary;base64,...` URL or b64_json; capability flags `supports_text_to_3d` / `supports_image_to_3d` gate per route; sync/blocking pattern mirroring video/generation)
 
-Speech `timestamps: true` returns JSON with the audio and its SHA-256, one
-entry per whitespace-separated written word, and native timing provenance.
-Words without native measurements have `measured: false`; no silent timing
-fallback is presented as measured. `pronunciations` keeps respellings or IPA
-separate from display text. Kokoro native times come from its English pipeline
-(`lang_code`, always "a" in muse today), so non-English voices get timings from
-English G2P; models without native timings and streaming timestamps return 400. Legacy
-`align` / `X-Alignment` remains Soprano paragraph timing. Qwen3-ASR returns
-transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
-`vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.
-For pronunciation checks omit `prompt`, whose context biases the listener.
+Per-modality wire details, runtimes, caps and history are in `docs/MODALITIES.md`
+(read the modality's section before changing it). Topic docs: `docs/PIXELART.md`,
+`docs/DECISIONS.md`, `docs/CHAT_COMPLETION.md`, `docs/AGENT_DISCOVERY.md`,
+`docs/STORAGE.md`, `docs/CONFIG.md`, `docs/RESOLVERS.md`, `docs/HF_PLUGINS.md`,
+`docs/MODEL_SCRIPTS.md`; runtime internals in `docs/INTERNALS.md`.
 
 Modality tags are MIME-style (`audio/speech`, not `audio.speech`). The HTTP
 path hierarchy mirrors the OpenAI shape where possible (`/v1/audio/speech`,
@@ -55,291 +49,6 @@ REST API under `/v1/admin/*` (v0.28.0+) for runtime model control
 without restarting `muse serve`: enable, disable, probe, pull, remove,
 plus worker introspection and async-job tracking. Closed-by-default
 behind `MUSE_ADMIN_TOKEN`. See "Admin REST API" below.
-
-`audio/quality` is muse's twenty-first modality. `POST
-/v1/audio/quality` accepts multipart `file` plus optional `model` and
-returns `{id, object, model, primary_score, scores, metadata}`. Each
-named score carries `value`, nominal `minimum` / `maximum`, and a
-direction (`higher_is_better`, `lower_is_better`, or `descriptive`),
-because a UTMOS 1-5 naturalness MOS is not numerically interchangeable
-with Audiobox's 1-10 axes. Both runtimes use TorchCodec to decode 16kHz
-mono ranges sequentially (10-second windows), return a duration-weighted
-aggregate plus `metadata.segments`, the literal `metadata.worst_segment`,
-and `metadata.worst_review_segment` (which ignores subsecond tail windows
-when a longer review candidate exists), and reject audio over
-`MUSE_AUDIO_QUALITY_MAX_DURATION_SECONDS` (600s default) with 413. The
-priority-100 HF plugin claims only two
-verified custom checkpoint shapes: `Blinorot/UTMOS-PyTorch` routes to
-the local TorchScript runtime and `facebook/audiobox-aesthetics`
-loads the package's official model class from Hub safetensors directly
-onto Muse's selected device. Audiobox must
-win before the broader priority-110 `audio/classification` plugin,
-since its Hub card carries that generic tag. Curated aliases are
-`utmos` (MIT, primary `naturalness`) and `audiobox-aesthetics`
-(CC-BY-4.0, primary `production_quality`). Pairwise/text-conditioned
-judges such as SpeechJudge are deferred to a separate comparison
-route/capability rather than overloading this single-ended contract.
-
-`audio/alignment` is muse's twenty-second modality. `POST
-/v1/audio/alignments` accepts multipart `file` + trusted reference `text`,
-plus optional `model` and `language`, and returns `{id, object, model, text,
-language, duration_seconds, words, metadata}`. Each word has `word`, `start`,
-`end`, and an uncalibrated confidence derived from the mean probability of its
-start/end timestamp tokens. This is forced alignment, not ASR: the model
-locates supplied words and does not decide what was spoken. The priority-90 HF
-plugin claims only `Qwen/Qwen3-ForcedAligner-0.6B-hf`, downloads its safe
-safetensors checkpoint, and installs Transformers 5.13+, TorchCodec, Nagisa,
-and SoyNLP. Audio is bounded before inference, resampled to 16kHz mono, and
-limited by `MUSE_AUDIO_ALIGNMENT_MAX_BYTES` (50 MB),
-`MUSE_AUDIO_ALIGNMENT_MAX_DURATION_SECONDS` (300s), and
-`MUSE_AUDIO_ALIGNMENT_MAX_TEXT_CHARS` (50,000). The curated alias is
-`qwen3-forced-aligner-0.6b` (Apache 2.0; 11 languages). Before audio decode,
-the runtime tokenizes the reference and rejects more than 2,048 alignable
-words; after processor preparation it enforces the checkpoint's 8,192-token
-context before moving inputs to the device. Confidence calculation selects
-timestamp-marker logits before its float32 softmax, avoiding a full-sequence
-probability tensor. Only the typed `AudioAlignmentDecodeError` emitted at the
-TorchCodec boundary maps to HTTP 415; model alignment failures remain 500s.
-
-`decision/evaluation` is muse's twenty-fourth modality (docs/DECISIONS.md).
-`POST /v1/systemone` takes `{model, state, questions}` (a text-only subset of
-TypeSafe's System One: Choice, Score, Noul; `model` is always required, no
-default) and returns `{model, answers, usage}` built by the shared codec from
-complete per-question distributions; confidence is concentration (Choice
-`(max p - 1/K)/(1 - 1/K)`, Score an ordered-spread statistic), never
-correctness, and `output_tokens` is 0. `validation.parse_request` is the one
-strict parser (raw bytes, duplicate keys at any depth, non-finite numbers,
-unknown/media fields, UTF-8 byte limits); the package exports
-`STRICT_REQUEST_PARSERS = {"/v1/systemone": "...:parse_request"}`, a generic
-AST-read seam the gateway runs on the raw body BEFORE model selection (its
-lenient `json.loads` would keep the last of two `model` keys), routing by the
-parsed `.model`. Two runtimes: `DecisionLlamaCppModel` renders
-evalengine/decision-0.8b-gguf's published no-thinking prompt (framing parsed
-for special tokens, user JSON as literal text), rejects any question over
-2,048 tokens before evaluating any, and softmaxes `get_logits_ith(-1)` over the
-option letters A-X (never `Llama.scores`, empty with `logits_all=False`);
-`DecimaOnnxModel` uses decima-ai 2.2.0's sessions/tokenizer/ordinal head but
-not its `decide*`/System One paths (they truncate, shorten options and may
-download), and rejects state+question over 512 tokens or an option over 64.
-Both reset/isolate per question and mark themselves `usable = False` after a
-native failure; `muse.core.server`'s `/health` returns 503 when any registered
-backend reports `usable is False`, so the supervisor's monitor replaces the
-worker (a generic hook). The decision GGUF runtime is in
-`muse.core.placement.NATIVE_GGUF_BACKENDS`, so admission resolves it on the
-native-GGUF pool. The priority-80 HF plugin claims exactly the two repos in
-its `SOURCES` table at their pinned commits (a moved Hub head is refused; the
-curated ids carry the pin), downloads exact allow-lists and checks each pinned
-file's size and the large files' SHA-256; this fixed the old misdispatch of
-Decima (card tag zero-shot-classification) to the NLI classifier and of the
-Decision GGUF to the chat runtime. In the worker, one `DecisionExecutor` per
-model runs batches on its own thread behind a cap-1/32-deep `ConcurrencyGate`
-and releases the slot from the native call's completion callback, so a
-cancelled request cannot free the backend while native work continues.
-Cancellation does stop the batch at the next question boundary: `evaluate`
-takes `should_stop` and raises `DecisionCancelled` (native state stays
-usable). The worker route wraps execution in
-`muse.core.disconnect.unless_disconnected` (Starlette/uvicorn never cancel a
-non-streaming handler on client disconnect, so it races the work against
-the `http.disconnect` message), and the package exports
-`CANCEL_ON_DISCONNECT_PATHS = ("/v1/systemone",)`, a generic AST-read seam
-(`discovery.disconnect_cancellable_paths`) that makes the gateway close its
-worker connection, release its slot/refcount and record 499 when the
-client leaves while the worker is still producing headers. Only declare it
-where the worker owns admission, or a freed gateway slot could put two
-runs on one backend.
-PROBE_DEFAULTS runs one Choice, Score and Noul question. No per-model
-inference authorization exists in muse, so there is no 403 path.
-
-`text/rerank` is muse's first Cohere-compat modality (rather than
-OpenAI-compat): OpenAI has no rerank API, and Cohere's `/v1/rerank` is
-the de-facto standard that downstream tooling (LangChain, LlamaIndex,
-Haystack) expects. Response envelope mirrors Cohere's: `results[]`
-with `index` + `relevance_score`, optional `document.text`, plus
-`meta.billed_units.search_units` for SDK compatibility.
-
-`text/summarization` is muse's second Cohere-compat modality (after
-text/rerank). OpenAI has no summarization API; Cohere's `/v1/summarize`
-was the de-facto reference until its 2024 deprecation, and the wire
-shape is what summarization tooling expects. Request: `{text, length,
-format, model}`. Response: `{id, model, summary, usage, meta}`.
-`length` ("short"|"medium"|"long") deterministically maps to
-`max_new_tokens` in the runtime: short=80, medium=180, long=400.
-`format` ("paragraph"|"bullets") is recorded in `meta.format` and is
-metadata-only for non-instruction summarizers like BART-CNN; future
-instruction-tuned summarizers can consult it. The bundled
-`bart-large-cnn` (Apache 2.0, ~400MB, CPU-friendly) is the default;
-the curated `bart-cnn-samsum` (`supports_dialog_summarization=true`)
-is dialog-tuned. The HF resolver sniffs any `summarization`-tagged
-repo at priority 110 and serves it via `BartSeq2SeqRuntime` over
-`transformers.AutoModelForSeq2SeqLM` (BART, PEGASUS, T5).
-
-`text/translation` (v0.58.0) is muse's twentieth modality and its
-first LibreTranslate-compat one -- self-hosted translation clients
-(LibreTranslate SDKs, the `libretranslate` CLI) work against muse
-unmodified. Wire shape: `POST /v1/translate` and the bare `POST
-/translate` alias (LT clients hardcode that path) take `{q, source,
-target, format?, model?}` (`q` is a string or list[str]; scalar in ->
-scalar out) and return `{translatedText}`; `GET /languages` returns
-`[{code, name, targets}, ...]` derived live from the resolved model's
-tokenizer, not a hand-maintained table. `model` is a muse extension
-LT clients never send -- see the default-model seam below. Single
-runtime `TranslationRuntime` over `transformers.AutoModelForSeq2SeqLM`
-+ `AutoTokenizer`, dispatching per family (`_family_for(hf_repo)`,
-mirroring the 3D modality's precedent): m2m100 and NLLB use
-`forced_bos_token_id` language-token injection (NLLB via a structured
-ISO-639-1 -> FLORES-200 table); Opus-MT checkpoints are fixed-pair
-(`capabilities.source_language`/`target_language`, any other pair
-400s `invalid_language`); MADLAD-400 (curated-only, GPU-oriented)
-prepends a T5-style `<2xx>` target prefix. The bundled `m2m100-418m`
-(facebook/m2m100_418M, MIT, ~2GB, `device: auto`, covers all pairs
-across 100 languages) is the default; curated additions are
-`nllb-200-distilled-600m` (**CC-BY-NC-4.0**, 200 languages, non-
-commercial license called out in its description) and the permissive
-per-pair `opus-mt-en-es` / `opus-mt-en-de` (Helsinki-NLP, ~300MB
-each, best per-pair quality). The HF resolver plugin sniffs
-`translation`-tagged repos (plus `text2text-generation` + name-
-pattern fallback) at **priority 109** -- one tier below the 110 group
-that includes text/summarization's plugin -- so translation's both-
-tagged disambiguation rule (a repo tagged both `summarization` and
-`translation` goes to translation only on a translation-family name
-match) is actually exercised by real `HFResolver` dispatch instead of
-being shadowed by summarization's unconditional `"summarization" in
-tags` sniff (an as-built fix; the design originally shipped this
-plugin at the same 110 tier, which made the rule correct in isolated
-unit tests but unreachable in practice since `"text/summarization" <
-"text/translation"` alphabetically). Because LibreTranslate clients
-never send `model`, the modality exports `MODEL_OPTIONAL_PATHS =
-("/v1/translate", "/translate", "/languages")`; `discover_modalities`
-aggregates every modality's declared paths into a `{path: modality}`
-map, and the gateway's catch-all proxy resolves `model` from that map
-(first ENABLED catalog model of the matching modality, by discovery
-order -- bundled m2m100 wins on a fresh install) instead of 400ing
-`model_required` when a declared path's request omits `model`; no
-enabled model of that modality -> 503 `no_default_model`. Any other
-path with a missing `model` keeps today's 400 exactly. This seam is
-generic: a future modality can opt in by exporting its own
-`MODEL_OPTIONAL_PATHS`, no gateway changes needed. Input size is
-capped by `limits.translate_max_chars` (env `MUSE_TRANSLATE_MAX_CHARS`,
-default 20000, read per-request) -> 400 `input_too_long`.
-`source: "auto"` (language auto-detection) and `POST /detect` are
-explicitly deferred; v1 returns a structured 400
-`source_detection_not_supported`.
-
-`image/embedding` is muse's first image-to-vector modality. The wire
-envelope at `POST /v1/images/embeddings` mirrors `/v1/embeddings`
-exactly (`{object: "list", data, model, usage}`) so OpenAI SDK clients
-that already consume embeddings can reuse helper code. Each `input`
-entry is a `data:image/...;base64,...` URL or `http(s)://...` URL
-pointing at PNG/JPEG/WEBP; image decoding goes through the shared
-`decode_image_input` helper from the image_generation modality.
-The bundled `dinov2-small` (Apache 2.0, 88MB, 384-dim, CPU-friendly)
-is the default; curated additions cover SigLIP2 and CLIP. The HF
-resolver sniffs any repo with an image-feature-extraction-class tag
-plus a `preprocessor_config.json` sibling at priority 105 (between
-embedding/text and image-generation file-pattern) and serves it via
-`ImageEmbeddingRuntime` over `transformers.AutoModel` +
-`AutoProcessor`. The runtime's `_extract_embeddings` dispatch picks
-the right pooling per architecture: CLIP `image_embeds` >
-SigLIP/DINOv2 `pooler_output` > DINOv2 base `last_hidden_state[:, 0]`
-(CLS token).
-
-`audio/embedding` is muse's first audio-to-vector modality. Wire shape
-is multipart-in (one or more `file` parts, mirroring
-`/v1/audio/transcriptions`) and `/v1/embeddings`-shaped JSON out
-(`{object: "list", data, model, usage}`). Audio decoding goes through
-`librosa` (already installed for Whisper) inside the runtime/script,
-which resamples on the way in to each model's preferred rate (CLAP
-48kHz, MERT 24kHz). The bundled `mert-v1-95m` (CC-BY-NC-4.0
-non-commercial, 95M parameters, 768-dim music understanding via
-mean-pool over time, `trust_remote_code=True` for its custom model
-architecture/config) is the default; the curated
-`clap-htsat-fused` adds 512-dim audio + text-aligned embeddings
-(BSD-3, supports_text_embeddings_too=True). The HF resolver sniffs
-any repo with `feature-extraction` tag plus a name pattern matching
-`clap`, `mert`, `audio-encoder`, `wav2vec`, or `audio-embedding` at
-priority 105, and serves it via `AudioEmbeddingRuntime` over
-`transformers.AutoModel` + `AutoFeatureExtractor` (with
-`AutoProcessor` preferred for newer repos). The runtime's
-`_extract_embeddings` dispatch picks the right pooling per
-architecture: CLAP `audio_embeds` > pooler_output > MERT/wav2vec
-`last_hidden_state.mean(dim=1)` (mean-pool over time). Per-file size
-cap via `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` (default 50MB); duration
-cap via `MUSE_AUDIO_EMBEDDINGS_MAX_SECONDS` (default 60s; runtime
-truncates after decode).
-
-`audio/generation` is muse's first modality with TWO URL routes mounted
-on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same
-request body, codec, registry surface, and runtime. The only per-route
-difference is the manifest capability key consulted: `supports_music`
-or `supports_sfx`. When a flag is False (or a future MusicGen-only
-model lacks `supports_sfx`), the unsupported route returns 400. The
-two-URL split is for legibility: a "footsteps on gravel" prompt sent
-to `/v1/audio/music` would silently produce a 30-second loop of
-footsteps treated as music; routing the same prompt to `/v1/audio/sfx`
-makes the user's intent explicit to operators reading logs and to the
-model itself.
-
-ACE-Step v1 3.5B (v0.49.0) is the second audio/generation backend and
-muse's first *song* model: a genre/style `prompt` plus optional
-structured `lyrics` (`[verse]`/`[chorus]` tags) produce a sung song;
-empty/None lyrics produce an instrumental (the runtime substitutes
-ACE-Step's literal `[instrumental]` tag). It is a bundled script
-(`ace-step-v1-3.5b`) that aliases the shared `AceStepRuntime` as `Model`
-(the VLM-bundled pattern), declares `supports_music: true` /
-`supports_sfx: false` (so `/v1/audio/sfx` returns 400 for it), and pins
-`device: cuda` (3.5B is impractical on CPU). The optional `lyrics` field
-(max 8000 chars) was added to `AudioGenerationRequest` and the
-`generate` protocol; models that ignore lyrics (Stable Audio) simply
-drop it. The route `duration` ceiling was raised 120s -> 240s for
-ACE-Step's long clips; the per-model runtime still clamps to its own
-`max_duration`. Unlike StableAudio (which returns in-memory numpy
-arrays), ACE-Step *writes WAV file(s) to disk and returns the path(s)*:
-`AceStepRuntime` hands the pipeline a temp `save_path`, resolves the
-on-disk output defensively (returned path if present, else the
-`save_path`), reads it back via `soundfile`, and deletes the temp dir in
-a `finally` (leak-safe, per the #200 temp-WAV lesson). `trust_remote_code`
-is NOT needed (`from acestep.pipeline_ace_step import ACEStepPipeline` is
-a direct package import). Install pins the git source (`ace-step @
-git+https://github.com/ace-step/ACE-Step.git` -- the distribution name
-is `ace-step` with a hyphen even though the import is `acestep`; the
-PyPI `ace-step` is a stale v0.1.0). `pip_extras` also pins `torchcodec`:
-ACE-Step's `save_wav_file` calls `torchaudio.save`, which on modern
-torchaudio (>=2.8) delegates encoding to torchcodec (backed by ffmpeg's
-libav, already in `system_packages`); without it generation fails at
-save time. Both the dist-name and torchcodec gaps were caught by
-real-API verification on the GPU box (Step B1), not by the fully-mocked
-unit tests. The `cpu_offload` / `overlapped_decode` / `torch_compile`
-low-VRAM knobs are exposed as optional manifest capabilities (default
-off) and forwarded to the pipeline constructor.
-
-The `/v1/images/generations` route also accepts optional `image` (data URL or http(s):// URL) + `strength` (0.0 to 1.0, default 0.5) fields for img2img since v0.17.0. OpenAI SDK clients pass them via `extra_body`:
-
-    client.images.generate(prompt="oil painting", model="sdxl-turbo",
-                           extra_body={"image": "data:image/png;base64,...", "strength": 0.6})
-
-Models advertise support via `capabilities.supports_img2img`. Requests for non-supporting models return 400.
-
-The `image/generation` modality also exposes `/v1/images/edits` (inpainting) and `/v1/images/variations` (alternates of one image, no prompt) since v0.21.0. Both are multipart/form-data routes that mount on the same modality. Inpainting takes `image` + `mask` + `prompt` and routes to `backend.inpaint(...)`, which lazy-loads `AutoPipelineForInpainting.from_pipe(self._pipe)` to share VRAM with the loaded t2i pipeline. Variations takes `image` only and routes to `backend.vary(...)`, which delegates to the existing img2img path with empty prompt and high strength (default 0.85). Capability flags `supports_inpainting` and `supports_variations` gate the routes; OpenAI SDK clients use `client.images.edit(image=..., mask=..., prompt=..., model=...)` and `client.images.create_variation(image=..., model=...)` natively.
-
-Multi-reference edits and gpt-image request fields (v0.68.0, spec docs/superpowers/specs/2026-10-22-local-image-models-design.md). `/v1/images/edits` merges `image` parts then `image[]` parts (the OpenAI SDK list shape) and `mask` is optional. With a mask: exactly one image, inpaint as before (unused `steps`/`seed`/`guidance`/`negative_prompt` are reported as ignored). Without a mask: the model must declare `supports_reference_images` (else 400 `reference_images_not_supported`, pointing at `/v1/capabilities?modality=image/generation`), at most `max_reference_images` (400 `too_many_images`; `MAX_EDIT_IMAGES = 16` is checked before any decode), each reference at least 64 px with aspect ratio at most 8:1; the route calls the optional `backend.edit(prompt, images=[...], ...)` (`ReferenceImageModel` protocol). Both routes go through `image_generation/options.py`: `size` omitted or `auto` means the model's `default_size` only for models that declare `size_multiple`/`max_pixels` (others keep 512x512); those models get sizes scaled down (never up) to `max_pixels` and the quality preset's cap, then rounded down to the multiple; `quality` low/medium/high/auto (dall-e `standard`/`hd` alias medium/high) maps to `capabilities.quality_presets`; `output_format` png/jpeg/webp with `output_compression`; `background` auto/opaque (`transparent` is 400 `background_not_supported`); `moderation` and `style` are accepted and ignored. Responses add `size` (as produced), `quality`, `output_format`, `background` and `metadata.ignored` (accepted fields that had no effect); models without quality presets, and variations, echo `quality: "auto"`/`background: "auto"`, values OpenAI does not document for responses (its Python SDK does not validate them). `runtimes/reference.py:DiffusersReferenceModel` loads any diffusers pipeline class named by `capabilities.pipeline_class` that takes `image=[...]`, placed by `muse.modalities._common.offload.place_pipeline(..., override_key=None)` (the video-only `server.video_cpu_offload` override never applies to image models). The HF plugin routes `flux.2-klein`/`flux2-klein` repos (not `base` ones, unless a curated entry for that repo sets `reference_runtime: true`, which also gives it and LoRAs on it undistilled presets: 28 steps, real guidance 4.0, low/medium/high 20/28/50) to it with `cpu_offload: model`, 4-step presets, `max_reference_images: 4`, `size_multiple: 16`, `max_pixels: 4194304`; its download allow-list includes `*/*.jinja` (klein's Qwen3 chat template lives only in `tokenizer/chat_template.jinja`). Klein's offload parks ~16 GB in host RAM that the LoadDirector does not count. The image probe also runs one `edit` for models with `supports_reference_images`, and fails (so a pull disables the model) when the generate or edit output looks degenerate (`image_generation/probe_check.py`, numpy+PIL imported lazily in the model venv): on luminance box-downsampled to <=256 px, std < 2.0 (flat) or lag-1 spatial autocorrelation (mean of horizontal and vertical) < 0.5 (noise-like); the autocorrelation test is skipped when the source image's short side (before downsampling) is under 128 px (1x pixel art reads ~0.45 at 16 px, and nearest-upsampling would hide noise). Calibrated: noise reads ~0, 57 local real images >= 0.62 (raw generations >= 0.84). LoRA on klein: the reference runtime accepts `lora_adapter` / `base_model` and a per-request `lora_scale` (`set_adapters` with `lora_scale * capabilities.lora_scale_factor`; shared base resolution in `runtimes/_lora.py:resolve_lora_base`). When `lora_scale_factor` is not set, both LoRA runtimes (this one and the SDXL diffusers one, whose `cross_attention_kwargs` scale it multiplies) derive it at load from the adapter file's safetensors header (stdlib only, no tensor bytes; `_lora.resolve_lora_scale_factor`): sqrt(r)/lora_alpha when diffusers' `__metadata__["lora_adapter_metadata"]` declares `<component>.use_rslora` with one r/alpha across components, no rank/alpha patterns, and the file has no `.alpha` tensors (peft would scale by alpha/sqrt(r), ComfyUI by 1); else 1.0, with a warning when the header is corrupt or ambiguous. An explicit capability always wins. The HF plugin routes klein-based LoRAs to the reference runtime, preferring `pytorch_lora_weights.safetensors`. The `prompt_prefix` capability is prepended by the route unless the prompt already contains its phrase (the prefix without its trailing separator), case-insensitively (`metadata.prompt_prefix_applied`). Curated `klein-pixel-art` (hf://Limbicnation/pixel-art-lora, base `flux2-klein-4b`, 512x512, 4 steps, prefix "pixel art sprite, ", `lora_scale_factor: 0.0625` because its rsLoRA metadata makes diffusers scale it 16x and an adapter weight of 0.25+ destroys the image, so `lora_scale` 1.0 equals the card's ComfyUI strength 1.0) feeds `/v1/images/pixelize`. Curated `flux2-klein-base-4b` (opted in) carries `klein-pixel-walk` (hf://svntax-dev/pixel_spritesheet_4walk_small_lora_v1, a plain rank-32 ai-toolkit LoRA so no `lora_scale_factor`; `prompt_prefix` is the card's 4x4 template sentence; 512x512): one image is a 4x4 walk sheet (down/left/right/up rows), pixelized with `sheet=4x4 grid=4 palette=auto:24` to 32x32 frames (the go/no-go spike passed 4/4; docs/benchmarks/2026-10-28-pixel-assets-acceptance.md). When a LoRA repo ships its final weight next to numbered intermediate checkpoints (`<stem>_<digits>.safetensors`), the plugin downloads only the final one. An unprobed LoRA (any manifest with `capabilities.base_model`, no `memory_gb` and no measurement of its own) is sized by the supervisor's ladder from its base's catalog entry, found by muse id or, for a raw `hf://` pull whose Hub tag names an HF repo, by that entry's `hf_repo`: the base's probe measurement for the LoRA's pool, else its `memory_gb`, never the base's weights on disk (see "Lazy load + LRU eviction"). When the base has neither (or is not in the catalog), the LoRA is sized from its own adapter weights, so a non-curated `hf://` klein LoRA pulled with `--no-probe` starts under-sized until probed; the pull probe measures it and later loads self-heal the estimate upward. `scripts/bench/image_compare.py` runs a case file (or a youtube-channel `visuals.yaml`, read-only) through muse models and, with `OPENAI_API_KEY`, gpt-image-2, writing `results.json` and an `index.html` contact sheet.
-
-`image/upscale` (v0.25.0) is muse's super-resolution modality: a separate MIME tag from `image/generation` because the runtime backbone is different (`StableDiffusionUpscalePipeline`, not `AutoPipelineForText2Image`). Wire shape at `POST /v1/images/upscale` is multipart/form-data (mirroring `/v1/images/edits`), with `image` as the source file plus `model`, `scale`, optional `prompt`, `negative_prompt`, `steps`, `guidance`, `seed`, `n`, and `response_format` as Form fields. Output envelope mirrors `/v1/images/generations`: `{created, data: [{b64_json|url, revised_prompt}]}`. The bundled `stable-diffusion-x4-upscaler` (CreativeML OpenRAIL++-M, ~3GB, fixed 4x) is the default; the HF resolver plugin (priority 105) sniffs other diffusers-shape upscalers (`model_index.json` + `image-to-image` tag + upscaler-name allowlist). The `supported_scales` capability gates the request `scale` parameter (returns 400 for unsupported values; SD x4 supports `[4]` only). An env-tunable input-side cap (`MUSE_UPSCALE_MAX_INPUT_SIDE`, default 1024) prevents runaway VRAM use on oversized inputs; the cap is read per-request, so changes take effect on the next request, not at supervisor restart. GAN-based upscalers (AuraSR, Real-ESRGAN) need separate non-diffusers runtimes and are deferred to v1.next.
-
-`image/vectorization` (v0.59.0) is muse's raster-to-SVG modality. `POST /v1/images/vectorize` accepts multipart `image` plus optional `model`, `max_new_tokens` (1-7680), `temperature` (0-2), `top_p`, `num_beams` (1-8), `seed`, and `response_format` (`json` or `svg`). JSON returns `{id, object, model, mime_type, svg, source_size, width, height, view_box, seed, usage, metadata}`; raw mode returns `image/svg+xml`, ready to save or pass to an SVG consumer such as Manim. The bundled and curated `starvector-1b-im2svg` model uses the Apache-2.0 official mixed-precision checkpoint (~5.14GB on disk, loaded fp16 with ~7GB working memory, suitable for a 12GB GPU). Supply-chain policy is exact-only: `muse pull` pins HF revision `380ab95d25a8e9ab1dc825debe238b4953ae13b9`, downloads only config/tokenizer/safetensors data, and instantiates Muse's audited inference-only architecture; there is intentionally no broad HF resolver and no `trust_remote_code`. The output boundary accepts a static SVG subset and rejects scripts, event handlers, foreign objects, embedded rasters, remote/data URLs, DTDs/entities, oversized documents, or excessive element nesting. Input long side defaults to 2048 pixels and is configurable with `MUSE_VECTORIZATION_MAX_INPUT_SIDE`. This model is aimed at icons, logos, flat illustrations, and technical diagrams rather than photographs.
-
-`image/segmentation` (v0.26.0) is muse's promptable-segmentation modality. Wire shape at `POST /v1/images/segment` is multipart/form-data: `image` as the source file plus `model`, `mode` (auto/points/boxes/text), `prompt` (text mode), `points` (JSON-encoded `[[x, y], ...]`), `boxes` (JSON-encoded `[[x1, y1, x2, y2], ...]`), `mask_format` (`png_b64` or `rle`), and `max_masks` as Form fields. Output: `{id, model, mode, image_size, masks: [{index, score, mask, bbox, area}]}`. Mode dispatch is capability-gated end-to-end: `supports_automatic`, `supports_point_prompts`, `supports_box_prompts`, `supports_text_prompts`. A request with `mode=text` against a model declaring `supports_text_prompts: False` returns 400 before the runtime is invoked. The bundled `sam2-hiera-tiny` (Apache 2.0, ~40MB, point/box/auto, no text) is the default; curated `sam2-hiera-base-plus` and `sam2-hiera-large` extend the family. The HF resolver plugin (priority 110) sniffs `mask-generation` and `image-segmentation` tags. CLIPSeg is a deferred future: the plugin pattern recognizes it and flips `supports_text_prompts: True`, but the SAM2Runtime backbone needs a CLIPSeg-specific replacement to actually consume the text prompt. The mask format dispatch (`png_b64` for portable / viewable, `rle` for compact / pycocotools-compatible) introduces a precedent: the codec ships pure-Python RLE encode/decode that round-trips internally, with `pycocotools` as an optional faster path that produces output other COCO tooling can decode directly. Axis-order discipline at the wire layer: `image_size` is `[W, H]` (PIL convention); RLE `size` is `[H, W]` (COCO convention); `bbox` is `[x, y, w, h]` (COCO bbox convention).
-
-`image/cv` (v0.37.0) is muse's image-CV-primitives umbrella, hosting three routes on one MIME tag: `POST /v1/images/depth` (depth estimation), `POST /v1/images/keypoints` (pose / keypoint detection), `POST /v1/images/detect` (object detection). Three sibling runtimes: `HFDepthRuntime` over `AutoModelForDepthEstimation`, config-dispatched `HFKeypointRuntime` (explicit `VitPoseForPoseEstimation` for ViTPose; the generic auto class for other supported keypoint families), and `HFObjectDetectionRuntime` over `AutoModelForObjectDetection`. Capability flags `supports_depth` / `supports_keypoints` / `supports_detection` on each model's manifest gate which route accepts it; mismatch returns 400 `wrong_primitive`. The depth route's `response_format` field selects between `png16` (16-bit grayscale PNG, default; quantized into the value range so the full 16-bit precision tracks the actual depth bounds) and `float32` (raw little-endian bytes, fully precise but ~4x payload). The keypoint runtime's v1 ViTPose flow takes a single full-image bbox per call; multi-person pose extraction needs an upstream person detector and is deferred. Bundled defaults: `depth-anything-v2-small` (relative depth, ~25M, Apache 2.0), `vitpose-base-simple` (COCO 17-keypoint pose, ~85M, Apache 2.0; Transformers >=4.48 plus SciPy), `detr-resnet-50` (COCO 80-class detection, ~41M, Apache 2.0; `pip_extras` includes `timm` for the ResNet backbone). Curated additions: `depth-anything-v2-base` (larger), `zoedepth-nyu-kitti` (metric meters), `dpt-large` (classic), `rtdetr-r50vd` (faster detection). The single HF plugin (priority 110) dispatches per primitive via tag (`depth-estimation`, `keypoint-detection`, `object-detection`) with repo-name fallbacks; `metric_depth: True` auto-derives from the repo name (`zoedepth`, `metric`).
-
-`image/ocr` (v0.36.0) is muse's image-to-text modality. Wire shape at `POST /v1/images/ocr` is multipart/form-data: `image` as the source file plus optional `model`, `prompt` (Nougat-style task hint; TrOCR ignores), and `max_new_tokens` (validated to [1, 4096]). Output envelope mirrors `/v1/audio/transcriptions`: `{id, model, text, usage: {completion_tokens}}`. Single runtime `HFVision2SeqRuntime` over `transformers.AutoModelForVision2Seq` + `AutoProcessor`; the processor handles per-family preprocessing (TrOCRProcessor, NougatProcessor) automatically. The bundled `trocr-base-printed` (MIT, 334M, English printed text) is the default; curated additions cover handwriting (`trocr-large-handwritten`, MIT), academic papers with math/LaTeX (`nougat-base`, **CC-BY-NC-4.0**, non-commercial), and math-formula-only (`texteller`, MIT). The HF plugin (priority 110) sniffs `image-to-text`-tagged repos but explicitly excludes `image-text-to-text` (those are VLMs, reserved for the future #97 `image/description` modality). Capability flags `supports_handwritten` and `supports_math` are advisory only (surfaced in `/v1/models` for client-side filtering, not server-enforced). Donut/DocVQA structured-document variants are out of scope for v1; they may land later as a separate `image/document` modality.
-
-`image/pixelart` (spec docs/superpowers/specs/2026-10-28-retro-pixel-assets-design.md, recipe docs/PIXELART.md) is muse's pixel-art toolbox: CPU-only, deterministic, no weights. `POST /v1/images/pixelize` takes multipart `image` plus `grid` (`auto`/N) or `target_size` (mutually exclusive), `palette` (`pico-8`, `db16`, `db32`, `endesga-32`, `nes`, `gameboy`, `auto:N`, `none`, or `#rrggbb,...`; default `auto:32`), `background`, `remove_enclosed` (default false; with `background=auto` also keys enclosed background-coloured regions of at least max(4 cells, 0.05% of the grid), measured after the grid is known and before the cell vote), `alpha_threshold`, `cleanup` (default: clean only after a grid snap), `outline`, `seamless`, `sheet`, `preview_scale` and `response_format` (`json` -> `{id, object: "image.pixelize", model, data, grid, size, palette, background_removed, metadata}`, or raw `png`). `POST /v1/images/autotile` takes `a2` (an existing RPG Maker block, alpha-hardened at 128) OR `fill` (+ optional `base`) plus edge style fields, `tile_size`, `palette`, `name` and `response_format` (`json` with `files.{a2,blob47}.b64_json`, `godot_tres`, `tiled_tsx` and `layout`, or a `zip` of `<name>_a2.png`, `<name>_blob47.png`, `<name>.tres`, `<name>.tsx`, `<name>_layout.json`). The blob sheet follows RPG Maker MV `FLOOR_AUTOTILE_TABLE` (rpgtkoolmv/corescript@182e3144, MIT; attribution in the source), keeps shape 46 and drops 47; `BlobTile` x/y are in tile units and `mask` is the reduced 8-neighbour bitmask (N=1, NE=2, E=4, SE=8, S=16, SW=32, W=64, NW=128). Caps: `limits.pixelart_max_input_side` (`MUSE_PIXELART_MAX_INPUT_SIDE`, default 4096, read per request) bounds each input side and the pixelize preview's long side (art size x `preview_scale`, rejected before the preview is allocated) -> 413 `input_too_large`; byte-cap overflow is 413 `payload_too_large`. Both paths are in the package's `MODEL_OPTIONAL_PATHS`, so a request without `model` (JSON or multipart) gets the first enabled image/pixelart model through the gateway's default-model seam. The runtime `PixelTools` (Pillow + numpy, imported lazily) is the bundled `pixel-tools` (CPU, `memory_gb` 1.5) and is a weightless model (below). `scripts/bench/pixel_compare.py` runs `pixel_cases.yaml` (8 sprite prompts x `db32` / `auto:16` / `db32` at `target_size` 64x64, plus a grass-over-dirt autotile; generated sprites have no consistent grid, so `grid=auto` usually reports none and `target_size` is the recipe's default for them) against a live server and writes `results.json` plus an `index.html` sheet whose autotile section paints a random 16x12 map from the blob tiles by mask so seams show.
-
-`video/generation` (v0.27.0) is muse's narrative-clip modality, the heaviest yet. Wire shape at `POST /v1/video/generations` is JSON-only (no multipart) with `prompt` plus optional `model`, `duration_seconds` (0.5 to 30), `fps` (1 to 60), `size` (WxH string), `seed`, `negative_prompt`, `steps`, `guidance`, `response_format` (`mp4` default, `webm`, or `frames_b64`), and `n` (capped at 2 because each video is heavy). Output envelope mirrors `/v1/images/animations`: `{data: [{b64_json}], model, metadata: {frames, fps, duration_seconds, format, size}}`. Two distinct runtimes ship under the same MIME tag: `WanRuntime` (`diffusers.WanPipeline` or `DiffusionPipeline` fallback) and `CogVideoXRuntime` (`diffusers.CogVideoXPipeline`); the HF resolver dispatches per architecture. The bundled `wan2-1-t2v-1-3b` (Apache 2.0, 5s clips at 832x480) bundles a UMT5-XXL text encoder (~11GB at fp16) alongside its 1.3B transformer, so a full-resident load is ~11-12GB and OOMs a 12GB card; the earlier "~3GB / fits 8GB" claim counted only the transformer and was wrong. Curated additions: `cogvideox-2b` (~6GB at fp16, 6s at 720x480, fits 12GB) and `ltx-video` (~13GB, 30fps at 1216x704, requires 16GB+). The HF plugin (priority 105) sniffs `text-to-video`-tagged repos whose name matches one of `wan`, `cogvideox`, `ltx-video`, `mochi`, or `hunyuan`. LTX/Mochi/Hunyuan currently fall back to `WanRuntime`; their dedicated runtimes ship in v1.next. Distinction from `image/animation`: animation is short looping clips (16 frames @ 8fps = 2s, default `loop=true`, animated WebP), video is narrative clips (5s+, single play, no loop field, mp4). The codec includes vp9 webm with vp8 fallback (when ffmpeg lacks vp9) and an explicit `UnsupportedFormatError` when neither codec is available. All bundled video models declare `device: "cuda"`; CPU inference would take 10 to 30 minutes per clip and isn't a useful default.
-
-CPU offload (v0.52.1) is a per-model capability, not a bool: `capabilities.cpu_offload` is `"model"` (`pipe.enable_model_cpu_offload(device=...)`, whole-component granularity, peak VRAM ~ largest single component), `"sequential"` (`pipe.enable_sequential_cpu_offload(device=...)`, sub-module granularity, fits <=12GB but slower), or absent/`false` (today's plain `.to(device)` move, unchanged default for models that do not set it). Offload and `.to(device)` are mutually exclusive; offload only applies when the resolved device is cuda, mirroring the existing `device != "cpu"` guard. `capabilities.vae_tiling: true` calls `enable_vae_tiling()` plus `enable_vae_slicing()` (best-effort, guarded by `hasattr`) after placement, to cap the VAE-decode spike at higher resolutions. `WanRuntime` and `CogVideoXRuntime` (which the bundled `wan2-1-t2v-1-3b` script aliases as its `Model`) dispatch through one shared helper, `muse.modalities._common.offload.place_pipeline`. The registry setting `server.video_cpu_offload` (env `MUSE_VIDEO_CPU_OFFLOAD`, opt_str, default unset) globally overrides the per-model capability across every video model: `model`, `sequential`, or `off`/`false`/`none` to force plain placement even on a model that declares offload; unset falls through to the capability. `wan2-1-t2v-1-3b` sets `cpu_offload: "sequential"` and `vae_tiling: true` by default (guarantees load+generate on 8-12GB out of the box) and a corrected `memory_gb: 3.0` (an honest sequential-peak estimate; `muse models probe` self-heals it to the measured value). A bigger-card operator who wants speed over headroom sets `server.video_cpu_offload model` (or `off`).
-
-`3d/generation` (v0.41.0 through v0.45.0) hosts four concrete runtimes under one MIME tag, dispatched per-family via `_family_for(repo_id)` in `model_3d_generation/hf.py`. `TripoSRRuntime` (v0.41.0+) is the bundled default for image-to-3D. `ShapERuntime` (v0.43.0+) wraps `diffusers.ShapEPipeline` for text-to-3D; it follows the deferred-imports pattern (module-level sentinels for `torch`, `ShapEPipeline`, `trimesh`; `_ensure_deps()` populates them lazily). `TRELLISRuntime` (v0.44.0+) wraps Microsoft's TRELLIS SDK via `transformers` AutoPipeline with `trust_remote_code=True` for image-to-3D. `Hunyuan3DRuntime` (v0.45.0+) is the fourth runtime and the first to support BOTH image-to-3D and text-to-3D from one model; it wraps Tencent's `hy3dgen` SDK with `trust_remote_code=True`. Internally, text-to-3D is a two-stage pipeline: text generates an image via `HunyuanDiTPipeline`, then the image is lifted to a mesh via `Hunyuan3DDiTFlowMatchingPipeline`. The `_Family.trust_remote_code` flag flows into the synthesized manifest's `capabilities.trust_remote_code`, which the runtime constructor reads via the kwargs splat. The per-family dispatch adds one `_Family` constant plus one dispatch branch in `_family_for` plus one runtime file under `runtimes/` per new runtime. Shap-E is text-only: the curated `shap-e` entry declares `supports_image_to_3d: False` and `supports_text_to_3d: True`; a request to `/v1/3d/from-image` with `model=shap-e` returns 400 before the runtime is invoked. TRELLIS is image-only: the curated entry (renamed from `trellis-text-image` to `trellis-image` in v0.44.0) declares `supports_text_to_3d: False`. Hunyuan3D-2 declares both flags True. GLB output flows through the existing codec: `trimesh.Trimesh` assembles vertices and faces from the pipeline output, then `mesh.export(file_type="glb")` yields the bytes. A companion `_pip_extras_for(runtime_path)` helper mirrors the dispatch shape so each runtime's venv installs only the deps it needs. After v0.45.0, task #108 is closed. Wonder3D is deferred indefinitely (multi-view plus NeuS reconstruction does not fit muse's one-pipeline-call runtime model).
 
 The package is organized around three plugin surfaces:
 
@@ -357,8 +66,6 @@ The package is organized around three plugin surfaces:
   (`LlamaCppModel` for GGUF, `SentenceTransformerModel` for ST embedders).
   Best for uniform model classes where one runtime serves many models.
   See `docs/RESOLVERS.md` and `docs/CHAT_COMPLETION.md`.
-
-`chat/completion` (v0.42.0+) accepts vision-language models via the OpenAI multimodal `messages` shape: `content: [{type: text}, {type: image_url, image_url: {url: ...}}]`. The route's pre-dispatch step (`_decode_image_parts` in `routes.py`) walks `messages`, validates capability flags (`supports_vision`, `supports_multi_image`) on the loaded model, decodes each `image_url` via the existing `decode_image_input` helper (data URLs + `http(s)://` with SSRF guard), and rewrites the part to a muse-internal `{type: image, image: <PIL.Image>}` shape before calling the backend's `chat()` / `chat_stream()`. Capability mismatches return 400 `vision_not_supported` or `too_many_images`; bad images return 400 `invalid_image`. The runtime is `HFVisionLanguageModel` (`muse.modalities.chat_completion.runtimes.transformers_vlm`); bundled default is `smolvlm-256m-instruct` (~500MB, CPU-runnable). Curated extends with SmolVLM-Instruct, Qwen2-VL-2B/7B, and LLaVA-1.5-7B.
 
 A modality-agnostic core (`muse.core`) holds the registry, discovery,
 resolver dispatch, HF downloader, per-venv pip install, and FastAPI
@@ -551,68 +258,14 @@ measurements bucket in `_record_observed_peak`, matching what
 CPU-only host degrades `auto`->cpu, which happens to match the buggy
 CPU-pool accounting; it only bites on a GPU host.
 
-**GPU-layers pin (v0.56.0, GGUF only).** `muse models set-gpu-layers <id> <N>`
-(N >= 0), `--all` (all layers on GPU, i.e. -1; a bare `-1` positional is not
-shell-passable through click), or `--clear` writes a top-level catalog
-`gpu_layers_override` (the `device_override` pattern): llama.cpp `n_gpu_layers`,
--1 = all layers on GPU, 0 = pure CPU, N > 0 = a static GPU/CPU layer split for
-GGUFs bigger than VRAM. Precedence: pin > `capabilities.n_gpu_layers` > runtime
-default (-1). Refuses non-GGUF models (other runtimes silently ignore the kwarg).
-Takes effect on next cold load; run `muse models probe <id>` after pinning
-so admission sizing measures the split's real (smaller) VRAM peak. The
-probe honors the pin automatically (it constructs via `load_backend`).
-**CUDA llama-cpp-python wheels (v0.62.1).** pip's source build is CPU-only
-without `nvcc`. `install.llama_cpp_wheel: cu130` (env `MUSE_LLAMA_CPP_WHEEL`)
-makes `muse pull` / `muse models refresh` install llama-cpp-python
-binary-only from the abetlen cu130 index, capped at the verified version in
-`muse.core.llama_cuda.WHEELS`, plus `nvidia-cuda-runtime`/`nvidia-cublas`
-(`pip_install.pip_install_commands`; a same-version CPU build is force-reinstalled
-`--no-deps`). The cap is folded into the requirement (`>=0.2.90,<=0.3.33`): a separate
-`<=` requirement makes pip download the newest ~800 MB wheel first. The wheel step
-uses `--no-cache-dir` because the index serves signed one-off URLs pip never reuses. The wheel does not ship libcudart/libcublas and its RPATH is
-`$ORIGIN`, so `llama_cuda.prepare_llama_cpp()` dlopens them RTLD_GLOBAL from
-`site-packages/nvidia/*/lib` before `import llama_cpp` (both GGUF runtimes'
-`_ensure_deps`, `placement.native_gpu_offload/backend`, and the supervisor's
-`_QUERY` capability script, which also adds them to its cache identity).
-With `cpu_only=True` (a cpu placement or 0 GPU layers) it first sets
-`CUDA_VISIBLE_DEVICES=""`: a CUDA build otherwise allocates VRAM and offloads
-host matmuls even at `n_gpu_layers=0`. No-op for CPU builds. See
-docs/CHAT_COMPLETION.md "GPU builds of llama-cpp-python".
-**Venv dedupe (v0.63.0).** `muse.core.venv_dedupe` hardlinks content-identical
-(SHA-256 + size + mode + uid) regular files >= 1 MiB under each model venv's
-`site-packages` (never `bin/`, `__pycache__`, dot-prefixed transaction
-workspaces, or files changed in the last 60s), via link-to-temp + rename after
-re-checking both files' stat and comparing their bytes (the digest cache in
-`venv-digests.json` only groups candidates and is pruned to live inodes); the
-linked name must still be the keeper's inode. A venv with a live
-`.<name>.transaction-*` workspace is skipped: a refresh or re-pull runs pip in
-the canonical path. Safe because pip unlinks before writing installed files,
-which is also why `venv_transaction` hardlinks those same files
-(`venv_dedupe.is_package_file`) instead of copying when it clones a venv, so
-re-pulls keep dedupe's links and need far less free space.
-`muse storage dedupe [--dry-run]` does every venv; `dedupe_after_install` runs an
-`only=<venv>` pass after each successful pull/refresh (`storage.dedupe_venvs`,
-default true; never fails the install). Saves disk and shared-library page
-cache, not VRAM. First pass on the dev host: 118.5 GiB of 154 GiB.
-`muse.core.hf_seed.seed_repo` hardlinks SHA-verified shared-HF-cache blobs
-(`HF_HUB_CACHE`) into `<catalog_dir>/weights` before cache-mode downloads (bundled
-`snapshot_download` and resolver `resolved.download`), so huggingface_hub reuses
-them by etag name instead of re-downloading; `drop_unused_seeds` removes the ones
-the snapshot did not reference. It links first and verifies the linked inode,
-links only blobs this user owns (clearing group/world write, since the inode is
-shared), honors trailing-`/` patterns like huggingface_hub, and reads only the
-pinned revision's snapshot when present. Resolver plugins pass their download
-allow-list as `ResolvedModel.allow_patterns` (the GGUF plugin's names only the
-chosen quant), so seeding hashes only what the pull will fetch. `muse doctor storage` names catalog models still
-loading from the shared cache (`StorageReport.shared_hf_models`): pre-0.61 pulls
-with no provenance receipt, which are unservable until re-pulled.
-The chat HF resolver caps the active `context_length` at 8192 and records the
-trained maximum as `max_context_length` (it used to size the KV cache for the
-full trained context: Qwen3-0.6B 6.65 GB -> 1.66 GB VRAM).
-Known limitation: a split model occupies both VRAM and host RAM, but the
-director accounts it against its resolved device's pool only -- the
-Tier-1 static-offload simplification (automatic offload was evaluated and
-rejected; see docs/superpowers/specs/2026-07-08-gpu-layers-pin-design.md).
+GGUF extras (details in `docs/INTERNALS.md`): `muse models set-gpu-layers <id> <N|--all|--clear>`
+pins llama.cpp `n_gpu_layers` (pin > `capabilities.n_gpu_layers` > -1; refused for non-GGUF);
+`install.llama_cpp_wheel: cu130` installs CUDA llama-cpp-python wheels binary-only, and
+`llama_cuda.prepare_llama_cpp()` must run before `import llama_cpp`; the chat resolver caps
+`context_length` at 8192. Storage: `muse.core.venv_dedupe` hardlinks identical venv files
+(`muse storage dedupe`), `muse.core.hf_seed` hardlinks shared-HF-cache blobs into
+`<catalog_dir>/weights` before downloads (see `docs/STORAGE.md`). A split GGUF is accounted
+against one pool only (known limitation).
 
 ### No shared supertype across modalities
 
@@ -674,7 +327,9 @@ HTTP surface (clients hit one port, do not care about internal venvs).
 
 The supervisor also runs an auto-restart monitor thread. Every 5
 seconds it polls each currently loaded worker's /health and checks for
-process death via Popen.poll. After 3 consecutive failures (or
+process death through the worker's owned-process observation
+(`muse.core.owned_process`, under the worker's `process_lock`, never
+reaping outside the owner). After 3 consecutive failures (or
 immediate process exit), the monitor terminates the existing process
 and respawns it with exponential backoff (1s, 2s, 4s, ..., capped at
 30s). After 10 unsuccessful restart attempts the worker is marked
@@ -693,356 +348,33 @@ they edit the catalog only and take effect on the next request.
 
 ## Lazy load + LRU eviction (v0.40.0+)
 
-`muse serve` no longer eager-loads enabled models at boot. The gateway
-comes up instantly with zero workers; per-model workers spawn on first
-request and are evicted under memory pressure via on-demand LRU. Behind
-this is a runtime decoupling: catalog `enabled: true` declares "in
-service, may serve requests" but does NOT imply "in memory right now."
-A 12GB GPU can have 30 models enabled and serve them all, just not
-simultaneously; the live working set is sized to fit current free VRAM
-minus a headroom margin.
+Full design, sizing ladder and lock discipline: `docs/INTERNALS.md`. The invariants:
 
-The orchestrator is `muse.cli_impl.load_director.LoadDirector`,
-attached to `SupervisorState`. The gateway wraps every forwarded
-request in `director.acquire(model_id)` / `director.release(model_id)`.
-`acquire` is a three-phase critical section: under-lock decision (read
-loaded set, query live free memory, pick eviction victims if needed) ->
-outside-lock load (worker spawn + `/health` poll, possibly with
-preceding evictions) -> under-lock commit (insert `LoadEntry`,
-increment refcount, update `last_touched_at`). Concurrent acquires for
-the *same* cold model collapse to one load via an `asyncio.Future` /
-`threading.Event` registered in `in_flight_loads`; concurrent acquires
-for *different* cold models proceed in parallel because the load phase
-runs outside the lock.
-
-**Acquire runs OFF the event loop (v0.50.3+).** The gateway dispatches
-`director.acquire` via `await asyncio.to_thread(...)` under
-`asyncio.shield` (`gateway.py:_route_via_director`), NOT as a blocking
-synchronous call. A cold load takes tens of seconds (worker spawn +
-health poll); calling it synchronously froze the single gateway event
-loop and stalled EVERY concurrent request, including ones for
-already-hot models (measured: a 37s cold load stalled 6 hot requests
-~35s each -- see `examples/concurrent/RESULTS.md`). Moving it off-loop
-makes request-path acquires genuinely concurrent, which required three
-companion safety fixes the serialized path had masked:
-1. **In-flight memory reservation.** `in_flight_loads` now maps to an
-   `InFlightLoad(event, memory_gb, pool)` record, and `_decide` debits
-   the sum of same-pool in-flight loads (`_reserved_for_pool`) from
-   available memory before the fit check (the eviction no-candidates
-   re-check nets the same reservations). Without this, two concurrent
-   cold loads for different models would both pass the fit check against
-   the same live free-VRAM reading and over-commit -> OOM. The
-   reservation is deliberately conservative (it may over-reserve while a
-   worker is mid-allocation, trading a possible spurious evict/503 for
-   guaranteed no-OOM; precise per-load allocation accounting is a
-   deferred follow-up).
-2. **Cancellation-safe release.** If a request is cancelled (client
-   disconnect / timeout) while its off-loop acquire is still running,
-   `shield` keeps the acquire alive and a done-callback releases the
-   refcount if the acquire later succeeds -- else a bumped refcount leaks
-   and pins the model non-evictable forever. `_forward`'s single idempotent
-   cleanup was likewise widened to `except BaseException` so a cancel on
-   the forward leg also releases.
-3. **Overlap-gated observed-peak writeback.** `_load_and_commit` only
-   writes the self-heal peak when the load was "solo" (the sole in-flight
-   load at both endpoints of its free_before..free_after window AND no
-   concurrent load/eviction bumped `_inflight_epoch`); an overlapping
-   load or eviction pollutes the global free-memory delta the writeback
-   infers a peak from.
-
-**Same-model cold-load coalescing (v0.51.0+).** Off-loop acquire fixed
-loop-blocking but left a second hazard: a burst of concurrent requests
-for the SAME cold model each dispatched their own `to_thread(acquire)`,
-and the N-1 that lost the director's singleton-collapse race parked in
-`event.wait` INSIDE ThreadPoolExecutor threads, exhausting the default
-`min(32, cpu+4)` pool and stalling unrelated hot traffic (measured 11.5s
-on the GPU box; loop stayed responsive, `/health` fine). `gateway.py`
-`_acquire_coalesced` elects ONE loader per cold model via a per-model
-`asyncio.Future` gate in `SupervisorState.cold_load_gates` (a plain dict:
-the loader election is await-free, hence atomic on the single loop thread
--- no lock, no two-loader TOCTOU). The loader runs one off-loop acquire;
-same-model waiters `await asyncio.shield(gate)` ON THE LOOP (no thread
-each). The gate is settled from a done-callback on the acquire future
-(NOT the loader body), so a loader cancelled mid-load still resolves its
-waiters; waiters `shield` so one cancellation can't poison the group;
-waiters PROPAGATE the loader's failure (no retry herd) and on success take
-their own refcount via a full re-acquire that re-decides hot-or-cold. The
-director is unchanged (its own threading collapse still serves admin
-warmup / other callers). Coalescing is same-model only; cross-model
-over-admission is still handled by the in-flight reservation above.
-
-Memory accounting is live, not declared. `muse.core.memory_probe`
-wraps `pynvml.nvmlDeviceGetMemoryInfo` (GPU) and
-`psutil.virtual_memory().available` (CPU). `nvidia-ml-py` is a soft
-dep under `[server]`: when missing (CPU-only host, AMD GPU, driver
-mismatch) `gpu_free_gb()` returns None and GPU loads either fall back
-to a declared `MUSE_GPU_BUDGET_GB` cap or 503 with `unservable_reason`.
-Every cold load also captures `free_before - free_after`; if the
-observed delta exceeds `measurements.<device>.peak_bytes` it gets
-written back via atomic write-then-rename. Estimates self-heal upward
-toward reality on every load.
-
-A model's load size comes from a four-step sizing ladder (in
-`supervisor.py:_has_memory_data`; its docstring uses the same numbering),
-most-honest first:
-
-1. `capabilities.memory_gb` (declared annotation), or
-   `measurements.<device>.peak_bytes` from a prior probe -- the
-   authoritative numbers.
-2. *Base chase:* when neither exists and the manifest declares
-   `capabilities.base_model` (a LoRA adapter, whose own dir holds only the
-   adapter), the ladder sizes it from that base's catalog entry
-   (`supervisor._base_model_memory_gb`, one level, from the catalog the
-   caller already read). The base is a muse catalog id, or an HF repo id
-   (a raw `hf://` LoRA pull takes it from the Hub tag, e.g.
-   `black-forest-labs/FLUX.2-klein-4B`) matched against the catalog
-   entries' `hf_repo` case-insensitively, ignoring any `@revision`; the
-   largest estimate wins if several entries carry that repo. Only the
-   base's probe measurement for the pool the LoRA loads into, else its
-   declared `memory_gb`, else a measurement from another device counts.
-   It never falls back to the base's weights on disk: a klein snapshot
-   sums to ~24 GB against a ~9.5 GB offloaded peak and would make the LoRA
-   unservable. So when the base has no `memory_gb` and no probe
-   measurement (or is not in the catalog), the LoRA falls through to
-   step 3 and is sized from its own adapter weights (tens of MB) until
-   the pull probe measures the real base+adapter peak (or the first load
-   self-heals it upward). Boot validation, the request-path re-check and
-   `backfill_manifest_memory` all use it.
-3. *Weights-on-disk fallback* (v0.47.3): when neither exists, the
-   supervisor sizes the model from the bytes already in its `local_dir`
-   (sum over the HF snapshot tree, symlinks followed). A pulled model
-   that was never probed is therefore sized from its weights and loads
-   on demand rather than 503'ing with "no memory estimate." This is the
-   common case -- every `muse pull` leaves weights on disk -- so the old
-   "run `muse models probe` first" wall is gone. *GGUF exception
-   (v0.50.2):* a GGUF snapshot dir routinely holds several quant variants
-   of one model (q3/q4/q5/q8/f16), but only the declared
-   `capabilities.gguf_file` actually loads. Summing the whole tree would
-   OVERestimate wildly (a 4B q4 whose repo ships six quants sums to ~15 GB
-   vs its ~2.6 GB weight) and 503 a servable model as "exceeds device
-   capacity", so when a specific `gguf_file` is declared the sizer counts
-   that one file (every shard of it, for a split GGUF), falling back to
-   the tree walk only if it is absent on disk. This bug stayed hidden until v0.50.1 routed undeclared-device
-   models to the cuda pool, where the inflated estimate first exceeded the
-   card. *Diffusers/transformers dedup (v0.54.3):* the same over-count bites
-   any snapshot that ships redundant encodings of one component -- fp16 AND
-   fp32, `.safetensors` AND `.ckpt`/`.bin`, `model-*.safetensors` AND
-   `pytorch_model-*.bin` -- plus large non-weight blobs (dataset-attribution
-   CSVs, READMEs). Stable Audio Open summed 14.6 GB vs its ~2.6 GB real load
-   and 503'd on a 12 GB card. The tree walk now counts only WEIGHT-extension
-   files and, per component (same dir + canonical stem, with dtype tags and
-   the `model`/`pytorch_model`/`tf_model`/`flax_model` prefix normalized),
-   keeps ONE variant -- fp16 over fp32, safetensors over pickle. Counting the
-   loaded variant (not the largest) leans the estimate DOWN, the safe
-   direction: an under-estimate self-heals via the observed-peak writeback
-   and a rare OOM is recovered by the auto-restart monitor, whereas an
-   over-estimate 503s a servable model outright.
-4. Nothing sizable (no annotation, no probe, no weights on disk): the
-   model is flagged `unservable_reason` and 503s before any worker
-   spawn.
-
-`backfill_manifest_memory` applies the same ladder to the manifest the
-gateway hands `director.acquire`, so the director sizes a never-probed
-model from its weights too (not from a default 0.0). A model that DOES
-fit (possibly after evicting idle LRU models) loads on demand; the
-director runs the live fit/evict decision. A model that cannot fit even
-an empty device is caught earlier by the request-path servability
-re-check (see below) and 503s at the gateway WITHOUT reaching the
-eviction loop -- deferring an impossible model to the director would
-only evict the whole idle working set before 503'ing.
-
-Memory-accounting settings (all optional; read via the config registry,
-so each can be set as a `MUSE_*` env var OR in `~/.muse/config.yaml` OR
-via `muse config set` -- see "Configuration" below and docs/CONFIG.md).
-As of v0.52.0 the four budget/headroom knobs are actually wired into the
-LoadDirector (before v0.52.0 they were documented but inert):
-
-- `MUSE_GPU_BUDGET_GB` (`server.gpu_budget_gb`): declared cap on GPU
-  memory; muse uses `min(declared, live)` when both are available.
-- `MUSE_CPU_BUDGET_GB` (`server.cpu_budget_gb`): declared cap on host RAM.
-- `MUSE_GPU_HEADROOM_GB` (`server.gpu_headroom_gb`, default `1.0`):
-  subtracted from live free VRAM before deciding fit; protects against
-  driver allocations and fragmentation.
-- `MUSE_CPU_HEADROOM_GB` (`server.cpu_headroom_gb`, default `2.0`):
-  subtracted from live free RAM before deciding fit.
-
-`muse models list` shows a five-state status enum:
-
-- `enabled_loaded` (filled circle): catalog-enabled and currently
-  resident on a worker.
-- `enabled_unloaded` (half circle): catalog-enabled but not resident;
-  next request triggers a cold load.
-- `disabled` (open circle): catalog-disabled; requests 503 without
-  attempting a load.
-- `recommended` (star): curated entry not yet pulled.
-- `available` (mid-dot): pullable from a resolver but not curated.
-
-The breaking behavior change is cold-start latency on first request
-to each model. A 9B GGUF can take 10-30s to load; a 3B diffusion
-model 5-15s. `muse models warmup <id>` is the manual pre-load: the
-admin endpoint `POST /v1/admin/models/{id}/warmup` runs the load
-without bumping refcount, so subsequent requests are hot. Operators
-who really want the v0.39 eager-boot semantics put a warmup loop in
-their startup script.
-
-`muse pull` runs probe at the end (`--no-probe` opts out for
-cross-device pulls, e.g., pulling on a CPU host for later GPU
-deployment). This gives freshly-pulled models a measured memory
-estimate up front. As of v0.47.3 the estimate is no longer *required*
-to serve: even a `--no-probe` pull (or a probe that was skipped) loads
-on demand, because the supervisor falls back to sizing the model from
-its on-disk weights (step 3 of the sizing ladder above). Probe still
-matters -- it yields a more honest peak than raw weights size, and it
-self-heals on every subsequent load -- but for sizing it is an
-optimization, not a gate.
-
-The probe IS a gate on the pull itself (v0.61.0): it proves the model
-loads and runs a representative inference. A successful pull leaves the
-model `enabled: true`. If the probe fails (load error, inference error,
-or timeout), `muse pull` exits 1 and
-the entry is kept but set `enabled: false`, so weights and venv survive
-for a retry; the message points at `muse models probe <id>` then
-`muse models enable <id>`. `catalog.pull()` returns the id it installed,
-so the probe targets the right entry even on a URI re-pull. The admin
-pull job runs `muse pull` as a subprocess and therefore ends `failed`.
-Admin probe jobs wait the model's own probe timeout plus 120 s; admin pull jobs
-wait 1800 s plus the largest declared probe timeout plus 120 s (the modality is
-unknown before resolution).
-The in-venv probe worker exits 0 when the model loads but its inference
-raises (the record carries `inference_error`); `run_probe` treats that
-record as a failure (returns 6), so it fails the pull too.
-A `--no-probe` pull exits 0 and stays enabled.
-
-Decoupling principle: `enabled` is catalog state; `loaded` is runtime
-state. Two new admin operations, `load_model_into_worker` and
-`unload_model_from_worker` (in `muse.admin.operations`), perform the
-runtime mutation *without* flipping the catalog `enabled` bit. The
-LoadDirector calls these on lazy-load and eviction paths so LRU
-eviction of model X doesn't accidentally disable X for the next
-request. The legacy `enable_model` / `disable_model` ops keep
-catalog-flip semantics for explicit operator intent and back the
-`muse models enable/disable` CLI verbs.
-
-Catalog format stays backward-compatible. `measurements.<device>.peak_bytes`
-gains self-healing semantics (passively updated on every cold load),
-and older muse readers ignore unknown fields. `/v1/models` gains
-`loaded: bool`, `last_loaded_at: iso8601 | null`, and `unservable_reason:
-str | null` per entry, plus the OpenAI-compat `created: int` (a stable
-`0`; muse has no per-model creation time) and `owned_by: str` (the HF org
-slug from `hf_repo`, else `"muse"`) added in v0.47.4 so strict OpenAI SDK
-clients that validate the model-object shape accept it. The OpenAI-shape
-envelope is otherwise unchanged. All these fields are written *after* the
-`capabilities` splat in `build_model_entry`, so a manifest can never
-clobber the authoritative `id`/`object`/`created`/`owned_by`/`loaded`
-keys.
-
-The gateway's `/v1/models` lists *every enabled catalog model*, not just
-the ones with a live worker (v0.47.3). Loaded workers are aggregated
-from their own `/v1/models`; enabled-but-unloaded catalog entries are
-appended with `loaded: false` (skipping disabled models and any without
-a `python_path`). Both paths render through the shared
-`muse.core.server.build_model_entry` helper so the entry shape is
-identical whether the model is resident or cold. Before v0.47.3 the
-gateway listed only loaded workers, so a freshly-booted lazy supervisor
-reported an empty `/v1/models` until the first request warmed a worker
--- a doc-vs-code drift that hid the entire enabled-but-unloaded set from
-clients.
-
-Worker-reported `last_loaded_at` is filled in by the gateway, not the
-worker (v0.47.4). Per-model workers run outside the supervisor and own no
-`LoadDirector`, so their own `/v1/models` reports `last_loaded_at: null`
-even for a resident model. The gateway's `_enrich_loaded_at` joins the
-real load timestamp from `state.director.loaded[id].loaded_at` (snapshot
-under the director lock, rendered via the shared `_format_loaded_at`)
-onto each aggregated resident entry before appending the unloaded rows;
-it never overwrites an already-non-null value. `/health` is broadened the
-same way: it unions enabled-but-unloaded catalog models + modalities into
-its `models`/`modalities` sets (via `_unloaded_catalog_entries`) so a
-zero-worker lazy supervisor reports the full serviceable surface, not an
-empty one.
-
-Servability is re-checked live at request time, not frozen at boot.
-Boot and the request-path re-check share ONE verdict function,
-`_servability_reason(entry, ...)` (sizing ladder, then a device-capacity
-check against live free memory), so the two can never drift.
-`validate_catalog_at_boot` stamps `unservable_reason` once on startup;
-`revalidate_servability` re-derives the full verdict on the first
-request to a stamped model against the LIVE catalog + live free memory.
-It clears the stamp only when the model is sizable AND fits: a probe or
-weights landing after boot clears a "no memory estimate" stamp, and
-freed memory clears a stale "exceeds device capacity" stamp -- both
-without a supervisor restart. A GENUINE "exceeds device capacity" stamp
-(the model cannot fit even an empty device) is RETAINED, so the gateway
-503s `model_unservable` directly instead of routing an impossible model
-into the director's eviction loop. So `muse models probe <id>` (which
-writes a measurement to the catalog) takes effect on the *next request*.
-The mtime-cached `_read_catalog` is the read path; a probe's catalog
-write bumps the mtime so the re-check sees fresh measurements.
-
-Lock discipline:
-
-- `state.director.lock` (RLock) guards in-memory mutations of the
-  loaded set, in_flight_loads, and the recent_decisions deque. Held
-  during decision and commit phases of `acquire`; released around the
-  long-running worker spawn / wait.
-- Admin operations (`load_model_into_worker`, `disable_model`,
-  `unload_model_from_worker`) plan their mutations under `state.lock`,
-  release the lock before slow worker spawn or shutdown, then reacquire
-  to commit. Same plan-then-execute pattern as the existing admin
-  endpoints; lets `acquire` and admin endpoints share the runtime
-  without serializing on slow I/O.
-- `catalog._CATALOG_WRITE_LOCK` serializes the read-modify-write on
-  `measurements` across observed-peak writebacks for *different* models
-  (and every other catalog RMW), so catalog.json round-trips stay atomic.
-
-### Idle eviction (v0.40.1+)
-
-In addition to memory-pressure LRU eviction, models can declare a
-per-model `capabilities.idle_timeout_seconds` in their manifest. A
-background sweeper thread runs every `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`
-(default 30) and evicts loaded models whose `last_touched_at` exceeds
-the timeout AND whose refcount is 0. This frees memory without
-waiting for traffic-driven LRU.
-
-A GLOBAL default idle timeout (`server.idle_timeout_seconds`, env
-`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`, v0.51.0+) applies to any model that
-declares no per-model `idle_timeout_seconds`. Precedence: per-model
-`capabilities.idle_timeout_seconds` wins; otherwise the global default;
-otherwise never idle-evict. As of v0.52.0 the global default is **600
-seconds (10 minutes)**, not off -- an untouched model with refcount 0 is
-reclaimed after 10 minutes by default. The value is resolved through the
-config registry (lenient: a non-numeric env/file value logs a warning and
-falls back to the 600s default, so a bad value cannot crash boot). This
-is the knob for "reclaim any idle model after N minutes" on a shared
-single-GPU box, where bundled models (which declare no per-model timeout)
-would otherwise sit resident until memory pressure.
-
-To DISABLE idle eviction entirely, set `server.idle_timeout_seconds` (or
-`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`) to `0` (or any value `<= 0`); the
-IdleSweeper's `<= 0` guard then never idle-evicts, and only memory
-pressure releases a model. Per-model `capabilities.idle_timeout_seconds`
-still overrides the global default in both directions.
-
-The sweeper reuses the on-demand eviction's disable_fn primitive,
-so the orphan-worker-on-disable-failure remediation (re-insert
-LoadEntry) applies uniformly. Idle eviction is logged in
-`recent_decisions` with reason="idle_timeout:Ns".
-
-Configuration:
-- Per-model: `capabilities.idle_timeout_seconds: <number>` in manifest. Null/absent = fall back to the global default.
-- Global default: `server.idle_timeout_seconds` (env `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`), default **600** (10 min); set `<= 0` to disable. Applied to models without a per-model timeout.
-- Sweep interval: `server.idle_sweep_interval_seconds` (env `MUSE_IDLE_SWEEP_INTERVAL_SECONDS`), default 30.
-
-### Request queueing (v0.55.0+)
-
-Two gateway-side mechanisms (spec docs/superpowers/specs/2026-07-08-request-queueing-design.md), both waiting ON the event loop (never in pool threads):
-
-- **Per-model concurrency cap:** `capabilities.max_concurrency` (else `server.default_max_concurrency`, default 0 = unlimited = no gating). Excess requests park FIFO on a per-model asyncio.Semaphore in `muse.cli_impl.queueing.ConcurrencyGate`. The CPU box's 32B runs with `max_concurrency: 1`.
-- **Capacity-wait:** the LoadDirector tags its capacity 503 `retryable=True` when the failure is TRANSIENT -- any of the three in-flight states holds: an in-use loaded model (refcount > 0) blocks eviction, another model's cold load is in flight (its reservation made the fit fail; v0.57.1), or an eviction is mid-flight (`director.evicting`: victim popped from `loaded` but disable_fn still shutting the worker down, so the director looks idle while VRAM is still occupied; v0.57.2). The gateway parks on `CapacityNotifier` (generation asyncio.Event, fired threadsafe by the director on release-to-zero, post-eviction, and load commit/abort) and retries under the shared deadline. Only a truly idle-and-empty device that still cannot fit the model 503s immediately.
-
-A modality may export a literal `CONCURRENCY_CEILING = {"max_concurrency": n, "max_queue_depth": n}` (AST-read by `muse.core.discovery.concurrency_ceilings`, like `MODEL_OPTIONAL_PATHS`). The gateway clamps every model of that modality to it, so no manifest, catalog edit or `server.default_max_concurrency` can raise it; `acquire_slot(..., max_queue_depth=)` takes the smaller positive of the ceiling and `server.max_queue_depth`, so a global 0 does not remove it. The gate applies a LOWERED cap live (surplus permits are retired: free ones at once, held ones as their holders release, never over-issuing); a raised cap still applies on restart. decision/evaluation declares 1 / 32.
-
-One budget covers both: `server.queue_timeout_seconds` (default 300; 0 = today's immediate-503). `server.max_queue_depth` (default 0 = unbounded) fast-fails 503 `queue_full`. Timeout -> 503 `queue_timeout` (message reports actual elapsed wait). Telemetry `request` events carry `queued_ms`; `/v1/admin/memory` and `/v1/telemetry/summary` expose per-model `queue_depth` (the seam a future queue-aware federation router consumes). `/v1/admin/memory` omits queue_depth when no gate is bound (unknown is never rendered as 0), while `/v1/telemetry/summary` always includes it (0 when unbound). Cold-starting models with parked waiters (not yet loaded) are visible too (v0.57.4): the summary lists them in a separate always-present `queued` array, and the admin per-model breakdown includes them as rows marked `loaded: false`. `acquire_slot` returns whether a slot was actually taken and the gateway releases only on True, so a live `server.default_max_concurrency` change can no longer desync the gate's accounting.
+- `enabled` is catalog state; `loaded` is runtime state. Workers spawn on first request through
+  `LoadDirector.acquire` (`muse.cli_impl.load_director`) and are evicted by LRU under memory
+  pressure or by the idle sweeper (`server.idle_timeout_seconds`, default 600; per-model
+  `capabilities.idle_timeout_seconds` wins; `<= 0` disables). Lazy-load/eviction use
+  `load_model_into_worker` / `unload_model_from_worker`, which never flip `enabled`.
+- The gateway runs `acquire` off the event loop (`asyncio.to_thread` under `shield`), coalesces
+  same-model cold loads on one per-model future (`_acquire_coalesced`), and reserves in-flight
+  memory per pool so concurrent cold loads of different models cannot over-commit. A cancelled
+  request still releases its refcount (done-callback); `_forward` cleans up on `BaseException`.
+- Memory is live (pynvml / psutil minus `server.*_headroom_gb`, capped by `server.*_budget_gb`).
+  A model's size comes from the four-step ladder in `supervisor._has_memory_data`:
+  (1) `capabilities.memory_gb` or a probe measurement for the resolved pool, (2) for a LoRA, its
+  base's estimate (never the base's weights on disk), (3) weights on disk (one GGUF file; one
+  variant per diffusers component), (4) unservable. Boot validation, the request-path re-check
+  (`_servability_reason`) and `backfill_manifest_memory` share it; `auto` resolves to a pool
+  through `memory_probe.auto_uses_cuda` everywhere. Observed peaks self-heal upward after solo
+  loads only.
+- The probe (`muse models probe`, also run by `muse pull`) is a gate on the pull: a failed load
+  or inference (including degenerate image output) exits nonzero and disables the model; a
+  failed probe never replaces a larger earlier inference peak.
+- Request queueing (v0.55.0): per-model `capabilities.max_concurrency` (else
+  `server.default_max_concurrency`, 0 = unlimited) parks requests FIFO on the loop; transient
+  capacity 503s (`retryable=True`) wait on `CapacityNotifier` under `server.queue_timeout_seconds`
+  (default 300); `server.max_queue_depth` fast-fails `queue_full`. A modality's literal
+  `CONCURRENCY_CEILING` clamps every model of that modality (decision/evaluation: 1 / 32).
 
 ## Configuration
 
@@ -1150,271 +482,26 @@ to the legacy catalog-only mutation with a warning.
 
 ## Observability
 
-`muse.observability/` (v0.51.x, on the `feature/observability-dashboard`
-branch) is a self-contained telemetry package: a sparse single-table
-event model, a fire-and-forget recorder, a per-worker log ring buffer,
-a periodic resource sampler, and a `/dashboard` HTML page backed by a
-small set of gated JSON/SSE endpoints. It has no dependency on any
-other modality; the rest of muse depends on it only through the thin
-`record(...)` call.
-
-Import-hygiene contract: `muse.observability/__init__.py` re-exports
-`EVENT_COLUMNS`, `event_to_row`, `TelemetryStore`, `TelemetryRecorder`,
-`record`, `get_recorder`, `init_recorder`, `reset_recorder`, `Sampler`,
-and `LogHub` EAGERLY (all stdlib-only), but re-exports
-`build_dashboard_router`, `DASHBOARD_HTML`, `require_dashboard_auth`,
-and `check_dashboard_token` LAZILY via a PEP 562 module `__getattr__`,
-because `dashboard.py` and `dashboard_auth.py` import fastapi and
-sse_starlette at module top. The director, gateway, and supervisor all
-import `muse.observability.recorder` from the hot request path, and
-importing any submodule runs `__init__.py` first -- an eager dashboard
-import there would drag fastapi into `muse --help` / `muse pull`,
-violating the project's deferred-imports convention. Regression guard:
-`tests/observability/test_public_api.py` re-imports `recorder` in a
-clean subprocess and asserts `"fastapi" not in sys.modules`.
-
-**Event model.** One sparse SQLite table, `events`
-(`muse.observability.store.TelemetryStore`), with columns
-`EVENT_COLUMNS` (`muse.observability.events`): `ts`, `type`, plus every
-field any event type might carry (`model_id`, `pool`, `gb`,
-`latency_ms`, `status`, `reason`, `cold_load_seconds`, `stream`,
-`free_vram_gb`, `free_ram_gb`, `gpu_used_gb`, `loaded_count`,
-`in_flight_count`, `modality`) -- unset fields are `NULL`, not one
-table per event type. `event_to_row(type, ts, **fields)` builds the
-full row and raises `ValueError` on an unknown field name (a typo'd
-kwarg fails loud instead of silently writing `NULL` to the wrong
-column). Four event types are recorded today: `model_load` and
-`model_evict` (from `LoadDirector.acquire` / eviction, `pool` +
-`gb`/`cold_load_seconds`), `request` (from the gateway's forwarding
-path, `latency_ms`/`status`/`stream`/`modality`), and `sample` (from
-`Sampler`, a periodic snapshot of `free_vram_gb`/`free_ram_gb`/
-`loaded_count`/`in_flight_count`). `TelemetryStore.series(metric,
-since_ts, bucket_seconds)` buckets rows into a fixed set of named
-metrics (`request_rate`, `latency`, `vram`, `ram`, `load_evict`); v1
-latency is avg+max per bucket, not exact percentiles.
-
-**Fire-and-forget recording.** `muse.observability.recorder.record(type,
-**fields)` is meant to be called from every hot path (director,
-gateway) and must never block or raise. `TelemetryRecorder` enqueues
-onto a bounded `queue.Queue` (`max_queue=10000`) and a daemon flush
-thread batches inserts into the store every `flush_interval` (0.5s
-default); when the queue is full the event is dropped and
-`recorder.dropped` increments rather than blocking the caller --
-`/v1/telemetry/summary` surfaces the running drop count so an operator
-can tell if the recorder is falling behind. Every call site
-(`load_director.py`, `gateway.py`) wraps `record(...)` in its own
-try/except so a telemetry regression can never break a real model load,
-eviction, or request. `init_recorder(store, enabled=...)` /
-`get_recorder()` / `reset_recorder()` manage a module-level singleton;
-`enabled=False` (or `telemetry.enabled: false`) swaps in a
-`_NoopRecorder` so a disabled deployment pays no queue/thread cost at
-all.
-
-**Log capture.** Each worker's stdout is piped into a per-model
-`LogHub` (`muse.observability.logs`) ring buffer, byte-bounded by
-`telemetry.log_buffer_kb` (KB, not lines), when telemetry is enabled;
-`spawn_worker(..., log_hub=state.log_hub)` in the supervisor starts a
-daemon reader thread (`_pump_worker_logs`) that tees each line to both
-the aggregate supervisor stdout and `hub.append(model_id, line)`. When
-telemetry is disabled `log_hub` stays `None` and workers spawn exactly
-as before (no reader thread, no behavior change). `LogHub` also fans
-out live lines to subscriber queues for the SSE tail; `snapshot(id)`
-returns the buffered history for a late-connecting client.
-
-**`/dashboard` + telemetry endpoints.** `build_dashboard_router(state)`
-(lazily imported, see above) mounts:
-- `GET /dashboard` -- a single self-contained HTML/CSS/JS page
-  (`DASHBOARD_HTML`), UN-GATED so it always loads (even with no token
-  configured yet) and prompts the browser for a token before hitting
-  any gated endpoint, storing it in `sessionStorage`.
-- `GET /v1/telemetry/summary` -- gated JSON: currently loaded models
-  (`model_id`/`pool`/`gb`/`last_used`), `in_flight` count,
-  `dropped_events`, and a federation-forward `node` id (`state.node_url`
-  or `state.node_id` if set, else `socket.gethostname()`) so a future
-  multi-node aggregator can tell which box a summary came from.
-- `GET /v1/telemetry/series?metric=...&window=...` -- gated JSON time
-  series from `TelemetryStore.series`; unknown `metric` returns 400
-  `invalid_metric`.
-- `POST /v1/telemetry/logs-ticket` -- gated (header): mints a
-  short-lived ticket (`muse.observability.log_tickets.LogTicketStore`)
-  the dashboard exchanges for SSE access without putting the admin
-  token in a URL.
-- `GET /v1/telemetry/logs/{model_id}` -- SSE tail, authenticated INSIDE
-  the handler (not via the `require_dashboard_auth` dependency, since
-  `EventSource` sends no custom headers): a valid `?ticket=` OR an
-  `Authorization: Bearer <token>` header (for curl-style clients)
-  is accepted; `?access_token=<token>` is NOT. Once authenticated, it
-  takes the buffered history and a subscription atomically
-  (`hub.subscribe_with_snapshot`, so no line falls between them), then
-  polls every 250ms until the client disconnects, unsubscribing in a
-  `finally` so a disconnect/cancel/exception never leaks a subscriber
-  queue.
-
-**Auth.** `muse.observability.dashboard_auth.check_dashboard_token`
-mirrors the admin API's closed-by-default policy: with no `admin.token`
-configured, every gated endpoint 503s `dashboard_closed` (same token as
-`MUSE_ADMIN_TOKEN`/admin API -- there is no separate dashboard secret).
-The admin token is HEADER-ONLY everywhere: a request needs it as
-`Authorization: Bearer <token>`; there is no `?access_token=` query-param
-fallback. The one place a header alone cannot work is the SSE log
-stream (`EventSource` cannot set custom headers), which instead
-authenticates with a short-lived, random ticket
-(`telemetry.log_ticket_ttl_seconds`, default 60s) minted from the
-header-gated `POST /v1/telemetry/logs-ticket`. The ticket is reusable
-within its TTL (not single-use, so `EventSource` auto-reconnect keeps
-working) and unscoped (it authorizes the logs SSE surface generally,
-matching the admin token's own all-or-nothing scope). So the admin
-token itself never rides a URL, and a leaked ticket in an access log
-is useless once its TTL elapses. Comparison is `secrets.compare_digest`;
-the token is never echoed in an error message or log line.
-
-**Config.** Five `telemetry.*` settings (see "Configuration" above and
-`docs/CONFIG.md`): `telemetry.enabled` (`MUSE_TELEMETRY_ENABLED`,
-default `true`), `telemetry.retention_days` (`MUSE_TELEMETRY_RETENTION_DAYS`,
-default `7`), `telemetry.log_buffer_kb` (`MUSE_TELEMETRY_LOG_BUFFER_KB`,
-default `64`), `telemetry.sample_interval_seconds`
-(`MUSE_TELEMETRY_SAMPLE_INTERVAL_SECONDS`, default `10.0`),
-`telemetry.log_ticket_ttl_seconds`
-(`MUSE_TELEMETRY_LOG_TICKET_TTL_SECONDS`, default `60.0`). The
-supervisor wires the store, recorder, sampler, and log hub together
-once at boot (`_init_telemetry`, gated on `telemetry.enabled`) and tears
-them down symmetrically on shutdown (`sampler.stop()` joins the sampler
-thread; `store.close()` closes the sqlite connection).
-
-### Eviction telemetry
-
-- **`model_evict` covers every director eviction** (memory-pressure LRU,
-  idle sweep, admin disable) and carries `pool` and `gb`; it is emitted from
-  `finish_eviction` once the teardown succeeds, so a failed disable records
-  no event (it logs a `disable_fn_raised` decision instead).
+`muse.observability` (details in `docs/INTERNALS.md`): a sparse single-table SQLite event store,
+a fire-and-forget `record(...)` that never blocks or raises (bounded queue; drops are counted),
+per-worker log ring buffers, a sampler, and `GET /dashboard` plus gated `/v1/telemetry/*`
+endpoints. Its `__init__` imports the dashboard (fastapi) lazily: hot-path modules import
+`muse.observability.recorder`, and `tests/observability/test_public_api.py` guards that
+fastapi stays out of `muse --help`. Gated endpoints use the admin token, header-only, compared
+with `secrets.compare_digest`; the SSE log tail authenticates with a short-lived ticket from
+`POST /v1/telemetry/logs-ticket` instead (EventSource cannot set headers). `model_evict` is
+emitted only after a successful teardown. Settings: `telemetry.*` (docs/CONFIG.md).
 
 ## Federation
 
-`muse federate` (branch `feature/federation-coordinator`, see
-`docs/superpowers/specs/2026-07-04-federation-design.md` for the full
-design) runs a thin coordinator process that fronts a static list of
-unmodified muse `serve` nodes so a client sees "one server with all the
-GPUs" instead of N separate boxes. This is the second sub-project of
-the federation arc; it consumes the per-node observability surface
-(`/v1/models`, `/v1/telemetry/summary`) shipped in v0.53.0.
-
-```
-                 clients (OpenAI SDK, curl, ...)
-                          |
-                 [ muse federate ]  :8100        <- new coordinator
-                  /       |       \
-             node A     node B     node C         <- unmodified muse servers
-```
-
-Nodes need NO code changes: they are plain `muse serve` instances. The
-coordinator lives in `muse.federation` (node-membership model, async
-poll-and-cache registry, pure model-locality router) plus
-`muse.cli_impl.federation` (the FastAPI app + `run_coordinator`,
-structurally a sibling of the existing single-host gateway in
-`muse.cli_impl.gateway`, reusing its `_forward` + SSE-relay machinery
-and `extract_model_from_request`).
-
-**Node membership (static, v1).** Nodes come from two merged sources,
-CLI entries winning on url collision:
-- `--node http://host:8000` or `--node name=http://host:8000` (repeatable).
-- A yaml file, `nodes: [{url, name?, token?}, ...]`. Default location is
-  `<catalog_dir>/federation.yaml` when it exists and neither `--config`
-  nor `federation.config_file` names an explicit path. The optional
-  per-node `token` is used ONLY by the coordinator's own outbound poll
-  to read that node's gated `/v1/telemetry/summary`; it is never
-  exposed to clients. Dynamic membership (registration, gossip,
-  health-based ejection) is deferred to v2.
-
-**Node-state refresh.** `muse.federation.registry.NodeRegistry` polls
-every node concurrently on a background interval
-(`federation.refresh_interval_seconds`, default 3.0s) and caches a
-`NodeState` snapshot per node: `GET <node>/v1/models` (reachability +
-per-model `loaded`) and (only if that node has a
-configured token) `GET <node>/v1/telemetry/summary` for `in_flight`.
-Route handlers read the cache via `.snapshot()`, so routing is a fast
-local lookup, never a per-request fan-out. A node whose poll fails is
-marked unreachable and skipped by the router until it recovers
-(per-node failure isolation: one bad node never aborts the refresh for
-the others).
-
-**Routing policy (model-locality, v1).** `muse.federation.router.select_node`
-is a pure function over the cached snapshot:
-1. Candidates = reachable nodes whose `/v1/models` lists the requested
-   model.
-2. Prefer loaded: among candidates, those with the model currently
-   `loaded` win over those that would have to cold-load it.
-3. Tie-break: lowest `in_flight` (from telemetry, if a token is
-   configured for that node), else round-robin over the tied set.
-4. No candidate -> 404 `model_not_available` (OpenAI-shape).
-
-Deferred to v2: hardware-aware routing (route a big model to the node
-whose GPU actually fits it), true queue-depth/latency-aware routing,
-sticky sessions, an aggregated cluster dashboard (v1 links out to each
-node's own `/dashboard` via `/v1/federation/nodes`), and
-coordinator-side inference auth (v1's inference routes are open,
-mirroring an unmodified node's own gateway; per-node tokens are used
-only for the coordinator's outbound telemetry poll, never exposed to
-clients).
-
-**Request forwarding + failover.** The catch-all proxy extracts `model`
-from the request body/query (the same logic the single-host gateway
-uses), asks `select_node`, and forwards via the shared `_forward`
-helper (buffered + SSE relay, unchanged). A forward that fails at
-connect/timeout (never mid-stream -- once a `StreamingResponse` starts,
-the relay is on its own) retries ONCE against a different candidate for
-the same model; if no other candidate exists, or the retry also fails,
-the coordinator returns 502 `no_node_available`.
-
-**Aggregated read endpoints**, mounted before the catch-all so they are
-never shadowed:
-- `GET /v1/models` -- OpenAI-shape union of model ids across reachable
-  nodes, each annotated with `loaded` (true if loaded on ANY node) and
-  `nodes` (which node names carry it).
-- `GET /health` -- `"ok"` if at least one node is reachable, else
-  `"degraded"`; per-node reachability/model-count/in_flight breakdown
-  in the body.
-- `GET /v1/federation/nodes` -- operator view: each node's url/name,
-  reachable state, loaded model list, in_flight (if known), and
-  last-poll age in seconds.
-
-**Config** (three settings under the `federation.*` group in
-`muse.core.config.SETTINGS`; see "Configuration" above and
-`docs/CONFIG.md`):
-- `federation.refresh_interval_seconds` (`MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS`,
-  default `3.0`) -- seconds between background polls of each node.
-- `federation.forward_timeout_seconds` (`MUSE_FEDERATION_FORWARD_TIMEOUT_SECONDS`,
-  default `300.0`) -- per-request timeout when forwarding to a node
-  (long, since generation requests can run for minutes).
-- `federation.config_file` (`MUSE_FEDERATION_CONFIG`, default unset) --
-  explicit path to the node-list yaml, overriding the
-  `<catalog_dir>/federation.yaml` default-if-exists lookup.
-
-**CLI:** `muse federate --port 8100 --node http://192.168.0.204:8000
---node http://192.168.0.50:8000` (or `--config path/to/federation.yaml`).
-`run_coordinator` (`muse.cli_impl.federation`) resolves the node list
-(`--config` > `federation.config_file` > `<catalog_dir>/federation.yaml`
-if it exists), and refuses to start a server -- exiting 2 with a clear
-stderr message -- if the merged node list is empty; a coordinator with
-zero nodes would otherwise boot healthy and 404 every request, a worse
-failure mode than refusing outright. Once nodes resolve, it builds a
-`NodeRegistry` + the coordinator app and blocks on
-`muse.cli_impl.serve_util.run_uvicorn` (the same bounded-graceful-
-shutdown uvicorn wrapper `muse serve` uses). Registry lifecycle is
-wired through the coordinator app's ASGI lifespan (an
-`asynccontextmanager` passed to `FastAPI(..., lifespan=...)` inside
-`build_coordinator`): `registry.start()` runs on startup, launching the
-background refresh loop on the SERVER'S OWN running event loop (which
-`NodeRegistry.start`'s `asyncio.ensure_future` requires), and
-`await registry.aclose()` runs on shutdown. This only fires when the
-ASGI lifespan protocol actually executes (a real uvicorn run, or a
-`with TestClient(app) as c:` block); a bare `TestClient(app).get(...)`
-(the style the existing route tests in `tests/cli_impl/test_federation_app.py`
-use) never triggers lifespan, so wiring it into `build_coordinator`
-did not disturb those tests' plain `.snapshot()`-only fakes.
-
-Client usage is unchanged OpenAI-compat, just pointed at the
-coordinator: `OpenAI(base_url="http://coordinator:8100/v1",
-api_key="not-used")`.
+`muse federate --port 8100 --node http://host:8000 ...` (or a `federation.yaml`) runs a coordinator
+in front of unmodified `muse serve` nodes (`muse.federation` plus `muse.cli_impl.federation`).
+It polls each node's `/v1/models` (and, with a per-node token, `/v1/telemetry/summary`) on a
+background interval and routes each request by model locality: nodes listing the model, loaded
+first, then lowest `in_flight`, else round-robin; one retry on connect/timeout failure, never
+mid-stream. It refuses to start with zero nodes. The registry starts in the ASGI lifespan, so
+plain `TestClient(app).get` tests never start it. Details: `docs/INTERNALS.md`; design:
+`docs/superpowers/specs/2026-07-04-federation-design.md`.
 
 ## Agent discovery
 
@@ -1616,6 +703,25 @@ ChatClient().chat(model="qwen3.5-4b-q4", messages=[{"role": "user", "content": "
 PY
 ```
 
+Working in a git worktree: the editable install points at the main
+checkout, so run tests with `PYTHONPATH=$PWD/src pytest ...` from the
+worktree or you will test main's code.
+
+Releasing (ask the owner before pushing, tagging or uploading):
+1. Bump `version` in `pyproject.toml`; commit `chore(release): X.Y.Z` with a
+   body summarising the release; annotated tag `vX.Y.Z` (message `vX.Y.Z`).
+2. Build from a clean export, never the working tree (a stray `build/`
+   dir leaks stale files into wheels): `git archive vX.Y.Z | tar -x -C
+   <tmp>`, `python -m build --sdist --wheel`, `twine check`, rebuild the
+   wheel from the sdist, and run `scripts/validate_installed_distribution.py`
+   in a clean venv for both wheels.
+3. Push `main` and the tag, wait for CI, then `twine upload` the two files
+   (credentials in `~/.pypirc`). PyPI `museq` was 0.60.2 until 0.70.1;
+   `uvx --from "museq[mcp]"` users get whatever PyPI has.
+
+Commits follow Conventional Commits with a scope (`feat(pixelart): ...`,
+`fix(owned-process): ...`, `docs(claude): ...`); see AGENTS.md.
+
 ## Project-specific conventions
 
 - **Deferred imports:** `src/muse/__init__.py` and `src/muse/cli.py` MUST NOT
@@ -1666,9 +772,13 @@ PY
 Two GitHub Actions workflows run on every push to `main` and every PR:
 
 - `.github/workflows/tests.yml` runs the fast lane (`pytest -m "not slow"`)
-  in a single Python-3.11 job with the full CPU stack
-  (`pip install -e ".[dev,server,audio,images,embeddings]"` against the
-  `download.pytorch.org/whl/cpu` index). Dependencies float on latest (no
+  on Ubuntu with Python 3.10-3.14 and on macos-14 with Python 3.12 (no
+  `os.waitid`, so the psutil leader-pinning path) and 3.13, with the full
+  CPU stack (`pip install -e ".[dev,server,audio,images,embeddings]"`
+  against the `download.pytorch.org/whl/cpu` index). A separate job is the
+  wheel and sdist release gate: build both, `twine check`, rebuild the
+  wheel from the sdist, and run `scripts/validate_installed_distribution.py`
+  in a clean venv for each wheel. Dependencies float on latest (no
   lockfile), so an upstream breaking release surfaces here on the next push
   rather than shipping silently. Model tests are mocked, so no weights are
   downloaded.
@@ -1698,9 +808,11 @@ imports that `from_pretrained` triggers. v0.32.0 closes that gap with
 a CI workflow:
 
 - `.github/workflows/fresh-venv-smoke.yml` runs on every push to main
-  and every PR. Matrix-tests five lightweight models (`kokoro-82m`,
-  `dinov2-small`, `bart-large-cnn`, `bge-reranker-v2-m3`,
-  `mert-v1-95m`).
+  and every PR. Matrix-tests the lightweight bundled models listed in
+  the workflow's `model:` matrix (16 as of v0.70: kokoro-82m, dinov2-small,
+  bart-large-cnn, bge-reranker-v2-m3, mert-v1-95m, supertonic-3, the two
+  text classifiers, trocr-base-printed, the three image/cv models,
+  ast-audioset, pixel-tools, utmos, audiobox-aesthetics).
 - Each job creates a fresh venv, installs only what `muse pull` would
   install, then runs the in-venv probe worker (`muse _probe_worker
   --no-inference`) to verify load. Failure surfaces a structured label
@@ -1880,9 +992,12 @@ tests/
 └── test_cli.py           # subprocess-level CLI smoke
 ```
 
-Fast lane is `-m "not slow"`. The one `@pytest.mark.slow` test in
-`cli_impl/test_e2e_supervisor.py` spawns a real supervisor subprocess
-(in-process, no network). The `tests/integration/` suite is separately
+Fast lane is `-m "not slow"`. `@pytest.mark.slow` marks tests that spawn
+real subprocesses or supervisors (33 files, e.g.
+`cli_impl/test_e2e_supervisor.py`); run the full lane before changing the
+supervisor, gateway, owned-process or install paths. The real-process
+suites are parametrized `waitid` / `no-waitid` (and `+darwin`, which
+emulates macOS process-group rules via `tests/darwin_process_semantics.py`). The `tests/integration/` suite is separately
 opt-in via `MUSE_REMOTE_SERVER` env var; fixtures auto-skip when the
 server isn't reachable or the required model isn't loaded. The
 `MUSE_CHAT_MODEL_ID` env var (default `qwen3.5-4b-q4`) lets the same
