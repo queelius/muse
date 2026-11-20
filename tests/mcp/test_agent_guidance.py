@@ -50,6 +50,66 @@ def test_optional_model_call_omits_model(caps_doc, openapi_doc, fake_http, media
     assert "model" not in str(seen[-1].url)
 
 
+def _gen_named(caps_doc, openapi_doc, name):
+    return next(g for g in generate_tools(caps_doc, openapi_doc) if g.name == name)
+
+
+def test_optional_model_json_post_omits_model(caps_doc, openapi_doc, fake_http,
+                                              media_env):
+    import json
+
+    import httpx
+
+    from muse.mcp.generated import call_generated
+
+    seen = []
+
+    def route(request):
+        seen.append(request)
+        return httpx.Response(200, json={"translatedText": "hola"})
+
+    gen = _gen_named(caps_doc, openapi_doc, "muse_translate")
+    call_generated(fake_http(route), gen, {"q": "hi", "source": "en", "target": "es"})
+    assert "model" not in json.loads(seen[-1].content)
+
+
+def test_optional_model_multipart_post_omits_model(caps_doc, openapi_doc, fake_http,
+                                                   media_env):
+    import httpx
+
+    from muse.mcp.generated import call_generated
+
+    (media_env / "in.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    seen = []
+
+    def route(request):
+        seen.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    gen = _gen_named(caps_doc, openapi_doc, "muse_pixelize_image")
+    call_generated(fake_http(route), gen, {"image_path": "in.png"})
+    assert b'name="model"' not in seen[-1].content
+    assert b'name="image"' in seen[-1].content
+
+
+def test_optional_model_route_sends_an_explicit_model(caps_doc, openapi_doc, fake_http,
+                                                      media_env):
+    import httpx
+
+    from muse.mcp.generated import call_generated
+
+    (media_env / "in.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    seen = []
+
+    def route(request):
+        seen.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    gen = _gen_named(caps_doc, openapi_doc, "muse_pixelize_image")
+    call_generated(fake_http(route), gen, {"image_path": "in.png", "model": "pt-2"})
+    assert b'name="model"\r\n\r\npt-2' in seen[-1].content
+
+
 # ---- titles and annotations ----
 
 def test_every_tool_has_a_title_and_annotations(caps_doc, openapi_doc):
@@ -69,14 +129,23 @@ def test_generated_titles_read_as_actions(caps_doc, openapi_doc):
 
 def test_generated_annotations(caps_doc, openapi_doc):
     tools = _tools(caps_doc, openapi_doc)
-    for t in tools.values():
-        assert t.annotations.destructiveHint is False
-        assert t.annotations.openWorldHint is False
-    # Media tools write files; JSON-only and GET tools change nothing.
-    assert tools["muse_generate_image"].annotations.readOnlyHint is False
-    assert tools["muse_list_voices"].annotations.readOnlyHint is True
-    assert tools["muse_embed_text"].annotations.readOnlyHint is True
+    for name, t in tools.items():
+        # Any generated tool can write a local file (media, a non-JSON body,
+        # or a spilled large result), so none is read-only; none changes
+        # muse's state, so none is destructive.
+        assert t.annotations.readOnlyHint is False, name
+        assert t.annotations.destructiveHint is False, name
+        props = t.inputSchema["properties"]
+        takes_url = any(k.endswith(("_url", "_urls")) for k in props)
+        assert t.annotations.openWorldHint is takes_url, name
+    assert tools["muse_pixelize_image"].annotations.openWorldHint is True
+    assert tools["muse_embed_text"].annotations.openWorldHint is False
     assert tools["muse_list_languages"].annotations.idempotentHint is True
+
+
+def test_model_argument_is_non_empty(caps_doc, openapi_doc):
+    for name, t in _tools(caps_doc, openapi_doc).items():
+        assert t.inputSchema["properties"]["model"]["minLength"] == 1, name
 
 
 def test_describe_is_read_only():
@@ -90,9 +159,10 @@ def test_admin_annotations_match_their_effect():
     for name in ("muse_list_models", "muse_get_model_info", "muse_get_memory_status",
                  "muse_get_workers", "muse_get_jobs", "muse_search_models"):
         assert ann[name].readOnlyHint is True, name
-    for name in ("muse_remove_model", "muse_disable_model"):
+    # A re-pull replaces weights and a failed probe disables the model.
+    for name in ("muse_remove_model", "muse_disable_model", "muse_pull_model"):
         assert ann[name].readOnlyHint is False and ann[name].destructiveHint is True
-    for name in ("muse_pull_model", "muse_enable_model", "muse_probe_model"):
+    for name in ("muse_enable_model", "muse_probe_model"):
         assert ann[name].readOnlyHint is False and ann[name].destructiveHint is False
     assert ann["muse_search_models"].openWorldHint is True
     assert ann["muse_pull_model"].openWorldHint is True
@@ -118,8 +188,11 @@ def test_instructions_are_sent_at_initialize(fake_http, media_env):
 def test_instructions_carry_the_workflow():
     text = INSTRUCTIONS
     for needle in ("muse_describe", "modality", "loaded", "cold", "file",
-                   "out_path", "_path", "job_id", "model"):
+                   "out_path", "_path", "_paths", "_urls", "job_id", "model",
+                   "MUSE_MCP_ALLOWED_PATH_PREFIXES", "output dir",
+                   "muse_list_models", "muse_search_models"):
         assert needle in text, needle
+    assert "cwd `/` is never" in text
     assert len(text) < 2500  # cheap: sent once per session
 
 

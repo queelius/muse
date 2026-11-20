@@ -67,17 +67,21 @@ first enabled model itself.
 the output dir), never returned inline: the result lists each file's path, \
 sha256 and size, with a resource_link per file and the model's revision. \
 `preview: true` adds a small inline image.
-Inputs: pass local files as `<field>_path` (allowed under the working \
-directory and the output dir) or `<field>_url`. An output path can be fed \
-straight into the next tool, e.g. muse_generate_image then \
-muse_pixelize_image with image_path. Errors carry muse's error code and message.
+Inputs: pass a local file as `<field>_path` or a URL as `<field>_url` (list \
+fields take `<field>_paths` / `<field>_urls`). Paths are allowed under the \
+output dir plus the working directory, or plus MUSE_MCP_ALLOWED_PATH_PREFIXES \
+when set (it replaces the working directory); a cwd `/` is never allowed. An \
+output path can be fed straight into the next tool, e.g. muse_generate_image \
+then muse_pixelize_image with image_path. Errors carry muse's error code and \
+message.
 """
 _ADMIN_INSTRUCTIONS = """\
-Admin tools (muse_pull_model, muse_enable_model, muse_probe_model, ...) need \
-the server's admin token. Pull, enable and probe are long-running and return \
+Admin tools need the server's admin token, except muse_list_models and \
+muse_search_models. Pull, enable and probe are long-running and return \
 a job_id; poll muse_get_jobs. Enabled models load on demand, so enabling is \
-not needed before a call. muse_remove_model and muse_disable_model take a \
-model out of service: confirm with the user first.
+not needed before a call. muse_remove_model, muse_disable_model and \
+muse_pull_model (a re-pull replaces weights; a failed probe disables the \
+model) can take a model out of service: confirm with the user first.
 """
 INSTRUCTIONS = _INFERENCE_INSTRUCTIONS + _ADMIN_INSTRUCTIONS
 

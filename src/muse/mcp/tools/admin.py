@@ -129,15 +129,16 @@ def _handle_get_jobs(client: MuseClient, args: dict) -> list[dict]:
 # ---- tool definitions ----
 
 # Hints for clients deciding whether to confirm a call. Reads never change
-# muse; pull, enable and probe add or load something and are safe to repeat;
-# remove deletes catalog state (and a venv with purge) and disable takes a
-# model out of service, so both are destructive. Only the Hub-facing tools
+# muse; enable and probe load or measure something and are safe to repeat.
+# Remove deletes catalog state (and a venv with purge), disable takes a model
+# out of service, and pull is destructive too: a re-pull replaces weights and
+# a failed probe leaves a working model disabled. Only the Hub-facing tools
 # (search, pull) reach outside the local muse server.
 _READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                         idempotentHint=True, openWorldHint=False)
 _READ_WEB = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                             idempotentHint=True, openWorldHint=True)
-_PULL = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+_PULL = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                         idempotentHint=True, openWorldHint=True)
 _ENABLE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                           idempotentHint=True, openWorldHint=False)

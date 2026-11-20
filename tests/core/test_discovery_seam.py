@@ -96,8 +96,22 @@ def test_routes_report_whether_model_is_optional(tmp_path):
          f'"routes": [{ROUTE}, {other}]}}\n')
     routes = modality_discovery([tmp_path])["audio/x"]["routes"]
     assert [r["model_optional"] for r in routes] == [True, False]
-    # The cached declaration is not mutated: a second read is identical.
-    assert modality_discovery([tmp_path])["audio/x"]["routes"] == routes
+
+
+def test_default_scan_returns_copies_of_the_cached_declarations():
+    """dirs=None reads the memoized declarations: annotating or mutating the
+    result must never reach the cache."""
+    from muse.core import discovery
+
+    first = modality_discovery()
+    route = first["image/pixelart"]["routes"][0]
+    assert route["model_optional"] is True
+    route["path"] = "/mutated"
+    first["image/pixelart"]["routes"].clear()
+    again = modality_discovery()
+    assert again["image/pixelart"]["routes"][0]["path"] == "/v1/images/pixelize"
+    cached = dict(discovery._declarations("DISCOVERY", None))["image/pixelart"]
+    assert all("model_optional" not in r for r in cached["routes"])
 
 
 def test_bundled_model_optional_routes_are_marked():

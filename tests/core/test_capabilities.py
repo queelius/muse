@@ -279,9 +279,10 @@ def test_llms_txt_follows_llmstxt_shape():
     assert lines[2].startswith("> ") and not lines[3].startswith(">")
     sections = _sections(text)
     assert list(sections)[-1] == "Optional"
-    # Links are absolute: llms.txt is often fetched and read out of context.
-    assert "[Capabilities](http://box:8000/v1/capabilities)" in text
-    assert "](/" not in text
+    # Links are relative: behind a TLS or Host-rewriting proxy a base derived
+    # from the request would be wrong. Only the install line uses the base.
+    assert "[Capabilities](/v1/capabilities)" in text
+    assert "](http" not in text
 
 
 def test_llms_txt_states_the_workflow():
@@ -294,7 +295,7 @@ def test_llms_txt_states_the_workflow():
 def test_llms_txt_modalities_link_to_their_filtered_document():
     text = render_llms_txt(_doc([(_facts(), _state(last_cold_load_seconds=4.5))]))
     mods = _sections(text)["Modalities"]
-    assert ("- [audio/speech](http://box:8000/v1/capabilities?modality=audio/speech):"
+    assert ("- [audio/speech](/v1/capabilities?modality=audio/speech):"
             " Text-to-speech.") in mods
     # Each enabled model: tier, live state and summary.
     assert "kokoro-82m (good; cold, last load 4.5 s): Fast TTS." in mods
@@ -334,7 +335,7 @@ def test_mcp_install_pins_the_server_release_line():
     assert server_block(version="0.70.1", node="n", base_url="u")["mcp"]["install"] \
         == 'uvx --from "museq[mcp]>=0.70" muse mcp'
     # A local or dev build may not be on PyPI: no pin.
-    for version in ("0.71.0.dev0", "0.70.1+local", "?"):
+    for version in ("0.71.0.dev0", "0.70.1+local", "0.0.0+unknown", "?"):
         assert server_block(version=version, node="n", base_url="u")["mcp"][
             "install"] == 'uvx --from "museq[mcp]" muse mcp'
 
@@ -384,3 +385,51 @@ def test_llms_txt_keeps_unservable_reasons_short():
     assert "kokoro-82m (good; unservable: model files are missing): Fast TTS." in text
     long = render_llms_txt(_doc([(_facts(), _state(unservable_reason="y" * 300))]))
     assert "y" * 78 not in long and "..." in long
+
+
+def test_llms_txt_folds_model_summaries_to_one_short_line():
+    long = "Line one of a summary\nthat wraps " + "word " * 60
+    facts = _facts()
+    facts = ModelFacts(**{**facts.__dict__, "notes": ModelNotes(long, (), (), "good")})
+    line = next(l for l in render_llms_txt(_doc([(facts, _state())])).splitlines()
+                if "kokoro-82m (" in l)
+    summary = line.split("): ", 1)[1]
+    assert "\n" not in summary and summary.startswith("Line one of a summary that wraps")
+    assert len(summary) <= 120 and summary.endswith("...")
+
+
+def _many(n, modality="audio/speech"):
+    tiers = ["draft", "good", "best", None]
+    out = []
+    for i in range(n):
+        f = _facts(f"m{i:03d}", modality)
+        f = ModelFacts(**{**f.__dict__, "notes": ModelNotes(
+            "A summary that is fairly long and descriptive. " * 4, (), (),
+            tiers[i % 4])})
+        out.append((f, _state(loaded=(i % 97 == 5))))
+    return out
+
+
+def test_llms_txt_caps_models_per_modality():
+    text = render_llms_txt(_doc(_many(20)))
+    mods = _sections(text)["Modalities"]
+    model_lines = [l for l in mods.splitlines() if l.startswith("  - model ")]
+    assert len(model_lines) == 8
+    # Loaded first, then by tier (best, good, draft, untiered).
+    assert model_lines[0].startswith("  - model m005 ")
+    tiers = [l.split("(", 1)[1].split(";")[0] for l in model_lines[1:]]
+    order = {"best": 0, "good": 1, "draft": 2, "untiered": 3}
+    assert tiers == sorted(tiers, key=order.get)
+    assert ("  - and 12 more (see /v1/capabilities?modality=audio/speech)") in mods
+
+
+def test_llms_txt_stays_small_for_a_huge_catalog():
+    models = _many(250, "audio/speech") + _many(250, "audio/transcription")
+    models = [(ModelFacts(**{**f.__dict__, "id": f"{f.modality[:5]}-{f.id}"}), s)
+              for f, s in models]
+    text = render_llms_txt(_doc(models))
+    assert len(text) < 12_000
+    for line in text.splitlines():
+        if line.lstrip().startswith("- "):
+            assert len(line) < 1000, line[:80]
+    assert text.count("  - model ") == 16

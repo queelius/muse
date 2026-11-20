@@ -16,14 +16,16 @@ All are public (no token), read-only, and never trigger a model load.
 | `GET /v1/capabilities` | The main document: `server` (version, node, links, MCP install line), `modalities[]` (summary, `use_for`, `not_for`, routes with request/response content types, an example, the MCP tool name, file fields, and `model_optional`), and `models[]` (id, modality, license, `revision`, `components`, one-line `summary`, `strengths`, `limits`, `quality_tier` of best/good/draft, filtered capability flags, memory estimate, and live state: loaded, last cold-load seconds, queue depth, `unservable_reason`). Only enabled models are listed. |
 | `GET /v1/capabilities?modality=audio/speech` | The same document narrowed to one modality. `?model=<id>` narrows to one model. An unknown value is a 404. |
 | `GET /openapi.json` | Complete OpenAPI for every inference route (alignments, vectorize, systemone and the rest), generated from the same declarations. |
-| `GET /llms.txt` | A short markdown page in the llmstxt.org shape, rendered from the capabilities document: an H1, a one-line summary, the workflow (pick a modality, read `?modality=` / `?model=`, call with `model`, expect a cold load when a model is not `loaded`), absolute links, the MCP install line, each modality that has an enabled model (linked to its filtered document, with routes, `model optional` marks, and every model's tier, live state and summary), and an `Optional` section naming the modalities with no model enabled here. |
+| `GET /llms.txt` | A short markdown page in the llmstxt.org shape, rendered from the capabilities document: an H1, a one-line summary, the workflow (pick a modality, read `?modality=` / `?model=`, call with `model`, expect a cold load when a model is not `loaded`), relative links (correct behind any proxy; only the `MUSE_SERVER=` install line uses the request's base URL), the MCP install line, each modality that has an enabled model (linked to its filtered document, with routes, `model optional` marks, and up to 8 models, loaded first then by tier, each on one line with its tier, live state and a summary cut to 120 characters, then "and K more"), and an `Optional` section naming the modalities with no model enabled here. The coordinator's merged document sets every `model_optional` to false, since its proxy needs `model`. |
 | `GET /.well-known/muse.json` | Same pointer document as `/`, at a well-known path. |
 | `GET /v1/models` | Unchanged OpenAI-shape list, plus a `revision` field per model. |
 
 A route with `model_optional: true` (its package lists it in
 `MODEL_OPTIONAL_PATHS`) accepts a request without `model`: the gateway uses
 the first enabled model of that modality (pixelize, autotile, translate,
-`/languages`, alignment, audio quality, vectorize). Other routes need `model`.
+`/languages`, alignment, audio quality, vectorize). Other routes need `model`,
+and so does every route through a `muse federate` coordinator, whose
+document reports `model_optional: false` throughout.
 
 `quality_tier` is absolute within a modality across bundled and curated
 models, so an agent can pick the best model for a task without a table of ids.
@@ -109,10 +111,14 @@ are listed (never stale generated tools). The server advertises
 re-list. A `model` argument is a string whose description lists the serving
 models, not an enum, so a model enabled mid-session is accepted; on a
 `model_optional` route it is not required. Every tool has a `title` and
-annotations: inference tools are non-destructive and closed-world (read-only
-when they write no media file), `muse_describe` and the admin read tools are
-read-only, `muse_remove_model` and `muse_disable_model` are destructive, and
-`muse_search_models` / `muse_pull_model` are open-world (Hugging Face Hub).
+annotations. Generated inference tools are not read-only (any can write a
+local file) and not destructive (a cold load may evict idle models, which is
+not counted as destructive), and are open-world only when they take `*_url` /
+`*_urls` inputs. `muse_describe` and the admin read tools are read-only;
+`muse_remove_model`, `muse_disable_model` and `muse_pull_model` (a re-pull
+replaces weights; a failed probe disables the model) are destructive;
+`muse_search_models` and `muse_pull_model` are open-world (Hugging Face Hub).
+The `model` argument has `minLength: 1`.
 `muse mcp --http` serves Streamable HTTP at `/mcp` (stateless). Behaviour:
 
 - Media outputs are written to files and returned as path, sha256, model and

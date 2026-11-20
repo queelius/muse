@@ -43,6 +43,11 @@ def merge_capabilities(
             if cur is None:
                 cur = modalities[mod["modality"]] = copy.deepcopy(mod)
                 cur["models"] = []
+                # The coordinator's proxy routes by `model` and has no
+                # default-model seam, so it never offers an optional model.
+                for route in cur.get("routes") or []:
+                    if isinstance(route, dict) and "model_optional" in route:
+                        route["model_optional"] = False
             for mid in mod.get("models") or []:
                 if mid not in cur["models"]:
                     cur["models"].append(mid)

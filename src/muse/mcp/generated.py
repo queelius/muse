@@ -271,7 +271,7 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     # against the client's cached schema, so an enum would reject a model
     # enabled mid-session. The server is the authority on unknown ids.
     optional_model = bool(route.get("model_optional"))
-    model_prop = {"type": "string", "description": (
+    model_prop = {"type": "string", "minLength": 1, "description": (
         "Model id. Serving now: " + ", ".join(ids) + " (see the list above; "
         "a model enabled later works too)." if ids else
         "Model id; no enabled model serves this route right now.")}
@@ -300,7 +300,7 @@ def _build(mod: dict, route: dict, openapi: dict, models: list[dict]) -> Generat
     tool = types.Tool(name=route["mcp_tool"], title=tool_title(route["mcp_tool"]),
                       description=_description(mod, route, models, from_openapi, defaults),
                       inputSchema=schema, outputSchema=OUTPUT_SCHEMA,
-                      annotations=_annotations(route, has_media))
+                      annotations=_annotations(route, props))
     return GeneratedTool(name=route["mcp_tool"], tool=tool, route=copy.deepcopy(route),
                          modality=mod["modality"], required_files=tuple(required_files),
                          fixed=fixed, image_output=image_output, aliases=aliases,
@@ -314,21 +314,21 @@ def tool_title(name: str) -> str:
     return words[:1].upper() + words[1:]
 
 
-def _annotations(route: dict, has_media: bool) -> types.ToolAnnotations:
+def _annotations(route: dict, props: dict) -> types.ToolAnnotations:
     """Hints for clients deciding whether to confirm a call.
 
-    No inference tool changes muse's state, so none is destructive, and the
-    world is the local muse server (``openWorldHint`` false). A tool whose
-    output is written to files is not read-only; a GET (or a JSON-only
-    result) is, and a GET is also idempotent. An explicit ``out_path``
-    replaces that file, but only when the caller names it, so the hint
-    stays non-destructive. Generation is not idempotent:
-    unseeded calls differ and each writes new files.
+    No generated tool is read-only: any of them can write a local file (a
+    media output, a non-JSON body, or a spilled large result). None is
+    destructive: they change no muse state and write only new or explicitly
+    named (``out_path``) files. A call can still cold-load its model, which
+    may evict other idle models from memory; that is load management, not a
+    destructive update. A tool taking ``*_url`` / ``*_urls`` inputs reaches
+    URLs outside the muse server (``openWorldHint``). A GET is idempotent.
     """
-    get = route["method"].upper() == "GET"
-    read_only = get or not has_media
-    return types.ToolAnnotations(readOnlyHint=read_only, destructiveHint=False,
-                                 idempotentHint=get, openWorldHint=False)
+    takes_url = any(k.endswith(("_url", "_urls")) for k in props)
+    return types.ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False,
+        idempotentHint=route["method"].upper() == "GET", openWorldHint=takes_url)
 
 
 def generate_tools(capabilities: dict, openapi: dict) -> list[GeneratedTool]:

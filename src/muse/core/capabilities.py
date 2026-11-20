@@ -275,8 +275,31 @@ def _model_line(entry: dict) -> str:
             reason = reason[:77].rstrip() + "..."
         state = f"unservable: {reason}"
     tier = entry.get("quality_tier") or "untiered"
-    summary = entry.get("summary")
+    summary = _one_line(entry.get("summary"), LLMS_SUMMARY_CHARS)
     return f"{entry['id']} ({tier}; {state})" + (f": {summary}" if summary else "")
+
+
+LLMS_SUMMARY_CHARS = 120
+LLMS_MODELS_PER_MODALITY = 8
+_TIER_ORDER = {"best": 0, "good": 1, "draft": 2}
+
+
+def _one_line(text: Any, limit: int) -> str:
+    """``text`` folded onto one line, cut to ``limit`` chars with an ellipsis."""
+    if not isinstance(text, str):
+        return ""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit - 3].rstrip() + "..."
+
+
+def _shown_models(entries: list[dict]) -> list[dict]:
+    """Loaded models first, then by quality tier (best, good, draft,
+    untiered), then id: the ones an agent should try first."""
+    return sorted(entries, key=lambda e: (
+        not e.get("loaded"), _TIER_ORDER.get(e.get("quality_tier"), 3),
+        str(e.get("id"))))
 
 
 def render_llms_txt(doc: dict) -> str:
@@ -286,17 +309,19 @@ def render_llms_txt(doc: dict) -> str:
     links, MCP, the modalities that have an enabled model (each linked to
     its filtered capabilities document, with routes and models), and an
     Optional section naming the modalities with no model enabled here.
-    Links are absolute when the base URL is known, since llms.txt is often
-    read out of context.
+    Links are relative: behind a TLS or Host-rewriting proxy a base derived
+    from the request would be wrong. Only the MUSE_SERVER install line uses
+    the derived base. Bounded for big catalogs: each model is one line with
+    its summary cut to LLMS_SUMMARY_CHARS, and a modality lists at most
+    LLMS_MODELS_PER_MODALITY models (loaded first, then by tier) plus a
+    pointer to its ?modality= document for the rest.
     """
     server = doc.get("server") or {}
     links = server.get("links") or LINKS
     mcp = server.get("mcp") or {}
-    known = (mcp.get("env") or {}).get(MCP_SERVER_ENV)
-    base = known or "http://host:8000"
-    root = known.rstrip("/") if known else ""
+    base = (mcp.get("env") or {}).get(MCP_SERVER_ENV) or "http://host:8000"
     install = mcp.get("install") or MCP_INSTALL
-    caps = root + links["capabilities"]
+    caps = links["capabilities"]
     by_id = {m.get("id"): m for m in doc.get("models") or [] if isinstance(m, dict)}
     mods = [m for m in doc.get("modalities") or [] if isinstance(m, dict)]
     served = [m for m in mods if m.get("models")]
@@ -325,9 +350,9 @@ def render_llms_txt(doc: dict) -> str:
         "",
         f"- [Capabilities]({caps}): JSON for every modality, model, route and"
         " live state; filter with ?modality= or ?model=",
-        f"- [OpenAPI]({root}{links['openapi']}): request and response schemas"
+        f"- [OpenAPI]({links['openapi']}): request and response schemas"
         " for every route",
-        f"- [Models]({root}{links['models']}): OpenAI-compatible model list with"
+        f"- [Models]({links['models']}): OpenAI-compatible model list with"
         " `loaded`",
         "",
         "## MCP",
@@ -353,9 +378,13 @@ def render_llms_txt(doc: dict) -> str:
                 notes.append("model optional")
             note = f" ({'; '.join(notes)})" if notes else ""
             lines.append(f"  - `{r['method']} {r['path']}`{note}")
-        for mid in m.get("models") or []:
-            entry = by_id.get(mid)
-            lines.append(f"  - model {_model_line(entry) if entry else mid}")
+        entries = [by_id.get(mid) or {"id": mid} for mid in m.get("models") or []]
+        shown = _shown_models(entries)
+        for entry in shown[:LLMS_MODELS_PER_MODALITY]:
+            lines.append(f"  - model {_model_line(entry)}")
+        if len(shown) > LLMS_MODELS_PER_MODALITY:
+            lines.append(f"  - and {len(shown) - LLMS_MODELS_PER_MODALITY} more"
+                         f" (see {caps}?modality={tag})")
     lines += [
         "",
         "## Optional",
