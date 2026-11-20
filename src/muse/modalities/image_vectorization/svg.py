@@ -200,6 +200,13 @@ def _namespace(name: str) -> str:
 
 
 def _validate_attribute(name: str, value: str) -> None:
+    # SVG presentation attributes and style values are parsed as CSS, where
+    # an escape such as ``\75rl(`` spells ``url(`` without the literal
+    # token the checks below look for. No static drawing needs one.
+    if "\\" in value:
+        raise VectorizationOutputError(
+            f"backslash escapes are not allowed in SVG attribute {name!r}"
+        )
     lowered = value.strip().lower()
     if any(fragment in lowered for fragment in _DANGEROUS_VALUE_FRAGMENTS):
         raise VectorizationOutputError(

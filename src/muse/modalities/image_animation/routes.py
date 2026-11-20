@@ -4,9 +4,8 @@ Wire contract documented in docs/superpowers/specs/2026-04-27-image-animation-mo
 """
 from __future__ import annotations
 
-import asyncio
 import base64
-import logging
+import threading
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -14,37 +13,29 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_animation.codec import (
-    encode_webp, encode_gif, encode_mp4, encode_frames_b64,
-    UnsupportedFormatError,
-)
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
+from muse.modalities._common.fields import parse_bounded_size
+from muse.modalities._common.images import (
+    ImageInputError,
     decode_image_input,
+    image_error_response,
+)
+from muse.modalities._common.inference import offload_call, produce_each
+from muse.modalities.image_animation.codec import (
+    UnsupportedFormatError,
+    encode_frames_b64,
+    encode_gif,
+    encode_mp4,
+    encode_webp,
+    require_imageio,
 )
 
 
 MODALITY = "image/animation"
 
-logger = logging.getLogger(__name__)
-
 _MAX_SIDE = 2048
 _MAX_PIXELS_PER_FRAME = 2_097_152
 _MAX_REQUEST_PIXEL_FRAMES = 128 * 1024 * 1024
 _DEFAULT_FRAMES = 16
-
-
-def _animation_result_images(results: list[object]) -> list[object]:
-    return [
-        frame
-        for result in results
-        for frame in (getattr(result, "frames", ()) or ())
-    ]
-
-
-def _close_animation_results(results: list[object]) -> None:
-    close_decoded_images(_animation_result_images(results))
 
 
 class AnimationsRequest(BaseModel):
@@ -66,16 +57,9 @@ class AnimationsRequest(BaseModel):
     @field_validator("size")
     @classmethod
     def _bounded_size(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        width, height = map(int, value.split("x"))
-        if width < 1 or height < 1:
-            raise ValueError("size dimensions must be positive")
-        if width > _MAX_SIDE or height > _MAX_SIDE:
-            raise ValueError(f"size dimensions must not exceed {_MAX_SIDE}")
-        if width * height > _MAX_PIXELS_PER_FRAME:
-            raise ValueError(
-                f"size must not exceed {_MAX_PIXELS_PER_FRAME} pixels per frame"
+        if value is not None:
+            parse_bounded_size(
+                value, max_side=_MAX_SIDE, max_pixels=_MAX_PIXELS_PER_FRAME,
             )
         return value
 
@@ -104,6 +88,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         model = registry.get_or_404(MODALITY, req.model)
         capabilities = registry.capabilities(MODALITY, model.model_id)
 
+        # Reject a format whose encoder is missing before the GPU work.
+        try:
+            require_imageio(req.response_format)
+        except UnsupportedFormatError as e:
+            return error_response(400, "invalid_parameter", str(e))
+
         # Image-to-animation gate
         init_image = None
         if req.image is not None:
@@ -115,91 +105,63 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
             try:
                 init_image = await decode_image_input(req.image)
-            except ValueError as e:
-                return error_response(
-                    400, "invalid_parameter", f"image decode failed: {e}",
-                )
+            except ImageInputError as e:
+                return image_error_response(e, field="image")
 
         width = height = None
         if req.size is not None:
             width, height = map(int, req.size.split("x"))
 
-        def _call_one(seed_offset: int):
-            with model._inference_lock:
-                kwargs = {
-                    "negative_prompt": req.negative_prompt,
-                    "frames": req.frames,
-                    "fps": req.fps,
-                    "width": width, "height": height,
-                    "steps": req.steps, "guidance": req.guidance,
-                    "init_image": init_image,
-                    "strength": req.strength,
-                }
-                if req.seed is not None:
-                    kwargs["seed"] = req.seed + seed_offset
-                return model.generate(req.prompt, **kwargs)
-
-        input_images = [init_image] if init_image is not None else []
-        results = []
-
-        def _cleanup_abandoned(current_result) -> None:
-            close_decoded_images(
-                input_images
-                + _animation_result_images(results)
-                + _animation_result_images([current_result])
-            )
-
-        try:
-            for i in range(req.n):
-                result = await run_native_offload(
-                    lambda i=i: _call_one(i),
-                    cleanup_abandoned=_cleanup_abandoned,
-                )
-                results.append(result)
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            close_decoded_images(
-                input_images + _animation_result_images(results)
-            )
-            raise
-
-        try:
-            # Encode each result according to response_format.
-            data = []
-            for r in results:
-                try:
-                    encoded = _encode(req.response_format, r, loop=req.loop)
-                except UnsupportedFormatError as e:
-                    return error_response(400, "invalid_parameter", str(e))
-                if req.response_format == "frames_b64":
-                    # encoded is list[str]; expand into per-frame data entries
-                    for s in encoded:
-                        data.append({"b64_json": s})
-                else:
-                    data.append({
-                        "b64_json": base64.b64encode(encoded).decode("ascii"),
-                    })
-
-            # Use the first result for top-level metadata (n=1 is common).
-            head = results[0]
-            body = {
-                "data": data,
-                "model": model.model_id,
-                "metadata": {
-                    "frames": len(head.frames),
-                    "fps": head.fps,
-                    "duration_seconds": round(
-                        len(head.frames) / max(head.fps, 1), 3,
-                    ),
-                    "format": req.response_format,
-                    "size": [head.width, head.height],
-                },
+        def _produce(seed_offset: int):
+            kwargs = {
+                "negative_prompt": req.negative_prompt,
+                "frames": req.frames,
+                "fps": req.fps,
+                "width": width, "height": height,
+                "steps": req.steps, "guidance": req.guidance,
+                "init_image": init_image,
+                "strength": req.strength,
             }
-            return JSONResponse(content=body)
-        finally:
-            close_decoded_images(input_images)
-            _close_animation_results(results)
+            if req.seed is not None:
+                kwargs["seed"] = req.seed + seed_offset
+            return model.generate(req.prompt, **kwargs)
+
+        def _encode_result(r):
+            encoded = _encode(req.response_format, r, loop=req.loop)
+            if req.response_format == "frames_b64":
+                # encoded is list[str]; expand into per-frame data entries
+                entries = [{"b64_json": s} for s in encoded]
+            else:
+                entries = [{"b64_json": base64.b64encode(encoded).decode("ascii")}]
+            meta = {
+                "frames": len(r.frames),
+                "fps": r.fps,
+                "duration_seconds": round(len(r.frames) / max(r.fps, 1), 3),
+                "format": req.response_format,
+                "size": [r.width, r.height],
+            }
+            return entries, meta
+
+        stop = threading.Event()
+        try:
+            encoded = await offload_call(
+                lambda: produce_each(
+                    req.n, _produce, _encode_result,
+                    lock=model._inference_lock, stop=stop,
+                ),
+                inputs=[init_image] if init_image is not None else [],
+                stop=stop,
+            )
+        except UnsupportedFormatError as e:
+            return error_response(400, "invalid_parameter", str(e))
+
+        # Use the first result for top-level metadata (n=1 is common).
+        body = {
+            "data": [entry for entries, _meta in encoded for entry in entries],
+            "model": model.model_id,
+            "metadata": encoded[0][1],
+        }
+        return JSONResponse(content=body)
 
     return router
 

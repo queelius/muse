@@ -3,39 +3,30 @@
 Multipart in (image file + optional model/prompt/max_new_tokens),
 JSON out (id, model, text, usage). Mirrors /v1/audio/transcriptions.
 
-Reuses decode_image_file from image_generation/image_input.py for
-the multipart upload; MUSE_IMAGE_INPUT_MAX_BYTES env cap (v0.34.0)
-applies. Per-backend _inference_lock from v0.34.0 serializes calls
-into one model.
+The upload goes through ``_common.images.read_and_decode_upload``
+(MUSE_IMAGE_INPUT_MAX_BYTES cap; decode off the event loop). Inference
+runs off-loop under the per-backend inference lock.
 """
 from __future__ import annotations
-
-import asyncio
-import logging
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
-    decode_image_file,
-)
+from muse.modalities._common.images import read_and_decode_upload
+from muse.modalities._common.inference import offload_call
 from muse.modalities.image_ocr.codec import encode_ocr
 
 
 MODALITY = "image/ocr"
 
 
-logger = logging.getLogger(__name__)
-
-
 # Hard ceiling on per-request decoder budget. Far above any sensible
 # OCR (Nougat full-page is ~2-3K tokens). Beyond this is either a
 # misuse or a budget-burner; reject with 400.
 _HARD_MAX_NEW_TOKENS = 4096
+_MAX_PROMPT_CHARS = 4000
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -56,56 +47,35 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                     f"max_new_tokens must be in [1, {_HARD_MAX_NEW_TOKENS}]; "
                     f"got {max_new_tokens}",
                 )
+        if prompt is not None and len(prompt) > _MAX_PROMPT_CHARS:
+            return error_response(
+                400, "invalid_parameter",
+                f"prompt must be 0 to {_MAX_PROMPT_CHARS} characters",
+            )
 
         backend = registry.get_or_404(MODALITY, model)
 
-        effective_id = backend.model_id
+        pil_image, error = await read_and_decode_upload(image)
+        if error is not None:
+            return error
 
-        # Decode the multipart upload (size-capped via decode_image_file;
-        # MUSE_IMAGE_INPUT_MAX_BYTES env cap applies).
-        try:
-            pil_image = await decode_image_file(image)
-        except ValueError as e:
-            return error_response(400, "invalid_parameter", str(e))
+        kwargs = {}
+        if prompt is not None:
+            kwargs["prompt"] = prompt
+        if max_new_tokens is not None:
+            kwargs["max_new_tokens"] = max_new_tokens
 
-        def _call():
-            with backend._inference_lock:
-                kwargs = {}
-                if prompt is not None:
-                    kwargs["prompt"] = prompt
-                if max_new_tokens is not None:
-                    kwargs["max_new_tokens"] = max_new_tokens
-                return backend.ocr(pil_image, **kwargs)
-
-        abandoned = False
-        try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images([pil_image])
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
-        except Exception:  # noqa: BLE001
-            # Log the real exception server-side but never leak it to the
-            # client: str(e) can carry internal filesystem paths, CUDA
-            # driver text, or other backend-implementation detail.
-            logger.exception("ocr call failed")
-            return error_response(
-                500, "internal_error",
-                "ocr backend failed; see server logs",
-            )
-        finally:
-            if not abandoned:
-                close_decoded_images([pil_image])
+        result = await offload_call(
+            lambda: backend.ocr(pil_image, **kwargs),
+            lock=backend._inference_lock,
+            inputs=[pil_image],
+        )
 
         body = encode_ocr(result)
         # Override result.model_id with the effective registry id in
         # case the runtime's model_id drifted (paranoia guard, mirrors
         # the moderation route's pattern).
-        body["model"] = effective_id
+        body["model"] = backend.model_id
         return JSONResponse(content=body)
 
     return router

@@ -40,12 +40,20 @@ def test_pip_extras_includes_core_deps():
     assert any("Pillow" in e for e in extras)
 
 
-def test_sniff_image_to_3d_tag():
-    assert HF_PLUGIN["sniff"](_fake_info(tags=["image-to-3d"])) is True
+def test_sniff_tag_alone_does_not_claim_unknown_families():
+    """An unknown family would fall back to the TripoSR runtime and fail."""
+    assert HF_PLUGIN["sniff"](_fake_info(tags=["image-to-3d"])) is False
+    assert HF_PLUGIN["sniff"](_fake_info(tags=["text-to-3d"])) is False
 
 
-def test_sniff_text_to_3d_tag():
-    assert HF_PLUGIN["sniff"](_fake_info(tags=["text-to-3d"])) is True
+def test_sniff_rejects_families_without_a_runtime():
+    for repo_id in (
+        "flamehaze1115/Wonder3D-v1.0",
+        "TencentARC/InstantMesh",
+        "stabilityai/stable-3d-whatever",
+    ):
+        info = _fake_info(tags=["image-to-3d"], repo_id=repo_id)
+        assert HF_PLUGIN["sniff"](info) is False, repo_id
 
 
 def test_sniff_repo_name_triposr():
@@ -63,18 +71,8 @@ def test_sniff_repo_name_hunyuan3d():
     assert HF_PLUGIN["sniff"](info) is True
 
 
-def test_sniff_repo_name_wonder3d():
-    info = _fake_info(tags=[], repo_id="flamehaze1115/Wonder3D-v1.0")
-    assert HF_PLUGIN["sniff"](info) is True
-
-
 def test_sniff_repo_name_shap_e():
     info = _fake_info(tags=[], repo_id="openai/shap-e")
-    assert HF_PLUGIN["sniff"](info) is True
-
-
-def test_sniff_repo_name_instantmesh():
-    info = _fake_info(tags=[], repo_id="TencentARC/InstantMesh")
     assert HF_PLUGIN["sniff"](info) is True
 
 
@@ -111,7 +109,6 @@ def test_resolve_supports_image_to_3d_for_non_shape_e():
         "stabilityai/TripoSR",
         "JeffreyXiang/TRELLIS-image-large",
         "tencent/Hunyuan3D-2",
-        "flamehaze1115/Wonder3D-v1.0",
     ):
         info = _fake_info(tags=["image-to-3d"], repo_id=repo_id)
         result = HF_PLUGIN["resolve"](repo_id, None, info)
@@ -253,12 +250,6 @@ def test_resolve_supports_text_to_3d_for_shap_e():
 def test_resolve_supports_text_to_3d_false_for_triposr():
     info = _fake_info(tags=["image-to-3d"], repo_id="stabilityai/TripoSR")
     result = HF_PLUGIN["resolve"]("stabilityai/TripoSR", None, info)
-    assert result.manifest["capabilities"]["supports_text_to_3d"] is False
-
-
-def test_resolve_supports_text_to_3d_false_for_wonder3d():
-    info = _fake_info(tags=["image-to-3d"], repo_id="flamehaze1115/Wonder3D-v1.0")
-    result = HF_PLUGIN["resolve"]("flamehaze1115/Wonder3D-v1.0", None, info)
     assert result.manifest["capabilities"]["supports_text_to_3d"] is False
 
 

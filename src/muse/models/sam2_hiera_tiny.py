@@ -73,7 +73,7 @@ MANIFEST = {
     "strengths": [
         "Point, box and automatic modes",
         "Tiny and fast, ~0.8 GB, CPU-friendly",
-        "PNG or COCO RLE masks; Apache 2.0",
+        "PNG or compact run-length masks; Apache 2.0",
     ],
     "limits": [
         "No text prompts: cannot segment an object by name",

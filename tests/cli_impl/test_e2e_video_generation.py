@@ -85,7 +85,7 @@ def test_video_e2e_default_mp4_envelope():
     client = _build_client()
     fake = _fake_imageio(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -109,7 +109,7 @@ def test_video_e2e_webm_envelope():
     client = _build_client()
     fake = _fake_imageio(b"FAKEWEBM")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(
@@ -151,7 +151,7 @@ def test_video_e2e_n_2_returns_two_videos():
     client = _build_client()
     fake = _fake_imageio(b"FAKEMP4")
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake,
     ):
         r = client.post(

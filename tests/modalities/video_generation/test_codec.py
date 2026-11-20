@@ -27,7 +27,7 @@ def _frames(n=3, w=64, h=64):
 
 def test_encode_mp4_raises_when_imageio_unavailable():
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=None,
     ):
         with pytest.raises(UnsupportedFormatError, match="imageio"):
@@ -48,7 +48,7 @@ def test_encode_mp4_calls_imageio_with_h264():
     fake_imageio.mimwrite = fake_mimwrite
 
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         out = encode_mp4(_frames(n=3), fps=12)
@@ -64,7 +64,7 @@ def test_encode_mp4_empty_frames_raises():
     fake_imageio = type("ii", (), {})()
     fake_imageio.mimwrite = lambda *a, **k: None
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         with pytest.raises(ValueError, match="empty"):
@@ -73,7 +73,7 @@ def test_encode_mp4_empty_frames_raises():
 
 def test_encode_webm_raises_when_imageio_unavailable():
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=None,
     ):
         with pytest.raises(UnsupportedFormatError, match="imageio"):
@@ -93,7 +93,7 @@ def test_encode_webm_calls_imageio_with_vp9():
     fake_imageio.mimwrite = fake_mimwrite
 
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         out = encode_webm(_frames(n=2), fps=24)
@@ -117,7 +117,7 @@ def test_encode_webm_falls_back_to_vp8_on_vp9_failure():
     fake_imageio.mimwrite = fake_mimwrite
 
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         out = encode_webm(_frames(), fps=24)
@@ -135,7 +135,7 @@ def test_encode_webm_raises_when_both_vp9_and_vp8_fail():
     fake_imageio.mimwrite = fake_mimwrite
 
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         with pytest.raises(UnsupportedFormatError, match="vp9 and vp8"):
@@ -146,7 +146,7 @@ def test_encode_webm_empty_frames_raises():
     fake_imageio = type("ii", (), {})()
     fake_imageio.mimwrite = lambda *a, **k: None
     with patch(
-        "muse.modalities.video_generation.codec._try_import_imageio",
+        "muse.modalities._common.video_codec._try_import_imageio",
         return_value=fake_imageio,
     ):
         with pytest.raises(ValueError, match="empty"):

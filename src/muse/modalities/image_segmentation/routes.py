@@ -18,33 +18,29 @@ of quads of integers). Bad JSON or shape mismatches yield 400.
 The output envelope (see codec.encode_segmentation) carries an id,
 the model id, the dispatch mode, the input image_size in PIL
 convention (W, H), and a list of masks with index, score, bbox, area,
-plus the encoded mask (PNG b64 or COCO RLE).
+plus the encoded mask (PNG b64 or muse's `p:` run-length format).
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
-
 
 from fastapi import APIRouter, File, Form, UploadFile
 
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
-    decode_image_file,
-)
+from muse.modalities._common.images import read_and_decode_upload
+from muse.modalities._common.inference import offload_call
 from muse.modalities.image_segmentation.codec import encode_segmentation
 from muse.modalities.image_segmentation.protocol import CapabilityError
 
 
-logger = logging.getLogger(__name__)
-
 MODALITY = "image/segmentation"
+_SIDE_SETTING = "MUSE_SEGMENTATION_MAX_INPUT_SIDE"
 
+
+class _ClientFault(Exception):
+    """The backend rejected the prompt (CapabilityError or ValueError)."""
 
 
 _VALID_MODES = ("auto", "points", "boxes", "text")
@@ -70,8 +66,7 @@ def _max_input_side() -> int:
     MUSE_SEGMENTATION_MAX_INPUT_SIDE) per call, so operators can change
     the cap without a server restart. A resolved value that is
     non-positive (parseable but nonsensical as a side cap) falls back
-    to the registry default, mirroring image_generation/image_input.py's
-    _default_max_bytes guard."""
+    to the registry default."""
     return config.get_positive("limits.segmentation_max_input_side")
 
 
@@ -187,82 +182,51 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 )
 
         backend = registry.get_or_404(MODALITY, model)
-
-        effective_id = getattr(backend, "model_id", None) or (model or "<default>")
+        effective_id = backend.model_id
         capabilities = registry.capabilities(MODALITY, effective_id)
 
         # Capability gate (defense-in-depth before runtime invocation).
+        # A manifest that does not declare the mode's flag does not get it.
         cap_key = _MODE_CAPABILITY[mode]
-        if not capabilities.get(cap_key, True):
+        if not capabilities.get(cap_key, False):
             human = _MODE_HUMAN[mode]
             return error_response(
                 400, "invalid_parameter",
                 f"model {effective_id!r} does not support {human} segmentation",
             )
 
-        max_side = _max_input_side()
-        try:
-            pil_image = await decode_image_file(image, max_side=max_side)
-        except ValueError as e:
-            message = str(e)
-            if "exceeds max input side" in message:
-                message += (
-                    " (set MUSE_SEGMENTATION_MAX_INPUT_SIDE to raise)"
-                )
-            return error_response(
-                400, "invalid_parameter", f"image decode failed: {message}",
-            )
-
-        def _call() -> object:
-            with backend._inference_lock:
-                return backend.segment(
-                    pil_image,
-                    mode=mode,
-                    prompt=prompt,
-                    points=parsed_points,
-                    boxes=parsed_boxes,
-                    max_masks=max_masks,
-                )
-
-        abandoned = False
-        try:
-            result = await run_native_offload(
-                _call,
-                cleanup_abandoned=(
-                    lambda _result: close_decoded_images([pil_image])
-                ),
-            )
-        except asyncio.CancelledError:
-            abandoned = True
-            raise
-        except (CapabilityError, ValueError) as e:
-            # Client faults: an unsupported mode (CapabilityError, the
-            # runtime's defense-in-depth for a mismatch the gate above
-            # should already have caught) or a malformed prompt/points/boxes
-            # (ValueError). Both are 400 invalid_parameter.
-            return error_response(
-                400, "invalid_parameter", str(e),
-            )
-        except Exception:  # noqa: BLE001
-            # Server faults: a bare RuntimeError (e.g. CUDA OOM) or any other
-            # unexpected error is NOT the client's fault. Surface a 500 in
-            # the OpenAI envelope so clients retry rather than treating a
-            # valid request as malformed, and so nothing escapes as a bare
-            # Starlette 500. Log the real exception server-side but never
-            # leak it to the client: str(e) can carry internal filesystem
-            # paths, CUDA driver text, or other backend-implementation
-            # detail.
-            logger.exception("segmentation inference failed")
-            return error_response(
-                500, "internal_error",
-                "segmentation backend failed; see server logs",
-            )
-        finally:
-            if not abandoned:
-                close_decoded_images([pil_image])
-
-        return encode_segmentation(
-            result, model_id=effective_id, mask_format=mask_format,
+        pil_image, error = await read_and_decode_upload(
+            image, max_side=_max_input_side(), side_setting=_SIDE_SETTING,
         )
+        if error is not None:
+            return error
+
+        def _call() -> dict:
+            with backend._inference_lock:
+                try:
+                    result = backend.segment(
+                        pil_image,
+                        mode=mode,
+                        prompt=prompt,
+                        points=parsed_points,
+                        boxes=parsed_boxes,
+                        max_masks=max_masks,
+                    )
+                except (CapabilityError, ValueError) as e:
+                    # Client faults: an unsupported mode (the runtime's
+                    # defense-in-depth for a mismatch the gate above should
+                    # already have caught) or a malformed prompt/points/boxes.
+                    # Anything else is a server fault for the app's 500
+                    # handler, which never leaks the exception text.
+                    raise _ClientFault(str(e)) from e
+            # Encode off the event loop too: up to 256 masks per request.
+            return encode_segmentation(
+                result, model_id=effective_id, mask_format=mask_format,
+            )
+
+        try:
+            return await offload_call(_call, inputs=[pil_image])
+        except _ClientFault as e:
+            return error_response(400, "invalid_parameter", str(e))
 
     return router

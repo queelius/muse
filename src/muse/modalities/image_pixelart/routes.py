@@ -1,7 +1,8 @@
 """FastAPI routes for /v1/images/pixelize and /v1/images/autotile (multipart).
 
 Both mirror /v1/images/upscale: files arrive as multipart uploads read
-through the shared bounded decoder (``limits.image_input_max_bytes``), the
+through the shared bounded decoder (``muse.modalities._common.images``,
+``limits.image_input_max_bytes``), the
 other fields as Form parameters validated here (400 ``invalid_parameter``).
 Inputs larger than ``limits.pixelart_max_input_side`` on either side, and
 pixelize previews whose long side (art size x ``preview_scale``) would exceed
@@ -18,7 +19,6 @@ importing the modality package stays light.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 
@@ -28,7 +28,11 @@ from fastapi.responses import JSONResponse, Response
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
+from muse.modalities._common.images import (
+    read_and_decode_upload,
+    read_and_decode_uploads,
+)
+from muse.modalities._common.inference import offload_call
 
 logger = logging.getLogger(__name__)
 
@@ -90,69 +94,9 @@ def _parse_colour_options(background: str, outline: str) -> tuple[str, str]:
     return bg, ol
 
 
-async def _decode(upload: UploadFile, field: str):
-    """Decode one upload; returns ``(image, None)`` or ``(None, error)``.
-
-    The bounded read stays on the event loop (async I/O); the pixel decode
-    runs in a worker thread, and an image decoded after its request was
-    cancelled is closed there."""
-    from muse.modalities.image_generation.image_input import (
-        ImageTooLargeError,
-        decode_image_bytes,
-        read_image_file,
-    )
-
-    max_side = _max_input_side()
-    try:
-        raw = await read_image_file(upload)
-        image = await run_native_offload(
-            lambda: decode_image_bytes(raw, max_side=max_side),
-            cleanup_abandoned=lambda img: _close([img]),
-        )
-        return image, None
-    except ImageTooLargeError as e:
-        return None, error_response(
-            413, "payload_too_large",
-            f"{field}: {e} (set MUSE_IMAGE_INPUT_MAX_BYTES to raise)",
-        )
-    except ValueError as e:
-        message = str(e)
-        if "exceeds max input side" in message:
-            return None, error_response(
-                413, "input_too_large",
-                f"{field}: {message} (set {_SIDE_ENV} to raise)",
-            )
-        if "exceeds max input pixels" in message:
-            return None, error_response(
-                413, "input_too_large",
-                f"{field}: {message} (set MUSE_IMAGE_INPUT_MAX_PIXELS to raise)",
-            )
-        return None, error_response(400, "invalid_image", f"{field}: {message}")
-
-
-def _close(images) -> None:
-    from muse.modalities.image_generation.image_input import close_decoded_images
-
-    close_decoded_images([i for i in images if i is not None])
-
-
 async def _run(backend, call, inputs: list):
     """Run ``call`` off-loop under the inference lock; closes ``inputs``."""
-    def _locked():
-        with backend._inference_lock:
-            return call()
-
-    abandoned = False
-    try:
-        return await run_native_offload(
-            _locked, cleanup_abandoned=lambda _result: _close(inputs),
-        )
-    except asyncio.CancelledError:
-        abandoned = True
-        raise
-    finally:
-        if not abandoned:
-            _close(inputs)
+    return await offload_call(call, lock=backend._inference_lock, inputs=inputs)
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -214,7 +158,9 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             sheet=sheet_value, preview_scale=preview_scale,
             max_preview_side=_max_input_side(),
         )
-        source, error = await _decode(image, "image")
+        source, error = await read_and_decode_upload(
+            image, "image", max_side=_max_input_side(), side_setting=_SIDE_ENV,
+        )
         if error is not None:
             return error
 
@@ -295,19 +241,17 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         from muse.modalities.image_pixelart.protocol import AutotileRequest
         from muse.modalities.image_pixelart.runtime import layout_entries
 
-        images: dict = {}
-        for field, upload in (("a2", a2), ("fill", fill), ("base", base)):
-            if upload is None:
-                continue
-            try:
-                img, error = await _decode(upload, field)
-            except BaseException:  # cancelled mid-way: close what is decoded
-                _close(images.values())
-                raise
-            if error is not None:
-                _close(images.values())
-                return error
-            images[field] = img
+        uploads = [
+            (field, upload)
+            for field, upload in (("a2", a2), ("fill", fill), ("base", base))
+            if upload is not None
+        ]
+        decoded, error = await read_and_decode_uploads(
+            uploads, max_side=_max_input_side(), side_setting=_SIDE_ENV,
+        )
+        if error is not None:
+            return error
+        images = {field: img for (field, _), img in zip(uploads, decoded)}
 
         style = None
         if fill is not None:

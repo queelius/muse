@@ -11,27 +11,28 @@ rejects oversized inputs before they reach the pipeline.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
-import logging
+import threading
 import time
-
 
 from fastapi import APIRouter, File, Form, UploadFile
 
 from muse.core import config
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities._native_offload import run_native_offload
-from muse.modalities.image_generation.image_input import (
-    close_decoded_images,
-    decode_image_file,
+from muse.modalities._common.fields import (
+    FieldError,
+    check_choice,
+    check_length,
+    check_range,
+    field_error_response,
 )
+from muse.modalities._common.images import read_and_decode_upload
+from muse.modalities._common.inference import offload_call, produce_each
 from muse.modalities.image_upscale.codec import to_bytes, to_data_url
 
-logger = logging.getLogger(__name__)
-
 MODALITY = "image/upscale"
+_SIDE_SETTING = "MUSE_UPSCALE_MAX_INPUT_SIDE"
 
 
 def _max_input_side() -> int:
@@ -39,9 +40,7 @@ def _max_input_side() -> int:
 
     Default 1024. Tunable via MUSE_UPSCALE_MAX_INPUT_SIDE so users with
     more VRAM can lift the cap without a code change. A resolved value
-    that is non-positive (parseable but nonsensical as a side cap)
-    falls back to the registry default, mirroring
-    image_generation/image_input.py's _default_max_bytes guard.
+    that is non-positive falls back to the registry default.
     """
     return config.get_positive("limits.upscale_max_input_side")
 
@@ -53,7 +52,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     async def upscale(
         image: UploadFile = File(...),
         model: str | None = Form(None),
-        scale: int = Form(4),
+        scale: int | None = Form(None),
         prompt: str = Form(""),
         negative_prompt: str | None = Form(None),
         steps: int | None = Form(None),
@@ -63,59 +62,35 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         response_format: str = Form("b64_json"),
     ):
         # Manual Form validation (Pydantic doesn't validate multipart).
-        if not (1 <= n <= 4):
-            return error_response(
-                400, "invalid_parameter", "n must be in [1, 4]",
-            )
-        if response_format not in ("b64_json", "url"):
-            return error_response(
-                400, "invalid_parameter",
-                "response_format must be 'b64_json' or 'url'",
-            )
-        if len(prompt) > 4000:
-            return error_response(
-                400, "invalid_parameter",
-                "prompt must be 0 to 4000 characters",
-            )
-        if negative_prompt is not None and len(negative_prompt) > 4000:
-            return error_response(
-                400, "invalid_parameter",
-                "negative_prompt must be 0 to 4000 characters",
-            )
-        if steps is not None and not (1 <= steps <= 100):
-            return error_response(
-                400, "invalid_parameter",
-                "steps must be in [1, 100]",
-            )
-        if guidance is not None and not (0.0 <= guidance <= 20.0):
-            return error_response(
-                400, "invalid_parameter",
-                "guidance must be in [0.0, 20.0]",
-            )
+        try:
+            check_range("n", n, 1, 4)
+            check_choice("response_format", response_format, ("b64_json", "url"))
+            check_length("prompt", prompt, 0, 4000)
+            check_length("negative_prompt", negative_prompt, 0, 4000)
+            check_range("steps", steps, 1, 100)
+            check_range("guidance", guidance, 0.0, 20.0)
+        except FieldError as e:
+            return field_error_response(e)
 
         backend = registry.get_or_404(MODALITY, model)
-
-        effective_id = getattr(backend, "model_id", None) or (model or "<default>")
+        effective_id = backend.model_id
         capabilities = registry.capabilities(MODALITY, effective_id)
         supported = list(capabilities.get("supported_scales") or [4])
+        if scale is None:
+            scale = int(capabilities.get("default_scale") or supported[0])
         if scale not in supported:
             return error_response(
                 400, "invalid_parameter",
                 f"model {effective_id!r} only supports scales: {supported}",
             )
 
-        max_side = _max_input_side()
-        try:
-            init_image = await decode_image_file(image, max_side=max_side)
-        except ValueError as e:
-            message = str(e)
-            if "exceeds max input side" in message:
-                message += " (set MUSE_UPSCALE_MAX_INPUT_SIDE to raise)"
-            return error_response(
-                400, "invalid_parameter", f"image decode failed: {message}",
-            )
+        init_image, error = await read_and_decode_upload(
+            image, max_side=_max_input_side(), side_setting=_SIDE_SETTING,
+        )
+        if error is not None:
+            return error
 
-        def _call_one(seed_offset: int):
+        def _produce(seed_offset: int):
             kwargs: dict = {
                 "scale": scale,
                 "prompt": prompt,
@@ -125,51 +100,26 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             }
             if seed is not None:
                 kwargs["seed"] = seed + seed_offset
-            with backend._inference_lock:
-                return backend.upscale(init_image, **kwargs)
+            return backend.upscale(init_image, **kwargs)
 
-        results = []
+        def _encode(r) -> dict:
+            entry: dict = {"revised_prompt": prompt or None}
+            if response_format == "url":
+                entry["url"] = to_data_url(r.image, fmt="png")
+            else:
+                entry["b64_json"] = base64.b64encode(
+                    to_bytes(r.image, fmt="png"),
+                ).decode()
+            return entry
 
-        def _cleanup_abandoned(current_result) -> None:
-            close_decoded_images(
-                [init_image]
-                + [getattr(result, "image", None) for result in results]
-                + [getattr(current_result, "image", None)]
-            )
-
-        try:
-            for i in range(n):
-                result = await run_native_offload(
-                    lambda i=i: _call_one(i),
-                    cleanup_abandoned=_cleanup_abandoned,
-                )
-                results.append(result)
-        except asyncio.CancelledError:
-            raise
-        except BaseException:
-            close_decoded_images(
-                [init_image]
-                + [getattr(result, "image", None) for result in results]
-            )
-            raise
-
-        data = []
-        try:
-            for r in results:
-                entry: dict = {"revised_prompt": prompt or None}
-                if response_format == "url":
-                    entry["url"] = to_data_url(r.image, fmt="png")
-                else:
-                    entry["b64_json"] = base64.b64encode(
-                        to_bytes(r.image, fmt="png"),
-                    ).decode()
-                data.append(entry)
-        finally:
-            close_decoded_images(
-                [init_image]
-                + [getattr(r, "image", None) for r in results]
-            )
-
+        stop = threading.Event()
+        data = await offload_call(
+            lambda: produce_each(
+                n, _produce, _encode, lock=backend._inference_lock, stop=stop,
+            ),
+            inputs=[init_image],
+            stop=stop,
+        )
         return {"created": int(time.time()), "data": data}
 
     return router

@@ -182,3 +182,42 @@ def test_search_yields_results_with_modality_tag():
     fake_api.list_models.assert_called_once()
     call_kwargs = fake_api.list_models.call_args.kwargs
     assert call_kwargs["filter"] == "text-to-video"
+
+
+def test_sniff_ignores_wan_in_the_org_name():
+    """`wangfuyun/AnimateLCM` is an animation repo, not Wan."""
+    info = _fake_info(
+        repo_id="wangfuyun/AnimateLCM",
+        siblings=["model_index.json"],
+        tags=["text-to-video", "diffusers"],
+    )
+    assert HF_PLUGIN["sniff"](info) is False
+
+
+def test_sniff_requires_wan_as_a_name_token():
+    for repo_id in ("someone/swan-diffusion", "someone/Rowan-T2V"):
+        info = _fake_info(repo_id=repo_id, tags=["text-to-video"])
+        assert HF_PLUGIN["sniff"](info) is False, repo_id
+
+
+def test_sniff_accepts_wan_variants():
+    for repo_id in (
+        "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        "someone/my-wan-finetune",
+        "someone/SkyReels-Wan_1.3B",
+    ):
+        info = _fake_info(repo_id=repo_id, tags=["text-to-video"])
+        assert HF_PLUGIN["sniff"](info) is True, repo_id
+
+
+def test_animation_plugin_wins_wangfuyun_after_dispatch():
+    """With the org-name match gone, image/animation is the only claimant."""
+    from muse.modalities.image_animation.hf import HF_PLUGIN as ANIM
+
+    info = _fake_info(
+        repo_id="wangfuyun/AnimateLCM",
+        siblings=["model_index.json"],
+        tags=["text-to-video", "diffusers"],
+    )
+    assert ANIM["sniff"](info) is True
+    assert HF_PLUGIN["sniff"](info) is False

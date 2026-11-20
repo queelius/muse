@@ -5,10 +5,11 @@ boxes are Python lists at the public API; the client serializes them
 via ``json.dumps`` before posting as Form fields, mirroring the wire
 contract documented in ``routes.py``.
 
-The default ``response_format`` is ``"png_b64"`` so each returned mask
-is a base64-encoded PNG string. Pass ``mask_format="rle"`` for
-COCO-style RLE dicts; downstream tooling like pycocotools and
-FiftyOne consumes that shape directly.
+The default ``mask_format`` is ``"png_b64"`` so each returned mask
+is a base64-encoded PNG string. Pass ``mask_format="rle"`` for muse's
+compact run-length dicts (``{"size": [H, W], "counts": "p:..."}``);
+they are not COCO-compressed, so decode them with
+``muse.modalities.image_segmentation.codec.decode_mask_rle``.
 """
 from __future__ import annotations
 

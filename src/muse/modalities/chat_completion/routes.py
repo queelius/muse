@@ -32,7 +32,7 @@ from muse.modalities.chat_completion.codec import (
     chunk_to_sse_data,
     result_to_openai_dict,
 )
-from muse.modalities.image_generation.image_input import (
+from muse.modalities._common.images import (
     close_decoded_images,
     decode_image_input,
     validate_total_image_pixels,

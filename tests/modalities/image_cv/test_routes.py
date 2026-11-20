@@ -201,7 +201,7 @@ class TestDepthRoute:
             files={"image": ("garbage.png", b"not really png", "image/png")},
         )
         assert r.status_code == 400
-        assert r.json()["error"]["code"] == "invalid_parameter"
+        assert r.json()["error"]["code"] == "invalid_image"
 
     def test_metric_depth_passes_through(self):
         backend = _FakeDepth(metric=True)
@@ -435,7 +435,8 @@ def test_runtime_exception_returns_500():
         manifest={"model_id": "broken", "capabilities": {"supports_depth": True}},
     )
     app = create_app(registry=reg, routers={MODALITY: build_router(reg)})
-    client = TestClient(app)
+    # The app's global handler renders backend failures.
+    client = TestClient(app, raise_server_exceptions=False)
     r = client.post(
         "/v1/images/depth",
         files={"image": ("t.png", _png_bytes(), "image/png")},
@@ -454,3 +455,31 @@ def test_inference_lock_attached_per_backend():
     backend = _FakeDepth()
     _client(backend, {"supports_depth": True})
     assert hasattr(backend, "_inference_lock")
+
+
+def test_decode_and_depth_encode_run_off_the_event_loop(monkeypatch):
+    from muse.modalities.image_cv import routes as cv_routes
+    from tests.modalities.loop_spy import spy_decode, spy_on
+
+    decoded = spy_decode(monkeypatch)
+    encoded: list[bool] = []
+    spy_on(monkeypatch, cv_routes, "encode_depth_envelope", encoded)
+    client = _client(_FakeDepth(), {"supports_depth": True})
+    r = client.post(
+        "/v1/images/depth",
+        files={"image": ("t.png", _png_bytes(), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    assert decoded == [False]
+    assert encoded == [False]
+
+
+def test_oversize_upload_is_413(monkeypatch):
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "8")
+    client = _client(_FakeDepth(), {"supports_depth": True})
+    r = client.post(
+        "/v1/images/depth",
+        files={"image": ("t.png", _png_bytes(), "image/png")},
+    )
+    assert r.status_code == 413
+    assert r.json()["error"]["code"] == "payload_too_large"

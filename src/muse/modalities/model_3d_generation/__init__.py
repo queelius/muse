@@ -14,7 +14,8 @@ The `format` field on each data element is reserved as a string so
 future formats (USDZ, OBJ-archive) are additive.
 
 Bundled default: TripoSR (image-to-3d only, ~120MB, MIT, CUDA).
-Curated coverage: TRELLIS (both routes), Hunyuan3D-2, Wonder3D, Shap-E.
+Curated coverage: TRELLIS (image-to-3d), Hunyuan3D-2 (both routes),
+Shap-E (text-to-3d).
 
 Python package directory is `model_3d_generation/` because Python
 identifiers cannot start with a digit; the MIME tag remains

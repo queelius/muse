@@ -24,10 +24,10 @@ Design decisions:
   - Every hop must be http or https, and a redirect may not downgrade https
     to http.
   - MUSE_ALLOW_PRIVATE_FETCH=1 escape hatch is preserved for operators on
-    trusted internal networks (same as the original image_input convention);
+    trusted internal networks (same as the original image-input convention);
     when set, resolution + pinning are skipped and the hostname is dialed as-is.
 
-IPv6 caveat:
+IPv6 caveat (inherited from the original image-input host check):
   socket.gethostbyname is IPv4-only. A hostname that resolves ONLY to an AAAA
   record will fail gethostbyname with OSError, causing a ValueError ("DNS
   resolution failed") before any fetch is attempted -- conservative, not

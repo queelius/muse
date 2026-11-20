@@ -46,7 +46,7 @@ class _FakeVectorizer:
         )
 
 
-def _client(backend):
+def _client(backend, *, raise_server_exceptions=True):
     registry = ModalityRegistry()
     registry.register(
         MODALITY, backend,
@@ -60,7 +60,7 @@ def _client(backend):
         registry=registry,
         routers={MODALITY: build_router(registry)},
     )
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 def test_json_response_and_generation_controls():
@@ -137,7 +137,7 @@ def test_corrupt_image_returns_400():
         files={"image": ("bad.png", b"not an image", "image/png")},
     )
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_parameter"
+    assert response.json()["error"]["code"] == "invalid_image"
 
 
 def test_input_side_cap(monkeypatch):
@@ -146,7 +146,8 @@ def test_input_side_cap(monkeypatch):
         "/v1/images/vectorize",
         files={"image": ("large.png", _png_bytes(64, 32), "image/png")},
     )
-    assert response.status_code == 400
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "input_too_large"
     assert "MUSE_VECTORIZATION_MAX_INPUT_SIDE" in (
         response.json()["error"]["message"]
     )
@@ -224,7 +225,7 @@ def test_runtime_error_returns_sanitized_500():
     backend.vectorize = MagicMock(
         side_effect=RuntimeError("/secret/path CUDA crash")
     )
-    response = _client(backend).post(
+    response = _client(backend, raise_server_exceptions=False).post(
         "/v1/images/vectorize",
         files={"image": ("diagram.png", _png_bytes(), "image/png")},
     )
@@ -241,7 +242,7 @@ def test_route_closes_decoded_source_after_backend():
     decoded.height = 32
 
     with patch(
-        "muse.modalities.image_vectorization.routes.decode_image_file",
+        "muse.modalities._common.images.decode_image_file",
         new=AsyncMock(return_value=decoded),
     ):
         response = _client(backend).post(
@@ -263,3 +264,15 @@ def test_registry_attaches_inference_lock():
         )
         assert response.status_code == 200
     assert hasattr(backend, "_inference_lock")
+
+
+def test_decode_runs_off_the_event_loop(monkeypatch):
+    from tests.modalities.loop_spy import spy_decode
+
+    decoded = spy_decode(monkeypatch)
+    response = _client(_FakeVectorizer()).post(
+        "/v1/images/vectorize",
+        files={"image": ("diagram.png", _png_bytes(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    assert decoded == [False]

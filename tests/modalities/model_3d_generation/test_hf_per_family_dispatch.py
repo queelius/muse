@@ -2,8 +2,9 @@
 
 The dispatcher picks a runtime path based on repo name. Shap-E gets
 ShapERuntime; TRELLIS gets TRELLISRuntime; Hunyuan3D-2 gets
-Hunyuan3DRuntime. Unknown repos (TripoSR, Wonder3D) fall through to
-TripoSRRuntime (regression watchdog).
+Hunyuan3DRuntime; TripoSR gets TripoSRRuntime. Any other repo (Wonder3D,
+InstantMesh, ...) has no family: _family_for returns None and _resolve
+raises ResolverError (curated pulls skip the sniff, so this is the gate).
 """
 import pytest
 
@@ -21,10 +22,26 @@ def test_runtime_path_for_trellis_now_dispatches_to_TRELLISRuntime():
     )
 
 
-def test_runtime_path_for_wonder3d():
-    """Wonder3D is deferred; falls back to TripoSR."""
+def test_wonder3d_has_no_family():
+    """Wonder3D is deferred; it must not fall back to TripoSR."""
     from muse.modalities.model_3d_generation.hf import _family_for
-    assert _family_for("flamehaze1115/wonder3d-v1.0").runtime_path.endswith(":TripoSRRuntime")
+    assert _family_for("flamehaze1115/wonder3d-v1.0") is None
+
+
+def test_resolve_refuses_repos_outside_the_known_families():
+    """Curated pulls pass modality= and skip the sniff, so _resolve itself
+    must refuse a family with no runtime."""
+    from types import SimpleNamespace
+
+    from muse.core.resolvers import ResolverError
+    from muse.modalities.model_3d_generation.hf import _resolve
+
+    info = SimpleNamespace(
+        id="flamehaze1115/wonder3d-v1.0", sha="a" * 40, tags=["image-to-3d"],
+        siblings=[], card_data=None,
+    )
+    with pytest.raises(ResolverError, match="no 3d/generation runtime"):
+        _resolve("flamehaze1115/wonder3d-v1.0", None, info)
 
 
 def test_runtime_path_for_triposr():
@@ -53,10 +70,9 @@ def test_pip_extras_for_family_includes_required_substrings(repo_id, required_su
         )
 
 
-def test_pip_extras_for_triposr_default():
-    """Non-family repos get the original TripoSR pip_extras (fallback path)."""
+def test_pip_extras_for_triposr():
     from muse.modalities.model_3d_generation.hf import _family_for
-    extras = _family_for("some/unknown-3d-repo").pip_extras
+    extras = _family_for("stabilityai/TripoSR").pip_extras
     assert any("tsr" in e for e in extras)
 
 
@@ -69,9 +85,14 @@ def test_family_for_shap_e_returns_shape_e_family():
     assert not hasattr(family, "trust_remote_code")
 
 
-def test_family_for_unknown_returns_default_triposr_family():
+def test_family_for_unknown_returns_none():
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("some/unknown-repo") is None
+
+
+def test_family_for_triposr_is_the_plain_triposr_family():
     from muse.modalities.model_3d_generation.hf import _family_for, _TRIPOSR_RUNTIME_PATH
-    family = _family_for("some/unknown-repo")
+    family = _family_for("stabilityai/TripoSR")
     assert family.runtime_path == _TRIPOSR_RUNTIME_PATH
     assert family.capability_overrides == {}
     assert not hasattr(family, "trust_remote_code")
@@ -80,11 +101,8 @@ def test_family_for_unknown_returns_default_triposr_family():
 def test_family_for_rejects_false_positive_substring():
     """Regression: _family_for must use word-boundary matching so that
     e.g. `my-reshape-enhancer` does NOT match `shape-e`."""
-    from muse.modalities.model_3d_generation.hf import (
-        _family_for, _TRIPOSR_RUNTIME_PATH,
-    )
-    family = _family_for("user/my-reshape-enhancer")
-    assert family.runtime_path == _TRIPOSR_RUNTIME_PATH
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("user/my-reshape-enhancer") is None
 
 
 def test_family_for_accepts_word_boundary_match():
@@ -97,8 +115,8 @@ def test_family_for_accepts_word_boundary_match():
 
 
 def test_family_default_has_empty_system_packages():
-    from muse.modalities.model_3d_generation.hf import _DEFAULT_FAMILY
-    assert _DEFAULT_FAMILY.system_packages == ()
+    from muse.modalities.model_3d_generation.hf import _family_for
+    assert _family_for("stabilityai/TripoSR").system_packages == ()
 
 
 def test_shape_e_family_has_empty_system_packages():

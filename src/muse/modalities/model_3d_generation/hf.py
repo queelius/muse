@@ -1,15 +1,19 @@
 """HF resolver plugin for 3d/generation.
 
-Sniffs HF repos for image-to-3d / text-to-3d shape and synthesizes a
-manifest pointing at the right runtime. Priority 110, same slot as the
+Sniffs HF repos whose name is a family muse has a runtime for
+(TripoSR, Shap-E, TRELLIS, Hunyuan3D) and synthesizes a manifest
+pointing at that runtime. An image-to-3d / text-to-3d tag alone does
+not claim a repo: Wonder3D, InstantMesh and other unsupported families
+would fall back to the TripoSR runtime and fail at load. Priority 110, same slot as the
 other modality-specific plugins (audio_classification, audio_embedding,
 image_segmentation, image_ocr, image_cv).
 
 Per-family dispatch via _family_for(): Shap-E repos route to
 ShapERuntime; TRELLIS repos route to TRELLISRuntime; Hunyuan3D-2
 repos route to Hunyuan3DRuntime (both added via v0.44.0+ _Family
-entries); unknown repos fall through to TripoSRRuntime via
-_DEFAULT_FAMILY. Wonder3D is deferred indefinitely. Adding a new
+entries); TripoSR repos route to TripoSRRuntime. Any other repo is
+refused by _resolve too (curated pulls skip the sniff). Wonder3D is
+deferred indefinitely. Adding a new
 family means appending one _Family entry to _FAMILIES plus shipping a
 runtime file; no new dispatch functions and no new conditional branches
 in _resolve.
@@ -27,7 +31,12 @@ from typing import Iterable
 from huggingface_hub import HfApi, snapshot_download
 
 from muse.core.artifacts import download_hf_artifact_bundle
-from muse.core.resolvers import ResolvedModel, SearchResult, hf_commit_revision
+from muse.core.resolvers import (
+    ResolvedModel,
+    ResolverError,
+    SearchResult,
+    hf_commit_revision,
+)
 from muse.core.hf_plugin_helpers import hf_model_id, hf_repo_license
 
 
@@ -219,11 +228,14 @@ _FAMILIES: tuple[_Family, ...] = (
     # Wonder3D: deferred indefinitely (v0.44.0 decision).
 )
 
-_DEFAULT_FAMILY = _Family(
-    name_hints=(),
+_TRIPOSR_FAMILY = _Family(
+    name_hints=("triposr",),
     runtime_path=_TRIPOSR_RUNTIME_PATH,
     pip_extras=_TRIPOSR_PIP_EXTRAS,
 )
+# Every family with a runtime. A repo matching none of them is refused:
+# Wonder3D, InstantMesh and friends must not fall back to TripoSR.
+_ALL_FAMILIES: tuple[_Family, ...] = (*_FAMILIES, _TRIPOSR_FAMILY)
 
 
 def _matches_hint(name: str, hint: str) -> bool:
@@ -240,30 +252,24 @@ def _matches_hint(name: str, hint: str) -> bool:
     return bool(pattern.search(name))
 
 
-def _family_for(repo_id: str) -> _Family:
-    """Pick the family by name-hint match; fall back to TripoSR."""
-    name = repo_id.lower()
+def _family_for(repo_id: str) -> _Family | None:
+    """The family whose name hint matches the repo NAME, else None."""
+    if not isinstance(repo_id, str):
+        return None
+    name = repo_id.rsplit("/", 1)[-1].lower()
     return next(
-        (f for f in _FAMILIES if any(_matches_hint(name, h) for h in f.name_hints)),
-        _DEFAULT_FAMILY,
+        (f for f in _ALL_FAMILIES if any(_matches_hint(name, h) for h in f.name_hints)),
+        None,
     )
 
 
 
-# Repo-name allowlist: the canonical 3D generation repos. These match
-# regardless of HF tagging (some repos are sloppy with tags). Highest
-# precedence.
-_NAME_HINTS = (
-    "triposr",
-    "trellis",
-    "wonder3d",
-    "hunyuan3d",
-    "shap-e",
-    "instantmesh",
-    "stable-3d",
-)
-# Tag-based fallback. The canonical 3D generation tags on HF.
+# Search queries these tags, then keeps only repos the sniff would claim.
 _TAG_HINTS = ("image-to-3d", "text-to-3d")
+
+
+def _is_known_family(repo_id: str) -> bool:
+    return _family_for(repo_id) is not None
 
 
 def _download_hunyuan_bundle(
@@ -293,14 +299,9 @@ def _download_hunyuan_bundle(
 
 
 def _sniff(info) -> bool:
-    repo_id = (getattr(info, "id", "") or "").lower()
-    # Repo-name allowlist dominates: well-known 3D generators always
-    # claim, even when their HF tags are sloppy or absent.
-    if any(s in repo_id for s in _NAME_HINTS):
-        return True
-    # Tag-based fallback.
-    tags = getattr(info, "tags", None) or []
-    return any(t in tags for t in _TAG_HINTS)
+    # Known families claim regardless of HF tags (some repos are sloppy
+    # with them); the match is on the repo name, never the org.
+    return _is_known_family(getattr(info, "id", "") or "")
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
@@ -309,10 +310,17 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     The per-family registry (_FAMILIES) selects the runtime by repo-name
     substring match. Current families: Shap-E (text-to-3D),
     TRELLIS (image-to-3D, installed SDK), Hunyuan3D-2 (both
-    directions, installed SDK). Unknown repos fall through to
-    TripoSR (image-to-3D) via _DEFAULT_FAMILY.
+    directions, installed SDK), TripoSR (image-to-3D). Any other repo
+    raises ResolverError: curated pulls name the modality and skip the
+    sniff, so this is the gate that keeps Wonder3D and friends from
+    falling back to the TripoSR runtime.
     """
     family = _family_for(repo_id)
+    if family is None:
+        raise ResolverError(
+            f"no 3d/generation runtime for {repo_id!r}: muse serves TripoSR, "
+            f"Shap-E, TRELLIS and Hunyuan3D repos only"
+        )
     revision = hf_commit_revision(info)
     is_hunyuan = family.runtime_path == _HUNYUAN3D_RUNTIME_PATH
 
@@ -397,7 +405,8 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
 
     Iterates both `image-to-3d` and `text-to-3d` tags and dedupes by
     repo id so a multi-tagged repo (TRELLIS, Hunyuan3D-2) yields one
-    SearchResult, not two.
+    SearchResult, not two. Repos of families without a runtime are
+    skipped, since a pull would refuse them.
     """
     seen: set[str] = set()
     for tag in _TAG_HINTS:
@@ -407,7 +416,7 @@ def _search(api: HfApi, query: str, *, sort: str, limit: int) -> Iterable[Search
         )
         for repo in repos:
             repo_id = getattr(repo, "id", None)
-            if not repo_id or repo_id in seen:
+            if not repo_id or repo_id in seen or not _is_known_family(repo_id):
                 continue
             seen.add(repo_id)
             yield SearchResult(

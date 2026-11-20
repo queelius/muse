@@ -1,8 +1,9 @@
 """HF resolver plugin for text-to-video repos.
 
-Sniffs HF repos with the `text-to-video` tag whose name matches one
-of the supported architecture patterns: wan, cogvideox, ltx, mochi,
-hunyuan. Priority 105.
+Sniffs HF repos with the `text-to-video` tag whose name (the part
+after the org) matches one of the supported architecture patterns:
+wan (as a name token, so `wangfuyun/AnimateLCM` is not Wan), cogvideox,
+ltx, mochi, hunyuan. Priority 105.
 
 Per-architecture dispatch:
   - *wan*           -> WanRuntime (production-ready)
@@ -19,6 +20,7 @@ huggingface_hub + muse.core only at module top.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -49,9 +51,23 @@ _PIP_EXTRAS = (
 )
 
 
+# "wan" is too short for a substring match ("wangfuyun/AnimateLCM",
+# "swan-..."): it must be a token of the repo NAME (not the org).
+_WAN_TOKEN_RE = re.compile(r"(?:^|[-_.])wan(?=$|[-_.\d])")
+
+
+def _repo_name(repo_id: str) -> str:
+    """The lowercased name part after the org; families never match the org."""
+    return repo_id.rsplit("/", 1)[-1].lower()
+
+
+def _is_wan(name: str) -> bool:
+    return _WAN_TOKEN_RE.search(name) is not None
+
+
 def _infer_defaults(repo_id: str) -> tuple[str, dict[str, Any]]:
     """Return (runtime_path, capabilities) per architecture pattern."""
-    rid = repo_id.lower()
+    rid = _repo_name(repo_id)
     if "cogvideox" in rid:
         caps = {
             "device": "cuda",
@@ -66,7 +82,7 @@ def _infer_defaults(repo_id: str) -> tuple[str, dict[str, Any]]:
             "memory_gb": 9.0,
         }
         return _COGVIDEOX_RUNTIME_PATH, caps
-    if "wan" in rid:
+    if _is_wan(rid):
         caps = {
             "device": "cuda",
             "default_duration_seconds": 5.0,
@@ -135,7 +151,7 @@ def _infer_defaults(repo_id: str) -> tuple[str, dict[str, Any]]:
 
 
 _KNOWN_PATTERNS = (
-    "wan", "cogvideox",
+    "cogvideox",
     "ltx-video", "ltx_video", "ltxvideo",
     "mochi", "hunyuan",
 )
@@ -145,8 +161,11 @@ def _sniff(info) -> bool:
     tags = getattr(info, "tags", None) or []
     if "text-to-video" not in tags:
         return False
-    repo_id = (getattr(info, "id", "") or "").lower()
-    return any(p in repo_id for p in _KNOWN_PATTERNS)
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return False
+    name = _repo_name(repo_id)
+    return _is_wan(name) or any(p in name for p in _KNOWN_PATTERNS)
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

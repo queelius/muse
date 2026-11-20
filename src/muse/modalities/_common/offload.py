@@ -1,11 +1,13 @@
 """Shared CPU-offload dispatch for diffusers pipelines.
 
-Video (WanRuntime, CogVideoXRuntime, and the bundled wan2_1_t2v_1_3b
-Model script, which duplicates WanRuntime's construction logic for the
-one-off-script loading path) place their pipeline the same way: either
-the whole-pipeline `.to(device)` move, or one of diffusers' two CPU
-offload modes. This module is the single place that dispatch lives, so
-all three call sites stay in lockstep.
+WanRuntime and CogVideoXRuntime (the bundled wan2_1_t2v_1_3b script
+aliases WanRuntime) and the image reference runtime
+(``image_generation/runtimes/reference.py``) place their pipeline the
+same way: either the whole-pipeline `.to(device)` move, or one of
+diffusers' two CPU offload modes. This module is the single place that
+dispatch lives, so every call site stays in lockstep. Offload applies on
+any non-cpu device (cuda, and mps too); on cpu the pipeline is left
+alone.
 
 Import-light by design: only `muse.core.config` (no torch, no
 diffusers) at module top, matching the config module's own
@@ -62,7 +64,7 @@ def place_pipeline(
     """Place a diffusers pipeline on its device.
 
     Dispatches to CPU offload (model or sequential granularity) when
-    requested and the device is not cpu, OR falls back to the plain
+    requested and the device is not cpu (cuda or mps), OR falls back to the plain
     `.to(device)` move -- the two are mutually exclusive, offload
     manages its own placement. On a cpu device the pipeline is left
     alone (matches the pre-offload `device != "cpu"` guard). VAE tiling

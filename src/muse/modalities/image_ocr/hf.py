@@ -69,13 +69,7 @@ def _sniff(info) -> bool:
     #   image-to-text presence proves it has an OCR-compatible mode.
     #   Claim it for image/ocr; the user can disambiguate via the
     #   curated YAML if a real VLM ends up here.
-    has_i2t = "image-to-text" in tags
-    has_it2t = "image-text-to-text" in tags
-    if has_i2t:
-        return True
-    if has_it2t:
-        return False
-    return False
+    return "image-to-text" in tags
 
 
 def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:

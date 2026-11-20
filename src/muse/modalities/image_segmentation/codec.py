@@ -4,23 +4,17 @@ Two formats:
 
   - ``"png_b64"``: base64-encoded PNG (binary mask, white=foreground).
     Portable, viewable in any image tool. Larger payload.
-  - ``"rle"``: COCO RLE dict ``{"size": [H, W], "counts": str}``.
-    Compact. Standard format for downstream tooling (pycocotools,
-    FiftyOne).
+  - ``"rle"``: muse's own compact run-length format,
+    ``{"size": [H, W], "counts": "p:<r0>,<r1>,..."}``. The runs are
+    column-major (Fortran order, like COCO) and alternate 0-runs and
+    1-runs starting with the leading 0-run, written as decimal integers
+    after the ``p:`` marker. The ``size``/order conventions follow COCO,
+    but the counts are NOT COCO's compressed string, so pycocotools and
+    FiftyOne cannot decode it directly; ``decode_mask_rle`` (or splitting
+    the counts on commas) can.
 
-Two RLE paths are supported:
-
-  - When ``pycocotools.mask`` is importable, the codec delegates to it
-    so external tooling can round-trip muse outputs byte-for-byte.
-  - Otherwise the codec falls back to a pure-Python RLE encoder that
-    follows the same wire shape (``{"size": [H, W], "counts": str}``)
-    and is reciprocal with its own decoder. The pure-Python encoding
-    is internally consistent (encode then decode equals identity); it
-    is intentionally NOT cross-compatible with pycocotools' compact
-    ASCII codec, which is intricate and undocumented outside their
-    source. Cross-compatibility is the role of pycocotools when
-    installed; the fallback is a self-contained safety net so muse
-    works without the dep.
+Encoding is vectorised with numpy: routes encode up to 256 masks per
+request, and a per-pixel Python loop took ~0.5 s per 2048x2048 mask.
 
 The PIL / numpy axis-order conventions are documented in
 ``muse.modalities.image_segmentation.protocol``.
@@ -29,35 +23,14 @@ from __future__ import annotations
 
 import base64
 import io
-import logging
 import uuid
 from typing import Any
 
-from muse.modalities.image_segmentation.protocol import (
-    MaskRecord, SegmentationResult,
-)
-
-logger = logging.getLogger(__name__)
+from muse.modalities.image_segmentation.protocol import SegmentationResult
 
 
-# Marker that a codec output came from the pure-Python fallback.
-# Decoders consult this prefix on counts to decide which decoder to
-# use; pycocotools-encoded counts never start with this marker.
+# Marks muse's run-length counts (see the module docstring).
 _PURE_RLE_PREFIX = "p:"
-
-
-def _try_import_pycocotools() -> Any | None:
-    """Lazy-import pycocotools.mask; return module or None.
-
-    Tests patch this directly to exercise both code paths without a
-    real pycocotools install.
-    """
-    try:
-        from pycocotools import mask as _m
-        return _m
-    except Exception as e:  # noqa: BLE001
-        logger.debug("pycocotools unavailable; using pure-Python RLE: %s", e)
-        return None
 
 
 def _ensure_uint8(mask: Any) -> Any:
@@ -88,56 +61,38 @@ def encode_mask_png(mask: Any) -> bytes:
 
 
 def encode_mask_rle(mask: Any) -> dict:
-    """Encode a 2D bool / uint8 mask in COCO RLE format.
+    """Encode a 2D bool / uint8 mask in muse's run-length format.
 
-    Returns ``{"size": [H, W], "counts": str}``. When pycocotools is
-    available, delegates to ``pycocotools.mask.encode``. Otherwise
-    falls back to the pure-Python encoder; the fallback is reciprocal
-    with ``decode_mask_rle`` and produces output in the same wire
-    shape but with a self-marking counts prefix.
+    Returns ``{"size": [H, W], "counts": "p:..."}``, reciprocal with
+    ``decode_mask_rle``.
     """
-    import numpy as np
     arr = _ensure_uint8(mask)
     h, w = arr.shape
-    pct = _try_import_pycocotools()
-    if pct is not None:
-        f_arr = np.asfortranarray(arr)
-        rle = pct.encode(f_arr)
-        counts = rle["counts"]
-        if isinstance(counts, bytes):
-            counts = counts.decode("ascii")
-        return {"size": [int(h), int(w)], "counts": counts}
     runs = _binary_mask_to_runs(arr)
-    counts = _PURE_RLE_PREFIX + ",".join(str(r) for r in runs)
+    counts = _PURE_RLE_PREFIX + ",".join(map(str, runs))
     return {"size": [int(h), int(w)], "counts": counts}
 
 
 def decode_mask_rle(rle: dict) -> Any:
     """Reciprocal of ``encode_mask_rle``; returns a ``(H, W)`` bool array.
 
-    Dispatches by counts prefix:
-
-      - ``"p:..."``: pure-Python format (this codec round-trip).
-      - else: pycocotools-encoded; requires pycocotools to decode.
+    Raises ValueError for counts without the ``p:`` marker or runs that
+    do not add up to ``H * W``.
     """
-    import numpy as np
-    h, w = rle["size"]
+    h, w = (int(v) for v in rle["size"])
     counts = rle["counts"]
     if isinstance(counts, bytes):
         counts = counts.decode("ascii")
-    if counts.startswith(_PURE_RLE_PREFIX):
-        runs = [int(r) for r in counts[len(_PURE_RLE_PREFIX):].split(",") if r]
-        arr = _runs_to_binary_mask(runs, h, w)
-        return arr.astype(bool)
-    pct = _try_import_pycocotools()
-    if pct is None:
-        raise RuntimeError(
-            "pycocotools is required to decode this RLE counts format; "
-            "install pycocotools or re-encode with pure-Python encoder"
+    if not counts.startswith(_PURE_RLE_PREFIX):
+        raise ValueError(
+            "RLE counts must use muse's 'p:' run-length format"
         )
-    rle_in = {"size": [int(h), int(w)], "counts": counts.encode("ascii")}
-    decoded = pct.decode(rle_in)
-    return np.asarray(decoded, dtype=bool)
+    runs = [int(r) for r in counts[len(_PURE_RLE_PREFIX):].split(",") if r]
+    if sum(runs) != h * w:
+        raise ValueError(
+            f"RLE runs cover {sum(runs)} pixels; size {h}x{w} needs {h * w}"
+        )
+    return _runs_to_binary_mask(runs, h, w).astype(bool)
 
 
 def _binary_mask_to_runs(arr: Any) -> list[int]:
@@ -145,36 +100,28 @@ def _binary_mask_to_runs(arr: Any) -> list[int]:
 
     Returns a list of run lengths, alternating between 0-runs and
     1-runs, starting with the count of leading zeros (per COCO
-    convention). An all-zero or all-one mask still produces a
-    single-element list.
+    convention, so a mask starting with 1 begins with a 0-length run).
+    An all-zero mask produces a single-element list.
     """
     import numpy as np
-    flat = np.asfortranarray(arr).reshape(-1, order="F")
-    runs: list[int] = []
-    last = 0
-    count = 0
-    for v in flat.tolist():
-        if v == last:
-            count += 1
-        else:
-            runs.append(count)
-            last = 1 - last
-            count = 1
-    runs.append(count)
-    return runs
+    flat = np.asarray(arr, dtype=np.uint8).reshape(-1, order="F")
+    if flat.size == 0:
+        return [0]
+    # Indices where the value changes, as run boundaries.
+    edges = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+    bounds = np.concatenate(([0], edges, [flat.size]))
+    runs = np.diff(bounds)
+    if flat[0] == 1:
+        runs = np.concatenate(([0], runs))
+    return runs.tolist()
 
 
 def _runs_to_binary_mask(runs: list[int], h: int, w: int) -> Any:
     """Reciprocal of ``_binary_mask_to_runs``."""
     import numpy as np
-    flat = np.zeros(h * w, dtype=np.uint8)
-    pos = 0
-    val = 0
-    for run in runs:
-        if val == 1:
-            flat[pos:pos + run] = 1
-        pos += run
-        val = 1 - val
+    lengths = np.asarray(runs, dtype=np.int64)
+    values = np.arange(lengths.size, dtype=np.uint8) % 2
+    flat = np.repeat(values, lengths)
     return flat.reshape((h, w), order="F")
 
 

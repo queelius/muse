@@ -81,19 +81,31 @@ _PIP_EXTRAS_KEYPOINT_SAFE = (
 _PIP_EXTRAS_DETECTION = (*_PIP_EXTRAS_BASE, "timm")
 
 
-_DEPTH_NAME_HINTS = ("depth", "dpt", "zoedepth", "midas")
-_KEYPOINT_NAME_HINTS = ("vitpose", "superpoint")
-_DETECTION_NAME_HINTS = (
-    "detr", "yolos", "rtdetr", "rt-detr", "owlvit", "owl-vit",
+# Name-hint fallbacks for repos missing the canonical task tag. They match
+# the repo NAME only (never the org) and name a family the runtime loads:
+# a bare "depth" would also claim ControlNet-depth conditioning models.
+_DEPTH_NAME_HINTS = (
+    "depth-anything", "depth_anything", "dpt", "zoedepth", "midas",
 )
+_KEYPOINT_NAME_HINTS = ("vitpose", "superpoint")
+# Zero-shot detectors (OWL-ViT, Grounding DINO) are not in
+# AutoModelForObjectDetection's mapping, so they are not hinted.
+_DETECTION_NAME_HINTS = ("detr", "yolos", "rtdetr", "rt-detr")
+
+
+def _repo_name(info) -> str:
+    repo_id = getattr(info, "id", "")
+    if not isinstance(repo_id, str):
+        return ""
+    return repo_id.rsplit("/", 1)[-1].lower()
 
 
 def _is_depth(info) -> bool:
     tags = getattr(info, "tags", None) or []
     if "depth-estimation" in tags:
         return True
-    repo_id = (getattr(info, "id", "") or "").lower()
-    return any(h in repo_id for h in _DEPTH_NAME_HINTS)
+    name = _repo_name(info)
+    return any(h in name for h in _DEPTH_NAME_HINTS)
 
 
 def _is_keypoint(info) -> bool:
@@ -160,8 +172,8 @@ def _is_object_detection(info) -> bool:
     tags = getattr(info, "tags", None) or []
     if "object-detection" in tags:
         return True
-    repo_id = (getattr(info, "id", "") or "").lower()
-    return any(h in repo_id for h in _DETECTION_NAME_HINTS)
+    name = _repo_name(info)
+    return any(h in name for h in _DETECTION_NAME_HINTS)
 
 
 def _is_metric_depth(repo_id: str) -> bool:

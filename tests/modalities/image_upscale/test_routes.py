@@ -168,7 +168,7 @@ def test_post_upscale_empty_image_returns_400(client):
         data={"model": "fake-upscale", "scale": "4"},
     )
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_parameter"
+    assert r.json()["error"]["code"] == "invalid_image"
 
 
 def test_post_upscale_malformed_image_returns_400(client):
@@ -180,20 +180,17 @@ def test_post_upscale_malformed_image_returns_400(client):
     assert r.status_code == 400
 
 
-def test_post_upscale_oversize_input_returns_400(client, monkeypatch):
+def test_post_upscale_oversize_input_returns_413(client, monkeypatch):
     monkeypatch.setenv("MUSE_UPSCALE_MAX_INPUT_SIDE", "32")
     r = client.post(
         "/v1/images/upscale",
         files={"image": ("src.png", _png_bytes(64, 64), "image/png")},
         data={"model": "fake-upscale", "scale": "4"},
     )
-    assert r.status_code == 400
+    assert r.status_code == 413
     err = r.json()["error"]
-    assert err["code"] == "invalid_parameter"
-    assert (
-        "too large" in err["message"].lower()
-        or "max" in err["message"].lower()
-    )
+    assert err["code"] == "input_too_large"
+    assert "MUSE_UPSCALE_MAX_INPUT_SIDE" in err["message"]
 
 
 # ---------------- config-hierarchy migration (limits.upscale_max_input_side) ----------------
@@ -301,10 +298,51 @@ def test_upscale_side_zero_env_falls_back(monkeypatch):
     everything". config.get() parses "0" to the literal int 0 (a valid
     int, not an error), so the accessor must guard non-positive values
     itself and fall back to the registry default, mirroring
-    image_input.py's _default_max_bytes."""
+    _common/images.py's _default_max_bytes."""
     from muse.core import config
     monkeypatch.setenv("MUSE_UPSCALE_MAX_INPUT_SIDE", "0")
     config.reset_config()
     from muse.modalities.image_upscale.routes import _max_input_side
     assert _max_input_side() == config.SETTINGS_BY_KEY["limits.upscale_max_input_side"].default
     config.reset_config()
+
+
+def test_post_upscale_omitted_scale_uses_default_scale():
+    """A model whose only scale is 2 must not 400 when scale is omitted."""
+    model = RecordingUpscaleModel(supported_scales=(2,))
+    reg = ModalityRegistry()
+    reg.register(
+        "image/upscale", model,
+        manifest={
+            "model_id": model.model_id,
+            "modality": "image/upscale",
+            "capabilities": {"supported_scales": [2], "default_scale": 2},
+        },
+    )
+    c = TestClient(create_app(
+        registry=reg, routers={"image/upscale": build_router(reg)},
+    ))
+    r = c.post(
+        "/v1/images/upscale",
+        files={"image": ("src.png", _png_bytes(16, 16), "image/png")},
+        data={"model": model.model_id},
+    )
+    assert r.status_code == 200, r.text
+    assert model.calls[0]["scale"] == 2
+
+
+def test_post_upscale_decodes_and_encodes_off_the_event_loop(client, monkeypatch):
+    from muse.modalities.image_upscale import routes as upscale_routes
+    from tests.modalities.loop_spy import spy_decode, spy_on
+
+    decoded = spy_decode(monkeypatch)
+    encoded: list[bool] = []
+    spy_on(monkeypatch, upscale_routes, "to_bytes", encoded)
+    r = client.post(
+        "/v1/images/upscale",
+        files={"image": ("src.png", _png_bytes(16, 16), "image/png")},
+        data={"model": "fake-upscale", "n": "2"},
+    )
+    assert r.status_code == 200, r.text
+    assert decoded == [False]
+    assert encoded == [False, False]

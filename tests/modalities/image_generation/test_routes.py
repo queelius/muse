@@ -417,7 +417,7 @@ def test_post_image_with_null_capabilities_returns_400_not_500():
 def test_post_malformed_data_url_returns_400_image_decode_error(
     client_with_capable_model,
 ):
-    """A bad data URL returns 400 with image_decode-flavored message."""
+    """A bad data URL returns 400 invalid_image."""
     r = client_with_capable_model.post("/v1/images/generations", json={
         "prompt": "x",
         "model": "fake-i2i-model",
@@ -427,7 +427,7 @@ def test_post_malformed_data_url_returns_400_image_decode_error(
     body = r.json()
     assert "error" in body
     err = body["error"]
-    assert err["code"] == "invalid_parameter"
+    assert err["code"] == "invalid_image"
     # Type or message should reference image
     assert "image" in err["message"].lower() or "decode" in err["message"].lower()
 
@@ -514,6 +514,9 @@ async def test_cancelled_generation_defers_input_and_eventual_output_cleanup(
         "decode_image_input",
         AsyncMock(return_value=init_image),
     )
+    # Encoding now runs inside the offloaded call; the stand-in output is
+    # not a real image.
+    monkeypatch.setattr(routes_mod, "to_bytes", lambda image, **_: b"png")
 
     pending = asyncio.create_task(endpoint(routes_mod.GenerationRequest(
         prompt="draw",
@@ -614,7 +617,7 @@ def test_post_edits_empty_image_returns_400(client_with_edits_model):
     )
     assert r.status_code == 400
     err = r.json()["error"]
-    assert err["code"] == "invalid_parameter"
+    assert err["code"] == "invalid_image"
 
 
 def test_post_edits_malformed_image_returns_400(client_with_edits_model):
@@ -633,7 +636,7 @@ def test_post_edits_malformed_image_returns_400(client_with_edits_model):
     )
     assert r.status_code == 400
     err = r.json()["error"]
-    assert err["code"] == "invalid_parameter"
+    assert err["code"] == "invalid_image"
 
 
 def test_post_edits_rejects_aggregate_decoded_pixels_and_closes_inputs(
@@ -644,7 +647,7 @@ def test_post_edits_rejects_aggregate_decoded_pixels_and_closes_inputs(
     decoded_image = MagicMock(size=(20_000_000, 1))
     decoded_mask = MagicMock(size=(20_000_000, 1))
     with patch(
-        "muse.modalities.image_generation.routes.decode_image_file",
+        "muse.modalities._common.images.decode_image_file",
         new=AsyncMock(side_effect=[decoded_image, decoded_mask]),
     ):
         response = client_with_edits_model.post(
@@ -660,8 +663,10 @@ def test_post_edits_rejects_aggregate_decoded_pixels_and_closes_inputs(
             },
         )
 
-    assert response.status_code == 400
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "input_too_large"
     assert "aggregate limit" in response.json()["error"]["message"]
+    assert "MUSE_IMAGE_INPUT_MAX_TOTAL_PIXELS" in response.json()["error"]["message"]
     assert edits_model.inpaint_calls == []
     decoded_image.close.assert_called_once_with()
     decoded_mask.close.assert_called_once_with()
@@ -836,7 +841,7 @@ def test_post_variations_empty_image_returns_400(client_with_edits_model):
     )
     assert r.status_code == 400
     err = r.json()["error"]
-    assert err["code"] == "invalid_parameter"
+    assert err["code"] == "invalid_image"
 
 
 def test_post_variations_response_format_url_returns_data_url(
@@ -1151,7 +1156,9 @@ def test_hard_cap_rejected_before_decode(monkeypatch):
     async def boom(*a, **k):
         raise AssertionError("decode called")
 
-    monkeypatch.setattr(routes_mod, "decode_image_file", boom)
+    import muse.modalities._common.images as images_mod
+
+    monkeypatch.setattr(images_mod, "decode_image_file", boom)
     r = c.post(
         "/v1/images/edits",
         files=[("image[]", ("a.png", b"x", "image/png")) for _ in range(17)],
@@ -1202,7 +1209,9 @@ def test_decoded_images_closed_on_error(monkeypatch):
 
     c, model = _ref_client()
     decoded = [MagicMock(size=(64, 64)), MagicMock(size=(64, 64))]
-    monkeypatch.setattr(routes_mod, "decode_image_file", AsyncMock(side_effect=decoded))
+    import muse.modalities._common.images as images_mod
+
+    monkeypatch.setattr(images_mod, "decode_image_file", AsyncMock(side_effect=decoded))
 
     def fail(prompt, **kw):
         raise RuntimeError("boom")
@@ -1397,3 +1406,102 @@ def test_inpaint_lora_scale_reported_ignored():
     assert r.status_code == 200, r.text
     assert "lora_scale" in r.json()["metadata"]["ignored"]
     assert "lora_scale" not in model.inpaint_calls[0]
+
+
+# ---------------- decode and encode run off the event loop ----------------
+
+
+def test_generations_decode_and_encode_off_the_event_loop(
+    client_with_capable_model, monkeypatch,
+):
+    from tests.modalities.loop_spy import spy_decode, spy_on
+
+    decoded = spy_decode(monkeypatch)
+    encoded: list[bool] = []
+    spy_on(monkeypatch, routes_mod, "to_bytes", encoded)
+    r = client_with_capable_model.post("/v1/images/generations", json={
+        "prompt": "x", "model": "fake-i2i-model", "n": 2,
+        "image": "data:image/png;base64," + __import__("base64").b64encode(
+            _png_bytes()).decode(),
+    })
+    assert r.status_code == 200, r.text
+    assert decoded == [False]
+    assert encoded == [False, False]
+
+
+def test_edits_and_variations_decode_and_encode_off_the_event_loop(
+    client_with_edits_model, monkeypatch,
+):
+    from tests.modalities.loop_spy import spy_decode, spy_on
+
+    decoded = spy_decode(monkeypatch)
+    encoded: list[bool] = []
+    spy_on(monkeypatch, routes_mod, "to_bytes", encoded)
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={
+            "image": ("s.png", _png_bytes(), "image/png"),
+            "mask": ("m.png", _mask_bytes(), "image/png"),
+        },
+        data={"prompt": "p", "model": "fake-edits-model", "size": "64x64"},
+    )
+    assert r.status_code == 200, r.text
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={"model": "fake-edits-model", "size": "64x64"},
+    )
+    assert r.status_code == 200, r.text
+    assert decoded == [False, False, False]
+    assert encoded == [False, False]
+
+
+def test_oversize_upload_is_413_payload_too_large(
+    client_with_edits_model, monkeypatch,
+):
+    monkeypatch.setenv("MUSE_IMAGE_INPUT_MAX_BYTES", "16")
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={"model": "fake-edits-model", "size": "64x64"},
+    )
+    assert r.status_code == 413
+    err = r.json()["error"]
+    assert err["code"] == "payload_too_large"
+    assert "MUSE_IMAGE_INPUT_MAX_BYTES" in err["message"]
+
+
+def test_decode_error_message_has_one_prefix_and_no_object_repr(
+    client_with_edits_model,
+):
+    r = client_with_edits_model.post(
+        "/v1/images/variations",
+        files={"image": ("s.png", b"not an image", "image/png")},
+        data={"model": "fake-edits-model", "size": "64x64"},
+    )
+    assert r.status_code == 400
+    message = r.json()["error"]["message"]
+    assert message.count("image decode failed") == 1
+    assert "BytesIO" not in message and "0x" not in message
+
+
+def test_multipart_range_messages_match_across_routes(client_with_edits_model):
+    """/edits and /variations share GenerationRequest's ranges and text."""
+    r = client_with_edits_model.post(
+        "/v1/images/edits",
+        files={"image": ("s.png", _png_bytes(), "image/png")},
+        data={"prompt": "p", "model": "fake-edits-model", "guidance": "21"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == "guidance must be in [0.0, 20.0]"
+    for route, data, files in (
+        ("/v1/images/edits", {"prompt": "p", "n": "11"},
+         {"image": ("s.png", _png_bytes(), "image/png")}),
+        ("/v1/images/variations", {"n": "11"},
+         {"image": ("s.png", _png_bytes(), "image/png")}),
+    ):
+        r = client_with_edits_model.post(
+            route, files=files, data={**data, "model": "fake-edits-model"},
+        )
+        assert r.status_code == 400
+        assert r.json()["error"]["message"] == "n must be in [1, 10]"

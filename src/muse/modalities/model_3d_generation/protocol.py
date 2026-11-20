@@ -43,7 +43,7 @@ class Generation3DResult:
 class ImageTo3DBackend(Protocol):
     """Structural protocol for backends that take an image as input.
 
-    Examples: TripoSR, Wonder3D, Hunyuan3D-2 (img-mode), TRELLIS (mixed).
+    Examples: TripoSR, Hunyuan3D-2 (img-mode), TRELLIS.
     """
 
     def image_to_3d(

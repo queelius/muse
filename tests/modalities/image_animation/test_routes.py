@@ -232,3 +232,50 @@ def test_backend_error_returns_openai_envelope():
     assert "detail" not in body
     assert body["error"]["code"] == "internal_error"
     assert "secret /internal/weights/path" not in r.text
+
+
+def test_mp4_without_imageio_is_400_before_generation(client_text_only):
+    client, backend = client_text_only
+    with patch(
+        "muse.modalities._common.video_codec._try_import_imageio",
+        return_value=None,
+    ):
+        r = client.post("/v1/images/animations", json={
+            "prompt": "x", "model": "fake-anim", "response_format": "mp4",
+        })
+    assert r.status_code == 400
+    assert "imageio" in r.json()["error"]["message"]
+    assert backend.last_kwargs is None
+
+
+def test_encoding_runs_off_the_event_loop(client_text_only, monkeypatch):
+    from muse.modalities.image_animation import routes as anim_routes
+    from tests.modalities.loop_spy import spy_on
+
+    client, _backend = client_text_only
+    seen: list[bool] = []
+    spy_on(monkeypatch, anim_routes, "encode_webp", seen)
+    r = client.post("/v1/images/animations", json={
+        "prompt": "x", "model": "fake-anim", "n": 2,
+    })
+    assert r.status_code == 200, r.text
+    assert seen == [False, False]
+
+
+def test_animation_frames_closed_after_encoding(client_text_only, monkeypatch):
+    client, backend = client_text_only
+    produced = []
+    real = backend.generate
+
+    def _generate(prompt, **kwargs):
+        result = real(prompt, **kwargs)
+        produced.extend(result.frames)
+        return result
+
+    backend.generate = _generate
+    r = client.post("/v1/images/animations", json={"prompt": "x", "model": "fake-anim"})
+    assert r.status_code == 200
+    # A closed PIL image has no raster; load() then fails.
+    for frame in produced:
+        with pytest.raises(ValueError):
+            frame.load()

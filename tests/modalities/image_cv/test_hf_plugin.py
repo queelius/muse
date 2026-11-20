@@ -44,9 +44,40 @@ def test_sniff_true_on_object_detection_tag():
 
 
 def test_sniff_true_on_depth_repo_name_fallback():
-    """A repo without depth-estimation tag but 'depth' in the name."""
-    info = _fake_info(tags=[], repo_id="custom-org/custom-depth-model")
-    assert HF_PLUGIN["sniff"](info) is True
+    """A repo without depth-estimation tag but a depth family in the name."""
+    for repo_id in (
+        "custom-org/depth-anything-finetune",
+        "custom-org/dpt-hybrid-custom",
+        "custom-org/zoedepth-custom",
+        "custom-org/midas-small",
+    ):
+        info = _fake_info(tags=[], repo_id=repo_id)
+        assert HF_PLUGIN["sniff"](info) is True, repo_id
+
+
+def test_sniff_rejects_controlnet_depth_repos():
+    """A bare 'depth' in the name is a ControlNet conditioning model, not
+    a depth estimator."""
+    for repo_id in (
+        "lllyasviel/sd-controlnet-depth",
+        "diffusers/controlnet-depth-sdxl-1.0",
+        "custom-org/custom-depth-model",
+    ):
+        info = _fake_info(tags=[], repo_id=repo_id)
+        assert HF_PLUGIN["sniff"](info) is False, repo_id
+
+
+def test_sniff_ignores_family_hints_in_the_org_name():
+    info = _fake_info(tags=[], repo_id="detr-fans/some-llm")
+    assert HF_PLUGIN["sniff"](info) is False
+
+
+def test_sniff_rejects_owlvit_zero_shot_detectors():
+    """OWL-ViT is zero-shot detection; AutoModelForObjectDetection cannot
+    load it."""
+    for repo_id in ("google/owlvit-base-patch32", "google/owl-vit-large"):
+        info = _fake_info(tags=[], repo_id=repo_id)
+        assert HF_PLUGIN["sniff"](info) is False, repo_id
 
 
 def test_sniff_true_on_keypoint_repo_name_fallback():
