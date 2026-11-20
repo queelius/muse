@@ -94,7 +94,29 @@ class TestRestartWorker:
         assert body["signal"] is None and body["revived"] is True
         assert body["restart_count_reset"] is True
         assert spec.status == "unhealthy"
-        assert spec.restart_count == 0 and spec.failure_count == 0
+        assert spec.restart_count == 0
+        assert spec.restart_exhausted is False
+
+    def test_revive_goes_through_the_supervisor_helper(
+        self, client, headers, monkeypatch,
+    ):
+        """The route delegates to supervisor.revive_worker (one owner of the
+        revive rules) instead of a local copy."""
+        import muse.admin.routes.workers as workers_mod
+
+        calls = []
+
+        def fake_revive(state, spec):
+            calls.append(spec)
+            return True
+
+        monkeypatch.setattr(workers_mod, "revive_worker", fake_revive)
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.status = "dead"
+        set_supervisor_state(SupervisorState(workers=[spec], device="cpu"))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 200
+        assert calls == [spec]
 
     def test_process_less_worker_without_dead_status_is_revived(self, client, headers):
         spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
@@ -209,10 +231,12 @@ def test_non_integer_port_is_an_openai_400(monkeypatch):
     assert r.json()["error"]["code"] == "invalid_parameter"
 
 
-class TestReviveOnlyLiveDirectorModels:
-    """A spec retained as dead after a disable/eviction/failed load must not
-    be revived: its model is no longer in director.loaded, so a respawned
-    worker would sit outside admission and idle eviction."""
+class TestReviveOnlyMonitorExhaustedSpecs:
+    """With a director bound, only a spec the monitor gave up on
+    (``restart_exhausted``) is revived. A spec retained dead after a
+    disable, eviction or failed load is not: a respawned worker would sit
+    outside admission and idle eviction. (The monitor's give-up removes the
+    models from director.loaded, so that set cannot tell the two apart.)"""
 
     def _state(self, spec, loaded_ids):
         import threading
@@ -237,10 +261,22 @@ class TestReviveOnlyLiveDirectorModels:
         assert "re-enable or warm up" in body["message"]
         assert spec.status == "dead" and spec.restart_count == 4
 
-    def test_spec_still_in_director_loaded_is_revived(self, client, headers):
+    def test_retained_dead_spec_still_in_director_loaded_is_not_revived(
+        self, client, headers,
+    ):
         spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
         spec.status = "dead"
         set_supervisor_state(self._state(spec, loaded_ids=["x"]))
+        r = client.post("/v1/admin/workers/9001/restart", headers=headers)
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "worker_not_revivable"
+        assert spec.status == "dead"
+
+    def test_monitor_exhausted_spec_is_revived(self, client, headers):
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001)
+        spec.status = "dead"
+        spec.restart_exhausted = True
+        set_supervisor_state(self._state(spec, loaded_ids=[]))
         r = client.post("/v1/admin/workers/9001/restart", headers=headers)
         assert r.status_code == 200
         assert spec.status == "unhealthy"
