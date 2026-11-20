@@ -57,12 +57,30 @@ def test_whole_file_result_and_language_prefill(runtime):
     model.generate.return_value.__getitem__.assert_called_once_with((slice(None), slice(3, None)))
 
 
-def test_runtime_refuses_oversize_before_decode(runtime, monkeypatch):
-    backend, processor, _, path, _ = runtime
-    monkeypatch.setenv('MUSE_ASR_MAX_MB', '0')
-    with pytest.raises(ValueError, match='MUSE_ASR_MAX_MB'):
-        backend.transcribe(path)
-    processor.apply_chat_template.assert_not_called()
+def test_duration_cap_defaults_to_600_seconds(runtime, monkeypatch):
+    """R6: Qwen3-ASR no longer inherits alignment's hidden 300 s cap."""
+    q = import_module('muse.modalities.audio_transcription.runtimes.qwen3_asr')
+    backend, _, _, path, waveform = runtime
+    seen = {}
+
+    def _decode(audio_path, **kwargs):
+        seen.update(kwargs)
+        return DecodedAudio(waveform, 16000, 2.5)
+
+    monkeypatch.setattr(q, 'decode_audio', _decode)
+    backend.transcribe(path)
+    assert seen['max_duration_seconds'] == 600.0
+
+
+def test_language_is_validated_before_decode(runtime, monkeypatch):
+    q = import_module('muse.modalities.audio_transcription.runtimes.qwen3_asr')
+    from muse.modalities.audio_transcription.protocol import InvalidLanguageError
+    backend, _, _, path, _ = runtime
+    decode = MagicMock()
+    monkeypatch.setattr(q, 'decode_audio', decode)
+    with pytest.raises(InvalidLanguageError):
+        backend.transcribe(path, language='klingon')
+    decode.assert_not_called()
 
 
 def test_unsupported_language_is_typed(runtime):

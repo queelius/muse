@@ -20,6 +20,10 @@ producer thread on the body's first iteration (a client that leaves before
 then never strands a lock-holding producer). Qwen3-ASR returns
 transcripts only: word timestamps and segment formats (`verbose_json`, `srt`,
 `vtt`) return 400; use `/v1/audio/alignments`. Translation is unsupported.
+Qwen3-ASR validates `language` before decoding and decodes at most
+`limits.asr_max_duration_seconds` (`MUSE_ASR_MAX_DURATION_SECONDS`, default
+600 s); longer audio returns 413 (it used to inherit alignment's 300 s
+default silently).
 For pronunciation checks omit `prompt`, whose context biases the listener.
 
 `audio/quality` is muse's twenty-first modality. `POST

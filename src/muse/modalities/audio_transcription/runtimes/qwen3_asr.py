@@ -12,7 +12,6 @@ No Hub code or external model package is executed.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Literal
 
 from muse.core import config
@@ -37,6 +36,20 @@ _LANGUAGES = {
     "fil": "Filipino", "fa": "Persian", "el": "Greek", "hu": "Hungarian",
     "mk": "Macedonian", "ro": "Romanian",
 }
+
+
+_DURATION_KEY = 'limits.asr_max_duration_seconds'
+_DEFAULT_MAX_DURATION_SECONDS = 600.0
+
+
+def _max_duration_seconds() -> float:
+    """Decoded-duration cap per request (MUSE_ASR_MAX_DURATION_SECONDS).
+
+    Falls back to 600 s until the setting row exists in muse.core.config.
+    """
+    if _DURATION_KEY not in config.SETTINGS_BY_KEY:
+        return _DEFAULT_MAX_DURATION_SECONDS
+    return float(config.get_positive(_DURATION_KEY))
 
 
 def _ensure_deps() -> None:
@@ -81,10 +94,7 @@ class Qwen3ASRRuntime:
             raise ValueError('Qwen3-ASR does not support translation')
         if word_timestamps:
             raise ValueError('Qwen3-ASR has no word timestamps; use /v1/audio/alignments')
-        max_bytes = config.get('limits.asr_max_mb') * 1024 * 1024
-        if Path(audio_path).stat().st_size > max_bytes:
-            raise ValueError('audio exceeds MUSE_ASR_MAX_MB')
-        decoded = decode_audio(audio_path)
+        # The route already enforces MUSE_ASR_MAX_MB on the upload.
         language_code = None
         canonical_language = None
         if language and language.lower() != 'auto':
@@ -94,6 +104,7 @@ class Qwen3ASRRuntime:
                     break
             if canonical_language is None:
                 raise InvalidLanguageError(f'unsupported Qwen3-ASR language: {language!r}')
+        decoded = decode_audio(audio_path, max_duration_seconds=_max_duration_seconds())
         messages = []
         if prompt:
             messages.append({'role': 'system', 'content': [{'type': 'text', 'text': prompt}]})
