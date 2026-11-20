@@ -585,6 +585,45 @@ class TestWorkerSpecExtensions:
         assert spec.last_spawn_at == 0.0
 
 
+class TestWorkerReadyTimeout:
+    """One setting bounds every readiness wait (ruling R12)."""
+
+    def test_wait_for_ready_defaults_to_the_setting(self, monkeypatch):
+        from muse.cli_impl import supervisor as sup
+
+        monkeypatch.setenv("MUSE_WORKER_READY_TIMEOUT_SECONDS", "0.05")
+        with patch("muse.cli_impl.supervisor.httpx.get",
+                   side_effect=sup.httpx.ConnectError("down")):
+            with pytest.raises(TimeoutError, match="within 0.05s"):
+                sup.wait_for_ready(port=9001, poll_interval=0.01)
+
+    def test_default_is_300_seconds(self, monkeypatch):
+        from muse.cli_impl.supervisor import worker_ready_timeout_seconds
+
+        monkeypatch.delenv("MUSE_WORKER_READY_TIMEOUT_SECONDS", raising=False)
+        assert worker_ready_timeout_seconds() == 300.0
+
+    def test_monitor_restart_uses_the_setting(self, monkeypatch):
+        import threading
+        from muse.cli_impl.supervisor import _attempt_restart
+
+        monkeypatch.setenv("MUSE_WORKER_READY_TIMEOUT_SECONDS", "123")
+        spec = WorkerSpec(models=["x"], python_path="/p", port=9001, device="cpu")
+        with patch("muse.cli_impl.supervisor.spawn_worker"), \
+             patch("muse.cli_impl.supervisor.wait_for_ready") as mock_wait:
+            _attempt_restart(spec, stop_event=threading.Event(), backoff_base=0)
+        assert mock_wait.call_args.kwargs["timeout"] == 123.0
+
+    def test_director_inflight_wait_derives_from_the_setting(self, monkeypatch):
+        from muse.cli_impl.load_director import LoadDirector
+
+        monkeypatch.setenv("MUSE_WORKER_READY_TIMEOUT_SECONDS", "500")
+        director = LoadDirector(
+            enable_fn=MagicMock(), disable_fn=MagicMock(), memory_probe=MagicMock(),
+        )
+        assert director.inflight_wait_timeout_seconds == 560.0
+
+
 class TestAttemptRestart:
     def test_respawns_after_process_death(self):
         """If process exited, terminate (no-op if dead) + respawn."""
@@ -748,7 +787,7 @@ class TestAttemptRestart:
             )
 
         mock_wait.assert_called_once_with(
-            port=9001, timeout=60.0, stop_event=stop_event,
+            port=9001, timeout=300.0, stop_event=stop_event,
             expected_nonce="replacement-nonce", worker=spec,
         )
         assert stopped_processes == [old_process, new_process]

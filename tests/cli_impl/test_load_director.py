@@ -1272,11 +1272,8 @@ class TestInFlightLeaseRecovery:
         )
         director.in_flight_loads["fake-model"] = abandoned
 
-        with patch(
-            "muse.cli_impl.load_director._INFLIGHT_WAIT_TIMEOUT_SECONDS",
-            0.0,
-        ):
-            assert director.acquire("fake-model", manifest=_manifest()) == 9001
+        director.inflight_wait_timeout_seconds = 0.0
+        assert director.acquire("fake-model", manifest=_manifest()) == 9001
 
         assert abandoned.event.is_set()
         assert director.in_flight_loads == {}
@@ -1297,10 +1294,8 @@ class TestInFlightLeaseRecovery:
         )
         director.in_flight_loads["fake-model"] = active
 
-        with patch(
-            "muse.cli_impl.load_director._INFLIGHT_WAIT_TIMEOUT_SECONDS",
-            0.0,
-        ), pytest.raises(OperationError) as exc:
+        director.inflight_wait_timeout_seconds = 0.0
+        with pytest.raises(OperationError) as exc:
             director.acquire("fake-model", manifest=_manifest())
 
         assert exc.value.code == "model_load_timeout"

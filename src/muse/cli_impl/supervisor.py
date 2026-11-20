@@ -677,18 +677,30 @@ def _require_worker_generation_alive(spec: WorkerSpec, proc: Any) -> None:
         )
 
 
+def worker_ready_timeout_seconds() -> float:
+    """Seconds a spawned worker may take to pass /health.
+
+    One setting (`server.worker_ready_timeout_seconds`) bounds every
+    readiness wait: lazy load, admin enable/restart and monitor restart.
+    """
+    return float(config.get("server.worker_ready_timeout_seconds"))
+
+
 def wait_for_ready(
-    *, port: int, timeout: float = 60.0, poll_interval: float = 0.5,
+    *, port: int, timeout: float | None = None, poll_interval: float = 0.5,
     stop_event: "threading.Event | None" = None,
     expected_nonce: str | None = None,
     worker: WorkerSpec | None = None,
 ) -> None:
     """Block until http://127.0.0.1:<port>/health returns 200, or timeout.
 
+    `timeout` defaults to `worker_ready_timeout_seconds()`.
     Raises TimeoutError if the worker never becomes ready. If `stop_event`
     is supplied, shutdown aborts the wait promptly instead of leaving an
     executor thread parked for the full model-load timeout.
     """
+    if timeout is None:
+        timeout = worker_ready_timeout_seconds()
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/health"
     last_err: Exception | None = None
@@ -770,7 +782,7 @@ def _attempt_restart(
     max_restarts: int = _MAX_RESTARTS,
     backoff_base: float = _BACKOFF_BASE,
     backoff_cap: float = _BACKOFF_CAP,
-    ready_timeout: float = 60.0,
+    ready_timeout: float | None = None,
     log_hub: "Any | None" = None,
 ) -> None:
     """Terminate existing process if alive, wait backoff, respawn.
@@ -782,6 +794,10 @@ def _attempt_restart(
     restart_count counts consecutive unsuccessful restart attempts, matching
     the documented budget: the failure branch increments it, while a
     replacement that reaches readiness resets it to zero.
+
+    `ready_timeout` defaults to `worker_ready_timeout_seconds()`, the same
+    budget the original load had: a model that loads in 60-120s must not be
+    killed by its own restart.
 
     `log_hub` is forwarded to `spawn_worker` so a respawned worker keeps
     piping its stdout into the LogHub when telemetry is enabled (mirrors
@@ -824,7 +840,10 @@ def _attempt_restart(
         spawn_worker(spec, device=spec.device, log_hub=log_hub)
         wait_for_ready(
             port=spec.port,
-            timeout=ready_timeout,
+            timeout=(
+                ready_timeout if ready_timeout is not None
+                else worker_ready_timeout_seconds()
+            ),
             stop_event=stop_event,
             expected_nonce=spec.worker_nonce,
             worker=spec,

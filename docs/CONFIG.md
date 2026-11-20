@@ -92,6 +92,7 @@ A snapshot of the defaults:
 | `server.gpu_headroom_gb` | `MUSE_GPU_HEADROOM_GB` | 1.0 |
 | `server.cpu_headroom_gb` | `MUSE_CPU_HEADROOM_GB` | 2.0 |
 | `server.aggregation_timeout_seconds` | `MUSE_AGGREGATION_TIMEOUT_SECONDS` | 5.0 (per-worker httpx timeout for `/v1/models` + `/health` fan-out) |
+| `server.worker_ready_timeout_seconds` | `MUSE_WORKER_READY_TIMEOUT_SECONDS` | 300.0 (seconds a spawned worker may take to load and pass `/health`: lazy load, admin enable/restart and monitor restart; the director's in-flight wait is this plus 60 s) |
 | `server.device` | `MUSE_DEVICE` | auto (`muse serve --device` overrides) |
 | `server.video_cpu_offload` | `MUSE_VIDEO_CPU_OFFLOAD` | null (global override: `model`\|`sequential`\|`off`; unset uses the per-model capability) |
 

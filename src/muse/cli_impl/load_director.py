@@ -48,7 +48,7 @@ inside the eviction failure path). The callable injection seam
 (`build_load_director`) injects its real worker spawn / shutdown callables.
 
 Bounded in-flight wait: waiters on an in-flight cold load call
-  event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS) rather than an
+  event.wait(timeout=self.inflight_wait_timeout_seconds) rather than an
   unbounded wait(). If the load-winner thread is killed non-cooperatively
   (SIGKILL/OOM during wait_for_ready), _abort/set() never runs and every
   waiter would block forever without a timeout. On timeout, the waiter
@@ -77,15 +77,22 @@ from typing import Any, Callable, Literal
 from muse.core.catalog import _CATALOG_WRITE_LOCK, _read_catalog, _write_catalog
 
 # Maximum seconds a waiter will block on an in-flight Event before
-# re-entering the decision phase. The value must exceed the load timeout
-# used by wait_for_ready (120s in production) plus some margin so normal
-# loads never time out. 180s is 60s of headroom above the worst-case
-# wait_for_ready window. A waiter that times out re-decides: if the
-# winner succeeded it takes the hot path; if the winner failed it becomes
-# the new winner. This avoids permanent hang when a winner thread is
-# killed non-cooperatively (SIGKILL / OOM / hardware reset) without
-# introducing a tight spin loop.
-_INFLIGHT_WAIT_TIMEOUT_SECONDS = 180.0
+# re-entering the decision phase: the worker readiness timeout
+# (`server.worker_ready_timeout_seconds`, which bounds the winner's
+# wait_for_ready) plus this margin, so normal loads never time out. A waiter
+# that times out re-decides: if the winner succeeded it takes the hot path;
+# if the winner failed it becomes the new winner. This avoids permanent hang
+# when a winner thread is killed non-cooperatively (SIGKILL / OOM / hardware
+# reset) without introducing a tight spin loop.
+_INFLIGHT_WAIT_MARGIN_SECONDS = 60.0
+
+
+def default_inflight_wait_timeout_seconds() -> float:
+    """The worker readiness timeout plus `_INFLIGHT_WAIT_MARGIN_SECONDS`."""
+    from muse.core import config
+    return float(config.get("server.worker_ready_timeout_seconds")) + (
+        _INFLIGHT_WAIT_MARGIN_SECONDS
+    )
 
 from muse.core.memory_probe import (
     auto_uses_cuda,
@@ -295,6 +302,7 @@ class LoadDirector:
         gpu_headroom_gb: float = _DEFAULT_GPU_HEADROOM_GB,
         cpu_headroom_gb: float = _DEFAULT_CPU_HEADROOM_GB,
         cuda_available_fn: Callable[[], bool] | None = None,
+        inflight_wait_timeout_seconds: float | None = None,
     ):
         self.enable_fn = enable_fn
         self.disable_fn = disable_fn
@@ -313,6 +321,12 @@ class LoadDirector:
             "cpu_headroom_gb", cpu_headroom_gb,
         )
         self.cuda_available_fn = cuda_available_fn
+        # Bounded wait for another thread's cold load (see module docstring).
+        self.inflight_wait_timeout_seconds = (
+            float(inflight_wait_timeout_seconds)
+            if inflight_wait_timeout_seconds is not None
+            else default_inflight_wait_timeout_seconds()
+        )
 
         self.loaded: dict[str, LoadEntry] = {}
         self.in_flight_loads: dict[str, InFlightLoad] = {}
@@ -533,14 +547,14 @@ class LoadDirector:
                 #
                 # Bounded wait instead of unbounded wait().
                 # If the winner is killed non-cooperatively (SIGKILL/OOM
-                # during the ~120s wait_for_ready), _abort/set() never
+                # during wait_for_ready), _abort/set() never
                 # runs. With no timeout, every waiter blocks forever.
                 # With a timeout, the waiter wakes and re-enters _decide:
                 # if the winner succeeded the model will be hot; if the
                 # winner failed there will be no LoadEntry and this
                 # thread becomes the new winner. This breaks the permanent
                 # hang without introducing a tight spin loop because each
-                # iteration is bounded by _INFLIGHT_WAIT_TIMEOUT_SECONDS.
+                # iteration is bounded by self.inflight_wait_timeout_seconds.
                 claim = decision[1]
                 self._wait_for_in_flight(model_id, claim)
                 # Loop and re-decide. Either the entry is now hot (winner
@@ -1329,7 +1343,7 @@ class LoadDirector:
         identity compare-and-swap; a still-live owner produces a retryable
         timeout instead of spawning a duplicate worker behind its back.
         """
-        if claim.event.wait(timeout=_INFLIGHT_WAIT_TIMEOUT_SECONDS):
+        if claim.event.wait(timeout=self.inflight_wait_timeout_seconds):
             return
 
         try:
@@ -1342,7 +1356,7 @@ class LoadDirector:
 
         expired = (
             time.monotonic() - claim.claimed_at
-            >= _INFLIGHT_WAIT_TIMEOUT_SECONDS
+            >= self.inflight_wait_timeout_seconds
         )
         reclaimed = False
         with self.lock:

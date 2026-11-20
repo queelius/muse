@@ -233,107 +233,100 @@ class TestH4EventWaitTimeout:
         """Simulate a killed winner: register in_flight_loads but never set().
 
         Use a very short timeout so the test runs in milliseconds instead of
-        the production 180s. The waiter should exit and either find the model
+        the production readiness timeout + 60s. The waiter should exit and either find the model
         in the loaded set (we insert it manually to simulate a belated
         success) or attempt to become the new winner.
         """
         from muse.cli_impl.load_director import (
             InFlightLoad,
             LoadDirector,
-            _INFLIGHT_WAIT_TIMEOUT_SECONDS,
         )
 
-        # Patch the constant so the test uses 0.1s instead of 180s.
-        import muse.cli_impl.load_director as ld_mod
-        original_timeout = ld_mod._INFLIGHT_WAIT_TIMEOUT_SECONDS
-        ld_mod._INFLIGHT_WAIT_TIMEOUT_SECONDS = 0.1
+        enable_call_count = [0]
+        winner_done = threading.Event()
 
-        try:
-            enable_call_count = [0]
-            winner_done = threading.Event()
+        def slow_enable(model_id: str) -> int:
+            enable_call_count[0] += 1
+            # The "winner" blocks here simulating a killed-but-not-
+            # set winner. We signal winner_done so the test can
+            # check the waiter unblocked, then return normally so
+            # the test can join cleanly.
+            winner_done.set()
+            return 9001
 
-            def slow_enable(model_id: str) -> int:
-                enable_call_count[0] += 1
-                # The "winner" blocks here simulating a killed-but-not-
-                # set winner. We signal winner_done so the test can
-                # check the waiter unblocked, then return normally so
-                # the test can join cleanly.
-                winner_done.set()
-                return 9001
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 64.0
 
-            probe = MagicMock()
-            probe.gpu_free_gb.return_value = None
-            probe.cpu_free_gb.return_value = 64.0
+        director = LoadDirector(
+            enable_fn=slow_enable,
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+            # 0.1s instead of the production readiness timeout + 60s.
+            inflight_wait_timeout_seconds=0.1,
+        )
 
-            director = LoadDirector(
-                enable_fn=slow_enable,
-                disable_fn=MagicMock(),
-                memory_probe=probe,
-            )
+        manifest = {
+            "capabilities": {"memory_gb": 0.1, "device": "cpu"},
+        }
 
-            manifest = {
-                "capabilities": {"memory_gb": 0.1, "device": "cpu"},
-            }
+        # Thread A: stash an Event in in_flight_loads WITHOUT setting it.
+        # This simulates a killed winner.
+        stash_event = threading.Event()
+        stash_ready = threading.Event()
 
-            # Thread A: stash an Event in in_flight_loads WITHOUT setting it.
-            # This simulates a killed winner.
-            stash_event = threading.Event()
-            stash_ready = threading.Event()
+        def stash_thread():
+            with director.lock:
+                evt = threading.Event()
+                director.in_flight_loads["test-model"] = InFlightLoad(
+                    event=evt, memory_gb=0.1, pool="cpu",
+                )
+            stash_ready.set()
+            # Hold the event un-set for 5 seconds (longer than the
+            # 0.1s timeout we patched in). The waiter must unblock.
+            stash_event.wait(timeout=5.0)
 
-            def stash_thread():
-                with director.lock:
-                    evt = threading.Event()
-                    director.in_flight_loads["test-model"] = InFlightLoad(
-                        event=evt, memory_gb=0.1, pool="cpu",
-                    )
-                stash_ready.set()
-                # Hold the event un-set for 5 seconds (longer than the
-                # 0.1s timeout we patched in). The waiter must unblock.
-                stash_event.wait(timeout=5.0)
+        stasher = threading.Thread(target=stash_thread, daemon=True)
+        stasher.start()
+        stash_ready.wait(timeout=2.0)
 
-            stasher = threading.Thread(target=stash_thread, daemon=True)
-            stasher.start()
-            stash_ready.wait(timeout=2.0)
+        # Thread B: waiter.  With the 0.1s timeout it should unblock,
+        # find no LoadEntry, and try to become the winner.  At that
+        # point it will acquire the in_flight slot and call enable_fn.
+        # First, remove the stale event from in_flight_loads so the
+        # waiter actually becomes the winner (simulates the killed
+        # winner having released its Event registration).
+        waiter_result = []
+        waiter_error = []
 
-            # Thread B: waiter.  With the 0.1s timeout it should unblock,
-            # find no LoadEntry, and try to become the winner.  At that
-            # point it will acquire the in_flight slot and call enable_fn.
-            # First, remove the stale event from in_flight_loads so the
-            # waiter actually becomes the winner (simulates the killed
-            # winner having released its Event registration).
-            waiter_result = []
-            waiter_error = []
+        def waiter_thread():
+            # Remove the stale event so the waiter's re-decide goes
+            # to the "load" phase instead of "wait" again.
+            time.sleep(0.15)  # wait past the 0.1s timeout
+            with director.lock:
+                director.in_flight_loads.pop("test-model", None)
+            try:
+                port = director.acquire("test-model", manifest=manifest)
+                waiter_result.append(port)
+            except Exception as exc:
+                waiter_error.append(exc)
 
-            def waiter_thread():
-                # Remove the stale event so the waiter's re-decide goes
-                # to the "load" phase instead of "wait" again.
-                time.sleep(0.15)  # wait past the 0.1s timeout
-                with director.lock:
-                    director.in_flight_loads.pop("test-model", None)
-                try:
-                    port = director.acquire("test-model", manifest=manifest)
-                    waiter_result.append(port)
-                except Exception as exc:
-                    waiter_error.append(exc)
+        wt = threading.Thread(target=waiter_thread, daemon=True)
+        wt.start()
+        wt.join(timeout=5.0)
+        stash_event.set()
+        stasher.join(timeout=2.0)
 
-            wt = threading.Thread(target=waiter_thread, daemon=True)
-            wt.start()
-            wt.join(timeout=5.0)
-            stash_event.set()
-            stasher.join(timeout=2.0)
+        # The waiter should have completed without hanging.
+        assert wt.is_alive() is False, "Waiter thread is still blocked -- H4 not fixed"
+        assert not waiter_error, f"Waiter raised: {waiter_error}"
+        assert waiter_result == [9001]
 
-            # The waiter should have completed without hanging.
-            assert wt.is_alive() is False, "Waiter thread is still blocked -- H4 not fixed"
-            assert not waiter_error, f"Waiter raised: {waiter_error}"
-            assert waiter_result == [9001]
-
-        finally:
-            ld_mod._INFLIGHT_WAIT_TIMEOUT_SECONDS = original_timeout
-
-    def test_constant_exceeds_load_timeout(self):
-        """Sanity: _INFLIGHT_WAIT_TIMEOUT_SECONDS > 120 (wait_for_ready default)."""
-        from muse.cli_impl.load_director import _INFLIGHT_WAIT_TIMEOUT_SECONDS
-        assert _INFLIGHT_WAIT_TIMEOUT_SECONDS > 120.0
+    def test_inflight_wait_exceeds_load_timeout(self):
+        """Sanity: the in-flight wait outlasts the worker readiness timeout."""
+        from muse.cli_impl.load_director import default_inflight_wait_timeout_seconds
+        from muse.cli_impl.supervisor import worker_ready_timeout_seconds
+        assert default_inflight_wait_timeout_seconds() > worker_ready_timeout_seconds()
 
 
 # ---------------------------------------------------------------------------
