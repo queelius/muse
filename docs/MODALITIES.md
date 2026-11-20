@@ -255,9 +255,15 @@ priority 105, and serves it via `AudioEmbeddingRuntime` over
 `_extract_embeddings` dispatch picks the right pooling per
 architecture: CLAP `audio_embeds` > pooler_output > MERT/wav2vec
 `last_hidden_state.mean(dim=1)` (mean-pool over time). Per-file size
-cap via `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` (default 50MB); duration
-cap via `MUSE_AUDIO_EMBEDDINGS_MAX_SECONDS` (default 60s; runtime
-truncates after decode).
+cap via `MUSE_AUDIO_EMBEDDINGS_MAX_BYTES` (default 50MB), and an aggregate
+cap of max(64 MiB, the per-file cap) across up to 32 files. Duration is
+bounded per model by `capabilities.max_duration_seconds` (default 60s):
+librosa stops decoding there (`duration=`), so a long file is never fully
+materialized. audio/classification takes the same capability (default
+60s). The four upload routes (alignment, classification, quality,
+embedding) resolve the model before reading the upload, so an unknown
+model 404s without reading up to 50 MB, and `run_on_spooled_upload` writes
+the temp file on the worker thread.
 
 `audio/generation` is muse's first modality with TWO URL routes mounted
 on ONE MIME tag. `/v1/audio/music` and `/v1/audio/sfx` share the same

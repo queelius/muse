@@ -164,3 +164,28 @@ async def test_cancelled_request_keeps_file_until_backend_finishes():
         await asyncio.sleep(0.01)
     assert seen["readable"] == b"audio"
     assert not os.path.exists(seen["path"])
+
+
+async def test_spooled_upload_writes_the_body_off_the_event_loop(monkeypatch):
+    import asyncio
+    import builtins
+    from muse.modalities._common import uploads
+
+    on_loop = []
+    real_open = builtins.open
+
+    def _open(path, mode="r", *args, **kwargs):
+        if "w" in mode:
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+    got = await uploads.run_on_spooled_upload(
+        b"abc", lambda p: real_open(p, "rb").read(), suffix=".wav",
+    )
+    assert got == b"abc"
+    assert on_loop == [False]

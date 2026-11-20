@@ -3,7 +3,7 @@
 - `read_upload`: bounded read + close, mapping empty -> 400 and
   oversize -> 413 (`payload_too_large`).
 - `run_on_spooled_upload`: write the bytes to a temp file and run the
-  synchronous backend call on it off the event loop. The temp file is
+  synchronous backend call on it, both off the event loop. The temp file is
   removed by the worker thread once the call finishes, so a cancelled
   request (client disconnect) cannot delete the file while the backend
   is still reading it; work cancelled before it started is cleaned up
@@ -107,15 +107,18 @@ async def run_on_spooled_upload(
 
     The file is always removed, and never before `call` has returned.
     """
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(data)
-        path = tmp.name
+    # Create the (empty) file here so cleanup always has a path; write the
+    # up-to-100 MB body on the worker thread, not the event loop.
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
     started = False
 
     def _work() -> T:
         nonlocal started
         started = True
         try:
+            with open(path, "wb") as handle:
+                handle.write(data)
             return call(path)
         finally:
             _unlink_quietly(path)

@@ -9,7 +9,8 @@ Each request carries one or more `file` parts whose bytes decode to
 audio (wav/mp3/flac/ogg/...) via librosa (in the runtime). The route
 layer:
   - Validates the `file` field (non-empty bytes per file)
-  - Enforces a size cap via MUSE_AUDIO_EMBEDDINGS_MAX_BYTES
+  - Enforces a per-file size cap via MUSE_AUDIO_EMBEDDINGS_MAX_BYTES and
+    an aggregate cap of max(64 MiB, that per-file cap)
   - Resolves the registered backend
   - Hands the raw bytes list to backend.embed(...)
   - Encodes the response per `encoding_format` (float | base64)
@@ -87,7 +88,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"at most {_MAX_FILES} audio files are allowed per request",
             )
 
+        backend = registry.get_or_404(MODALITY, model)
+
         max_bytes = _max_upload_bytes()
+        # The aggregate cap never undercuts the per-file cap, so raising
+        # MUSE_AUDIO_EMBEDDINGS_MAX_BYTES past 64 MiB still admits one file.
+        max_total = max(_MAX_TOTAL_UPLOAD_BYTES, max_bytes)
         audio_bytes_list: list[bytes] = []
         total_bytes = 0
         for idx, upload in enumerate(file):
@@ -98,15 +104,12 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             if isinstance(data, JSONResponse):
                 return data
             total_bytes += len(data)
-            if total_bytes > _MAX_TOTAL_UPLOAD_BYTES:
+            if total_bytes > max_total:
                 return error_response(
                     413, "payload_too_large",
-                    "aggregate audio upload exceeds "
-                    f"{_MAX_TOTAL_UPLOAD_BYTES} bytes",
+                    f"aggregate audio upload exceeds {max_total} bytes",
                 )
             audio_bytes_list.append(data)
-
-        backend = registry.get_or_404(MODALITY, model)
 
         # backend.embed is sync (transformers forward + librosa decode);
         # offload so a slow inference doesn't block sibling /health,

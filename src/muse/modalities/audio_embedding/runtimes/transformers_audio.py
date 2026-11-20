@@ -185,15 +185,17 @@ def _decode_audio(
 ) -> Any:
     """Decode raw audio bytes into a mono float32 numpy array.
 
-    Resamples to `sample_rate`, mono. Truncates to
-    `max_seconds * sample_rate` samples to bound memory. librosa's
+    Resamples to `sample_rate`, mono. Decodes at most `max_seconds` (and
+    truncates to `max_seconds * sample_rate` samples) to bound memory. librosa's
     BytesIO path handles wav/mp3/flac/ogg/etc. via its underlying
     audioread / soundfile chain.
     """
     import numpy as np
 
+    # `duration` stops the decode at the cap instead of materializing the
+    # whole file (an hour of mp3 is ~690 MB of float32 at 48 kHz).
     audio, _ = librosa.load(
-        io.BytesIO(raw), sr=sample_rate, mono=True,
+        io.BytesIO(raw), sr=sample_rate, mono=True, duration=max_seconds,
     )
     max_samples = int(max_seconds * sample_rate)
     if len(audio) > max_samples:

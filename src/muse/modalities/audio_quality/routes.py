@@ -41,14 +41,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         file: UploadFile = File(...),
         model: str | None = Form(None),
     ):
+        backend = registry.get_or_404(MODALITY, model)
+
         cap = _max_bytes()
         raw = await read_upload(
             file, max_bytes=cap, limit=f"MUSE_AUDIO_QUALITY_MAX_BYTES={cap}",
         )
         if isinstance(raw, JSONResponse):
             return raw
-
-        backend = registry.get_or_404(MODALITY, model)
 
         def _call(path: str):
             with backend._inference_lock:

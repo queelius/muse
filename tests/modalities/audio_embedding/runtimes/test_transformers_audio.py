@@ -593,3 +593,12 @@ def test_embed_calls_librosa_load_per_clip():
     )
     _patched_embed(rt, [b"a", b"b"])
     assert rt._fake_librosa.load.call_count == 2
+
+
+def test_decode_audio_stops_decoding_at_max_seconds():
+    """I7: librosa must not decode a whole hour of audio to keep 60 s."""
+    fake_librosa = MagicMock()
+    fake_librosa.load = MagicMock(return_value=(np.zeros(10, dtype=np.float32), 16000))
+    with patch.object(ae_mod, "librosa", fake_librosa):
+        _decode_audio(b"raw", sample_rate=16000, max_seconds=12.5)
+    assert fake_librosa.load.call_args.kwargs["duration"] == 12.5

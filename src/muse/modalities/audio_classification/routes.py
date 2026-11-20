@@ -2,7 +2,7 @@
 
 Multipart in (file + optional model + optional top_k), JSON out
 mirroring /v1/text/classifications. Spools the upload to a temp file
-before invoking librosa (which expects a path).
+because the runtime's `classify(audio_path)` protocol takes a path.
 
 Per-backend _inference_lock (v0.34.0) serializes calls. Size cap via
 MUSE_AUDIO_CLS_MAX_BYTES env (default 50MB), read per-request.
@@ -59,14 +59,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 f"top_k must be >= 1; got {top_k}",
             )
 
+        backend = registry.get_or_404(MODALITY, model)
+
         cap = _max_bytes()
         raw = await read_upload(
             file, max_bytes=cap, limit=f"MUSE_AUDIO_CLS_MAX_BYTES={cap}",
         )
         if isinstance(raw, JSONResponse):
             return raw
-
-        backend = registry.get_or_404(MODALITY, model)
 
         def _call(path: str):
             with backend._inference_lock:
