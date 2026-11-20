@@ -469,17 +469,11 @@ def _load_model_with_ownership(
             assert plan == "spawn_new"
             try:
                 _ensure_server_running(state)
-                spawn_worker(
+                _spawn_and_wait(
                     spec_ref,
                     device=state.device,
                     log_hub=getattr(state, "log_hub", None),
-                )
-                wait_for_ready(
-                    port=spec_ref.port,
-                    timeout=120.0,
                     stop_event=state.stop_event,
-                    expected_nonce=spec_ref.worker_nonce,
-                    worker=spec_ref,
                 )
             except Exception:
                 try:
@@ -1529,13 +1523,8 @@ def _restart_worker_inplace(
     spec.failure_count = 0
     spec.models = list(planned_models)
     try:
-        spawn_worker(spec, device=device, log_hub=log_hub)
-        wait_for_ready(
-            port=spec.port,
-            timeout=120.0,
-            stop_event=stop_event,
-            expected_nonce=spec.worker_nonce,
-            worker=spec,
+        _spawn_and_wait(
+            spec, device=device, log_hub=log_hub, stop_event=stop_event,
         )
     except Exception:
         _cleanup_failed_worker_start(spec)
@@ -1548,6 +1537,24 @@ def _restart_worker_inplace(
         raise
     spec.restart_count = 0
     spec.status = "running"
+
+
+def _spawn_and_wait(
+    spec: Any, *, device: str, log_hub: Any, stop_event: Any,
+) -> None:
+    """Spawn ``spec``'s worker and block until that exact generation is ready.
+
+    The readiness wait uses ``server.worker_ready_timeout_seconds`` (the
+    ``wait_for_ready`` default), the same budget as lazy load and the
+    monitor restart. Callers own cleanup on failure.
+    """
+    spawn_worker(spec, device=device, log_hub=log_hub)
+    wait_for_ready(
+        port=spec.port,
+        stop_event=stop_event,
+        expected_nonce=spec.worker_nonce,
+        worker=spec,
+    )
 
 
 def launch_async(

@@ -484,7 +484,7 @@ class TestEnableModel:
         mock_spawn.assert_called_once()
         spec = state.workers[0]
         mock_wait.assert_called_once_with(
-            port=9123, timeout=120.0, stop_event=state.stop_event,
+            port=9123, stop_event=state.stop_event,
             expected_nonce="enable-nonce", worker=spec,
         )
         assert len(state.workers) == 1
@@ -640,7 +640,7 @@ class TestLoadModelIntoWorkerDeadSpec:
 
         spec = state.workers[0]
         mock_wait.assert_called_once_with(
-            port=9200, timeout=120.0, stop_event=state.stop_event,
+            port=9200, stop_event=state.stop_event,
             expected_nonce="load-nonce", worker=spec,
         )
         mock_shutdown.assert_called_once_with([spec])
@@ -1502,7 +1502,7 @@ class TestRestartWorkerCleanup:
 
         assert stopped_processes == [old_process, new_process]
         mock_wait.assert_called_once_with(
-            port=9001, timeout=120.0, stop_event=state.stop_event,
+            port=9001, stop_event=state.stop_event,
             expected_nonce="restart-nonce", worker=spec,
         )
 
