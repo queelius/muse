@@ -1280,10 +1280,19 @@ class LoadDirector:
             device = resolve_model_placement(model_id, snapshot, entry=entry).device
         except Exception as exc:
             failure = exc
-        return self._decide_locked(
-            model_id, manifest=manifest, bump_refcount=bump_refcount,
-            native_device=device, prepared=(snapshot, entry), placement_error=failure,
-        )
+        from muse.admin.operations import OperationError
+        try:
+            return self._decide_locked(
+                model_id, manifest=manifest, bump_refcount=bump_refcount,
+                native_device=device, prepared=(snapshot, entry), placement_error=failure,
+            )
+        except OperationError as exc:
+            if exc.code == "model_placement_changed":
+                # Retryable, but no release or eviction will ever wake a
+                # gateway waiter parked on it; wake it now so it re-decides
+                # against the edited manifest/catalog straight away.
+                self._fire_capacity_listener()
+            raise
 
     def _decide_locked(
         self, model_id: str, *, manifest: dict, bump_refcount: bool,
@@ -2070,12 +2079,20 @@ class LoadDirector:
                         device=device,
                     )
                 cumulative_freed_gb += freed_this_round
+            except BaseException:
+                # An unexpected exception propagating (from the poll after a
+                # confirmed shutdown, or a BaseException out of disable_fn,
+                # where the worker may still be alive and its entry is
+                # restored). This loop's own exit-point wake is skipped, so
+                # settle with notify: a confirmed shutdown freed capacity
+                # that parked requests must get a chance to use.
+                if not settled:
+                    settled = True
+                    self.finish_eviction(claim, success=disabled, notify=True)
+                raise
             finally:
                 if not settled:
-                    # Normal success, or an unexpected exception propagating
-                    # (from the poll after a confirmed shutdown, or a
-                    # BaseException out of disable_fn, where the worker may
-                    # still be alive and its entry is restored).
+                    # Normal success.
                     self.finish_eviction(claim, success=disabled, notify=False)
 
         # Loop exited normally: cumulative_freed_gb >= shortfall_gb, i.e.

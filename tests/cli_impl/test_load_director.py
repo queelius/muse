@@ -302,6 +302,32 @@ class TestColdAcquireEvictsLRU:
     polls memory_probe for release, then loads the new model in the freed slot.
     """
 
+    def test_release_poll_failure_still_wakes_capacity_waiters(self):
+        """M2: a victim whose shutdown completed frees capacity even when
+        the release poll raises afterwards; parked waiters must be woken."""
+        probe = MagicMock()
+        probe.gpu_free_gb.return_value = None
+        probe.cpu_free_gb.return_value = 1.0
+        director = LoadDirector(
+            enable_fn=MagicMock(return_value=9002),
+            disable_fn=MagicMock(),
+            memory_probe=probe,
+            cpu_headroom_gb=0.0,
+        )
+        now = time.monotonic()
+        director.loaded["victim"] = LoadEntry(
+            "victim", 9001, 4.0, 0, now - 10, now - 10, pool="cpu",
+        )
+        director.capacity_listener = MagicMock()
+        with patch.object(
+            director, "_wait_for_memory_release",
+            side_effect=RuntimeError("probe lost"),
+        ), pytest.raises(RuntimeError, match="probe lost"):
+            director.acquire("newcomer", manifest=_manifest(memory_gb=3.0))
+        assert "victim" not in director.loaded
+        assert "victim" not in director._evicting
+        director.capacity_listener.assert_called()
+
     def test_evicts_one_lru_candidate_to_make_room(self):
         # Set up: probe whose CPU-free reading mutates as loads + evicts
         # happen, simulating live memory pressure. Initially the host has

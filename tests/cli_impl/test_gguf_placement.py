@@ -8,6 +8,7 @@ import time
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -516,3 +517,30 @@ def test_native_admission_rechecks_after_unlocked_preparation(native_entry, monk
                 pending.result(timeout=2)
             assert caught.value.code == expected[change]
             assert MODEL not in director.in_flight_loads
+
+
+def test_placement_changed_wakes_capacity_waiters(native_entry, monkeypatch):
+    """model_placement_changed is retryable, so the gateway parks on the
+    capacity notifier; the director must fire it or the waiter sleeps for
+    the whole queue timeout (review M2)."""
+    from muse.admin.operations import OperationError
+    from muse.core import placement
+
+    entry, _, _ = native_entry
+    director = LoadDirector(
+        enable_fn=lambda _: 9001, disable_fn=lambda _: None, memory_probe=Probe(),
+        cpu_headroom_gb=0,
+    )
+    director.capacity_listener = MagicMock()
+
+    def prepare(*args, **kwargs):
+        edited = dict(entry, device_override="cpu")
+        catalog._write_catalog({MODEL: edited})
+        return placement.Placement("cpu", "cpu", 0)
+
+    monkeypatch.setattr(placement, "resolve_model_placement", prepare)
+    with pytest.raises(OperationError) as caught:
+        director._decide(MODEL, manifest=entry["manifest"])
+    assert caught.value.code == "model_placement_changed"
+    assert caught.value.retryable is True
+    director.capacity_listener.assert_called()
