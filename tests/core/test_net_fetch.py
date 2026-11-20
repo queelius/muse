@@ -1,9 +1,9 @@
 """Tests for muse.core.net_fetch -- the shared hardened fetch primitive.
 
 Coverage:
-  - validate_public_host: rejects private/loopback/link-local IPs
-  - validate_public_host: allows public IPs
-  - validate_public_host: honors MUSE_ALLOW_PRIVATE_FETCH=1
+  - resolve_public_ip: rejects private/loopback/link-local IPs
+  - resolve_public_ip: allows public IPs
+  - resolve_public_ip: honors MUSE_ALLOW_PRIVATE_FETCH=1
   - fetch_url_bytes: raises when body exceeds max_bytes (streaming check)
   - fetch_url_bytes: rejects a redirect whose Location resolves to a private IP (H7 regression)
   - fetch_url_bytes: follows a redirect to a public host successfully
@@ -16,11 +16,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from muse.core.net_fetch import validate_public_host, fetch_url_bytes
+from muse.core.net_fetch import fetch_url_bytes, resolve_public_ip
 
 
 # ---------------------------------------------------------------------------
-# validate_public_host
+# resolve_public_ip
 # ---------------------------------------------------------------------------
 
 
@@ -36,26 +36,26 @@ class TestValidatePublicHost:
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("127.0.0.1"):
             with pytest.raises(ValueError, match="non-public"):
-                validate_public_host("http://localhost/path")
+                resolve_public_ip("http://localhost/path")
 
     def test_rejects_link_local_aws_imds(self, monkeypatch):
         """169.254.169.254 is the classic cloud IMDS SSRF target."""
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("169.254.169.254"):
             with pytest.raises(ValueError, match="non-public"):
-                validate_public_host("http://169.254.169.254/latest/meta-data/")
+                resolve_public_ip("http://169.254.169.254/latest/meta-data/")
 
     def test_rejects_private_192_168(self, monkeypatch):
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("192.168.1.1"):
             with pytest.raises(ValueError, match="non-public"):
-                validate_public_host("http://router.local/")
+                resolve_public_ip("http://router.local/")
 
     def test_rejects_private_10_x(self, monkeypatch):
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("10.0.0.50"):
             with pytest.raises(ValueError, match="non-public"):
-                validate_public_host("https://internal.corp/data")
+                resolve_public_ip("https://internal.corp/data")
 
     def test_rejects_loopback_ipv6(self, monkeypatch):
         """::1 (IPv6 loopback) should be rejected.
@@ -68,24 +68,24 @@ class TestValidatePublicHost:
         # systems. We patch it to return "127.0.0.1" (same loopback intent).
         with _patch_dns("127.0.0.1"):
             with pytest.raises(ValueError, match="non-public"):
-                validate_public_host("http://[::1]/path")
+                resolve_public_ip("http://[::1]/path")
 
     def test_allows_public_ip(self, monkeypatch):
         """A public IP (example.com -> 93.184.216.34) passes through."""
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("93.184.216.34"):
-            validate_public_host("https://example.com/image.png")  # must not raise
+            resolve_public_ip("https://example.com/image.png")  # must not raise
 
     def test_honors_allow_private_fetch_env(self, monkeypatch):
         """MUSE_ALLOW_PRIVATE_FETCH=1 bypasses all host checks."""
         monkeypatch.setenv("MUSE_ALLOW_PRIVATE_FETCH", "1")
         # No DNS patch needed -- the env bypass returns before resolution.
-        validate_public_host("http://169.254.169.254/iam/")  # must not raise
+        resolve_public_ip("http://169.254.169.254/iam/")  # must not raise
 
     def test_rejects_url_with_no_hostname(self, monkeypatch):
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with pytest.raises(ValueError, match="hostname"):
-            validate_public_host("http:///no-host")
+            resolve_public_ip("http:///no-host")
 
     def test_error_message_names_escape_hatch(self, monkeypatch):
         """Error should mention MUSE_ALLOW_PRIVATE_FETCH so operators know
@@ -93,7 +93,7 @@ class TestValidatePublicHost:
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("10.1.2.3"):
             with pytest.raises(ValueError, match="MUSE_ALLOW_PRIVATE_FETCH"):
-                validate_public_host("https://internal.corp/x")
+                resolve_public_ip("https://internal.corp/x")
 
     def test_rejects_cgnat_100_64(self, monkeypatch):
         """100.64.0.0/10 (Carrier-Grade NAT / shared address space, RFC
@@ -103,12 +103,12 @@ class TestValidatePublicHost:
         monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
         with _patch_dns("100.64.0.1"):
             with pytest.raises(ValueError, match="non-public"):
-                validate_public_host("http://cgnat.example/path")
+                resolve_public_ip("http://cgnat.example/path")
 
     def test_allows_cgnat_when_allow_private_fetch_set(self, monkeypatch):
         """The MUSE_ALLOW_PRIVATE_FETCH opt-out still applies to CGNAT."""
         monkeypatch.setenv("MUSE_ALLOW_PRIVATE_FETCH", "1")
-        validate_public_host("http://100.64.0.1/path")  # must not raise
+        resolve_public_ip("http://100.64.0.1/path")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ class TestFetchUrlBytes:
         )
 
         redirect_resp = _make_redirect_response(
-            "http://internal.corp/secret", status_code=302,
+            "https://internal.corp/secret", status_code=302,
         )
 
         inner_client = MagicMock()
@@ -436,3 +436,105 @@ class TestFetchUrlBytes:
                 fetch_url_bytes(
                     "https://example.com/loop", max_bytes=1024, max_redirects=3,
                 )
+
+
+def _client_ctx(*responses):
+    inner = MagicMock()
+    inner.send = MagicMock(side_effect=list(responses))
+    inner.build_request = MagicMock(return_value=MagicMock(extensions={}))
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=inner)
+    ctx.__exit__ = MagicMock(return_value=False)
+    return ctx, inner
+
+
+class TestFetchSchemeAndDeadline:
+    @pytest.fixture(autouse=True)
+    def _public_dns(self, monkeypatch):
+        monkeypatch.delenv("MUSE_ALLOW_PRIVATE_FETCH", raising=False)
+        monkeypatch.setattr(
+            "muse.core.net_fetch.socket.gethostbyname", lambda host: "93.184.216.34",
+        )
+
+    def test_non_http_initial_scheme_rejected(self):
+        ctx, inner = _client_ctx()
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            with pytest.raises(ValueError, match="scheme"):
+                fetch_url_bytes("ftp://example.com/x", max_bytes=10)
+        inner.send.assert_not_called()
+
+    def test_redirect_to_non_http_scheme_rejected(self):
+        ctx, inner = _client_ctx(_make_redirect_response("ftp://example.com/x"))
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            with pytest.raises(ValueError, match="scheme"):
+                fetch_url_bytes("https://example.com/a", max_bytes=10)
+        assert inner.send.call_count == 1
+
+    def test_https_to_http_downgrade_rejected(self):
+        ctx, inner = _client_ctx(_make_redirect_response("http://example.com/x"))
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            with pytest.raises(ValueError, match="downgrade"):
+                fetch_url_bytes("https://example.com/a", max_bytes=10)
+        assert inner.send.call_count == 1
+
+    def test_http_to_https_redirect_followed(self):
+        ctx, inner = _client_ctx(
+            _make_redirect_response("https://example.com/x"),
+            _make_sync_response(content=b"ok"),
+        )
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            assert fetch_url_bytes("http://example.com/a", max_bytes=10) == b"ok"
+
+    def test_total_deadline_stops_a_slow_drip(self, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("muse.core.net_fetch.time.monotonic", lambda: clock[0])
+
+        def drip():
+            for _ in range(100):
+                clock[0] += 29.0  # each chunk arrives just under a read timeout
+                yield b"x"
+
+        resp = _make_sync_response()
+        resp.iter_bytes = MagicMock(return_value=drip())
+        ctx, _ = _client_ctx(resp)
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            with pytest.raises(ValueError, match="deadline"):
+                fetch_url_bytes("https://example.com/a", max_bytes=1000,
+                                total_timeout=60.0)
+        resp.close.assert_called()
+
+    def test_per_hop_timeout_capped_by_remaining_budget(self, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("muse.core.net_fetch.time.monotonic", lambda: clock[0])
+        redirect = _make_redirect_response("https://example.com/b")
+
+        def send(request, stream):
+            if inner.send.call_count == 1:
+                clock[0] += 50.0
+                return redirect
+            return _make_sync_response(content=b"ok")
+
+        ctx, inner = _client_ctx()
+        inner.send = MagicMock(side_effect=send)
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            assert fetch_url_bytes("https://example.com/a", max_bytes=10,
+                                   timeout=30.0, total_timeout=60.0) == b"ok"
+        timeouts = [c.kwargs["timeout"] for c in inner.build_request.call_args_list]
+        assert timeouts[0] == 30.0
+        assert timeouts[1] == pytest.approx(10.0)
+
+    def test_deadline_exhausted_before_next_hop(self, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("muse.core.net_fetch.time.monotonic", lambda: clock[0])
+
+        def send(request, stream):
+            clock[0] += 61.0
+            return _make_redirect_response("https://example.com/b")
+
+        ctx, inner = _client_ctx()
+        inner.send = MagicMock(side_effect=send)
+        with patch("muse.core.net_fetch.httpx.Client", return_value=ctx):
+            with pytest.raises(ValueError, match="deadline"):
+                fetch_url_bytes("https://example.com/a", max_bytes=10,
+                                total_timeout=60.0)
+        assert inner.send.call_count == 1

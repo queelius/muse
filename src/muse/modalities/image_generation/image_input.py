@@ -22,10 +22,7 @@ import re
 from typing import Any
 
 from muse.core import config
-from muse.core.net_fetch import (
-    afetch_url_bytes,
-    validate_public_host as _validate_public_host_impl,
-)
+from muse.core.net_fetch import afetch_url_bytes
 
 
 logger = logging.getLogger(__name__)
@@ -243,18 +240,6 @@ async def _fetch_http_url(value: str, *, max_bytes: int, max_pixels: int):
     except Exception as e:  # noqa: BLE001
         raise ValueError(f"fetch failed: {e}") from e
     return _bytes_to_pil(raw, max_pixels=max_pixels)
-
-
-def _validate_public_host(url: str) -> None:
-    """Thin alias for muse.core.net_fetch.validate_public_host.
-
-    Preserved for backward compatibility: existing tests and any external
-    callers that reference
-    ``muse.modalities.image_generation.image_input._validate_public_host``
-    continue to work. The real implementation lives in
-    ``muse.core.net_fetch.validate_public_host``.
-    """
-    _validate_public_host_impl(url)
 
 
 def _bytes_to_pil(

@@ -1,7 +1,7 @@
 """Hardened URL fetch primitive shared by the image routes.
 
 Public API:
-    validate_public_host(url)     -- raises ValueError for private/loopback/etc. IPs.
+    resolve_public_ip(url)        -- validated public IP for url's host (raises ValueError).
     fetch_url_bytes(url, ...)     -- sync, host-validated, size-capped, manual-redirect.
     afetch_url_bytes(url, ...)    -- async variant (delegates to thread to stay DRY).
 
@@ -17,11 +17,17 @@ Design decisions:
     TLS SNI extension (for certificate verification).
   - Body is streamed chunk-by-chunk so the size cap fires before the full body
     is buffered into RAM (C3).
+  - One overall deadline (``total_timeout``) spans every hop and chunk: httpx's
+    ``timeout`` bounds each connect/read separately, so without it a server
+    that drips a byte just under the read timeout would hold the fetch (and
+    the worker thread running it) indefinitely.
+  - Every hop must be http or https, and a redirect may not downgrade https
+    to http.
   - MUSE_ALLOW_PRIVATE_FETCH=1 escape hatch is preserved for operators on
     trusted internal networks (same as the original image_input convention);
     when set, resolution + pinning are skipped and the hostname is dialed as-is.
 
-IPv6 caveat (inherited from image_input._validate_public_host):
+IPv6 caveat:
   socket.gethostbyname is IPv4-only. A hostname that resolves ONLY to an AAAA
   record will fail gethostbyname with OSError, causing a ValueError ("DNS
   resolution failed") before any fetch is attempted -- conservative, not
@@ -34,6 +40,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import time
 import urllib.parse
 
 import httpx
@@ -101,22 +108,6 @@ def resolve_public_ip(url: str) -> str | None:
     return ip_str
 
 
-def validate_public_host(url: str) -> None:
-    """Reject URLs whose host resolves to a non-public IP.
-
-    Thin wrapper over :func:`resolve_public_ip` that discards the resolved
-    IP; retained for callers that only need the raise-on-private check and
-    do their own connection.
-
-    Operators on a trusted network who want to fetch from internal services
-    can opt out by setting MUSE_ALLOW_PRIVATE_FETCH=1.
-
-    Raises:
-        ValueError: with an actionable message that names MUSE_ALLOW_PRIVATE_FETCH.
-    """
-    resolve_public_ip(url)
-
-
 def _pin_url_to_ip(url: str, ip: str) -> tuple[str, str]:
     """Rewrite ``url`` so its host is the pinned ``ip``.
 
@@ -138,6 +129,20 @@ def _pin_url_to_ip(url: str, ip: str) -> tuple[str, str]:
     return pinned, host_header
 
 
+_ALLOWED_SCHEMES = ("http", "https")
+DEFAULT_TOTAL_TIMEOUT = 120.0
+
+
+def _check_scheme(url: str, previous: str | None) -> str:
+    """Return ``url``'s scheme, rejecting non-http(s) and https->http hops."""
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(f"refusing to fetch URL with scheme {scheme!r}: {url!r}")
+    if previous == "https" and scheme == "http":
+        raise ValueError(f"refusing redirect that would downgrade https to http: {url!r}")
+    return scheme
+
+
 # ---------------------------------------------------------------------------
 # Synchronous fetch
 # ---------------------------------------------------------------------------
@@ -149,6 +154,7 @@ def fetch_url_bytes(
     max_bytes: int,
     timeout: float = 30.0,
     max_redirects: int = 3,
+    total_timeout: float = DEFAULT_TOTAL_TIMEOUT,
 ) -> bytes:
     """Fetch ``url`` synchronously, with SSRF guard, size cap, and safe redirect handling.
 
@@ -159,16 +165,33 @@ def fetch_url_bytes(
       hops, re-resolving + re-validating the redirect target's host each hop.
     - Streams the body and raises ``ValueError`` as soon as accumulated bytes
       exceed ``max_bytes`` (does NOT buffer the full body before checking).
+    - Accepts only http(s) on every hop and refuses an https->http redirect.
+    - ``timeout`` bounds each connect/read; ``total_timeout`` bounds the whole
+      fetch across hops and chunks (each hop's timeout is capped at the time
+      left, so the deadline is overshot by at most one read).
 
     Raises:
-        ValueError: SSRF block, size exceeded, too many redirects, HTTP error.
+        ValueError: SSRF block, bad scheme, size exceeded, too many
+            redirects, deadline passed.
         httpx.HTTPStatusError: non-2xx final response (callers may re-raise as ValueError).
+        httpx.HTTPError: transport failures (connect/read timeout, etc.).
     """
     current_url = url
     hops = 0
+    deadline = time.monotonic() + total_timeout
+    scheme = _check_scheme(current_url, None)
+
+    def _remaining() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ValueError(
+                f"fetching {url!r} exceeded its {total_timeout:g}s deadline"
+            )
+        return left
 
     with httpx.Client(timeout=timeout, follow_redirects=False) as client:
         while True:
+            hop_timeout = min(timeout, _remaining())
             # Resolve + validate the host, then dial THAT exact IP. Skipped
             # (pinned_ip is None) only when MUSE_ALLOW_PRIVATE_FETCH=1.
             pinned_ip = resolve_public_ip(current_url)
@@ -176,6 +199,7 @@ def fetch_url_bytes(
                 request_url, host_header = _pin_url_to_ip(current_url, pinned_ip)
                 request = client.build_request(
                     "GET", request_url, headers={"Host": host_header},
+                    timeout=hop_timeout,
                 )
                 # TLS SNI + cert verification use the real hostname, not the
                 # pinned IP; httpcore reads this extension for server_hostname.
@@ -183,7 +207,7 @@ def fetch_url_bytes(
                     urllib.parse.urlparse(current_url).hostname or ""
                 )
             else:
-                request = client.build_request("GET", current_url)
+                request = client.build_request("GET", current_url, timeout=hop_timeout)
             response = client.send(request, stream=True)
             # `stream=True` opens the connection without reading the body;
             # it must be closed on every exit path. The success path below
@@ -212,6 +236,7 @@ def fetch_url_bytes(
                     # target, so an open-redirect / DNS-rebind to a private
                     # IP is caught there.
                     next_url = urllib.parse.urljoin(current_url, location)
+                    scheme = _check_scheme(next_url, scheme)
                     current_url = next_url
                     continue  # follow the hop
 
@@ -219,6 +244,7 @@ def fetch_url_bytes(
                 response.raise_for_status()
                 buf = bytearray()
                 for chunk in response.iter_bytes():
+                    _remaining()
                     buf += chunk
                     if len(buf) > max_bytes:
                         raise ValueError(
@@ -241,6 +267,7 @@ async def afetch_url_bytes(
     max_bytes: int,
     timeout: float = 30.0,
     max_redirects: int = 3,
+    total_timeout: float = DEFAULT_TOTAL_TIMEOUT,
 ) -> bytes:
     """Async variant of ``fetch_url_bytes`` for use in async route handlers.
 
@@ -254,4 +281,5 @@ async def afetch_url_bytes(
         max_bytes=max_bytes,
         timeout=timeout,
         max_redirects=max_redirects,
+        total_timeout=total_timeout,
     )
