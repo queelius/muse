@@ -50,10 +50,11 @@ class IdleSweeper:
 
     Constructor injection:
       - director: LoadDirector. The sweeper reads `director.loaded`
-        under `director.lock`, calls `director.disable_fn`, probes
-        `director.memory_probe`, and appends to
-        `director.recent_decisions`. Never mutates LoadDirector
-        internals beyond what the public surface allows.
+        under `director.lock`, claims an idle entry with
+        `begin_idle_eviction`, calls `director.disable_fn`, and settles the
+        claim with `finish_eviction` (which measures memory, logs the
+        decision and records telemetry). Never mutates LoadDirector
+        internals beyond that public surface.
       - catalog_lookup: Callable[[str], dict]. model_id -> manifest
         dict. Per-tick lookup so a `muse models remove` mid-tick
         cleanly skips that candidate. Implementations should raise
@@ -63,10 +64,11 @@ class IdleSweeper:
         Default 30.0 (matches `MUSE_IDLE_SWEEP_INTERVAL_SECONDS=30`).
       - default_idle_timeout_seconds: float | None. A GLOBAL default idle
         timeout applied to any model that does not declare its own
-        `capabilities.idle_timeout_seconds`. None (the default) preserves
-        the original behavior: models without a per-model timeout are never
-        idle-evicted (only memory pressure releases them). The supervisor
-        sets this from `MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`. A per-model
+        `capabilities.idle_timeout_seconds`. None (the constructor default,
+        used by direct callers and tests) means models without a per-model
+        timeout are never idle-evicted. The supervisor passes
+        `server.idle_timeout_seconds` (`MUSE_DEFAULT_IDLE_TIMEOUT_SECONDS`,
+        600 s by default; `<= 0` disables). A per-model
         `idle_timeout_seconds` always takes precedence over this default.
       - stop_event: threading.Event | None. Optional external event so
         the supervisor can share `state.stop_event`. If None, the

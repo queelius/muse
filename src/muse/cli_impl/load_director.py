@@ -1291,8 +1291,10 @@ class LoadDirector:
             bumped under the lock (when bump_refcount=True); port is the
             worker_port read under the same lock (no TOCTOU window for
             an evictor to race in).
-          ("wait",): another thread owns the load; caller awaits the Event.
-          ("load",): we just claimed ownership; run load phase + commit.
+          ("wait", claim): another thread owns the load; caller awaits the
+            claim's Event (`_wait_for_in_flight`).
+          ("load", claim): we just claimed ownership (an InFlightLoad);
+            run the load phase + commit.
           ("prepare_native", manifest): prepare a native cold load outside
             this lock, then repeat classification and configuration checks.
           ("evict_and_retry", shortfall_gb, device, required_gb): the
@@ -1307,10 +1309,10 @@ class LoadDirector:
         request accounting) and False for warmup (load idempotently
         without skewing LRU ordering or pinning the model).
 
-        On the ("load",) return path, an Event has been stashed in
+        On the ("load", claim) return path, the claim has been stashed in
         self.in_flight_loads[model_id]. The caller is responsible for
-        either committing (success) or popping + setting the Event
-        (failure). _commit and _abort cover both cases.
+        either committing (success) or popping + setting its Event
+        (failure); _load_and_commit and _abort cover both cases.
         """
         with self.lock:
             if model_id in self._failed_rollbacks:
@@ -2156,7 +2158,7 @@ class LoadDirector:
 
         Note this is the POOL, not the measurements bucket key: "mps" pools
         against host RAM here but keeps its own "mps" bucket in
-        _record_observed_peak (matching what `muse models probe` writes).
+        observed_peak (matching what `muse models probe` writes).
         """
         normalized = str(device or "auto").lower()
         if normalized not in ("auto", ""):

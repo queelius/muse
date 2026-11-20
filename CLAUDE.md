@@ -149,7 +149,7 @@ Modality backends implementing modality-specific protocols
 - `muse.core.catalog` is the facade (enable/device/GPU-layer state, `load_backend`, provenance checks) over `catalog_store` (catalog.json I/O, schema, read cache, `_CATALOG_WRITE_LOCK`), `catalog_locks` (pull lock, storage-cache lock, resource lease), `catalog_models` (`CatalogEntry`, discovery caches, `known_models`, `get_manifest`), `catalog_pull` (`pull()` and its transactions) and `catalog_remove`. Tests patch names where they are looked up, i.e. in the submodule.
 - `muse.cli_impl.worker`: single-worker mode (runs one uvicorn in one venv). Invoked via `muse _worker` (hidden subcommand).
 - `muse.cli_impl.gateway`: FastAPI proxy app. Routes by `model` field in request body/query; aggregates `/v1/models` and `/health` across workers.
-- `muse.cli_impl.supervisor`: orchestrates workers + gateway. `plan_workers` groups catalog by venv; `spawn_worker` + `wait_for_ready` manage subprocess lifecycle; `run_supervisor` is the entrypoint `muse serve` delegates to.
+- `muse.cli_impl.supervisor`: orchestrates workers + gateway. `spawn_worker` + `wait_for_ready` manage subprocess lifecycle (readiness bounded by `server.worker_ready_timeout_seconds`, default 300 s, for lazy load, admin enable/restart and monitor restart); the monitor restarts crashed workers; `run_supervisor` is the entrypoint `muse serve` delegates to.
 - `muse.cli_impl.search`: `run_search()` for `muse search`. Thin wrapper over `resolvers.search()` plus log-level quieting so httpx's per-request debug lines don't interleave with the table output.
 
 ### Modality conventions
@@ -253,7 +253,7 @@ reading, else the torch CUDA/ROCm detector). A probe whose inference fails
 keeps an earlier, larger successful inference peak rather than replacing it
 with its load-only peak. `mps` is its own case: it pools against host RAM for sizing
 (pynvml is CUDA-only, and MPS is unified memory) but keeps its own `mps`
-measurements bucket in `_record_observed_peak`, matching what
+measurements bucket in `LoadDirector.observed_peak`, matching what
 `muse models probe` persists. This bug never surfaced in CI because a
 CPU-only host degrades `auto`->cpu, which happens to match the buggy
 CPU-pool accounting; it only bites on a GPU host.
@@ -333,7 +333,12 @@ reaping outside the owner). After 3 consecutive failures (or
 immediate process exit), the monitor terminates the existing process
 and respawns it with exponential backoff (1s, 2s, 4s, ..., capped at
 30s). After 10 unsuccessful restart attempts the worker is marked
-dead; /health reports "degraded" and /v1/models skips its entries.
+dead and the director forgets its models (`LoadDirector.forget_worker`),
+so the next request cold-loads a replacement instead of getting 502s;
+/health reports "degraded" while any worker is dead or unhealthy, and
+/v1/models lists the model as `loaded: false`. `supervisor.revive_worker`
+(the admin restart route) gives only such a monitor-exhausted spec a fresh
+budget; a spec retained dead after an unproven teardown stays dead.
 The monitor reads the dynamic loaded set from `state.director.loaded`
 on each tick, so admin-driven loads and evictions show up immediately.
 
@@ -864,13 +869,16 @@ Three sources of truth, in order of fidelity:
    with a `~` prefix.
 3. **No data**: `-` in the list. Run probe to populate.
 
-`muse models list` picks the most honest available number per row,
-tagged GPU or CPU based on `capabilities.device`. The footer aggregates
-GPU and CPU separately across enabled models.
+`muse models list` shows the number admission uses
+(`supervisor.memory_estimate`): the larger of the annotation and the
+measurement for the pool the model loads into (a `set-device` pin
+included), tagged GPU or CPU by that pool, so an `auto` model on a
+CPU-only host is CPU. The footer aggregates GPU and CPU separately across
+enabled models.
 
 `muse models info <id>` shows annotation and probe measurement
 side-by-side, including the inference shape that produced the peak
-and the date probed.
+and the date probed, plus that admission size.
 
 **Memory is a function of input shape, not a single number.** Whisper
 at 30s audio uses different VRAM than at 5min. SDXL-Turbo at 512^2 uses
