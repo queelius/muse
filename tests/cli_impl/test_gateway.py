@@ -8,10 +8,8 @@ from fastapi.testclient import TestClient
 
 from muse.cli_impl.gateway import (
     RequestBodyLimitMiddleware,
-    RequestBodyTooLarge,
     _prefetch_worker_response,
     _proxy_headers,
-    cache_bounded_request_body,
     extract_model_from_request,
     build_gateway,
     WorkerRoute,
@@ -332,53 +330,6 @@ class TestWorkerRoute:
 
 
 class TestBoundedRequestBody:
-    @pytest.mark.asyncio
-    async def test_chunked_body_is_bounded_without_content_length(self):
-        from starlette.requests import Request
-
-        messages = iter([
-            {"type": "http.request", "body": b"1234", "more_body": True},
-            {"type": "http.request", "body": b"5678", "more_body": False},
-        ])
-
-        async def receive():
-            return next(messages)
-
-        request = Request({
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/test",
-            "headers": [],
-            "query_string": b"",
-        }, receive=receive)
-
-        with pytest.raises(RequestBodyTooLarge) as exc_info:
-            await cache_bounded_request_body(request, limit=7)
-        assert exc_info.value.observed == 8
-
-    @pytest.mark.asyncio
-    async def test_bounded_body_is_cached_for_later_forwarding(self):
-        from starlette.requests import Request
-
-        sent = False
-
-        async def receive():
-            nonlocal sent
-            assert sent is False
-            sent = True
-            return {"type": "http.request", "body": b"payload", "more_body": False}
-
-        request = Request({
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/test",
-            "headers": [],
-            "query_string": b"",
-        }, receive=receive)
-        assert await cache_bounded_request_body(request, limit=8) == b"payload"
-        assert await request.body() == b"payload"
-        assert sent is True
-
     @pytest.mark.asyncio
     async def test_global_middleware_rejects_chunked_body_before_route(self):
         called = False

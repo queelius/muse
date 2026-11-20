@@ -119,22 +119,13 @@ _HOP_BY_HOP_HEADERS = frozenset({
 })
 
 
-class RequestBodyTooLarge(ValueError):
-    """An inbound gateway request exceeded its configured byte budget."""
-
-    def __init__(self, *, limit: int, observed: int) -> None:
-        self.limit = limit
-        self.observed = observed
-        super().__init__(f"request body exceeds {limit} byte limit")
-
-
 class RequestBodyLimitMiddleware:
     """Bound and replay every inbound HTTP body before route dispatch.
 
     Enforcement at the ASGI boundary covers explicit admin, aggregation,
     dashboard, and future routes as well as the catch-all inference proxy.
     The downstream app receives one replayable request message, so FastAPI
-    body parsing and the proxy's own cache can consume it normally.
+    body parsing and the proxy can consume it normally.
     """
 
     def __init__(self, app: Any, *, limit: int) -> None:
@@ -406,46 +397,6 @@ class WorkerRoute:
     """
     model_id: str
     worker_url: str
-
-
-async def cache_bounded_request_body(request: Request, *, limit: int) -> bytes:
-    """Read and cache at most ``limit`` bytes from an ASGI request stream.
-
-    ``Content-Length`` is only an early rejection optimization; chunked or
-    dishonest clients are still bounded while streaming.  Starlette normally
-    sets ``request._body`` in ``Request.body()``.  We set the same cache after
-    our bounded read so model extraction and the eventual worker forward see
-    exactly one body without consuming the receive channel twice.
-    """
-    if limit <= 0:
-        raise ValueError("request body limit must be positive")
-    cached = getattr(request, "_body", None)
-    if isinstance(cached, bytes):
-        if len(cached) > limit:
-            raise RequestBodyTooLarge(limit=limit, observed=len(cached))
-        return cached
-
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared = int(content_length)
-        except (TypeError, ValueError):
-            declared = None
-        if declared is not None and declared > limit:
-            raise RequestBodyTooLarge(limit=limit, observed=declared)
-
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > limit:
-            raise RequestBodyTooLarge(limit=limit, observed=total)
-        chunks.append(chunk)
-    body = b"".join(chunks)
-    request._body = body
-    return body
 
 
 async def extract_model_from_request(request: Any) -> Any:
@@ -824,16 +775,8 @@ def build_gateway(
         # registered BEFORE this catch-all, so they win via FastAPI's
         # registration order.
 
-        try:
-            body = await cache_bounded_request_body(
-                request, limit=app.state.max_request_body_bytes,
-            )
-        except RequestBodyTooLarge as exc:
-            return error_response(
-                413,
-                "request_too_large",
-                f"request body exceeds the configured {exc.limit} byte limit",
-            )
+        # RequestBodyLimitMiddleware already bounded (and replays) the body.
+        body = await request.body()
 
         # A modality may declare a strict parser for its paths (decision's
         # /v1/systemone). It runs on the raw body BEFORE model selection, so
@@ -1850,9 +1793,10 @@ async def _forward(
                 )
 
     try:
-        # The body read comes after the caller took its refcount. For a
-        # body-bearing GET it is the first read and can fail on a client
-        # disconnect, so it sits inside the cleanup guard too.
+        # The body read comes after the caller took its refcount. The
+        # gateway proxy has already cached it, but a caller that has not
+        # (federation) reads it here for the first time and can fail on a
+        # client disconnect, so it sits inside the cleanup guard too.
         body = await request.body()
         client = httpx.AsyncClient(timeout=timeout)
         stream_ctx = client.stream(
