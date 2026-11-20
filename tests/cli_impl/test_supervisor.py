@@ -88,6 +88,21 @@ class TestSpawnWorker:
         assert kwargs["start_new_session"] is (os.name == "posix")
 
     @patch("muse.cli_impl.supervisor.subprocess.Popen")
+    def test_spawn_worker_strips_the_admin_token(self, mock_popen, monkeypatch):
+        """Workers run third-party model code; they never get the admin token."""
+        from muse.cli_impl.supervisor import spawn_worker
+
+        monkeypatch.setenv("MUSE_ADMIN_TOKEN", "secret-admin-token")
+        monkeypatch.setenv("MUSE_CATALOG_DIR", "/kept")
+        mock_popen.return_value = MagicMock(pid=12345)
+        spec = WorkerSpec(models=["m"], python_path="/venv/python", port=9001)
+        spawn_worker(spec, device="cpu")
+        env = mock_popen.call_args.kwargs["env"]
+        assert "MUSE_ADMIN_TOKEN" not in env
+        assert env["MUSE_CATALOG_DIR"] == "/kept"
+        assert os.environ["MUSE_ADMIN_TOKEN"] == "secret-admin-token"
+
+    @patch("muse.cli_impl.supervisor.subprocess.Popen")
     def test_spawn_worker_assigns_a_fresh_readiness_nonce(
         self, mock_popen, monkeypatch,
     ):

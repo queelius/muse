@@ -77,6 +77,10 @@ logger = logging.getLogger(__name__)
 _SUPERVISOR_PID_ENV = "MUSE_SUPERVISOR_PID"
 _WORKER_NONCE_ENV = "MUSE_WORKER_NONCE"
 _WORKER_NONCE_HEADER = "X-Muse-Worker-Nonce"
+# Secrets a worker never needs. Workers run third-party model code
+# (trust_remote_code models, arbitrary pip_extras), so the admin bearer
+# token stays in the supervisor.
+_WORKER_SECRET_ENV = ("MUSE_ADMIN_TOKEN",)
 _WORKER_LOG_READ_BYTES = 16 * 1024
 _WORKER_LOG_LINE_BYTES = 64 * 1024
 _WORKER_LOG_TRUNCATION = b"...[truncated]\n"
@@ -505,6 +509,8 @@ def spawn_worker(spec: WorkerSpec, *, device: str, log_hub: "Any | None" = None)
             cmd.extend(["--model", m])
         logger.info("spawning worker: %s", " ".join(cmd))
         child_env = os.environ.copy()
+        for name in _WORKER_SECRET_ENV:
+            child_env.pop(name, None)
         child_env[_SUPERVISOR_PID_ENV] = str(os.getpid())
         worker_nonce = secrets.token_urlsafe(32)
         child_env[_WORKER_NONCE_ENV] = worker_nonce
