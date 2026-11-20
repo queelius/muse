@@ -16,6 +16,9 @@ stdio mode.
 
 Resources: ``muse://capabilities`` and ``muse://models/{id}`` (JSON).
 
+``INSTRUCTIONS`` (the workflow: describe, pick a model, call, read files) is
+sent at initialize; an admin- or inference-only filter sends its half.
+
 Importing this module lazily probes the ``mcp`` Python package; without it
 the symbols still exist and construction raises a RuntimeError pointing at
 ``pip install 'museq[mcp]'``.
@@ -45,6 +48,38 @@ _FAILED_CACHE_SECONDS = 5.0
 _FILTERS = ("all", "admin", "inference")
 CAPABILITIES_URI = "muse://capabilities"
 MODEL_URI_PREFIX = "muse://models/"
+
+# Sent once at initialize (the client usually adds it to the model's
+# context), so keep it short and about the workflow; per-model facts come
+# from muse_describe, which follows the server.
+_INFERENCE_INSTRUCTIONS = """\
+muse is a local multi-modality generation server (speech, transcription, chat, \
+images, pixel art, 3D, video, embeddings and more). To use it:
+1. Call muse_describe with `modality` (e.g. image/generation) or `model` to \
+learn what a modality is for and not for, its tools, and each model's summary, \
+limits, quality_tier and live state. Unfiltered, a large document goes to a file.
+2. Pick a model: prefer quality_tier good over draft and a model already \
+`loaded`. A cold model loads on its first call, which can take seconds to \
+minutes (last_cold_load_seconds); a non-null unservable_reason means it will \
+fail. Pass its id as `model`; a tool whose `model` says Optional picks the \
+first enabled model itself.
+3. Call the tool. Media outputs are written to local files (out_path, else \
+the output dir), never returned inline: the result lists each file's path, \
+sha256 and size, with a resource_link per file and the model's revision. \
+`preview: true` adds a small inline image.
+Inputs: pass local files as `<field>_path` (allowed under the working \
+directory and the output dir) or `<field>_url`. An output path can be fed \
+straight into the next tool, e.g. muse_generate_image then \
+muse_pixelize_image with image_path. Errors carry muse's error code and message.
+"""
+_ADMIN_INSTRUCTIONS = """\
+Admin tools (muse_pull_model, muse_enable_model, muse_probe_model, ...) need \
+the server's admin token. Pull, enable and probe are long-running and return \
+a job_id; poll muse_get_jobs. Enabled models load on demand, so enabling is \
+not needed before a call. muse_remove_model and muse_disable_model take a \
+model out of service: confirm with the user first.
+"""
+INSTRUCTIONS = _INFERENCE_INSTRUCTIONS + _ADMIN_INSTRUCTIONS
 
 try:
     import mcp.types as _mcp_types  # noqa: F401
@@ -143,8 +178,13 @@ class MCPServer:
         # Session -> signature of the tool list it last saw (weak: a closed
         # session drops out). Touched on the event loop only.
         self._sessions: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-        self._server = _LowServer("muse")
+        self._server = _LowServer("muse", instructions=self._instructions())
         self._wire_handlers()
+
+    def _instructions(self) -> str:
+        if self._inference and self._admin:
+            return INSTRUCTIONS
+        return _INFERENCE_INSTRUCTIONS if self._inference else _ADMIN_INSTRUCTIONS
 
     # ---- discovery cache ----
 
