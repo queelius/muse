@@ -760,7 +760,7 @@ class TestIdleEvictionTelemetry:
 
         assert [t for t, _ in capture_records if t == "model_evict"] == []
         assert director.loaded["fake-model"] is entry
-        assert "fake-model" not in director.evicting
+        assert "fake-model" not in director._evicting
         failure = director.recent_decisions[-1]
         assert failure.reason.startswith("disable_fn_raised")
         assert failure.evicted == []
@@ -778,4 +778,4 @@ class TestIdleEvictionTelemetry:
 
         assert self._sweeper(director).tick() == ["fake-model"]
         assert "fake-model" not in director.loaded
-        assert "fake-model" not in director.evicting
+        assert "fake-model" not in director._evicting

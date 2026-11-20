@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -16,12 +17,27 @@ def _deadline(seconds: float) -> float:
     return time.monotonic() + seconds
 
 
+def _slot(gate, model_id, cap, *, deadline, max_queue_depth=None):
+    """acquire_slot/release_slot as a lexical async context (test helper)."""
+    @asynccontextmanager
+    async def held():
+        taken = await gate.acquire_slot(
+            model_id, cap, deadline=deadline, max_queue_depth=max_queue_depth,
+        )
+        try:
+            yield
+        finally:
+            if taken:
+                gate.release_slot(model_id)
+    return held()
+
+
 class TestConcurrencyGate:
     async def test_unlimited_cap_is_noop(self):
         gate = ConcurrencyGate()
-        async with gate.slot("m", None, deadline=_deadline(1)):
+        async with _slot(gate, "m", None, deadline=_deadline(1)):
             assert gate.depth("m") == 0  # unlimited: not even tracked
-        async with gate.slot("m", 0, deadline=_deadline(1)):
+        async with _slot(gate, "m", 0, deadline=_deadline(1)):
             pass  # 0 also means unlimited
 
     async def test_cap_serializes_and_wakes_fifo(self):
@@ -30,12 +46,12 @@ class TestConcurrencyGate:
         release_first = asyncio.Event()
 
         async def holder():
-            async with gate.slot("m", 1, deadline=_deadline(5)):
+            async with _slot(gate, "m", 1, deadline=_deadline(5)):
                 order.append(0)
                 await release_first.wait()
 
         async def waiter(i: int):
-            async with gate.slot("m", 1, deadline=_deadline(5)):
+            async with _slot(gate, "m", 1, deadline=_deadline(5)):
                 order.append(i)
 
         h = asyncio.create_task(holder())
@@ -55,14 +71,14 @@ class TestConcurrencyGate:
         started = asyncio.Event()
 
         async def holder():
-            async with gate.slot("m", 1, deadline=_deadline(5)):
+            async with _slot(gate, "m", 1, deadline=_deadline(5)):
                 started.set()
                 await asyncio.sleep(0.5)
 
         h = asyncio.create_task(holder())
         await started.wait()
         with pytest.raises(QueueTimeout) as exc:
-            async with gate.slot("m", 1, deadline=_deadline(0.05)):
+            async with _slot(gate, "m", 1, deadline=_deadline(0.05)):
                 pass
         assert exc.value.model_id == "m"
         h.cancel()
@@ -73,26 +89,26 @@ class TestConcurrencyGate:
         started = asyncio.Event()
 
         async def holder():
-            async with gate.slot("m", 1, deadline=_deadline(5)):
+            async with _slot(gate, "m", 1, deadline=_deadline(5)):
                 started.set()
                 await asyncio.sleep(0.5)
 
         h = asyncio.create_task(holder())
         await started.wait()
-        w = asyncio.create_task(gate.slot("m", 1, deadline=_deadline(5)).__aenter__())
+        w = asyncio.create_task(_slot(gate, "m", 1, deadline=_deadline(5)).__aenter__())
         await asyncio.sleep(0.01)  # w is parked; depth == 1 == bound
         with pytest.raises(QueueFull):
-            async with gate.slot("m", 1, deadline=_deadline(5)):
+            async with _slot(gate, "m", 1, deadline=_deadline(5)):
                 pass
         h.cancel(); w.cancel()
 
     async def test_slot_released_on_exception(self):
         gate = ConcurrencyGate()
         with pytest.raises(RuntimeError):
-            async with gate.slot("m", 1, deadline=_deadline(1)):
+            async with _slot(gate, "m", 1, deadline=_deadline(1)):
                 raise RuntimeError("boom")
         # slot free again: immediate re-acquire succeeds
-        async with gate.slot("m", 1, deadline=_deadline(1)):
+        async with _slot(gate, "m", 1, deadline=_deadline(1)):
             pass
 
     async def test_burst_arrival_enforces_queue_full(self, monkeypatch):
@@ -109,7 +125,7 @@ class TestConcurrencyGate:
 
         async def worker(i: int):
             try:
-                async with gate.slot("m", 1, deadline=_deadline(5)):
+                async with _slot(gate, "m", 1, deadline=_deadline(5)):
                     ok.append(i)
                     await asyncio.sleep(0.05)  # hold the slot briefly
             except QueueFull:
@@ -129,7 +145,7 @@ class TestConcurrencyGate:
         # deadline.
         gate = ConcurrencyGate()
         start = time.monotonic()
-        async with gate.slot("m", 2, deadline=time.monotonic()):
+        async with _slot(gate, "m", 2, deadline=time.monotonic()):
             assert gate.depth("m") == 0
         elapsed = time.monotonic() - start
         assert elapsed < 0.05
@@ -141,7 +157,7 @@ class TestConcurrencyGate:
         started = asyncio.Event()
 
         async def holder():
-            async with gate.slot("m", 1, deadline=_deadline(5)):
+            async with _slot(gate, "m", 1, deadline=_deadline(5)):
                 started.set()
                 await asyncio.sleep(0.5)
 
@@ -149,7 +165,7 @@ class TestConcurrencyGate:
         await started.wait()
         start = time.monotonic()
         with pytest.raises(QueueTimeout):
-            async with gate.slot("m", 1, deadline=time.monotonic()):
+            async with _slot(gate, "m", 1, deadline=time.monotonic()):
                 pass
         elapsed = time.monotonic() - start
         assert elapsed < 0.05
@@ -164,7 +180,7 @@ class TestConcurrencyGate:
         samples: list[int] = []
 
         async def worker(i: int):
-            async with gate.slot("m", 5, deadline=_deadline(5)):
+            async with _slot(gate, "m", 5, deadline=_deadline(5)):
                 samples.append(gate.depth("m"))
                 await asyncio.sleep(0.02)
 
@@ -183,7 +199,7 @@ class TestConcurrencyGate:
         samples.clear()
 
         async def worker_no_contention(i: int):
-            async with gate.slot("m2", 5, deadline=_deadline(5)):
+            async with _slot(gate, "m2", 5, deadline=_deadline(5)):
                 samples.append(gate.depth("m2"))
                 await asyncio.sleep(0.01)
 
@@ -312,7 +328,7 @@ class TestAcquireReleaseSlot:
         assert gate.depth("m") == 0
         assert gate._entered.get("m", 0) == 0
         # slot is free again
-        async with gate.slot("m", 1, deadline=_deadline(1)):
+        async with _slot(gate, "m", 1, deadline=_deadline(1)):
             pass
 
     async def test_double_release_is_safe(self):
@@ -418,7 +434,7 @@ class TestQueueDepthCeiling:
         gate = ConcurrencyGate()
         tasks = await self._fill(gate, 1, max_queue_depth=1)
         with pytest.raises(QueueFull):
-            async with gate.slot("m", 1, deadline=_deadline(5), max_queue_depth=1):
+            async with _slot(gate, "m", 1, deadline=_deadline(5), max_queue_depth=1):
                 pass
         await self._drain(gate, tasks)
 

@@ -59,7 +59,6 @@ Bounded in-flight wait: waiters on an in-flight cold load call
 from __future__ import annotations
 
 import collections
-import collections.abc
 import logging
 import math
 import threading
@@ -196,8 +195,8 @@ class EvictingReservation:
     """Accounting for one model whose worker shutdown is in progress.
 
     ``pool`` is the concrete accounting pool of the popped entry, or None for
-    a marker with no entry (an admin disable of an unloaded model, or a bare
-    marker inserted through the ``evicting`` view): an unknown pool stays
+    a marker with no entry (an admin disable of an unloaded model): an
+    unknown pool stays
     conservatively relevant to every pool's capacity-wait decision.
     ``memory_gb`` stays debited from configured budgets until the shutdown
     owner confirms the worker has stopped (then it drops to 0.0 while the
@@ -206,39 +205,6 @@ class EvictingReservation:
 
     pool: str | None = None
     memory_gb: float = 0.0
-
-
-class _EvictingIds(collections.abc.MutableSet):
-    """Set-shaped live view of ``LoadDirector._evicting``'s keys.
-
-    Keeps the historical ``director.evicting`` set surface (membership,
-    iteration, equality with a set, ``add``/``discard``) working on top of the
-    single id -> EvictingReservation mapping. ``add`` inserts an unknown-pool,
-    zero-memory marker.
-    """
-
-    __slots__ = ("_records",)
-
-    def __init__(self, records: dict[str, EvictingReservation]):
-        self._records = records
-
-    def __contains__(self, model_id: object) -> bool:
-        return model_id in self._records
-
-    def __iter__(self):
-        return iter(list(self._records))
-
-    def __len__(self) -> int:
-        return len(self._records)
-
-    def add(self, model_id: str) -> None:
-        self._records.setdefault(model_id, EvictingReservation())
-
-    def discard(self, model_id: str) -> None:
-        self._records.pop(model_id, None)
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({set(self._records)!r})"
 
 
 @dataclass(eq=False)
@@ -341,8 +307,7 @@ class LoadDirector:
         # the victim's pool), and configured-budget admission keeps debiting
         # the victim's declared memory until disable_fn confirms the worker
         # stopped (else another cold load could overlap the still-resident
-        # victim). `evicting` is a set-shaped view of its keys. Guarded by
-        # self.lock.
+        # victim). Guarded by self.lock.
         self._evicting: dict[str, EvictingReservation] = {}
         # Explicit admin disable is persistent: once claimed, new acquires
         # remain blocked until the matching enable path calls allow_model().
@@ -391,11 +356,6 @@ class LoadDirector:
         # capacity-waiters wake and re-decide. Never allowed to raise into
         # the caller (wrapped at each call site).
         self.capacity_listener: Callable[[], None] | None = None
-
-    @property
-    def evicting(self) -> _EvictingIds:
-        """Set-shaped live view of the model ids whose eviction is in flight."""
-        return _EvictingIds(self._evicting)
 
     @staticmethod
     def _validate_capacity_knob(
@@ -1071,23 +1031,6 @@ class LoadDirector:
             listener()
         except Exception:  # noqa: BLE001
             logger.warning("capacity_listener raised; ignoring", exc_info=True)
-
-    def status(self) -> dict[str, dict[str, Any]]:
-        """Snapshot of currently-loaded models for /v1/models lookup.
-
-        Each value is `{"loaded": True, "worker_port", "last_touched_at",
-        "refcount"}`. Models not currently loaded are absent.
-        """
-        with self.lock:
-            return {
-                mid: {
-                    "loaded": True,
-                    "worker_port": e.worker_port,
-                    "last_touched_at": e.last_touched_at,
-                    "refcount": e.refcount,
-                }
-                for mid, e in self.loaded.items()
-            }
 
     def observed_peak(
         self,

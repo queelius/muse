@@ -60,6 +60,20 @@ pytestmark = pytest.mark.slow
 # ----------------------------------------------------------------------
 
 
+
+def _status(director) -> dict:
+    """Snapshot of the director's loaded set (formerly LoadDirector.status)."""
+    with director.lock:
+        return {
+            mid: {
+                "loaded": True,
+                "worker_port": e.worker_port,
+                "last_touched_at": e.last_touched_at,
+                "refcount": e.refcount,
+            }
+            for mid, e in director.loaded.items()
+        }
+
 @pytest.fixture(autouse=True)
 def _reset_supervisor_state():
     """Belt-and-suspenders: nothing in this file registers a global
@@ -219,7 +233,7 @@ class TestTwoModelsBothFit:
             assert captured["urls"][1] == "http://127.0.0.1:9002/v1/audio/speech"
 
         # Both models in director.loaded; neither was evicted.
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "model-a" in snapshot
         assert "model-b" in snapshot
         assert disable_fn.call_count == 0
@@ -273,7 +287,7 @@ class TestTwoModelsBothFit:
         assert enable_fn.call_count == 1
         assert disable_fn.call_count == 0
         # After three release calls, refcount is back to 0 (no leaks).
-        snapshot = director.status()
+        snapshot = _status(director)
         assert snapshot["model-a"]["refcount"] == 0
 
 
@@ -369,7 +383,7 @@ class TestTightBudgetForcesSwap:
         assert enable_fn.call_count == 4
 
         # Final state: only model-b is loaded.
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "model-b" in snapshot
         assert "model-a" not in snapshot
 

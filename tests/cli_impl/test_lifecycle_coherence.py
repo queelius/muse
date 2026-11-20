@@ -113,14 +113,14 @@ def test_eviction_claim_survives_free_memory_probe_failure_and_can_settle():
     claim = director.begin_model_disable(resident.model_id)
 
     assert director._eviction_claims[resident.model_id] is claim
-    assert resident.model_id in director.evicting
+    assert resident.model_id in director._evicting
     assert resident.model_id in director._blocked_models
     assert director.finish_eviction(
         claim, success=False, error=RuntimeError("teardown failed"),
     )
     director.allow_model(resident.model_id)
     assert director.loaded[resident.model_id] is resident
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id not in director._blocked_models
 
 
@@ -142,7 +142,7 @@ def test_interrupted_eviction_claim_publication_rolls_back_every_marker():
         director.begin_model_disable(resident.model_id)
 
     assert director.loaded[resident.model_id] is resident
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id not in director._blocked_models
     assert resident.model_id not in director._eviction_claims
     assert resident.model_id not in director._evicting
@@ -166,7 +166,7 @@ def test_admin_disable_wrapper_settles_director_and_blocks_until_enable():
 
     worker_disable.assert_called_once_with(resident.model_id, state=state)
     assert resident.model_id not in director.loaded
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id in director._blocked_models
     with pytest.raises(OperationError) as caught:
         director.acquire(resident.model_id, manifest=_manifest())
@@ -194,7 +194,7 @@ def test_failed_disable_restores_accounting_and_prior_allow_state():
             disable_model(resident.model_id, state=state)
 
     assert director.loaded[resident.model_id] is resident
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id not in director._blocked_models
 
 
@@ -293,7 +293,7 @@ def test_idle_eviction_reserves_capacity_and_blocks_racing_reacquire():
 
     with director.lock:
         assert resident.model_id not in director.loaded
-        assert resident.model_id in director.evicting
+        assert resident.model_id in director._evicting
         assert director._resident_for_pool("cpu") == pytest.approx(3.0)
         _, available = director._available_for_device("cpu")
         assert available == pytest.approx(1.0)
@@ -307,7 +307,7 @@ def test_idle_eviction_reserves_capacity_and_blocks_racing_reacquire():
     thread.join(timeout=2.0)
     assert not thread.is_alive()
     assert outcome == [[resident.model_id]]
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id not in director._blocked_models
     assert notifications == ["capacity"]
     assert director.recent_decisions[-1].reason == "idle_timeout:1s"
@@ -329,7 +329,7 @@ def test_failed_idle_eviction_clears_transient_state_and_restores_capacity():
     assert sweeper.tick() == []
 
     assert director.loaded[resident.model_id] is resident
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id not in director._blocked_models
     assert director._resident_for_pool("cpu") == pytest.approx(3.0)
     assert notifications == ["capacity"]
@@ -561,7 +561,7 @@ def test_lru_eviction_of_blocked_entry_keeps_admin_block():
 
     director.disable_fn.assert_called_once_with(resident.model_id)
     assert resident.model_id not in director.loaded
-    assert resident.model_id not in director.evicting
+    assert resident.model_id not in director._evicting
     assert resident.model_id in director._blocked_models
     with pytest.raises(OperationError) as caught:
         director.acquire(resident.model_id, manifest=_manifest())

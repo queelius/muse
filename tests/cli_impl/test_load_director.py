@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from muse.cli_impl.load_director import EvictingReservation
+
 from muse.admin.operations import OperationError
 from muse.cli_impl.load_director import (
     DecisionLogEntry,
@@ -32,6 +34,20 @@ from muse.cli_impl.load_director import (
 )
 from muse.core.catalog import _read_catalog, _write_catalog
 
+
+
+def _status(director) -> dict:
+    """Snapshot of the director's loaded set (formerly LoadDirector.status)."""
+    with director.lock:
+        return {
+            mid: {
+                "loaded": True,
+                "worker_port": e.worker_port,
+                "last_touched_at": e.last_touched_at,
+                "refcount": e.refcount,
+            }
+            for mid, e in director.loaded.items()
+        }
 
 def _make_probe(gpu_free: float = 32.0, cpu_free: float = 64.0) -> MagicMock:
     """Default probe: lots of room. The 'fits' branch is exercised."""
@@ -79,11 +95,11 @@ class TestWorkerTransitionClaims:
         with pytest.raises(OperationError) as pressure:
             director.acquire("incoming", manifest=_manifest(8.0))
         assert pressure.value.retryable is True
-        assert list(director.status()) == ["sibling"]
+        assert list(_status(director)) == ["sibling"]
 
         director.finish_worker_transition(token)
         assert director.acquire("incoming", manifest=_manifest(8.0)) == 9002
-        assert list(director.status()) == ["incoming"]
+        assert list(_status(director)) == ["incoming"]
 
     @pytest.mark.parametrize("owner", ["load", "eviction"])
     def test_transition_refuses_sibling_owned_by_load_or_eviction(self, owner):
@@ -151,7 +167,7 @@ class TestHotAcquire:
         assert enable_fn.call_count == 1
 
         # Refcount incremented twice: once per acquire
-        snapshot = director.status()
+        snapshot = _status(director)
         assert snapshot["fake-model"]["refcount"] == 2
 
     def test_hot_acquire_updates_last_touched(self):
@@ -163,13 +179,13 @@ class TestHotAcquire:
         )
 
         director.acquire("fake-model", manifest=_manifest())
-        first_touched = director.status()["fake-model"]["last_touched_at"]
+        first_touched = _status(director)["fake-model"]["last_touched_at"]
 
         # Sleep enough that monotonic advances past time-resolution noise
         time.sleep(0.01)
 
         director.acquire("fake-model", manifest=_manifest())
-        second_touched = director.status()["fake-model"]["last_touched_at"]
+        second_touched = _status(director)["fake-model"]["last_touched_at"]
 
         assert second_touched > first_touched
 
@@ -217,7 +233,7 @@ class TestColdAcquireFits:
 
         director.acquire("fake-model", manifest=_manifest(memory_gb=0.5))
 
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "fake-model" in snapshot
         assert snapshot["fake-model"]["worker_port"] == 9001
         assert snapshot["fake-model"]["loaded"] is True
@@ -234,7 +250,7 @@ class TestColdAcquireFits:
         director.acquire("fake-model", manifest=_manifest())
         after = time.monotonic()
 
-        snapshot = director.status()
+        snapshot = _status(director)
         loaded_at = snapshot["fake-model"]["last_touched_at"]
         # last_touched_at is monotonic seconds, recorded inside acquire
         assert before <= loaded_at <= after
@@ -367,7 +383,7 @@ class TestColdAcquireEvictsLRU:
         # After release, refcount goes to 0 (evictable).
         director.acquire("victim", manifest=_manifest(memory_gb=5.0, device="cpu"))
         director.release("victim")
-        assert director.status()["victim"]["refcount"] == 0
+        assert _status(director)["victim"]["refcount"] == 0
 
         # Now cold-acquire "newcomer" at 6 GB. cpu_free=4, headroom=2,
         # available=2, shortfall=4. Director must evict "victim".
@@ -376,7 +392,7 @@ class TestColdAcquireEvictsLRU:
 
         assert port == 9002
         disable_fn.assert_called_once_with("victim")
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "newcomer" in snapshot
         assert "victim" not in snapshot
 
@@ -434,7 +450,7 @@ class TestColdAcquireEvictsLRU:
         assert port == 9003
         # Both victims evicted, oldest first.
         assert evict_calls == ["oldest", "middle"]
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "newcomer" in snapshot
         assert "oldest" not in snapshot
         assert "middle" not in snapshot
@@ -454,7 +470,7 @@ class TestColdAcquireEvictsLRU:
 
         # Pre-load a model and DO NOT release it. refcount stays at 1.
         director.acquire("busy", manifest=_manifest(memory_gb=1.0, device="cpu"))
-        assert director.status()["busy"]["refcount"] == 1
+        assert _status(director)["busy"]["refcount"] == 1
 
         with pytest.raises(OperationError) as exc_info:
             director.acquire("oversized", manifest=_manifest(memory_gb=100.0, device="cpu"))
@@ -465,7 +481,7 @@ class TestColdAcquireEvictsLRU:
         # No eviction happened: refcount > 0 protected the only candidate.
         disable_fn.assert_not_called()
         # Busy model still loaded.
-        assert "busy" in director.status()
+        assert "busy" in _status(director)
 
     def test_skips_refcount_positive_candidates(self):
         # Mix of evictable + non-evictable candidates. Only the evictable
@@ -517,7 +533,7 @@ class TestColdAcquireEvictsLRU:
 
         assert port == 9003
         assert evict_calls == ["evictable"]
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "busy" in snapshot
         assert snapshot["busy"]["refcount"] == 1
         assert "evictable" not in snapshot
@@ -675,12 +691,12 @@ class TestColdAcquireEvictsLRU:
         # Pre-load "stuck" first (older), release. cpu_free 12 -> 8.
         director.acquire("stuck", manifest=_manifest(memory_gb=4.0, device="cpu"))
         director.release("stuck")
-        assert director.status()["stuck"]["refcount"] == 0
+        assert _status(director)["stuck"]["refcount"] == 0
         time.sleep(0.01)
         # Pre-load "good" newer, release. cpu_free 8 -> 4.
         director.acquire("good", manifest=_manifest(memory_gb=4.0, device="cpu"))
         director.release("good")
-        assert director.status()["good"]["refcount"] == 0
+        assert _status(director)["good"]["refcount"] == 0
 
         # Now cpu_free=4, headroom=1, available=3. Cold-acquire newcomer
         # at 6 GB. shortfall=3. LRU is "stuck"; disable_fn raises;
@@ -694,7 +710,7 @@ class TestColdAcquireEvictsLRU:
         assert disable_fn.call_args_list[1][0] == ("good",)
         assert disable_fn.call_count == 2
 
-        snapshot = director.status()
+        snapshot = _status(director)
         # Newcomer loaded.
         assert "newcomer" in snapshot
         # The first victim ("stuck") was re-inserted because disable_fn
@@ -903,13 +919,13 @@ class TestRelease:
 
         director.acquire("fake-model", manifest=_manifest())
         director.acquire("fake-model", manifest=_manifest())
-        assert director.status()["fake-model"]["refcount"] == 2
+        assert _status(director)["fake-model"]["refcount"] == 2
 
         director.release("fake-model")
-        assert director.status()["fake-model"]["refcount"] == 1
+        assert _status(director)["fake-model"]["refcount"] == 1
 
         director.release("fake-model")
-        assert director.status()["fake-model"]["refcount"] == 0
+        assert _status(director)["fake-model"]["refcount"] == 0
 
     def test_does_not_call_disable_fn_on_release(self):
         # v0.40.0 Task B: release does not auto-evict. Eviction is on-demand
@@ -934,11 +950,11 @@ class TestRelease:
         )
 
         director.acquire("fake-model", manifest=_manifest())
-        first = director.status()["fake-model"]["last_touched_at"]
+        first = _status(director)["fake-model"]["last_touched_at"]
 
         time.sleep(0.01)
         director.release("fake-model")
-        second = director.status()["fake-model"]["last_touched_at"]
+        second = _status(director)["fake-model"]["last_touched_at"]
         assert second > first
 
     def test_release_unknown_model_is_noop(self):
@@ -1052,7 +1068,7 @@ class TestConcurrentAcquireSameModel:
         assert call_count["n"] == 1, f"enable_fn was called {call_count['n']} times; expected 1"
 
         # Refcount must be 2: each acquire bumps it.
-        assert director.status()["fake-model"]["refcount"] == 2
+        assert _status(director)["fake-model"]["refcount"] == 2
 
 
 # ----------------------------------------------------------------------
@@ -1179,7 +1195,7 @@ class TestEnableFnException:
         # blocked indefinitely waiting on a dead Event.
         assert director.in_flight_loads == {}
         # And no LoadEntry was inserted on failure.
-        assert "fake-model" not in director.status()
+        assert "fake-model" not in _status(director)
 
     def test_failed_rollback_stays_blocked_and_accounted_until_disable(self):
         cleanup_failure = RuntimeError("worker teardown uncertain")
@@ -1952,7 +1968,7 @@ class TestWarmup:
 
         director.warmup("fake-model", manifest=_manifest())
 
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "fake-model" in snapshot
         assert snapshot["fake-model"]["refcount"] == 0
         assert snapshot["fake-model"]["loaded"] is True
@@ -1969,7 +1985,7 @@ class TestWarmup:
 
         director.acquire("fake-model", manifest=_manifest())
         director.release("fake-model")
-        assert director.status()["fake-model"]["refcount"] == 0
+        assert _status(director)["fake-model"]["refcount"] == 0
         enable_fn.reset_mock()
 
         port = director.warmup("fake-model", manifest=_manifest())
@@ -1977,7 +1993,7 @@ class TestWarmup:
         assert port == 9001
         enable_fn.assert_not_called()
         # Refcount must still be 0 (warmup must not bump).
-        assert director.status()["fake-model"]["refcount"] == 0
+        assert _status(director)["fake-model"]["refcount"] == 0
 
     def test_warmup_when_already_loaded_with_inflight_request(self):
         # If the model is loaded with refcount > 0 (a live request),
@@ -1989,13 +2005,13 @@ class TestWarmup:
         )
 
         director.acquire("fake-model", manifest=_manifest())
-        assert director.status()["fake-model"]["refcount"] == 1
+        assert _status(director)["fake-model"]["refcount"] == 1
 
         port = director.warmup("fake-model", manifest=_manifest())
 
         assert port == 9001
         # refcount unchanged (still 1 from the live acquire).
-        assert director.status()["fake-model"]["refcount"] == 1
+        assert _status(director)["fake-model"]["refcount"] == 1
 
     def test_warmup_records_decision_log_on_load(self):
         # Warmup should still be observable via recent_decisions.
@@ -2049,7 +2065,7 @@ class TestWarmup:
 
         assert port == 9002
         disable_fn.assert_called_once_with("victim")
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "newcomer" in snapshot
         # Newcomer at refcount=0 (warmup default).
         assert snapshot["newcomer"]["refcount"] == 0
@@ -2413,13 +2429,13 @@ class TestAutoDeviceLiveAccounting:
         # Pre-load victim: gpu_free=8, headroom=1, available=7 >= 6, fits.
         director.acquire("victim", manifest=_manifest(memory_gb=6.0, device="auto"))
         director.release("victim")
-        assert director.status()["victim"]["refcount"] == 0
+        assert _status(director)["victim"]["refcount"] == 0
 
         # Newcomer at 5 GB: gpu_free=2, available=1, shortfall -> evict victim.
         port = director.acquire("newcomer", manifest=_manifest(memory_gb=5.0, device="auto"))
         assert port == 9002
         disable_fn.assert_called_once_with("victim")
-        snapshot = director.status()
+        snapshot = _status(director)
         assert "newcomer" in snapshot
         assert "victim" not in snapshot
 
@@ -2508,7 +2524,7 @@ class TestLoadFailureSurfacesAsOperationError:
         assert ei.value.code == "model_load_failed"
         assert "worker failed to become healthy" in ei.value.message
         # Cleanup ran: no stale LoadEntry, no stranded in-flight slot.
-        assert director.status() == {}
+        assert _status(director) == {}
         assert director.in_flight_loads == {}
 
     def test_operation_error_from_load_passes_through_unwrapped(self):
@@ -2869,7 +2885,7 @@ class TestEvictionWindowRetryable:
     behavior. Observed live: six 503s at ~0.5s during qwen's eviction of
     ace-step (decision log 03:19:09Z, 2026-07-09).
 
-    Fix: track evictions-in-progress in `self.evicting`; include it in
+    Fix: track evictions-in-progress in `self._evicting`; include it in
     the retryable condition; fire the capacity listener when an eviction
     completes so parked waiters re-decide against the real freed memory.
     """
@@ -2890,7 +2906,7 @@ class TestEvictionWindowRetryable:
         # disable_fn still shutting the worker down, evictor not yet
         # registered in in_flight_loads. Director looks idle but capacity
         # WILL free when the eviction completes.
-        d.evicting.add("victim-model")
+        d._evicting["victim-model"] = EvictingReservation()
         with pytest.raises(OperationError) as exc:
             d._evict_lru_until_fits(
                 model_id="new", shortfall_gb=7.0, device="cuda",
@@ -2935,7 +2951,7 @@ class TestEvictionWindowRetryable:
         assert port == 9002
         assert ("fire",) in events
         assert events.index(("fire",)) < events.index(("enable", "new"))
-        assert d.evicting == set()
+        assert d._evicting == {}
 
     def test_evicting_cleared_when_memory_poll_raises(self):
         # v0.57.3 review finding: the marker must clear even when the
@@ -2967,7 +2983,7 @@ class TestEvictionWindowRetryable:
                 "new",
                 manifest={"capabilities": {"memory_gb": 6.0, "device": "cuda"}},
             )
-        assert d.evicting == set()
+        assert d._evicting == {}
 
     def test_partial_eviction_before_503_fires_listener(self):
         # v0.57.3 review finding: when an eviction frees SOME memory but the
@@ -3029,4 +3045,4 @@ class TestEvictionWindowRetryable:
         # The failed eviction re-inserted the victim; the evicting marker
         # must not leak (a leaked marker would make every future capacity
         # 503 spuriously retryable forever).
-        assert d.evicting == set()
+        assert d._evicting == {}

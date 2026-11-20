@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from muse.cli_impl.load_director import EvictingReservation
+
 from muse.admin.routes.memory import _per_model_breakdown
 from muse.cli_impl import supervisor
 from muse.cli_impl.load_director import LoadDirector, LoadEntry
@@ -480,7 +482,7 @@ def test_native_admission_rechecks_after_unlocked_preparation(native_entry, monk
                 if change == "blocked":
                     director._blocked_models.add(MODEL)
                 elif change == "evicting":
-                    director.evicting.add(MODEL)
+                    director._evicting[MODEL] = EvictingReservation()
                 elif change.startswith("resident"):
                     now = time.monotonic()
                     director.loaded[MODEL] = LoadEntry(MODEL, 9003, 1.0, 0, now, now, pool="cuda")
