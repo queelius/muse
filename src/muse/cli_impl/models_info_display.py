@@ -323,14 +323,12 @@ def format_info(
         uptime = loaded_worker.get("worker_uptime_seconds")
         status_value = loaded_worker.get("worker_status") or "running"
         restart = loaded_worker.get("restart_count", 0)
-        last_err = loaded_worker.get("last_error")
         lines.append(f"  pid:             {pid if pid is not None else '-'}")
         lines.append(
             f"  uptime:          {_format_uptime(uptime) if uptime is not None else '-'}"
         )
         lines.append(f"  status:          {status_value}")
         lines.append(f"  restart count:   {restart}")
-        lines.append(f"  last error:      {last_err if last_err else 'none'}")
     elif online_status is None:
         lines.append("  not running (supervisor unreachable; run `muse serve`)")
     else:

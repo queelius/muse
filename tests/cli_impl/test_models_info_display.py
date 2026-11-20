@@ -116,10 +116,10 @@ class TestFormatInfo:
                 "worker_uptime_seconds": 60 * 60 + 30 * 60 + 5,
                 "worker_status": "running",
                 "restart_count": 0,
-                "last_error": None,
             },
         )
         assert "loaded on worker port 9001" in out
+        assert "last error" not in out
         assert "pid:" in out
         assert "4711" in out
         assert "1h 30m" in out
