@@ -68,6 +68,10 @@ def _validate_json_body(decl, route, example):
         from muse.modalities.decision_evaluation.validation import parse_request
 
         parse_request(json.dumps(example).encode())
+    elif decl["path"] == "/v1/systemone/batch":
+        from muse.modalities.decision_evaluation.validation import parse_batch_request
+
+        parse_batch_request(json.dumps(example).encode())
     else:  # pragma: no cover
         pytest.fail(f"no validator for JSON route {decl['path']}")
 

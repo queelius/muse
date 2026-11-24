@@ -53,6 +53,23 @@ class DecisionRequest:
 
 
 @dataclass(frozen=True)
+class DecisionBatchItem:
+    """One validated item in a /v1/systemone/batch request."""
+
+    id: str | None
+    state: str | dict[str, JsonValue] | list[JsonValue]
+    questions: tuple[tuple[str, DecisionQuestion], ...]
+
+
+@dataclass(frozen=True)
+class DecisionBatchRequest:
+    """A validated /v1/systemone/batch request. `items` keeps the caller's order."""
+
+    model: str
+    items: tuple[DecisionBatchItem, ...]
+
+
+@dataclass(frozen=True)
 class PreparedQuestion:
     """One question after backend preparation.
 

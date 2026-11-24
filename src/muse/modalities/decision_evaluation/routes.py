@@ -1,8 +1,9 @@
-"""POST /v1/systemone: typed Choice / Score / Noul decisions.
+"""POST /v1/systemone and POST /v1/systemone/batch: typed decisions.
 
-The body is read with its own 128 KiB bound and parsed strictly (see
-validation.py) before the model is looked up, on the worker as on the
-gateway. Execution goes through one DecisionExecutor per model.
+Each route reads its body with its own bound (128 KiB single, 512 KiB batch)
+and parses strictly (see validation.py) before the model is looked up, on
+the worker as on the gateway. Execution goes through one DecisionExecutor
+per model.
 
 Errors use the OpenAI envelope: 400 invalid request or input-token
 limit, 413 body/state size, 404 unknown model, 503 queue full/timeout or
@@ -23,13 +24,21 @@ from muse.core import config
 from muse.core.disconnect import ClientDisconnected, unless_disconnected
 from muse.core.errors import error_response
 from muse.core.registry import ModalityRegistry
-from muse.modalities.decision_evaluation.codec import encode_response
+from muse.modalities.decision_evaluation.codec import (
+    encode_batch_response,
+    encode_response,
+)
 from muse.modalities.decision_evaluation.execution import DecisionExecutor
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
     DecisionInputError,
 )
-from muse.modalities.decision_evaluation.validation import MAX_BODY_BYTES, parse_request
+from muse.modalities.decision_evaluation.validation import (
+    MAX_BATCH_BODY_BYTES,
+    MAX_BODY_BYTES,
+    parse_batch_request,
+    parse_request,
+)
 
 
 # MODALITY defined locally to avoid the __init__ circular import;
@@ -45,20 +54,20 @@ logger = logging.getLogger(__name__)
 _UNAVAILABLE = {"backend_unusable", "shutting_down"}
 
 
-async def _read_body(request: Request) -> bytes:
-    """The raw body, refusing more than MAX_BODY_BYTES even without a
+async def _read_body(request: Request, *, max_bytes: int = MAX_BODY_BYTES) -> bytes:
+    """The raw body, refusing more than max_bytes even without a
     Content-Length (the stream is counted as it arrives)."""
     declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+    if declared is not None and declared.isdigit() and int(declared) > max_bytes:
         raise DecisionInputError(
-            "body_too_large", f"request body exceeds {MAX_BODY_BYTES} bytes", status=413,
+            "body_too_large", f"request body exceeds {max_bytes} bytes", status=413,
         )
     chunks, total = [], 0
     async for chunk in request.stream():
         total += len(chunk)
-        if total > MAX_BODY_BYTES:
+        if total > max_bytes:
             raise DecisionInputError(
-                "body_too_large", f"request body exceeds {MAX_BODY_BYTES} bytes", status=413,
+                "body_too_large", f"request body exceeds {max_bytes} bytes", status=413,
             )
         chunks.append(chunk)
     return b"".join(chunks)
@@ -86,7 +95,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
     @router.post("/v1/systemone")
     async def systemone(request: Request):
         try:
-            req = parse_request(await _read_body(request))
+            req = parse_request(await _read_body(request, max_bytes=MAX_BODY_BYTES))
         except DecisionInputError as exc:
             return error_response(exc.status, exc.code, exc.message)
 
@@ -101,6 +110,60 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
                 _executor(backend.model_id).execute(backend, req, deadline=deadline),
             )
             body = encode_response(req, batch, model_id=backend.model_id)
+        except ClientDisconnected:
+            return error_response(499, "client_disconnected", "the client disconnected")
+        except DecisionInputError as exc:
+            return error_response(exc.status, exc.code, exc.message)
+        except QueueFull:
+            return error_response(
+                503, "queue_full", f"queue for model {req.model!r} is full",
+            )
+        except QueueTimeout:
+            return error_response(
+                503, "queue_timeout", f"timed out waiting for model {req.model!r}",
+            )
+        except DecisionBackendError as exc:
+            if exc.code in _UNAVAILABLE:
+                return error_response(503, "model_unusable", exc.message)
+            logger.error("decision backend %s failed: %s", backend.model_id, exc.code)
+            return error_response(
+                500, "decision_backend_error",
+                "the decision backend produced an invalid result",
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Type only: native messages can carry paths or user text.
+            logger.error(
+                "decision backend %s raised %s", backend.model_id, type(exc).__name__,
+            )
+            return error_response(
+                500, "decision_backend_error", "the decision backend failed",
+            )
+        return JSONResponse(body)
+
+    @router.post("/v1/systemone/batch")
+    async def systemone_batch(request: Request):
+        try:
+            req = parse_batch_request(
+                await _read_body(request, max_bytes=MAX_BATCH_BODY_BYTES),
+            )
+        except DecisionInputError as exc:
+            return error_response(exc.status, exc.code, exc.message)
+
+        backend = registry.get_or_404(MODALITY, req.model)
+
+        budget = config.get("server.queue_timeout_seconds") or 0.0
+        deadline = time.monotonic() + max(0.0, float(budget))
+        started = time.monotonic()
+        try:
+            # A client that gives up stops the batch before the next item or question.
+            batches = await unless_disconnected(
+                request,
+                _executor(backend.model_id).execute_batch(backend, req, deadline=deadline),
+            )
+            elapsed_ms = round((time.monotonic() - started) * 1000.0, 2)
+            body = encode_batch_response(
+                req, batches, model_id=backend.model_id, elapsed_ms=elapsed_ms,
+            )
         except ClientDisconnected:
             return error_response(499, "client_disconnected", "the client disconnected")
         except DecisionInputError as exc:

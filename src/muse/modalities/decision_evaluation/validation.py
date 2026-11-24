@@ -1,8 +1,9 @@
-"""Strict request parsing for POST /v1/systemone.
+"""Strict request parsing for POST /v1/systemone and POST /v1/systemone/batch.
 
-`parse_request(body)` takes the raw request bytes (the gateway and the
-direct worker both call it before any model selection) and returns an
-immutable `DecisionRequest`, or raises `DecisionInputError`.
+`parse_request(body)` and `parse_batch_request(body)` take the raw request
+bytes (the gateway and the direct worker both call them before any model
+selection) and return an immutable `DecisionRequest` / `DecisionBatchRequest`,
+or raise `DecisionInputError`.
 
 Strictness rules:
   - UTF-8 only; malformed bytes, a BOM and unpaired surrogates are errors.
@@ -22,6 +23,8 @@ import math
 
 from muse.modalities.decision_evaluation.protocol import (
     QUESTION_KINDS,
+    DecisionBatchItem,
+    DecisionBatchRequest,
     DecisionInputError,
     DecisionQuestion,
     DecisionRequest,
@@ -30,6 +33,8 @@ from muse.modalities.decision_evaluation.protocol import (
 
 
 MAX_BODY_BYTES = 128 * 1024
+MAX_BATCH_BODY_BYTES = 512 * 1024
+MIN_BATCH_ITEMS, MAX_BATCH_ITEMS = 1, 64
 MAX_STATE_BYTES = 64 * 1024
 MAX_STATE_DEPTH = 8
 MIN_QUESTIONS, MAX_QUESTIONS = 1, 16
@@ -42,6 +47,8 @@ MAX_DESCRIPTION_BYTES = 2 * 1024
 NOUL_DEFAULTS = (("true", "True"), ("false", "False"))
 
 _REQUEST_FIELDS = frozenset({"model", "state", "questions"})
+_BATCH_REQUEST_FIELDS = frozenset({"model", "items"})
+_BATCH_ITEM_FIELDS = frozenset({"id", "state", "questions"})
 _QUESTION_FIELDS = frozenset({"type", "instructions", "criteria"})
 _MEDIA_FIELDS = frozenset({
     "image", "images", "audio", "video", "media", "file", "files",
@@ -115,11 +122,11 @@ def _encodable(text: str) -> None:
         raise _fail("invalid_unicode", "request contains an unpaired surrogate") from None
 
 
-def _decode(body: bytes) -> JsonValue:
-    if len(body) > MAX_BODY_BYTES:
+def _decode(body: bytes, *, max_bytes: int = MAX_BODY_BYTES) -> JsonValue:
+    if len(body) > max_bytes:
         raise _fail(
             "body_too_large",
-            f"request body exceeds {MAX_BODY_BYTES} bytes",
+            f"request body exceeds {max_bytes} bytes",
             status=413,
         )
     try:
@@ -165,19 +172,19 @@ def _bounded_text(value: JsonValue, limit: int, *, allow_empty: bool = False) ->
     )
 
 
-def _parse_state(value: JsonValue, depth: int) -> str | dict | list:
+def _parse_state(value: JsonValue, depth: int, *, where: str = "state") -> str | dict | list:
     if isinstance(value, str):
         if value == "":
-            raise _fail("invalid_state", "state must be a nonempty string, object or array")
+            raise _fail("invalid_state", f"{where} must be a nonempty string, object or array")
         size = _utf8_len(value)
     elif isinstance(value, (dict, list)):
         if depth > MAX_STATE_DEPTH:
-            raise _fail("state_too_deep", f"state nests deeper than {MAX_STATE_DEPTH} levels")
+            raise _fail("state_too_deep", f"{where} nests deeper than {MAX_STATE_DEPTH} levels")
         size = _utf8_len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
     else:
-        raise _fail("invalid_state", "state must be a nonempty string, object or array")
+        raise _fail("invalid_state", f"{where} must be a nonempty string, object or array")
     if size > MAX_STATE_BYTES:
-        raise _fail("state_too_large", f"state exceeds {MAX_STATE_BYTES} bytes", status=413)
+        raise _fail("state_too_large", f"{where} exceeds {MAX_STATE_BYTES} bytes", status=413)
     return value
 
 
@@ -271,9 +278,36 @@ def _parse_question(value: JsonValue, where: str) -> DecisionQuestion:
     return DecisionQuestion(kind=kind, instructions=instructions, criteria=criteria)
 
 
+def _parse_questions(
+    questions: JsonValue, *, prefix: str = "",
+) -> tuple[tuple[str, DecisionQuestion], ...]:
+    where_questions = f"{prefix}questions"
+    if not isinstance(questions, dict):
+        raise _fail(
+            "invalid_questions",
+            f"{where_questions} must be an object keyed by question id",
+        )
+    n = len(questions)
+    if not MIN_QUESTIONS <= n <= MAX_QUESTIONS:
+        raise _fail(
+            "invalid_questions",
+            f"{where_questions} has {n} entries; expected {MIN_QUESTIONS}-{MAX_QUESTIONS}",
+        )
+    parsed: list[tuple[str, DecisionQuestion]] = []
+    for i, (qid, question) in enumerate(questions.items()):
+        where = f"{where_questions}[{i}]"
+        if not _bounded_text(qid, MAX_KEY_BYTES):
+            raise _fail(
+                "invalid_question_id",
+                f"{where} id must be 1-{MAX_KEY_BYTES} UTF-8 bytes",
+            )
+        parsed.append((qid, _parse_question(question, where)))
+    return tuple(parsed)
+
+
 def parse_request(body: bytes) -> DecisionRequest:
     """Parse and validate a raw /v1/systemone body. Raises DecisionInputError."""
-    doc = _decode(body)
+    doc = _decode(body, max_bytes=MAX_BODY_BYTES)
     if not isinstance(doc, dict):
         raise _fail("invalid_request", "request body must be a JSON object")
     _check_text(doc)
@@ -288,24 +322,65 @@ def parse_request(body: bytes) -> DecisionRequest:
 
     raw_state = _require(doc, "state", "request")
     state = _parse_state(raw_state, _check_text(raw_state))
+    questions = _parse_questions(_require(doc, "questions", "request"))
 
-    questions = _require(doc, "questions", "request")
-    if not isinstance(questions, dict):
-        raise _fail("invalid_questions", "questions must be an object keyed by question id")
-    n = len(questions)
-    if not MIN_QUESTIONS <= n <= MAX_QUESTIONS:
+    return DecisionRequest(model=model, state=state, questions=questions)
+
+
+def parse_batch_request(body: bytes) -> DecisionBatchRequest:
+    """Parse and validate a raw /v1/systemone/batch body. Raises DecisionInputError."""
+    doc = _decode(body, max_bytes=MAX_BATCH_BODY_BYTES)
+    if not isinstance(doc, dict):
+        raise _fail("invalid_request", "request body must be a JSON object")
+    _check_text(doc)
+    _reject_unknown(doc, _BATCH_REQUEST_FIELDS, "request")
+
+    model = _require(doc, "model", "request")
+    if not _bounded_text(model, MAX_KEY_BYTES):
         raise _fail(
-            "invalid_questions",
-            f"questions has {n} entries; expected {MIN_QUESTIONS}-{MAX_QUESTIONS}",
+            "invalid_model",
+            f"model must be a nonempty catalog id of at most {MAX_KEY_BYTES} UTF-8 bytes",
         )
-    parsed: list[tuple[str, DecisionQuestion]] = []
-    for i, (qid, question) in enumerate(questions.items()):
-        where = f"questions[{i}]"
-        if not _bounded_text(qid, MAX_KEY_BYTES):
-            raise _fail(
-                "invalid_question_id",
-                f"{where} id must be 1-{MAX_KEY_BYTES} UTF-8 bytes",
-            )
-        parsed.append((qid, _parse_question(question, where)))
 
-    return DecisionRequest(model=model, state=state, questions=tuple(parsed))
+    raw_items = _require(doc, "items", "request")
+    if not isinstance(raw_items, list):
+        raise _fail("invalid_request", "items must be a JSON array")
+    n_items = len(raw_items)
+    if not MIN_BATCH_ITEMS <= n_items <= MAX_BATCH_ITEMS:
+        raise _fail(
+            "invalid_request",
+            f"items has {n_items} entries; expected {MIN_BATCH_ITEMS}-{MAX_BATCH_ITEMS}",
+        )
+
+    parsed_items: list[DecisionBatchItem] = []
+    seen_ids: set[str] = set()
+    for i, raw_item in enumerate(raw_items):
+        where = f"items[{i}]"
+        if not isinstance(raw_item, dict):
+            raise _fail("invalid_request", f"{where} must be an object")
+        _reject_unknown(raw_item, _BATCH_ITEM_FIELDS, where)
+
+        raw_id = raw_item.get("id")
+        if raw_id is not None:
+            if not _bounded_text(raw_id, MAX_KEY_BYTES):
+                raise _fail(
+                    "invalid_item_id",
+                    f"{where}.id must be null or a nonempty string of at most "
+                    f"{MAX_KEY_BYTES} UTF-8 bytes",
+                )
+            if raw_id in seen_ids:
+                raise _fail(
+                    "duplicate_item_id",
+                    f"{where}.id duplicates an earlier item id",
+                )
+            seen_ids.add(raw_id)
+            item_id: str | None = raw_id
+        else:
+            item_id = None
+
+        raw_state = _require(raw_item, "state", where)
+        state = _parse_state(raw_state, _check_text(raw_state), where=f"{where}.state")
+        questions = _parse_questions(_require(raw_item, "questions", where), prefix=f"{where}.")
+        parsed_items.append(DecisionBatchItem(id=item_id, state=state, questions=questions))
+
+    return DecisionBatchRequest(model=model, items=tuple(parsed_items))

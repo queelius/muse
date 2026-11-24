@@ -263,18 +263,25 @@ class TestQueueCeiling:
 def test_only_systemone_cancels_its_worker_call_on_disconnect():
     from muse.core.discovery import disconnect_cancellable_paths
 
-    assert disconnect_cancellable_paths() == frozenset({"/v1/systemone"})
+    assert disconnect_cancellable_paths() == frozenset({
+        "/v1/systemone",
+        "/v1/systemone/batch",
+    })
 
 
 @pytest.mark.parametrize("path,expected", [
-    ("/v1/systemone", True), ("/v1/systemone/", True), ("/v1/other", False),
+    ("/v1/systemone", True),
+    ("/v1/systemone/", True),
+    ("/v1/systemone/batch", True),
+    ("/v1/systemone/batch/", True),
+    ("/v1/other", False),
 ])
 async def test_route_watches_disconnect_only_for_declared_paths(path, expected):
     from muse.cli_impl.gateway import _route_via_director, build_gateway
 
     state = _state()
     paths = build_gateway(state=state).state.disconnect_cancellable_paths
-    assert paths == frozenset({"/v1/systemone"})
+    assert paths == frozenset({"/v1/systemone", "/v1/systemone/batch"})
     req = MagicMock()
     req.method = "POST"
     req.url.path = path

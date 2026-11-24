@@ -6,7 +6,7 @@ Concise engineering guide for Gemini / Antigravity agents working in this reposi
 
 - **Identity & Packaging**: Python 3.10+ (`src/` layout). Distributed on PyPI as **`museq`** (`pyproject.toml` `[project].name = "museq"`), while the Python import path, CLI binary (`muse`), and repo stay **`muse`**.
 - **Purpose**: Self-hostable, model-agnostic multi-modality AI server with OpenAI-compatible (plus Cohere, LibreTranslate, TypeSafe System One, and muse-native) HTTP endpoints.
-- **Scale (live codebase)**: **25 modalities** under `src/muse/modalities/`, **30 bundled model scripts** under `src/muse/models/`, **12 admin endpoints**, and a dynamic **MCP server** (11 fixed admin tools + `muse_describe` + dynamic per-route inference tools generated from `/v1/capabilities` + `/openapi.json`).
+- **Scale (live codebase)**: **28 modalities** under `src/muse/modalities/`, **34 bundled model scripts** under `src/muse/models/`, **12 admin endpoints**, and a dynamic **MCP server** (11 fixed admin tools + `muse_describe` + dynamic per-route inference tools generated from `/v1/capabilities` + `/openapi.json`).
 - **Package Data**: `src/muse/curated.yaml`, `src/muse/chat_formats.yaml`, and bundled speech reference voices (`src/muse/modalities/audio_speech/data/*.{wav,json}`) are shipped as wheel package data and loaded via `importlib.resources`.
 - **CLI Philosophy**: Deliberately admin-only (`serve`, `pull`, `search`, `models`, `config`, `doctor`, `storage`, `telemetry`, `federate`, `mcp`). Never add per-modality CLI verbs (`muse speak`, etc.); inference belongs on HTTP and MCP.
 
@@ -46,8 +46,8 @@ src/muse/
 │   ├── storage.py           # Owned-storage accounting, safe pruning, venv hardlink deduplication
 │   ├── resource_registry.py # Owned process/resource tracking for clean teardown & doctor
 │   └── image_preprocessing.py # Shared 4-tier image processor selection helper
-├── modalities/              # 25 self-contained modality packages + shared `_common/` helpers
-├── models/<model_id>.py     # 30 bundled drop-in model scripts (MANIFEST + Model)
+├── modalities/              # 28 self-contained modality packages + shared `_common/` helpers
+├── models/<model_id>.py     # 34 bundled drop-in model scripts (MANIFEST + Model)
 ├── admin/                   # `/v1/admin/*` routes, shared bearer auth, JobStore, operations, AdminClient
 ├── observability/           # TelemetryStore (SQLite WAL), events, recorder, traces, sampler, logs, dashboard, `_lifecycle`
 ├── federation/              # Static node membership, NodeRegistry polling, model-locality router
@@ -58,10 +58,10 @@ docs/                        # MODALITIES.md, INTERNALS.md, CONFIG.md, TELEMETRY
 examples/                    # Runnable HTTP/SDK clients
 ```
 
-### The 25 Modalities (`src/muse/modalities/`)
+### The 28 Modalities (`src/muse/modalities/`)
 
 Python directory names use underscores; runtime `MODALITY` tags are MIME-style (`3d/generation` lives in `model_3d_generation/`):
-`audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation` (`/v1/audio/music` + `/v1/audio/sfx`), `audio/quality`, `audio/speech` (`/v1/audio/speech` + saved voices `/v1/audio/speech/voices`), `audio/transcription`, `chat/completion` (text LLMs + VLMs), `decision/evaluation` (`/v1/systemone`), `embedding/text`, `image/animation`, `image/cv` (`/v1/images/{depth,keypoints,detect}`), `image/embedding`, `image/generation` (`/v1/images/{generations,edits,variations}`), `image/ocr`, `image/pixelart` (`/v1/images/{pixelize,autotile}`), `image/segmentation`, `image/upscale`, `image/vectorization`, `3d/generation` (`/v1/3d/{from-image,generations}`), `text/classification` (`/v1/moderations` + `/v1/text/classifications`), `text/rerank`, `text/summarization`, `text/translation` (`/v1/translate`, `/translate`, `GET /languages`), `video/generation`.
+`audio/alignment`, `audio/classification`, `audio/embedding`, `audio/generation` (`/v1/audio/music` + `/v1/audio/sfx` with optional mastering/looping), `audio/process` (`/v1/audio/process` weightless DSP mastering/looping), `audio/quality`, `audio/speech` (`/v1/audio/speech` + saved voices `/v1/audio/speech/voices`), `audio/transcription`, `chat/completion` (text LLMs + VLMs), `decision/evaluation` (`/v1/systemone` + `/v1/systemone/batch`), `embedding/text`, `image/animation`, `image/cv` (`/v1/images/{depth,keypoints,detect}`), `image/embedding`, `image/generation` (`/v1/images/{generations,edits,variations}`), `image/matting` (`/v1/images/matting` via `sprite-matte` + `birefnet-lite`), `image/ocr`, `image/pixelart` (`/v1/images/{pixelize,autotile,spritesheet}`), `image/segmentation`, `image/upscale`, `image/vectorization`, `3d/generation` (`/v1/3d/{from-image,generations}`), `music/midi` (`/v1/music/midi` SMF Type 1 + structured score via `midi-composer` + ABC LMs), `text/classification` (`/v1/moderations` + `/v1/text/classifications`), `text/rerank`, `text/summarization`, `text/translation` (`/v1/translate`, `/translate`, `GET /languages`), `video/generation`.
 
 ## 3. Architecture Invariants
 
@@ -75,7 +75,7 @@ Python directory names use underscores; runtime `MODALITY` tags are MIME-style (
   - `src/muse/__init__.py`, `src/muse/cli.py`, and `src/muse/core/config.py` must stay free of heavy ML libs (`torch`, `transformers`, `diffusers`, `llama_cpp`, `sentence_transformers`) so `muse --help` and `muse pull` run with core deps only.
   - `src/muse/observability/__init__.py` eagerly exports only stdlib-backed symbols and lazily loads `dashboard` / `dashboard_auth` via PEP 562 `__getattr__` so importing `recorder` never pulls in `fastapi` (enforced by `tests/observability/test_public_api.py`).
   - Runtimes and bundled model scripts defer heavy imports via module-level `None` sentinels + `_ensure_deps()`, and MUST reuse `muse.core.runtime_helpers` (`select_device`, `dtype_for_name`, `set_inference_mode`, `LoadTimer`, `resolve_model_source`) — enforced via AST scan in `tests/core/test_runtime_helpers_meta.py`.
-- **`MODEL_OPTIONAL_PATHS`**: Modalities whose wire clients may omit `model` export a `MODEL_OPTIONAL_PATHS` tuple in `__init__.py` (currently `audio_alignment`, `audio_quality`, `image_pixelart`, `image_vectorization`, and `text_translation`). `discover_modalities` / `model_optional_paths()` aggregates them; the gateway resolves the first enabled catalog model of that modality (or 503 `no_default_model`) instead of 400 `model_required`.
+- **`MODEL_OPTIONAL_PATHS`**: Modalities whose wire clients may omit `model` export a `MODEL_OPTIONAL_PATHS` tuple in `__init__.py` (currently `audio_alignment`, `audio_process`, `audio_quality`, `image_matting`, `image_pixelart`, `image_vectorization`, `music_midi`, and `text_translation`). `discover_modalities` / `model_optional_paths()` aggregates them; the gateway resolves the first enabled catalog model of that modality (or 503 `no_default_model`) instead of 400 `model_required`.
 - **Capability & device placement precedence**:
   - **Device** (resolved via `effective_device` / `load_backend`): `catalog.device_override` (`muse models set-device`) > `manifest.capabilities.device` (if `!= "auto"`) > `muse serve --device` / `MUSE_DEVICE` > `"auto"` (`cuda` > `mps` > `cpu`). Default for CUDA-safe models is `"auto"` (only ONNX `supertonic-3` pins `"cpu"`).
   - **Consistent pool resolution**: `auto` resolves to GPU VRAM iff live GPU memory is present, consistently across `LoadDirector`, `supervisor._servability_reason`, and `/v1/admin/memory`. (`mps` pools against host RAM but records probe measurements under `mps`.)

@@ -24,16 +24,24 @@ import concurrent.futures
 import logging
 import threading
 
+from collections.abc import Callable
+from typing import TypeVar
+
 from muse.cli_impl.queueing import ConcurrencyGate
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
     DecisionBatch,
+    DecisionBatchRequest,
+    DecisionCancelled,
+    DecisionInputError,
     DecisionModel,
     DecisionRequest,
+    PreparedBatch,
 )
 
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 def _run(
@@ -42,6 +50,34 @@ def _run(
     # Every question is prepared (tokenized, length-checked) before any is
     # evaluated, so an invalid question means no inference at all.
     return backend.evaluate(backend.prepare(request), should_stop=stop.is_set)
+
+
+def _run_batch(
+    backend: DecisionModel, request: DecisionBatchRequest, stop: threading.Event,
+) -> list[DecisionBatch]:
+    # Prepare every item before evaluating any, so an over-limit item fails
+    # cleanly without running partial inference. Check cancellation between
+    # every item (prepare and evaluate) as well as between every question.
+    prepared: list[PreparedBatch] = []
+    for i, item in enumerate(request.items):
+        if stop.is_set():
+            raise DecisionCancelled()
+        item_req = DecisionRequest(
+            model=request.model, state=item.state, questions=item.questions,
+        )
+        try:
+            prepared.append(backend.prepare(item_req))
+        except DecisionInputError as exc:
+            raise DecisionInputError(
+                exc.code, f"items[{i}]: {exc.message}", status=exc.status,
+            ) from None
+
+    results: list[DecisionBatch] = []
+    for batch in prepared:
+        if stop.is_set():
+            raise DecisionCancelled()
+        results.append(backend.evaluate(batch, should_stop=stop.is_set))
+    return results
 
 
 def _consume(future: asyncio.Future) -> None:
@@ -79,9 +115,26 @@ class DecisionExecutor:
     async def execute(
         self, backend: DecisionModel, request: DecisionRequest, *, deadline: float,
     ) -> DecisionBatch:
-        """Run one batch. Raises QueueFull / QueueTimeout while waiting,
-        DecisionBackendError when the backend is unusable or closed, and
-        whatever prepare/evaluate raise."""
+        """Run one single-item request. Raises QueueFull / QueueTimeout while
+        waiting, DecisionBackendError when the backend is unusable or closed,
+        and whatever prepare/evaluate raise."""
+        return await self._submit(backend, _run, request, deadline=deadline)
+
+    async def execute_batch(
+        self, backend: DecisionModel, request: DecisionBatchRequest, *, deadline: float,
+    ) -> list[DecisionBatch]:
+        """Run a multi-item batch under a single executor slot and shared
+        queue deadline, checking cancellation between items and questions."""
+        return await self._submit(backend, _run_batch, request, deadline=deadline)
+
+    async def _submit(
+        self,
+        backend: DecisionModel,
+        fn: Callable[..., _T],
+        request: object,
+        *,
+        deadline: float,
+    ) -> _T:
         self._check_open(backend)
         # Release only a slot actually taken (the gateway's rule): False
         # means "uncapped, nothing reserved".
@@ -91,7 +144,7 @@ class DecisionExecutor:
         stop = threading.Event()
         try:
             self._check_open(backend)
-            future = self._pool.submit(_run, backend, request, stop)
+            future = self._pool.submit(fn, backend, request, stop)
         except BaseException:
             if took_slot:
                 self._gate.release_slot(self.model_id)

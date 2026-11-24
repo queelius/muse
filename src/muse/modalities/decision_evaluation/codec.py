@@ -18,11 +18,13 @@ option or level. Probabilities are not rounded.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 import math
 
 from muse.modalities.decision_evaluation.protocol import (
     DecisionBackendError,
     DecisionBatch,
+    DecisionBatchRequest,
     DecisionQuestion,
     DecisionRequest,
     JsonValue,
@@ -119,6 +121,33 @@ def _encode_answer(question: DecisionQuestion, values: tuple[float, ...]) -> dic
     return {"type": "noul", "noul": values[keys.index("true")]}
 
 
+def _encode_item_result(
+    questions: tuple[tuple[str, DecisionQuestion], ...],
+    result: DecisionBatch,
+) -> tuple[dict[str, JsonValue], dict[str, int]]:
+    """Validate one backend DecisionBatch against its questions."""
+    if not isinstance(result, DecisionBatch):
+        raise _invalid("invalid_result")
+    tokens = result.input_tokens
+    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+        raise _invalid("invalid_usage")
+
+    by_id: dict[str, QuestionDistribution] = {}
+    for dist in result.answers:
+        if not isinstance(dist, QuestionDistribution) or dist.question_id in by_id:
+            raise _invalid("incomplete_answers")
+        by_id[dist.question_id] = dist
+    if set(by_id) != {qid for qid, _ in questions}:
+        raise _invalid("incomplete_answers")
+
+    answers: dict[str, JsonValue] = {}
+    for qid, question in questions:
+        values = _distribution(question.keys, by_id[qid].probabilities)
+        answers[qid] = _encode_answer(question, values)
+
+    return answers, {"input_tokens": tokens, "output_tokens": 0}
+
+
 def encode_response(
     request: DecisionRequest,
     result: DecisionBatch,
@@ -131,27 +160,51 @@ def encode_response(
     is missing, repeated or extra, any distribution is incomplete,
     non-finite, negative or not normalized, or usage is malformed.
     """
-    if not isinstance(result, DecisionBatch):
-        raise _invalid("invalid_result")
-    tokens = result.input_tokens
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
-        raise _invalid("invalid_usage")
-
-    by_id: dict[str, QuestionDistribution] = {}
-    for dist in result.answers:
-        if not isinstance(dist, QuestionDistribution) or dist.question_id in by_id:
-            raise _invalid("incomplete_answers")
-        by_id[dist.question_id] = dist
-    if set(by_id) != {qid for qid, _ in request.questions}:
-        raise _invalid("incomplete_answers")
-
-    answers: dict[str, JsonValue] = {}
-    for qid, question in request.questions:
-        values = _distribution(question.keys, by_id[qid].probabilities)
-        answers[qid] = _encode_answer(question, values)
-
+    answers, usage = _encode_item_result(request.questions, result)
     return {
         "model": model_id,
         "answers": answers,
-        "usage": {"input_tokens": tokens, "output_tokens": 0},
+        "usage": usage,
+    }
+
+
+def encode_batch_response(
+    request: DecisionBatchRequest,
+    results: Sequence[DecisionBatch],
+    *,
+    model_id: str,
+    elapsed_ms: float = 0.0,
+) -> dict[str, JsonValue]:
+    """Validate every item's backend result and build the batch envelope."""
+    if not isinstance(results, (list, tuple)) or len(results) != len(request.items):
+        raise _invalid("incomplete_results")
+    if (
+        isinstance(elapsed_ms, bool)
+        or not isinstance(elapsed_ms, (int, float))
+        or not math.isfinite(elapsed_ms)
+        or elapsed_ms < 0.0
+    ):
+        raise _invalid("invalid_usage")
+
+    encoded: list[dict[str, JsonValue]] = []
+    total_questions = 0
+    for i, (item, result) in enumerate(zip(request.items, results)):
+        answers, usage = _encode_item_result(item.questions, result)
+        total_questions += len(item.questions)
+        encoded.append({
+            "index": i,
+            "id": item.id,
+            "answers": answers,
+            "usage": usage,
+        })
+
+    return {
+        "object": "decision.batch",
+        "model": model_id,
+        "results": encoded,
+        "usage": {
+            "items": len(encoded),
+            "questions": total_questions,
+            "elapsed_ms": float(elapsed_ms),
+        },
     }
