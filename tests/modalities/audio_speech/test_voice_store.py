@@ -8,11 +8,63 @@ import pytest
 from muse.modalities.audio_speech.protocol import (
     UnknownVoiceError, VoiceError, VoiceUnreadableError,
 )
+from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES, VoiceCatalog
 from muse.modalities.audio_speech.voices import VoiceStore, load_bundled_voice
 
 
 def _secs(s=2.0):
     return (np.sin(np.linspace(0, 100, int(24000 * s))) * 0.5).astype("float32")
+
+
+def _entries(root):
+    """Directory entries of a voice root, ignoring the shared lock file."""
+    return sorted(p.name for p in root.iterdir() if p.name != ".lock")
+
+
+def test_save_writes_metadata_and_updated_at(tmp_path):
+    store = VoiceStore(tmp_path / "v")
+    store.save("grimbold", _secs(2.0), 24000, "Welcome, traveler.", metadata={
+        "category": "npc/dwarf/blacksmith", "tags": "male,gravelly",
+        "design": {"model": "qwen3-tts-1.7b-voicedesign", "instructions": "gruff dwarf"}})
+    e = store.catalog.entry("grimbold")
+    assert (e.category, e.tags, e.design["model"]) == (
+        "npc/dwarf/blacksmith", ("gravelly", "male"), "qwen3-tts-1.7b-voicedesign")
+    assert e.updated_at and e.created_at and e.updated_at == e.created_at
+    assert store.get("grimbold").transcript == "Welcome, traveler."
+
+
+def test_save_without_metadata_writes_null_fields(tmp_path):
+    store = VoiceStore(tmp_path / "v")
+    store.save("plain", _secs(), 24000, "hi")
+    meta = json.loads((tmp_path / "v" / "plain" / "voice.json").read_text())
+    assert meta["category"] is None and meta["tags"] == [] and meta["design"] is None
+
+
+def test_save_bad_metadata_is_400_and_writes_nothing(tmp_path):
+    store = VoiceStore(tmp_path / "v")
+    with pytest.raises(VoiceError) as ex:
+        store.save("g", _secs(2.0), 24000, "t", metadata={"category": "Bad Cat!"})
+    assert ex.value.code == "invalid_voice_metadata" and ex.value.status == 400
+    assert store.names() == []
+    assert not (tmp_path / "v").exists()
+
+
+def test_store_and_catalog_share_one_lock(tmp_path):
+    store = VoiceStore(tmp_path / "v")
+    assert store.catalog is VoiceCatalog.for_root(tmp_path / "v", bundled={})
+
+
+def test_bundled_narrator_has_metadata(tmp_path):
+    e = VoiceCatalog.for_root(tmp_path / "none", bundled=BUNDLED_VOICES).entry("narrator")
+    assert e.category == "narrator/neutral" and e.read_only and e.description
+    assert e.design["model"] == "qwen3-tts-1.7b-voicedesign"
+    assert e.design["instructions"].startswith("A clear, neutral adult narrator")
+
+
+def test_runtime_bundled_voices_follow_the_catalog():
+    from muse.modalities.audio_speech.runtimes.qwen3_tts import bundled_voices
+
+    assert set(bundled_voices()) == set(BUNDLED_VOICES)
 
 
 def test_save_then_get_round_trips(tmp_path):
@@ -60,7 +112,7 @@ def test_existing_name_needs_overwrite(tmp_path):
     assert e.value.code == "voice_exists" and e.value.status == 409
     second = store.save("a", _secs(3.0), 24000, "two", overwrite=True)
     assert second.sha256 != first.sha256 and second.transcript == "two"
-    assert [p.name for p in tmp_path.iterdir()] == ["a"]
+    assert _entries(tmp_path) == ["a"]
 
 
 def test_limit_counts_new_names_only(tmp_path):
@@ -78,11 +130,13 @@ def test_bundled_voice_is_read_only(tmp_path):
         "narrator", ref.audio_path, ref.audio_path.with_name("voice.json"))
     assert bundled.read_only
     store = VoiceStore(tmp_path / "root", bundled={"narrator": bundled})
-    for call in (lambda: store.save("narrator", _secs(), 24000, "x", overwrite=True),
-                 lambda: store.delete("narrator")):
+    # Saving over a bundled voice stays 400; deleting one is a 409 conflict
+    # (the catalog's rule for DELETE and PATCH, spec 2026-11-24).
+    for call, status in ((lambda: store.save("narrator", _secs(), 24000, "x", overwrite=True), 400),
+                         (lambda: store.delete("narrator"), 409)):
         with pytest.raises(VoiceError) as e:
             call()
-        assert e.value.code == "voice_read_only" and e.value.status == 400
+        assert e.value.code == "voice_read_only" and e.value.status == status
     store.save("zed", _secs(), 24000, "x")
     assert store.names() == ["narrator", "zed"]
     assert store.get("narrator") is bundled
@@ -191,7 +245,7 @@ def test_overwrite_failure_rolls_back_old_voice(tmp_path, monkeypatch):
         store.save("a", _secs(3.0), 24000, "two", overwrite=True)
     monkeypatch.undo()
     assert store.get("a").sha256 == first.sha256
-    assert [p.name for p in tmp_path.iterdir()] == ["a"]
+    assert _entries(tmp_path) == ["a"]
 
 
 def test_permission_error_on_root_is_voice_unreadable(tmp_path, monkeypatch):

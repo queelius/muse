@@ -21,8 +21,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict
-from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator, Literal, Mapping
 
 import numpy as np
 
@@ -34,6 +33,7 @@ from muse.core.runtime_helpers import (
     set_inference_mode,
 )
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, VoiceError
+from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES
 from muse.modalities.audio_speech.voices import (
     StoredVoice,
     VoiceStore,
@@ -53,7 +53,6 @@ DEFAULT_INSTRUCTIONS = (
     "speaking at a moderate pace."
 )
 PROMPT_CACHE_SIZE = 32
-_DATA = Path(__file__).resolve().parents[1] / "data"
 
 
 def _ensure_deps() -> None:
@@ -73,9 +72,9 @@ def _ensure_deps() -> None:
 
 
 def bundled_voices() -> dict[str, StoredVoice]:
-    """The read-only voices shipped with muse (currently just ``narrator``)."""
-    return {NARRATOR: load_bundled_voice(
-        NARRATOR, _DATA / "narrator.wav", _DATA / "narrator.json")}
+    """The read-only voices shipped with muse (``voice_catalog.BUNDLED_VOICES``)."""
+    return {name: load_bundled_voice(name, wav, meta)
+            for name, (wav, meta) in BUNDLED_VOICES.items()}
 
 
 class Qwen3TTSRuntime:
@@ -181,11 +180,13 @@ class Qwen3TTSRuntime:
         *,
         overwrite: bool = False,
         source_filename: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> StoredVoice:
         store = self._require_store()
         try:
             return store.save(name, audio, sample_rate, transcript,
-                              overwrite=overwrite, source_filename=source_filename)
+                              overwrite=overwrite, source_filename=source_filename,
+                              metadata=metadata)
         finally:
             self._evict(name)
 

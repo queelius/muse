@@ -4,5 +4,12 @@
   "sample_rate": 24000,
   "duration_seconds": 3.92,
   "description": "A clear, neutral adult narrator with an even, friendly tone, speaking at a moderate pace.",
+  "category": "narrator/neutral",
+  "tags": ["adult", "clear", "neutral"],
+  "notes": "The default voice of qwen3-tts-0.6b-base; read-only.",
+  "design": {
+    "model": "qwen3-tts-1.7b-voicedesign",
+    "instructions": "A clear, neutral adult narrator with an even, friendly tone, speaking at a moderate pace."
+  },
   "generated_by": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign@5ecdb673"
 }

@@ -376,7 +376,11 @@ class VoiceCatalog:
                 if exclusive:
                     securefs.ensure_directory(
                         self.root, error=VoiceUnreadableError, label="voices directory")
-                if exclusive or self.root.is_dir():
+                try:
+                    root_exists = self.root.is_dir()
+                except OSError as exc:
+                    raise VoiceUnreadableError("voices directory cannot be read") from exc
+                if exclusive or root_exists:
                     handle = securefs.open_lock_file(
                         self.root / _LOCK, error=VoiceUnreadableError,
                         label="voices lock")

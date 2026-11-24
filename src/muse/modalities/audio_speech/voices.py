@@ -1,9 +1,12 @@
-"""Saved reference voices for audio/speech.
+"""Saved reference voices for audio/speech: saving and synthesis reads.
 
 Layout per voice: ``<root>/<name>/reference.wav`` + ``<root>/<name>/voice.json``.
 Writes build the directory under ``<root>/.tmp-<random>`` and ``os.replace``
-it into place, so readers never see a half-written voice. No heavy imports:
-stdlib ``wave`` + numpy only.
+it into place, under the voice root's exclusive lock (``VoiceCatalog.lock``,
+shared with every other process), so readers never see a half-written voice.
+Listing, details and metadata edits live in the stdlib ``voice_catalog``;
+this module adds the numpy side (validating and writing clips, reading the
+waveform for synthesis). No heavy imports: stdlib ``wave`` + numpy only.
 """
 from __future__ import annotations
 
@@ -13,22 +16,23 @@ import io
 import json
 import os
 import shutil
-import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import numpy as np
 
-from muse.core import config, securefs
+from muse.core import config
 from muse.modalities.audio_speech.protocol import (
-    UnknownVoiceError,
     VoiceError,
     VoiceUnreadableError,
 )
 from muse.modalities.audio_speech.voice_catalog import (  # noqa: F401  (re-exported)
     NAME_PATTERN,
+    VoiceCatalog,
+    normalize_metadata,
+    read_voice_file,
     voice_store_root,
 )
 
@@ -68,15 +72,7 @@ class StoredVoice:
     meta_path: Path | None = None
 
 
-def _read_file(path: Path) -> tuple[bytes, tuple]:
-    """Read one regular file without following symlinks; return bytes and
-    its (mtime_ns, size, ino) taken from the same descriptor."""
-    fd = securefs.open_regular_file(
-        path, os.O_RDONLY, error=VoiceUnreadableError, label="voice file")
-    with os.fdopen(fd, "rb") as fh:
-        st = os.fstat(fh.fileno())
-        return fh.read(), (st.st_mtime_ns, st.st_size, st.st_ino)
-
+_read_file = read_voice_file
 
 def _load(name: str, wav_path: Path, json_path: Path, *, read_only: bool) -> StoredVoice:
     try:
@@ -156,62 +152,32 @@ class VoiceStore:
         self.root = Path(root)
         self._bundled = dict(bundled or {})
         self._max = max_voices
-        self._lock = threading.RLock()  # re-entrant: save/delete call names()/get()
+        self.catalog = VoiceCatalog.for_root(self.root, bundled={
+            n: (sv.audio_path, sv.meta_path or Path(sv.audio_path).with_suffix(".json"))
+            for n, sv in self._bundled.items()})
+        # The catalog's in-process lock: holding it blocks every reader and
+        # writer of this root in this process (other processes wait on the
+        # file lock that VoiceCatalog.lock takes on first acquisition).
+        self._lock = self.catalog._rlock
 
     # -- reading -----------------------------------------------------------
 
-    def _saved_names(self) -> list[str]:
-        try:
-            entries = sorted(self.root.iterdir())
-        except (FileNotFoundError, NotADirectoryError):
-            return []
-        except OSError as exc:
-            raise VoiceUnreadableError("voices directory cannot be read") from exc
-        names = []
-        for d in entries:
-            try:
-                if not NAME_PATTERN.fullmatch(d.name) or d.is_symlink() or not d.is_dir():
-                    continue
-                if not (d / _WAV).is_file():
-                    continue
-                json.loads(_read_file(d / _JSON)[0].decode("utf-8"))
-            except (VoiceUnreadableError, FileNotFoundError, ValueError):
-                continue
-            except OSError as exc:
-                raise VoiceUnreadableError("voices directory cannot be read") from exc
-            names.append(d.name)
-        return names
-
     def names(self) -> list[str]:
-        with self._lock:
-            return sorted(self._bundled) + [
-                n for n in self._saved_names() if n not in self._bundled]
-
-    def _saved_dir(self, name: str) -> Path:
-        if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
-            raise UnknownVoiceError(name, self.names())
-        d = self.root / name
-        try:
-            missing = d.is_symlink() or not d.is_dir()
-        except OSError as exc:
-            raise VoiceUnreadableError("voices directory cannot be read") from exc
-        if missing:
-            raise UnknownVoiceError(name, self.names())
-        return d
+        return self.catalog.names()
 
     def get(self, name: str) -> StoredVoice:
         if name in self._bundled:
             return self._bundled[name]
-        # Serialised with save/delete so a swap can't expose a missing
-        # directory or pair one version's transcript with another's audio.
-        with self._lock:
-            d = self._saved_dir(name)
+        # Under the shared lock so a save can't expose a missing directory
+        # or pair one version's transcript with another's audio.
+        with self.catalog.lock(exclusive=False):
+            d = self.catalog.saved_dir_unlocked(name)
             return _load(name, d / _WAV, d / _JSON, read_only=False)
 
     def get_with_audio(self, name: str) -> tuple[StoredVoice, np.ndarray]:
-        """``get`` plus the reference waveform, read under the store lock so
-        an in-process save or delete cannot land between the two reads."""
-        with self._lock:
+        """``get`` plus the reference waveform, read under the shared lock so
+        a save or delete in any process cannot land between the two reads."""
+        with self.catalog.lock(exclusive=False):
             stored = self.get(name)
             try:
                 return stored, read_voice_audio(stored)
@@ -260,29 +226,33 @@ class VoiceStore:
         return np.clip(audio.astype("float32"), -1.0, 1.0), text
 
     def save(self, name: str, audio: np.ndarray, sample_rate: int, transcript: str, *,
-             overwrite: bool = False, source_filename: str | None = None) -> StoredVoice:
+             overwrite: bool = False, source_filename: str | None = None,
+             metadata: Mapping[str, Any] | None = None) -> StoredVoice:
         audio, text = self._validate(name, audio, sample_rate, transcript)
+        fields = normalize_metadata(metadata or {}, partial=False)
         if name in self._bundled:
             raise VoiceError("voice_read_only", f"voice {name!r} is bundled and read-only")
         wav = _wav_bytes(audio, sample_rate)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         meta = {
             "name": name,
             "transcript": text,
             "sample_rate": sample_rate,
             "duration_seconds": audio.size / sample_rate,
             "sha256": hashlib.sha256(wav).hexdigest(),
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "created_at": now,
+            "updated_at": now,
             "source_filename": source_filename,
+            **fields,
         }
-        with self._lock:
-            securefs.ensure_directory(
-                self.root, error=VoiceUnreadableError, label="voices directory")
+        # The exclusive lock creates the root (mode 0700) on first save.
+        with self.catalog.lock(exclusive=True):
             final = self.root / name
             exists = final.exists() or final.is_symlink()
             if exists and not overwrite:
                 raise VoiceError("voice_exists", f"voice {name!r} already exists", 409)
             if (not exists and self._max is not None
-                    and len(self._saved_names()) >= self._max):
+                    and len(self.catalog.saved_names_unlocked()) >= self._max):
                 raise VoiceError(
                     "voice_limit_reached", f"voice limit of {self._max} reached", 409)
             tmp = self.root / f".tmp-{os.urandom(6).hex()}"
@@ -307,10 +277,5 @@ class VoiceStore:
         return self.get(name)
 
     def delete(self, name: str) -> None:
-        if name in self._bundled:
-            raise VoiceError("voice_read_only", f"voice {name!r} is bundled and read-only")
-        with self._lock:
-            d = self._saved_dir(name)
-            gone = self.root / f".old-{os.urandom(6).hex()}"
-            os.replace(d, gone)
-            shutil.rmtree(gone, ignore_errors=True)
+        """Delete a saved voice (409 ``voice_read_only`` for a bundled one)."""
+        self.catalog.delete(name)
