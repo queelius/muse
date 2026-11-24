@@ -225,6 +225,15 @@ def test_save_and_delete_go_through_store(tmp_path):
     assert not voice_dir.exists()
 
 
+def test_save_with_metadata_reads_back_through_voice_entry():
+    m = _clone()
+    m.save_voice("grimbold", _tone(), 24000, "Hello, traveler.",
+                 metadata={"category": "npc/dwarf", "tags": ["male"]})
+    e = m.voice_entry("grimbold")
+    assert (e.name, e.category, e.tags) == ("grimbold", "npc/dwarf", ("male",))
+    assert m.voice_entry("narrator").category == "narrator/neutral"
+
+
 def test_saved_voice_cap_comes_from_config(monkeypatch):
     monkeypatch.setenv("MUSE_MAX_SAVED_VOICES", "1")
     m = _clone()

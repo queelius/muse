@@ -86,6 +86,13 @@ DISCOVERY = {
             "example": {
                 "model": "<model>", "name": "grimbold",
                 "transcript": "Welcome, traveler.",
+                "category": "npc/dwarf/blacksmith",
+                "tags": "male,elderly,gravelly",
+                "description": "A gruff, elderly dwarf blacksmith with a gravelly voice.",
+                "design_model": "qwen3-tts-1.7b-voicedesign",
+                "design_instructions": (
+                    "A gruff, elderly dwarf blacksmith, gravelly and slow, "
+                    "with a slight Scottish lilt."),
             },
         },
         {

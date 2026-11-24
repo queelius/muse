@@ -43,6 +43,7 @@ from muse.modalities._common.audio_decode import (
 from muse.modalities._common.uploads import (
     read_upload, run_on_spooled_upload, upload_suffix,
 )
+from muse.modalities.audio_speech.voice_catalog import METADATA_KEYS, normalize_metadata
 from muse.modalities.audio_speech.voices import MAX_SECONDS, VOICE_SAMPLE_RATE
 from muse.modalities._common.streaming import threaded_sse_response
 from muse.core.registry import ModalityRegistry
@@ -120,6 +121,23 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         transcript: str = Form(...),
         overwrite: bool = Form(False),
         model: str | None = Form(None),
+        category: str | None = Form(None, description=(
+            "Where the voice sits, as a slash path of 1-4 segments of "
+            "[a-z0-9][a-z0-9_-]{0,31}, e.g. npc/dwarf/blacksmith. "
+            "Lowercased and trimmed.")),
+        tags: str | None = Form(None, description=(
+            "Comma-separated labels (at most 16, each [a-z0-9][a-z0-9_-]{0,31}), "
+            "e.g. 'male,elderly,gravelly'. Deduplicated and sorted.")),
+        description: str | None = Form(None, description=(
+            "What the voice sounds like (at most 500 characters).")),
+        notes: str | None = Form(None, description=(
+            "What the voice is for and how to use it (at most 2000 characters).")),
+        design_model: str | None = Form(None, description=(
+            "The model that designed the reference take, e.g. "
+            "qwen3-tts-1.7b-voicedesign (at most 256 characters).")),
+        design_instructions: str | None = Form(None, description=(
+            "The voice description the take was designed from (at most "
+            "4096 characters); kept so the voice can be redesigned later.")),
     ):
         backend = registry.get_or_404(MODALITY, model)
         if not _supports_saved_voices(registry, backend):
@@ -132,6 +150,14 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         )
         if isinstance(raw, JSONResponse):
             return raw
+        metadata: dict = {
+            k: v for k, v in {
+                "category": category, "tags": tags,
+                "description": description, "notes": notes,
+            }.items() if v is not None
+        }
+        if design_model is not None or design_instructions is not None:
+            metadata["design"] = {"model": design_model, "instructions": design_instructions}
 
         def _call(path: str):
             decoded = decode_audio(
@@ -142,13 +168,15 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             if hasattr(wave, "numpy"):
                 wave = wave.numpy()
             wave = np.asarray(wave, dtype=np.float32).reshape(-1)
-            return backend.save_voice(
+            stored = backend.save_voice(
                 name, wave, VOICE_SAMPLE_RATE, transcript,
                 overwrite=overwrite, source_filename=audio.filename,
+                metadata=metadata,
             )
+            return stored, _saved_metadata(backend, stored.name, metadata)
 
         try:
-            stored = await run_on_spooled_upload(
+            stored, saved_meta = await run_on_spooled_upload(
                 raw, _call, suffix=upload_suffix(audio.filename),
             )
         except AudioDurationExceededError as exc:
@@ -182,6 +210,7 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             "name": stored.name,
             "duration_seconds": stored.duration_seconds,
             "sha256": stored.sha256,
+            **saved_meta,
         }
 
     @router.delete("/speech/voices/{name}")
@@ -286,6 +315,20 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
         return await _non_stream(model, req, spoken, pronunciations)
 
     return router
+
+
+def _saved_metadata(backend, name: str, sent: dict) -> dict:
+    """The metadata a save stored: read back from the backend's catalog when
+    it has one, else the normalized fields that were sent."""
+    reader = getattr(backend, "voice_entry", None)
+    if callable(reader):
+        e = reader(name)
+        fields = {"category": e.category, "tags": list(e.tags),
+                  "description": e.description, "notes": e.notes,
+                  "design": dict(e.design) if e.design else None}
+    else:
+        fields = normalize_metadata(sent, partial=False)
+    return {k: fields[k] for k in METADATA_KEYS}
 
 
 def _supports_saved_voices(registry: ModalityRegistry, backend) -> bool:

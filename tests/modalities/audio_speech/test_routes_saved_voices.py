@@ -34,13 +34,13 @@ class FakeTTS:
         self.delete_raises = delete_raises
 
     def save_voice(self, name, audio, sample_rate, transcript, *,
-                   overwrite=False, source_filename=None):
+                   overwrite=False, source_filename=None, metadata=None):
         if self.save_raises:
             raise self.save_raises
         self.saved.append(dict(
             name=name, audio=audio, sample_rate=sample_rate,
             transcript=transcript, overwrite=overwrite,
-            source_filename=source_filename,
+            source_filename=source_filename, metadata=metadata,
         ))
         return StoredVoice(
             name=name, audio_path="/x.wav", transcript=transcript,
@@ -92,6 +92,8 @@ def test_save_voice_ok(decode):
     assert r.json() == {
         "object": "audio.voice", "model": "fake-tts", "name": "grimbold",
         "duration_seconds": 1.5, "sha256": "ab" * 32,
+        "category": None, "tags": [], "description": None, "notes": None,
+        "design": None,
     }
     (call,) = fake.saved
     assert call["name"] == "grimbold"
@@ -100,6 +102,44 @@ def test_save_voice_ok(decode):
     assert call["overwrite"] is False
     assert call["source_filename"] == "ref.wav"
     assert call["audio"].dtype == np.float32 and call["audio"].shape == (36000,)
+
+
+def test_save_passes_metadata_fields(decode):
+    fake = FakeTTS()
+    r = _save(_client(fake), category="npc/dwarf", tags="male, gravelly",
+              design_instructions="gruff")
+    assert r.status_code == 200, r.text
+    md = fake.saved[0]["metadata"]
+    assert md == {"category": "npc/dwarf", "tags": "male, gravelly",
+                  "design": {"model": None, "instructions": "gruff"}}
+    body = r.json()
+    assert body["category"] == "npc/dwarf" and body["tags"] == ["gravelly", "male"]
+    assert body["design"] == {"model": None, "instructions": "gruff"}
+
+
+def test_save_without_metadata_sends_empty_metadata(decode):
+    fake = FakeTTS()
+    assert _save(_client(fake)).status_code == 200
+    assert fake.saved[0]["metadata"] == {}
+
+
+def test_save_reads_back_backend_entry_when_available(decode):
+    from muse.modalities.audio_speech.voice_catalog import entry_from_meta
+
+    fake = FakeTTS()
+    fake.voice_entry = lambda name: entry_from_meta(name, {
+        "transcript": "t", "sample_rate": 24000, "duration_seconds": 1.5,
+        "category": "narrator/epic", "tags": ["deep"]}, read_only=False)
+    body = _save(_client(fake), category="ignored/by/readback").json()
+    assert body["category"] == "narrator/epic" and body["tags"] == ["deep"]
+
+
+def test_save_invalid_metadata_is_400_envelope(decode):
+    fake = FakeTTS(save_raises=VoiceError(
+        "invalid_voice_metadata", "category: bad segment", 400))
+    r = _save(_client(fake), category="Bad Cat!")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_voice_metadata"
 
 
 def test_save_overwrite_flag(decode):
@@ -219,9 +259,10 @@ class StoreBackedTTS(FakeTTS):
         self.store = store
 
     def save_voice(self, name, audio, sample_rate, transcript, *,
-                   overwrite=False, source_filename=None):
+                   overwrite=False, source_filename=None, metadata=None):
         return self.store.save(name, audio, sample_rate, transcript,
-                               overwrite=overwrite, source_filename=source_filename)
+                               overwrite=overwrite, source_filename=source_filename,
+                               metadata=metadata)
 
 
 def test_save_trailing_newline_name_is_invalid(decode, tmp_path):

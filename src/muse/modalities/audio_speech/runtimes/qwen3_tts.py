@@ -33,7 +33,7 @@ from muse.core.runtime_helpers import (
     set_inference_mode,
 )
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, VoiceError
-from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES
+from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES, VoiceEntry
 from muse.modalities.audio_speech.voices import (
     StoredVoice,
     VoiceStore,
@@ -165,6 +165,10 @@ class Qwen3TTSRuntime:
         yield AudioChunk(audio=result.audio, sample_rate=result.sample_rate)
 
     # -- saved voices (clone mode) -------------------------------------------
+
+    def voice_entry(self, name: str) -> VoiceEntry:
+        """One voice's catalog entry (metadata, no audio); shared-lock read."""
+        return self._require_store().catalog.entry(name)
 
     def check_voice(self, voice: str | None) -> None:
         """Raise UnknownVoiceError before a stream starts; no-op in design mode."""
