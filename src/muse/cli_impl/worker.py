@@ -22,7 +22,8 @@ from muse.core.catalog import (
     known_models,
     load_backend,
 )
-from muse.core.discovery import discover_modalities, modality_dirs
+from muse.core.discovery import discover_modalities, light_hooks, modality_dirs
+from muse.core.light import RegistryLightCatalog
 from muse.core.registry import ModalityRegistry
 from muse.core.server import create_app
 
@@ -150,6 +151,13 @@ def _run_worker_with_leases(
     for tag, build_router in discover_modalities(modality_dirs()).items():
         log.info("mounting modality router for %s", tag)
         routers[tag] = build_router(registry)
+    # Model-free routes (muse.core.light) a package exports beside its
+    # router; the gateway serves the same routes from disk ahead of its
+    # proxy, so a standalone worker and the gateway answer them alike.
+    light = RegistryLightCatalog(registry)
+    for tag, hooks in light_hooks().items():
+        if hooks.build_light_router is not None:
+            routers[f"{tag}:light"] = hooks.build_light_router(light)
 
     app = create_app(registry=registry, routers=routers)
     worker_nonce = os.environ.get(_WORKER_NONCE_ENV)

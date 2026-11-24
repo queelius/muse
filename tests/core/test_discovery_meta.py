@@ -6,18 +6,36 @@ import json
 
 import pytest
 
-from muse.core.discovery import discover_modalities, modality_dirs, modality_discovery
+from muse.core.discovery import (
+    discover_modalities,
+    light_hooks,
+    modality_dirs,
+    modality_discovery,
+)
+from muse.core.light import RegistryLightCatalog
 from muse.core.registry import ModalityRegistry
 
 ROUTERS = discover_modalities(modality_dirs())
+LIGHT = {t: h.build_light_router for t, h in light_hooks().items()
+         if h.build_light_router is not None}
 DECL = modality_discovery()
 
 
-def _api_routes(tag):
+def _routes_of(router):
     from fastapi.routing import APIRoute
 
-    router = ROUTERS[tag](ModalityRegistry())
     return [r for r in router.routes if isinstance(r, APIRoute)]
+
+
+def _light_routes(tag):
+    if tag not in LIGHT:
+        return []
+    return _routes_of(LIGHT[tag](RegistryLightCatalog(ModalityRegistry())))
+
+
+def _api_routes(tag):
+    """Every route a worker mounts for ``tag``: its router plus its light router."""
+    return _routes_of(ROUTERS[tag](ModalityRegistry())) + _light_routes(tag)
 
 
 def test_every_modality_declares_discovery():
@@ -26,9 +44,23 @@ def test_every_modality_declares_discovery():
 
 @pytest.mark.parametrize("tag", sorted(ROUTERS))
 def test_every_mounted_route_is_declared(tag):
-    mounted = {(m, r.path) for r in _api_routes(tag) for m in r.methods}
+    mounted = [(m, r.path) for r in _api_routes(tag) for m in r.methods]
     declared = {(r["method"], r["path"]) for r in DECL[tag]["routes"]}
-    assert mounted == declared
+    assert len(mounted) == len(set(mounted)), "router and light router overlap"
+    assert set(mounted) == declared
+
+
+@pytest.mark.parametrize("tag", sorted(ROUTERS))
+def test_light_flag_matches_light_router(tag):
+    light = {(m, r.path) for r in _light_routes(tag) for m in r.methods}
+    flagged = {(r["method"], r["path"]) for r in DECL[tag]["routes"] if r.get("light")}
+    assert flagged == light
+
+
+def _path_params(path: str) -> set[str]:
+    import re
+
+    return set(re.findall(r"{([^}]+)}", path))
 
 
 def test_mcp_tool_names_unique_across_modalities():
@@ -78,22 +110,29 @@ def _validate_json_body(decl, route, example):
 
 @pytest.mark.parametrize("tag", sorted(ROUTERS))
 def test_examples_match_route_request_models(tag):
+    """Each example's keys split into path parameters, query parameters and
+    the body; every path parameter has an example value, and the body part
+    validates against the route's request model."""
     routes = {(m, r.path): r for r in _api_routes(tag) for m in r.methods}
     for decl in DECL[tag]["routes"]:
         route = routes[(decl["method"], decl["path"])]
         example = _example_for(decl)
+        path_keys = _path_params(decl["path"])
+        assert path_keys <= set(example), f"{decl['path']}: example lacks a path parameter"
+        query_keys = {p.alias for p in route.dependant.query_params}
+        body = {k: v for k, v in example.items()
+                if k not in path_keys and k not in query_keys}
         ctype = decl["request_content_type"]
         if ctype == "application/json":
-            _validate_json_body(decl, route, example)
+            _validate_json_body(decl, route, body)
         elif ctype == "multipart/form-data":
             names = {p.alias for p in route.dependant.body_params}
-            assert set(example) | set(decl["file_fields"]) <= names
+            assert set(body) | set(decl["file_fields"]) <= names
             required = {p.alias for p in route.dependant.body_params if p.field_info.is_required()}
-            assert required <= set(example) | set(decl["file_fields"])
+            assert required <= set(body) | set(decl["file_fields"])
         else:
             assert ctype is None and decl["method"] in ("GET", "DELETE")
-            names = {p.alias for p in route.dependant.query_params}
-            assert set(example) <= names
+            assert body == {}, f"{decl['path']}: unknown example keys {sorted(body)}"
 
 
 def test_text_media_fields_only_on_json_routes_and_svg_declared():

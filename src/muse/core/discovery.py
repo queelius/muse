@@ -25,7 +25,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from muse.core import config
 
@@ -332,7 +332,9 @@ def _valid_mcp_defaults(value: Any) -> bool:
     )
 
 
-_OPTIONAL_ROUTE_KEYS = {"text_media_fields", "mcp_defaults"}
+# ``light``: the route is served by the package's ``build_light_router``
+# (model-free; muse.core.light), not by ``build_router``.
+_OPTIONAL_ROUTE_KEYS = {"text_media_fields", "mcp_defaults", "light"}
 
 
 def _valid_discovery_route(route: Any) -> bool:
@@ -347,21 +349,26 @@ def _valid_discovery_route(route: Any) -> bool:
         return False
     if "mcp_defaults" in route and not _valid_mcp_defaults(route["mcp_defaults"]):
         return False
+    if "light" in route and not isinstance(route["light"], bool):
+        return False
     if not all(isinstance(route[k], t) for k, t in _DISCOVERY_ROUTE_KEYS.items()):
         return False
     # `mcp_tool` is a tool name, or None for a route with no MCP tool.
     if route["mcp_tool"] is not None and not isinstance(route["mcp_tool"], str):
         return False
-    if route["method"] not in ("GET", "POST", "DELETE"):
+    if route["method"] not in ("GET", "POST", "DELETE", "PATCH"):
         return False
     # A GET or DELETE has no body, so its content type is None and `example`
-    # holds query parameters; a POST declares what it accepts.
+    # holds query (and path) parameters; a POST declares what it accepts and
+    # a PATCH takes a JSON body.
     if route["request_content_type"] is None:
         if route["method"] not in ("GET", "DELETE"):
             return False
     elif route["request_content_type"] not in (
         "application/json", "multipart/form-data",
     ):
+        return False
+    elif route["method"] == "PATCH" and route["request_content_type"] != "application/json":
         return False
     if route["compat"] is not None and not isinstance(route["compat"], str):
         return False
@@ -472,7 +479,41 @@ def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
     module-level MODALITY (str, MIME-style tag) and build_router (callable).
     First-found-wins on MODALITY tag collision. Returns {tag: build_router}.
     """
-    found: dict[str, Callable] = {}
+    return {tag: module.build_router for tag, module in _modality_packages(dirs)}
+
+
+class LightHooks(NamedTuple):
+    """A modality package's optional model-free exports (muse.core.light)."""
+
+    build_light_router: Callable | None
+    model_options: Callable | None
+
+
+@_memoize_default_scan
+def light_hooks(dirs: list[Path] | None = None) -> dict[str, LightHooks]:
+    """{modality tag: LightHooks} for the packages ``discover_modalities``
+    accepts that export ``build_light_router`` and/or ``model_options``.
+
+    ``build_light_router(catalog) -> APIRouter`` serves model-free routes;
+    ``model_options(model_id, capabilities) -> dict | None`` lists a model's
+    named options (e.g. saved voices) for the capabilities document.
+    """
+    out: dict[str, LightHooks] = {}
+    for tag, module in _modality_packages(dirs if dirs is not None else modality_dirs()):
+        build = getattr(module, "build_light_router", None)
+        options = getattr(module, "model_options", None)
+        build = build if callable(build) else None
+        options = options if callable(options) else None
+        if build is not None or options is not None:
+            out[tag] = LightHooks(build, options)
+    return out
+
+
+def _modality_packages(dirs: list[Path]):
+    """Yield (MODALITY tag, imported package) for each valid modality package
+    under ``dirs``, in scan order, first-found-wins on a tag collision.
+    Packages that fail to import or lack MODALITY / build_router are logged
+    and skipped."""
     tag_sources: dict[str, Path] = {}
 
     for d in dirs:
@@ -509,7 +550,7 @@ def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
                 )
                 continue
 
-            if tag in found:
+            if tag in tag_sources:
                 existing = tag_sources[tag]
                 logger.warning(
                     "MODALITY tag %r already discovered at %s; keeping that one, "
@@ -518,9 +559,8 @@ def discover_modalities(dirs: list[Path]) -> dict[str, Callable]:
                 )
                 continue
 
-            found[tag] = build_router
             tag_sources[tag] = sub
-    return found
+            yield tag, module
 
 
 REQUIRED_HF_PLUGIN_KEYS = (

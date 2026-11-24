@@ -25,7 +25,7 @@ from muse.core.capabilities import (
     UnknownFilter, build_document, model_facts, node_name, server_block,
 )
 from muse.core.discovery import modality_discovery
-from muse.core.errors import ModelNotFoundError, error_response
+from muse.core.errors import ModelNotFoundError, error_response, validation_error_response
 from muse.core.provenance import lookup_revision
 from muse.core.registry import ModalityRegistry
 
@@ -51,20 +51,7 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error_handler(request: Request, exc: RequestValidationError):
-        details = "; ".join(
-            f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('msg', '')}"
-            for e in exc.errors()
-        )
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "invalid_request",
-                    "message": details or str(exc),
-                    "type": "invalid_request_error",
-                }
-            },
-        )
+        return validation_error_response(exc)
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):

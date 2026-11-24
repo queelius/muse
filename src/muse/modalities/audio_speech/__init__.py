@@ -104,7 +104,7 @@ DISCOVERY = {
             "mcp_tool": None,
             "file_fields": [],
             "media_fields": [],
-            "example": {"model": "<model>"},
+            "example": {"model": "<model>", "name": "grimbold"},
         },
     ],
 }

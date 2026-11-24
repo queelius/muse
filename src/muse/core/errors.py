@@ -6,7 +6,27 @@ against their API can reuse error-handling code.
 from __future__ import annotations
 
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+
+def validation_error_response(exc: RequestValidationError) -> JSONResponse:
+    """The 422 ``invalid_request`` envelope for a request that failed FastAPI
+    validation (field path and message per error, joined with ``; ``)."""
+    details = "; ".join(
+        f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('msg', '')}"
+        for e in exc.errors()
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "invalid_request",
+                "message": details or str(exc),
+                "type": "invalid_request_error",
+            }
+        },
+    )
 
 
 def error_type_for_status(status: int) -> str:
