@@ -13,6 +13,10 @@ from muse.modalities.image_pixelart.protocol import AutotileRequest, AutotileRes
 
 if TYPE_CHECKING:  # pragma: no cover
     from muse.modalities.image_pixelart.pixelize import PixelizeOptions, PixelizeResult
+    from muse.modalities.image_pixelart.spritesheet import (
+        SpritesheetOptions,
+        SpritesheetResult,
+    )
 
 # numpy, Pillow and the pixel library are imported inside the methods, never
 # at module load: Pillow is not a base muse dependency, so script discovery
@@ -49,6 +53,11 @@ class PixelTools:
         from muse.modalities.image_pixelart.pixelize import pixelize
 
         return pixelize(image, opts)
+
+    def spritesheet(self, image: Any, opts: "SpritesheetOptions") -> "SpritesheetResult":
+        from muse.modalities.image_pixelart.spritesheet import bake_spritesheet
+
+        return bake_spritesheet(image, opts)
 
     def autotile(self, request: AutotileRequest) -> AutotileResult:
         import numpy as np

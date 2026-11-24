@@ -16,6 +16,10 @@ if TYPE_CHECKING:  # pragma: no cover
     from muse.modalities.image_pixelart.autotile import BlobTile, EdgeStyle
     from muse.modalities.image_pixelart.palettes import PaletteSpec
     from muse.modalities.image_pixelart.pixelize import PixelizeOptions, PixelizeResult
+    from muse.modalities.image_pixelart.spritesheet import (
+        SpritesheetOptions,
+        SpritesheetResult,
+    )
 
 
 @dataclass
@@ -61,3 +65,5 @@ class ImagePixelartModel(Protocol):
     def pixelize(self, image: Any, opts: "PixelizeOptions") -> "PixelizeResult": ...
 
     def autotile(self, request: AutotileRequest) -> AutotileResult: ...
+
+    def spritesheet(self, image: Any, opts: "SpritesheetOptions") -> "SpritesheetResult": ...

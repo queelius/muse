@@ -13,8 +13,13 @@ def _routes():
 
 def test_discovery_declares_tools():
     routes = _routes()
-    assert set(routes) == {"/v1/images/pixelize", "/v1/images/autotile"}
+    assert set(routes) == {
+        "/v1/images/pixelize",
+        "/v1/images/autotile",
+        "/v1/images/spritesheet",
+    }
     pix, auto = routes["/v1/images/pixelize"], routes["/v1/images/autotile"]
+    sheet = routes["/v1/images/spritesheet"]
     assert pix["mcp_tool"] == "muse_pixelize_image"
     assert pix["file_fields"] == ["image"]
     assert pix["media_fields"] == ["data[].b64_json"]
@@ -26,6 +31,10 @@ def test_discovery_declares_tools():
         "files.godot_tres": "text/plain", "files.tiled_tsx": "application/xml",
     }
     assert auto["request_content_type"] == "multipart/form-data"
+    assert sheet["mcp_tool"] == "muse_bake_spritesheet"
+    assert sheet["file_fields"] == ["image"]
+    assert sheet["media_fields"] == ["data[].b64_json"]
+    assert sheet["request_content_type"] == "multipart/form-data"
 
 
 def test_autotile_mcp_tool_defaults_to_zip():
@@ -73,14 +82,18 @@ def test_probe_defaults_run():
 
     assert "4x" in PROBE_DEFAULTS["shape"] and "T=16" in PROBE_DEFAULTS["shape"]
     out = PROBE_DEFAULTS["call"](PixelTools(model_id="pixel-tools", hf_repo="", local_dir=None))
-    assert out == {"grid": 4, "tiles": 47}
+    assert out == {"grid": 4, "tiles": 47, "spritesheet_frames": 8}
 
 
 def test_model_optional_paths_declared_and_discovered():
     import muse.modalities.image_pixelart as pkg
     from muse.core.discovery import _reset_model_optional_paths_cache, model_optional_paths
 
-    assert pkg.MODEL_OPTIONAL_PATHS == ("/v1/images/pixelize", "/v1/images/autotile")
+    assert pkg.MODEL_OPTIONAL_PATHS == (
+        "/v1/images/pixelize",
+        "/v1/images/autotile",
+        "/v1/images/spritesheet",
+    )
     assert "MODEL_OPTIONAL_PATHS" in pkg.__all__
     _reset_model_optional_paths_cache()
     try:
@@ -89,6 +102,7 @@ def test_model_optional_paths_declared_and_discovered():
         _reset_model_optional_paths_cache()
     assert paths["/v1/images/pixelize"] == "image/pixelart"
     assert paths["/v1/images/autotile"] == "image/pixelart"
+    assert paths["/v1/images/spritesheet"] == "image/pixelart"
 
 
 def test_discovery_carries_the_walk_sheet_recipe():

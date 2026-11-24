@@ -43,6 +43,7 @@ MANIFEST = {
         "memory_gb": 1.5,
         "supports_pixelize": True,
         "supports_autotile": True,
+        "supports_spritesheet": True,
         "supported_tile_sizes": [16, 24, 32, 48],
     },
 }

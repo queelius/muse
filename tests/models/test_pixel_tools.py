@@ -23,6 +23,7 @@ def test_pixel_tools_manifest():
     assert caps["device"] == "cpu"
     # Ruling F: measured peak ~1.3 GB at the 4096 px input cap.
     assert caps["memory_gb"] == 1.5
+    assert caps["supports_spritesheet"] is True
     assert {"Pillow", "numpy"} <= {e.split(">")[0].split("=")[0] for e in MANIFEST["pip_extras"]}
     assert "Pillow>=10.0" in MANIFEST["pip_extras"]
     for key in ("summary", "strengths", "limits", "quality_tier", "license", "description"):

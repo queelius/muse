@@ -1,4 +1,4 @@
-"""HTTP client for /v1/images/pixelize and /v1/images/autotile."""
+"""HTTP client for /v1/images/pixelize, /v1/images/autotile and /v1/images/spritesheet."""
 from __future__ import annotations
 
 import requests
@@ -52,3 +52,13 @@ class PixelartClient:
         r = self._post("/v1/images/autotile", files,
                        {"model": model, "response_format": response_format, **fields})
         return r.content if response_format == "zip" else r.json()
+
+    def spritesheet(self, image: bytes, *, model: str | None = None,
+                    response_format: str = "json", **fields) -> dict | bytes:
+        """Slice, clean, align, palette-lock, and optionally mirror a sprite
+        sheet. Returns the JSON envelope, raw PNG bytes (``response_format="png"``),
+        or zip bundle bytes (``response_format="zip"``)."""
+        r = self._post("/v1/images/spritesheet",
+                       {"image": ("image.png", image, "image/png")},
+                       {"model": model, "response_format": response_format, **fields})
+        return r.content if response_format in ("png", "zip") else r.json()

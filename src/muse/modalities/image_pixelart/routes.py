@@ -1,4 +1,4 @@
-"""FastAPI routes for /v1/images/pixelize and /v1/images/autotile (multipart).
+"""FastAPI routes for /v1/images/pixelize, /v1/images/autotile and /v1/images/spritesheet (multipart).
 
 Both mirror /v1/images/upscale: files arrive as multipart uploads read
 through the shared bounded decoder (``muse.modalities._common.images``,
@@ -284,6 +284,172 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             return Response(
                 content=out, media_type="application/zip",
                 headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+            )
+        return JSONResponse(content=out)
+
+    @router.post("/spritesheet")
+    async def spritesheet(
+        image: UploadFile = File(...),
+        model: str | None = Form(None),
+        grid: str = Form("3x2"),
+        frame_size: str = Form("48x48"),
+        fit_size: str | None = Form(None),
+        mirror_mode: str = Form("none"),
+        background: str = Form("auto"),
+        bg_threshold: int = Form(236),
+        fringe_threshold: int = Form(212),
+        clear_enclosed_white: bool = Form(True),
+        clean_stray: bool = Form(True),
+        align: str = Form("bottom"),
+        bottom_padding: int = Form(2),
+        resample: str = Form("nearest"),
+        hard_alpha: bool = Form(True),
+        alpha_threshold: int = Form(128),
+        palette: str = Form("none"),
+        output_cols: int | None = Form(None),
+        response_format: str = Form("json"),
+    ):
+        if response_format not in ("json", "png", "zip"):
+            return error_response(400, "invalid_parameter",
+                                  "response_format must be 'json', 'png' or 'zip'")
+        if mirror_mode not in ("none", "5to8"):
+            return error_response(400, "invalid_parameter",
+                                  "mirror_mode must be 'none' or '5to8'")
+        if background not in ("auto", "white", "none"):
+            return error_response(400, "invalid_parameter",
+                                  "background must be 'auto', 'white' or 'none'")
+        if align not in ("bottom", "center"):
+            return error_response(400, "invalid_parameter",
+                                  "align must be 'bottom' or 'center'")
+        if resample not in ("nearest", "lanczos"):
+            return error_response(400, "invalid_parameter",
+                                  "resample must be 'nearest' or 'lanczos'")
+        if not 0 <= bg_threshold <= 255:
+            return error_response(400, "invalid_parameter",
+                                  "bg_threshold must be in [0, 255]")
+        if not 0 <= fringe_threshold <= 255:
+            return error_response(400, "invalid_parameter",
+                                  "fringe_threshold must be in [0, 255]")
+        if not 0 <= alpha_threshold <= 255:
+            return error_response(400, "invalid_parameter",
+                                  "alpha_threshold must be in [0, 255]")
+        if bottom_padding < 0:
+            return error_response(400, "invalid_parameter",
+                                  "bottom_padding must be non-negative")
+        if output_cols is not None and output_cols < 1:
+            return error_response(400, "invalid_parameter",
+                                  "output_cols must be a positive integer")
+
+        try:
+            grid_value = _parse_pair(grid, "grid", "CxR")
+            if grid_value is None:
+                raise _BadParameter("grid must be CxR with positive integers (e.g. 3x2)")
+            frame_value = _parse_pair(frame_size, "frame_size", "WxH")
+            if frame_value is None:
+                raise _BadParameter("frame_size must be WxH with positive integers (e.g. 48x48)")
+            fit_value = _parse_pair(fit_size, "fit_size", "WxH")
+            if fit_value is not None and (
+                fit_value[0] > frame_value[0] or fit_value[1] > frame_value[1]
+            ):
+                raise _BadParameter(
+                    f"fit_size {fit_value[0]}x{fit_value[1]} exceeds "
+                    f"frame_size {frame_value[0]}x{frame_value[1]}"
+                )
+            if align == "bottom" and bottom_padding >= frame_value[1]:
+                raise _BadParameter(
+                    f"bottom_padding ({bottom_padding}) must be smaller than "
+                    f"frame height ({frame_value[1]})"
+                )
+            if mirror_mode == "5to8" and grid_value[0] * grid_value[1] < 5:
+                raise _BadParameter(
+                    f"mirror_mode='5to8' requires a grid with at least 5 cells, "
+                    f"got {grid_value[0]}x{grid_value[1]}"
+                )
+            spec = _parse_palette(palette)
+        except _BadParameter as e:
+            return error_response(400, "invalid_parameter", str(e))
+
+        cap = _max_input_side()
+        n_frames = 8 if mirror_mode == "5to8" else grid_value[0] * grid_value[1]
+        out_cols = (
+            output_cols
+            if output_cols is not None
+            else (4 if mirror_mode == "5to8" else grid_value[0])
+        )
+        out_rows = (n_frames + out_cols - 1) // out_cols
+        out_w, out_h = out_cols * frame_value[0], out_rows * frame_value[1]
+        if max(out_w, out_h) > cap:
+            return error_response(
+                413, "input_too_large",
+                f"spritesheet atlas {out_w}x{out_h} exceeds max side {cap} "
+                f"(limits.pixelart_max_input_side; set {_SIDE_ENV} to raise)",
+            )
+
+        backend = registry.get_or_404(MODALITY, model)
+
+        from muse.modalities.image_pixelart.codec import (
+            encode_spritesheet,
+            png_bytes,
+            spritesheet_zip,
+        )
+        from muse.modalities.image_pixelart.spritesheet import (
+            SpritesheetOptions,
+            SpritesheetTooLargeError,
+        )
+
+        opts = SpritesheetOptions(
+            grid=grid_value,
+            frame_size=frame_value,
+            fit_size=fit_value,
+            mirror_mode=mirror_mode,
+            background=background,
+            bg_threshold=bg_threshold,
+            fringe_threshold=fringe_threshold,
+            clear_enclosed_white=clear_enclosed_white,
+            clean_stray=clean_stray,
+            align=align,
+            bottom_padding=bottom_padding,
+            resample=resample,
+            hard_alpha=hard_alpha,
+            alpha_threshold=alpha_threshold,
+            palette=spec,
+            output_cols=output_cols,
+            max_output_side=cap,
+        )
+        source, error = await read_and_decode_upload(
+            image, "image", max_side=cap, side_setting=_SIDE_ENV,
+        )
+        if error is not None:
+            return error
+
+        def _call():
+            result = backend.spritesheet(source, opts)
+            if response_format == "png":
+                return png_bytes(result.atlas)
+            if response_format == "zip":
+                return spritesheet_zip(result)
+            return encode_spritesheet(result, backend.model_id)
+
+        try:
+            out = await _run(backend, _call, [source])
+        except SpritesheetTooLargeError as e:
+            return error_response(
+                413, "input_too_large",
+                f"{e} (limits.pixelart_max_input_side; set {_SIDE_ENV} to raise)",
+            )
+        except ValueError as e:
+            return error_response(400, "invalid_parameter", str(e))
+        except Exception:  # noqa: BLE001
+            logger.exception("spritesheet failed")
+            return error_response(500, "internal_error",
+                                  "spritesheet failed; see server logs")
+
+        if response_format == "png":
+            return Response(content=out, media_type="image/png")
+        if response_format == "zip":
+            return Response(
+                content=out, media_type="application/zip",
+                headers={"Content-Disposition": 'attachment; filename="spritesheet.zip"'},
             )
         return JSONResponse(content=out)
 
