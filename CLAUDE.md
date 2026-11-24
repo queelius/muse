@@ -526,6 +526,12 @@ read-only, never triggers a model load, computed off the event loop:
   (multi-component digest); chat sets `system_fingerprint` to
   `<id>@<revision[:12]>`. `/v1/models` gains `revision`. See
   `muse.core.provenance`.
+- Light routes (`muse.core.light`): a package may export
+  `build_light_router(catalog)` beside `build_router` for model-free routes
+  (DISCOVERY `light: true`). Workers mount it over `RegistryLightCatalog`;
+  the gateway mounts it ahead of its proxy over `GatewayLightCatalog`
+  (`cli_impl/light_catalog.py`, same model errors as the proxy), so those
+  routes never acquire or cold-load. The voice catalog is the first user.
 - `model_optional` route flags, the `/llms.txt` shape and the
   `server.mcp.install` pin: docs/AGENT_DISCOVERY.md.
 

@@ -25,6 +25,20 @@ A route with `model_optional: true` (its package lists it in
 the first enabled model of that modality (pixelize, autotile, translate,
 `/languages`, alignment, audio quality, vectorize). Other routes need `model`.
 
+A route with `light: true` never loads a model: the gateway answers it
+itself, from disk or the model's manifest, ahead of its proxy (no worker
+spawn, no cold load, no queue). The saved-voice catalog is the first user:
+listing and filtering voices, one voice's details, its reference clip, and
+metadata edits and deletes on `/v1/audio/speech/voices`. A package exports
+`build_light_router(catalog)` beside `build_router` (`muse.core.light`);
+workers mount it over their registry (`RegistryLightCatalog`) and the gateway
+over the catalog (`muse.cli_impl.light_catalog.GatewayLightCatalog`, whose
+model errors match the proxy's: 400 `model_required` / `invalid_model`, 404
+`model_not_found`, 409 `model_disabled`, 503 `catalog_unavailable`). A light
+route that cannot answer from disk (a preset-voice listing) forwards through
+the director like any proxied request. Request validation errors on the
+gateway's own routes use the same 422 `invalid_request` envelope as workers.
+
 `quality_tier` is absolute within a modality across bundled and curated
 models, so an agent can pick the best model for a task without a table of ids.
 Model notes live next to each model (bundled script MANIFEST or curated

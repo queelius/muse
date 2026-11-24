@@ -29,10 +29,7 @@ Other paths keep FastAPI's default handling.
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.exception_handlers import (
-    http_exception_handler,
-    request_validation_exception_handler,
-)
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -64,7 +61,11 @@ def install_admin_error_handler(app: FastAPI) -> None:
 
     async def _validation_handler(request, exc: RequestValidationError):
         if not request.url.path.startswith(ADMIN_PATH_PREFIX):
-            return await request_validation_exception_handler(request, exc)
+            # Every other route the gateway itself serves (light routes,
+            # telemetry, capabilities) uses the workers' 422 envelope.
+            from muse.core.errors import validation_error_response
+
+            return validation_error_response(exc)
         return error_response(400, "invalid_parameter", _validation_message(exc))
 
     app.add_exception_handler(RequestValidationError, _validation_handler)

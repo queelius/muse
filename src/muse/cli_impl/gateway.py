@@ -59,6 +59,7 @@ from muse.core.catalog import CatalogError, _read_catalog, get_manifest, is_enab
 from muse.core.discovery import (
     concurrency_ceilings,
     disconnect_cancellable_paths,
+    light_hooks,
     modality_discovery,
     model_optional_paths,
     strict_request_parsers,
@@ -420,7 +421,7 @@ class WorkerRoute:
 async def extract_model_from_request(request: Any) -> Any:
     """Extract the `model` field from a request.
 
-    - POST with JSON body: body["model"]
+    - POST or PATCH with JSON body: body["model"]
     - POST with multipart/form-data body: form["model"]
       (used by /v1/audio/transcriptions, /v1/audio/translations, and
       future multipart endpoints like /v1/images/edits.)
@@ -433,7 +434,7 @@ async def extract_model_from_request(request: Any) -> Any:
     if request.method in ("GET", "DELETE"):
         return request.query_params.get("model")
 
-    if request.method == "POST":
+    if request.method in ("POST", "PATCH"):
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
             try:
@@ -793,6 +794,19 @@ def build_gateway(
 
     from muse.cli_impl.agent_routes import install_agent_routes
     install_agent_routes(app, capabilities=capabilities_document)
+
+    # Light routes (muse.core.light): model-free routes a modality exports
+    # beside its router, answered here from disk ahead of the catch-all, so
+    # they never acquire, spawn or cold-load. Left out of the gateway's own
+    # schema: merge_openapi adds them from the modality schemas, with their
+    # DISCOVERY descriptions.
+    from muse.cli_impl.light_catalog import GatewayLightCatalog
+    light_catalog = GatewayLightCatalog(
+        state, timeout, app.state.disconnect_cancellable_paths)
+    for tag, hooks in light_hooks().items():
+        if hooks.build_light_router is not None:
+            app.include_router(
+                hooks.build_light_router(light_catalog), include_in_schema=False)
 
     @app.api_route(
         "/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
