@@ -42,6 +42,11 @@ class _AudioGenerationClient:
         guidance: float | None,
         negative_prompt: str | None,
         lyrics: str | None = None,
+        trim_silence: bool = False,
+        loop_fade_s: float = 0.0,
+        target_peak_dbfs: float | None = None,
+        mono: bool = False,
+        sample_rate: int | None = None,
     ) -> bytes:
         body: dict[str, Any] = {"prompt": prompt}
         if model is not None:
@@ -60,6 +65,16 @@ class _AudioGenerationClient:
             body["negative_prompt"] = negative_prompt
         if lyrics is not None:
             body["lyrics"] = lyrics
+        if trim_silence:
+            body["trim_silence"] = True
+        if loop_fade_s:
+            body["loop_fade_s"] = loop_fade_s
+        if target_peak_dbfs is not None:
+            body["target_peak_dbfs"] = target_peak_dbfs
+        if mono:
+            body["mono"] = True
+        if sample_rate is not None:
+            body["sample_rate"] = sample_rate
         r = requests.post(
             f"{self.server_url}{self._route}",
             json=body,
@@ -89,6 +104,11 @@ class MusicClient(_AudioGenerationClient):
         guidance: float | None = None,
         negative_prompt: str | None = None,
         lyrics: str | None = None,
+        trim_silence: bool = False,
+        loop_fade_s: float = 0.0,
+        target_peak_dbfs: float | None = None,
+        mono: bool = False,
+        sample_rate: int | None = None,
     ) -> bytes:
         return self._post(
             prompt,
@@ -96,6 +116,11 @@ class MusicClient(_AudioGenerationClient):
             response_format=response_format,
             steps=steps, guidance=guidance, negative_prompt=negative_prompt,
             lyrics=lyrics,
+            trim_silence=trim_silence,
+            loop_fade_s=loop_fade_s,
+            target_peak_dbfs=target_peak_dbfs,
+            mono=mono,
+            sample_rate=sample_rate,
         )
 
 
@@ -119,6 +144,11 @@ class SFXClient(_AudioGenerationClient):
         guidance: float | None = None,
         negative_prompt: str | None = None,
         lyrics: str | None = None,
+        trim_silence: bool = False,
+        loop_fade_s: float = 0.0,
+        target_peak_dbfs: float | None = None,
+        mono: bool = False,
+        sample_rate: int | None = None,
     ) -> bytes:
         return self._post(
             prompt,
@@ -126,4 +156,9 @@ class SFXClient(_AudioGenerationClient):
             response_format=response_format,
             steps=steps, guidance=guidance, negative_prompt=negative_prompt,
             lyrics=lyrics,
+            trim_silence=trim_silence,
+            loop_fade_s=loop_fade_s,
+            target_peak_dbfs=target_peak_dbfs,
+            mono=mono,
+            sample_rate=sample_rate,
         )

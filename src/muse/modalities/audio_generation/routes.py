@@ -29,6 +29,7 @@ from muse.modalities.audio_generation.codec import (
     encode_opus,
     encode_wav,
 )
+from muse.modalities.audio_generation.protocol import AudioGenerationResult
 
 
 MODALITY = "audio/generation"
@@ -43,7 +44,9 @@ class AudioGenerationRequest(BaseModel):
     Same body shape as /v1/audio/speech, except `prompt` replaces
     `input` (this is generation, not TTS), and audio-generation
     extensions like `duration`, `steps`, `guidance`, `negative_prompt`
-    are exposed.
+    are exposed. Optional mastering flags delegate to
+    ``muse.modalities.audio_process.dsp.process_audio`` when enabled;
+    all default off so existing behavior is unchanged.
     """
     prompt: str = Field(..., min_length=1, max_length=4000)
     model: str | None = None
@@ -59,6 +62,51 @@ class AudioGenerationRequest(BaseModel):
     # Optional structured lyrics for song models (ACE-Step). None/empty =>
     # instrumental. Models that ignore lyrics (Stable Audio) simply drop it.
     lyrics: str | None = Field(default=None, max_length=8000)
+    # Optional post-generation mastering flags (all default off).
+    trim_silence: bool = False
+    loop_fade_s: float = Field(0.0, ge=0.0, le=30.0)
+    target_peak_dbfs: float | None = Field(None, ge=-48.0, le=0.0)
+    mono: bool = False
+    sample_rate: int | None = Field(None, ge=8000, le=96000)
+
+
+def _has_mastering(req: AudioGenerationRequest) -> bool:
+    return (
+        req.trim_silence
+        or req.loop_fade_s > 0.0
+        or req.target_peak_dbfs is not None
+        or req.mono
+        or req.sample_rate is not None
+    )
+
+
+def _apply_mastering(
+    result: AudioGenerationResult,
+    req: AudioGenerationRequest,
+) -> AudioGenerationResult:
+    """Apply optional post-generation mastering via ``audio_process.dsp``."""
+    from muse.modalities.audio_process.dsp import process_audio
+
+    processed = process_audio(
+        result.audio,
+        result.sample_rate,
+        mono=req.mono,
+        target_sample_rate=req.sample_rate,
+        trim_silence=req.trim_silence,
+        fade_in_ms=5.0 if req.trim_silence else 0.0,
+        fade_out_ms=15.0 if req.trim_silence else 0.0,
+        loop_fade_s=req.loop_fade_s,
+        target_peak_dbfs=req.target_peak_dbfs,
+    )
+    meta = dict(result.metadata)
+    meta["mastering"] = processed.metrics
+    return AudioGenerationResult(
+        audio=processed.audio,
+        sample_rate=processed.sample_rate,
+        channels=processed.channels,
+        duration_seconds=processed.metrics["duration_s"],
+        metadata=meta,
+    )
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
@@ -110,11 +158,16 @@ async def _handle(registry: ModalityRegistry, req: AudioGenerationRequest, *, ki
     if isinstance(result, JSONResponse):
         return result
 
-    # Encoding (pydub/ffmpeg, soundfile FLAC) runs off-loop but outside the
-    # model lock: up to 240 s of stereo audio would otherwise stall /health.
+    # Optional mastering + encoding (pydub/ffmpeg, soundfile FLAC) run off-loop
+    # and outside the model lock: up to 240 s of stereo audio would otherwise
+    # stall /health.
+    def _postprocess_and_encode() -> bytes:
+        final = _apply_mastering(result, req) if _has_mastering(req) else result
+        return _encode(req.response_format, final)
+
     try:
-        body = await asyncio.to_thread(_encode, req.response_format, result)
-    except UnsupportedFormatError as e:
+        body = await asyncio.to_thread(_postprocess_and_encode)
+    except (UnsupportedFormatError, ValueError) as e:
         return error_response(400, "invalid_parameter", str(e))
 
     return Response(

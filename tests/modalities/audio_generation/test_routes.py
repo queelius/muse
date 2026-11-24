@@ -387,3 +387,96 @@ def test_encoding_runs_off_the_event_loop(monkeypatch):
     r = client.post("/v1/audio/music", json={"prompt": "x"})
     assert r.status_code == 200
     assert seen == [False]
+
+
+# Optional mastering flags (delegating to muse.modalities.audio_process.dsp).
+
+def _tone_backend(*, sr=16000, duration_s=0.6, lead_s=0.2, tail_s=0.2, channels=2, amp=0.2):
+    """Return a fake backend emitting a padded stereo/mono sine clip."""
+    backend = MagicMock()
+    backend.model_id = "stable-audio-open-1.0"
+    n = int(round(duration_s * sr))
+    t = np.arange(n, dtype=np.float64) / sr
+    tone = (amp * np.sin(2.0 * np.pi * 440.0 * t)).astype(np.float32)
+    mono = np.concatenate([
+        np.zeros(int(round(lead_s * sr)), dtype=np.float32),
+        tone,
+        np.zeros(int(round(tail_s * sr)), dtype=np.float32),
+    ])
+    audio = np.stack([mono, mono * 0.5], axis=1) if channels == 2 else mono
+    backend.generate.return_value = AudioGenerationResult(
+        audio=audio, sample_rate=sr, channels=channels,
+        duration_seconds=len(mono) / sr,
+    )
+    return backend
+
+
+def test_sfx_mastering_default_off_preserves_raw_output():
+    from muse.modalities.audio_process.codec import decode_audio_bytes
+
+    backend = _tone_backend(sr=16000, duration_s=0.4, lead_s=0.2, tail_s=0.2, channels=2, amp=0.2)
+    client = _make_client(backend)
+    r = client.post("/v1/audio/sfx", json={"prompt": "click"})
+    assert r.status_code == 200
+    decoded, sr = decode_audio_bytes(r.content)
+    assert sr == 16000
+    assert decoded.ndim == 2 and decoded.shape[1] == 2
+    assert len(decoded) == int(round(0.8 * 16000))
+    assert float(np.max(np.abs(decoded))) == pytest.approx(0.2, abs=1e-2)
+
+
+def test_sfx_mastering_trim_normalize_mono_resample():
+    from muse.modalities.audio_process.codec import decode_audio_bytes
+
+    backend = _tone_backend(sr=16000, duration_s=0.4, lead_s=0.25, tail_s=0.25, channels=2, amp=0.2)
+    client = _make_client(backend)
+    r = client.post("/v1/audio/sfx", json={
+        "prompt": "footstep",
+        "trim_silence": True,
+        "target_peak_dbfs": -3.0,
+        "mono": True,
+        "sample_rate": 22050,
+    })
+    assert r.status_code == 200
+    decoded, sr = decode_audio_bytes(r.content)
+    assert sr == 22050
+    assert decoded.ndim == 1
+    # Trimmed duration (~0.4s + 85ms pad) is strictly shorter than raw 0.9s.
+    assert len(decoded) / sr < 0.7
+    expected_peak = 10.0 ** (-3.0 / 20.0)
+    assert float(np.max(np.abs(decoded))) == pytest.approx(expected_peak, abs=0.02)
+
+
+def test_music_mastering_loop_fade():
+    from muse.modalities.audio_process.codec import decode_audio_bytes
+
+    backend = _tone_backend(sr=16000, duration_s=1.0, lead_s=0.0, tail_s=0.0, channels=1, amp=0.3)
+    client = _make_client(backend)
+    r = client.post("/v1/audio/music", json={
+        "prompt": "ambient bed",
+        "loop_fade_s": 0.25,
+        "target_peak_dbfs": -6.0,
+    })
+    assert r.status_code == 200
+    decoded, sr = decode_audio_bytes(r.content)
+    assert sr == 16000
+    assert len(decoded) == pytest.approx(int(0.75 * 16000), abs=4)
+    expected_peak = 10.0 ** (-6.0 / 20.0)
+    assert float(np.max(np.abs(decoded))) == pytest.approx(expected_peak, abs=0.02)
+
+
+@pytest.mark.parametrize(
+    "bad_fields",
+    [
+        {"loop_fade_s": -1.0},
+        {"loop_fade_s": 31.0},
+        {"target_peak_dbfs": 1.0},
+        {"target_peak_dbfs": -60.0},
+        {"sample_rate": 4000},
+        {"sample_rate": 192000},
+    ],
+)
+def test_audio_generation_mastering_validation_bounds(bad_fields):
+    client = _make_client(_fake_backend())
+    r = client.post("/v1/audio/sfx", json={"prompt": "x", **bad_fields})
+    assert r.status_code == 422

@@ -27,7 +27,8 @@ class AudioGenerationResult:
         differ slightly from the requested duration when the model
         rounds to its internal grid.
     metadata: dict of model-specific provenance (prompt, steps,
-        guidance, seed, model_id).
+        guidance, seed, model_id, and optional ``mastering`` metrics when
+        route-level post-processing is enabled).
     """
     audio: np.ndarray
     sample_rate: int
