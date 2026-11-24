@@ -22,9 +22,11 @@ DECL = modality_discovery()
 
 
 def _routes_of(router):
+    """The router's documented routes (a hidden route, such as the voice
+    router's not-found catch-all, is not part of the contract)."""
     from fastapi.routing import APIRoute
 
-    return [r for r in router.routes if isinstance(r, APIRoute)]
+    return [r for r in router.routes if isinstance(r, APIRoute) and r.include_in_schema]
 
 
 def _light_routes(tag):

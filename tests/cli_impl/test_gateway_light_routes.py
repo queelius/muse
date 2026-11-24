@@ -126,6 +126,30 @@ def test_get_audio_patch_and_delete_never_acquire(client, director, _env):
     assert director.acquire_calls == 0
 
 
+def test_patch_with_model_in_the_query(client, director, _env):
+    _voice(_env, "sage")
+    r = client.patch("/v1/audio/speech/voices/sage?model=fake-clone",
+                     json={"category": "npc/guard"})
+    assert r.status_code == 200, r.text
+    assert r.json()["category"] == "npc/guard" and director.acquire_calls == 0
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/v1/audio/speech/voices/..%2Fetc?model=fake-clone"),
+    ("GET", "/v1/audio/speech/voices/sage/?model=fake-clone"),
+    ("GET", "/v1/audio/speech/voices/?model=fake-clone"),
+    ("GET", "/v1/audio/speech/voices/sage/audio/extra?model=fake-clone"),
+    ("DELETE", "/v1/audio/speech/voices/a/b?model=fake-clone"),
+    ("PATCH", "/v1/audio/speech/voices/a/b?model=fake-clone"),
+])
+def test_malformed_voice_paths_are_404_and_never_acquire(client, director, method, path):
+    kw = {"json": {"notes": "x"}} if method == "PATCH" else {}
+    r = client.request(method, path, **kw)
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "voice_not_found"
+    assert director.acquire_calls == 0
+
+
 def test_missing_model_is_400_model_required(client):
     r = client.get("/v1/audio/speech/voices")
     assert r.status_code == 400 and r.json()["error"]["code"] == "model_required"

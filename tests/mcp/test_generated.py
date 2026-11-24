@@ -207,6 +207,24 @@ def test_patch_sends_json_body_and_path(caps_doc, openapi_doc, fake_http, media_
     assert _structured(blocks)["response"]["category"] == "npc"
 
 
+def test_patch_keeps_explicit_nulls_so_fields_can_be_cleared(
+        caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_update_voice")
+    client = fake_http(lambda r: httpx.Response(200, json={"name": "g"}))
+    call_generated(client, gen, {"model": "m", "name": "g", "notes": None,
+                                 "design": None, "category": "npc"})
+    assert json.loads(fake_http.requests[-1].content) == {
+        "model": "m", "notes": None, "design": None, "category": "npc"}
+
+
+def test_post_still_drops_nulls(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_speak")
+    client = fake_http(lambda r: httpx.Response(
+        200, content=_wav(), headers={"content-type": "audio/wav"}))
+    call_generated(client, gen, {"model": "m", "input": "hi", "voice": None})
+    assert "voice" not in json.loads(fake_http.requests[-1].content)
+
+
 def test_delete_is_destructive_and_sends_query(caps_doc, openapi_doc, fake_http, media_env):
     gen = _gen(caps_doc, openapi_doc, "muse_delete_voice")
     assert gen.tool.annotations.destructiveHint is True

@@ -195,8 +195,18 @@ def build_light_router(catalog: LightCatalog) -> APIRouter:
             "Content-Disposition": f'inline; filename="{name}.wav"'})
 
     @router.patch("/speech/voices/{name}")
-    async def update_voice(name: str, body: VoicePatch):
-        m = await _resolve(body.model)
+    async def update_voice(
+        name: str, body: VoicePatch,
+        model: str | None = Query(None, description=(
+            "The model, as on GET and DELETE; or send it in the body. If both "
+            "are given they must match.")),
+    ):
+        if model is not None and body.model is not None and model != body.model:
+            return error_response(
+                400, "invalid_parameter",
+                f"`model` differs between the query ({model!r}) and the body "
+                f"({body.model!r}); send it once")
+        m = await _resolve(body.model if body.model is not None else model)
         if not isinstance(m, LightModel):
             return m
         if not _saved(m):
@@ -225,6 +235,22 @@ def build_light_router(catalog: LightCatalog) -> APIRouter:
                 500, "internal_error", "deleting the voice failed; see server logs")
         return {"object": "audio.voice.deleted", "model": m.model_id,
                 "name": name, "deleted": True}
+
+    # Last, so every declared route above wins: any other path under
+    # /voices/ (an encoded slash, a trailing slash, an extra segment) is a
+    # voice that cannot exist. Answering it here keeps it from falling
+    # through to the gateway's proxy, which would cold-load the model only
+    # for the worker to 404.
+    @router.api_route(
+        "/speech/voices/{rest:path}", methods=["GET", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    async def no_such_voice(rest: str):
+        return error_response(
+            404, "voice_not_found",
+            "no such voice route; voice names match [a-z0-9][a-z0-9_-]{0,63} and "
+            "the routes are /v1/audio/speech/voices/{name} and "
+            "/v1/audio/speech/voices/{name}/audio")
 
     return router
 

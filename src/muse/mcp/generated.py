@@ -498,8 +498,13 @@ def call_generated(client: Any, gen: GeneratedTool, args: dict) -> list[dict]:
     method = route["method"].upper()
     multipart = route.get("request_content_type") == "multipart/form-data"
     parts = _take_files(gen, args, multipart)
+    # A PATCH sends only the fields it changes, and an explicit null there
+    # means "clear this field", so the caller's nulls are kept; elsewhere a
+    # null is an omitted optional argument.
+    keep_nulls = method == "PATCH"
     body = {**gen.defaults,
-            **{gen.aliases.get(k, k): v for k, v in args.items() if v is not None}}
+            **{gen.aliases.get(k, k): v for k, v in args.items()
+               if v is not None or keep_nulls}}
     in_path = {}
     for name in path_params(route["path"]):
         if body.get(name) in (None, ""):

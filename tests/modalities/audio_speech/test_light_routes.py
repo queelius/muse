@@ -137,6 +137,25 @@ def test_patch_sets_and_clears_fields(home):
     assert cleared["notes"] is None and cleared["category"] == "npc/guard"
 
 
+def test_patch_takes_model_from_the_query_too(home):
+    _voice(home, "guard")
+    c = _client(PRESET, SAVED)  # the registry default is the preset model
+    r = c.patch(f"/v1/audio/speech/voices/guard?model={MODEL}", json={"category": "npc/guard"})
+    assert r.status_code == 200, r.text
+    assert r.json()["category"] == "npc/guard"
+    same = c.patch(f"/v1/audio/speech/voices/guard?model={MODEL}",
+                   json={"model": MODEL, "notes": "n"})
+    assert same.status_code == 200
+
+
+def test_patch_conflicting_query_and_body_model_is_400(home):
+    _voice(home, "guard")
+    r = _client(SAVED, PRESET).patch(
+        f"/v1/audio/speech/voices/guard?model={MODEL}", json={"model": "kokoro", "notes": "n"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_parameter"
+
+
 def test_patch_rule_violation_is_400(home):
     _voice(home, "guard")
     r = _client(SAVED).patch("/v1/audio/speech/voices/guard",
@@ -191,7 +210,17 @@ def test_encoded_traversal_never_reaches_a_voice(home):
     for path in ("..%2Fsecret.wav", "..%2F..%2Fvoices%2Fsecret.wav"):
         r = c.get(f"/v1/audio/speech/voices/{path}/audio?model={MODEL}")
         assert r.status_code == 404
+        assert r.json()["error"]["code"] == "voice_not_found"
         assert b"secret" not in r.content
+
+
+def test_catch_all_does_not_shadow_save_or_the_declared_routes(home):
+    c = _client(SAVED)
+    # POST /voices is the router's save route, not the catch-all.
+    r = c.post("/v1/audio/speech/voices", data={"name": "x", "transcript": "t"})
+    assert r.status_code == 422  # missing the audio file, from the save route
+    assert c.get(f"/v1/audio/speech/voices?model={MODEL}").status_code == 200
+    assert c.get(f"/v1/audio/speech/voices/narrator/audio?model={MODEL}").status_code == 200
 
 
 def test_corrupt_voice_is_500_voice_unreadable(home):
