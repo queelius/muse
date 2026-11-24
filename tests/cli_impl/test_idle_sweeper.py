@@ -747,6 +747,7 @@ class TestIdleEvictionTelemetry:
             "pool": "cpu",
             "gb": 2.5,
             "reason": "idle_timeout:30s",
+            "request_id": None,
         }]
 
     def test_failed_idle_eviction_records_no_event(self, capture_records):

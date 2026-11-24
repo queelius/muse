@@ -25,7 +25,7 @@ PUBLIC_KEYS: frozenset[str] = frozenset({
     "calibrated", "lora_adapter", "base_model", "supported_scales", "supported_tile_sizes",
     "safe_labels", "languages", "multi_label", "num_labels", "output_format",
     "output_mime_type", "static_svg_only", "voice_cloning", "pronunciation_kinds",
-    "prompt_prefix",
+    "prompt_prefix", "supported_modes", "supported_time_signatures",
 })
 
 HIDDEN_KEYS: frozenset[str] = frozenset({
@@ -38,7 +38,7 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "lora_scale", "lora_scale_factor", "reference_runtime", "image_processor_overrides", "window_seconds", "num_beams",
     "temperature", "probabilities", "calibration", "confidence",
     "revision", "adapter_model_subdir", "base_model_revision", "base_model_subdir", "dtype",
-    "mode", "default_instructions",
+    "mode", "default_instructions", "input_size", "format",
 })
 
 
