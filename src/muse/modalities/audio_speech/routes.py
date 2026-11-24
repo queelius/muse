@@ -103,16 +103,10 @@ class SpeechRequest(BaseModel):
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
+    # Listing, inspecting, auditioning, editing and deleting voices are
+    # model-free and live in `light` (muse.core.light); only saving a new
+    # voice (which decodes audio in the model's venv) is served here.
     router = APIRouter(prefix="/v1/audio", tags=["audio/speech"])
-
-    @router.get("/speech/voices")
-    def list_voices(model: str | None = None):
-        m = registry.get_or_404(MODALITY, model)
-        try:
-            voices = getattr(m, "voices", [])
-        except VoiceUnreadableError as exc:
-            return _voice_error_response(exc)
-        return {"model": m.model_id, "voices": voices}
 
     @router.post("/speech/voices")
     async def save_voice(
@@ -211,27 +205,6 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             "duration_seconds": stored.duration_seconds,
             "sha256": stored.sha256,
             **saved_meta,
-        }
-
-    @router.delete("/speech/voices/{name}")
-    async def delete_voice(name: str, model: str | None = None):
-        backend = registry.get_or_404(MODALITY, model)
-        if not _supports_saved_voices(registry, backend):
-            return _saving_not_supported()
-        try:
-            await asyncio.to_thread(backend.delete_voice, name)
-        except VoiceError as exc:
-            return error_response(exc.status, exc.code, str(exc))
-        except VoiceUnreadableError as exc:
-            return _voice_error_response(exc)
-        except Exception:  # noqa: BLE001
-            logger.exception("deleting voice failed")
-            return error_response(
-                500, "internal_error", "deleting the voice failed; see server logs",
-            )
-        return {
-            "object": "audio.voice.deleted", "model": backend.model_id,
-            "name": name, "deleted": True,
         }
 
     @router.post("/speech")

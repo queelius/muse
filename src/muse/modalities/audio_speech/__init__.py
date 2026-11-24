@@ -17,6 +17,7 @@ from muse.modalities.audio_speech.protocol import (
     VoiceError,
     VoiceUnreadableError,
 )
+from muse.modalities.audio_speech.light import build_light_router
 from muse.modalities.audio_speech.routes import build_router
 
 MODALITY = "audio/speech"
@@ -35,8 +36,14 @@ DISCOVERY = {
         "reference clip plus its transcript under a name with POST "
         "/v1/audio/speech/voices on a model with supports_saved_voices "
         "(qwen3-tts-0.6b-base), then speak with voice=<name>; the same name keeps "
-        "the same voice on every line. Delete with DELETE "
-        "/v1/audio/speech/voices/{name}?model=."
+        "the same voice on every line. Saved voices form a catalog: each has a "
+        "category path (narrator/epic, npc/human/guard), tags, a description, "
+        "notes and the design instructions it came from. Browse with GET "
+        "/v1/audio/speech/voices?model=&category=&tag=&q=, inspect one with GET "
+        "/v1/audio/speech/voices/{name}, audition its reference clip with GET "
+        "/v1/audio/speech/voices/{name}/audio, edit metadata with PATCH "
+        "/v1/audio/speech/voices/{name}, and delete with DELETE "
+        "/v1/audio/speech/voices/{name}?model=. None of these load a model."
     ),
     "use_for": [
         "narration and voiceover for a video from a written script",
@@ -44,7 +51,13 @@ DISCOVERY = {
         "listing the voices a speech model offers before choosing one",
         "inventing a character voice from a text description",
         "giving each game character one consistent voice across many lines: "
-        "design a take, save it as a named voice, then clone it for every line",
+        "design a take on qwen3-tts-1.7b-voicedesign with instructions, listen to "
+        "it, save it with POST /v1/audio/speech/voices including category, "
+        "description and design_instructions, then speak with voice=<name> on "
+        "qwen3-tts-0.6b-base",
+        "finding an existing voice for a role by category, tag or text search, "
+        "and auditioning it before using it",
+        "organizing voices into categories and annotating them for other agents",
     ],
     "not_for": [
         "music or sound effects (use audio/generation)",
@@ -72,7 +85,49 @@ DISCOVERY = {
             "mcp_tool": "muse_list_voices",
             "file_fields": [],
             "media_fields": [],
-            "example": {"model": "<model>"},
+            "example": {"model": "<model>", "category": "narrator"},
+            "light": True,
+        },
+        {
+            "method": "GET",
+            "path": "/v1/audio/speech/voices/{name}",
+            "request_content_type": None,
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_get_voice",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>", "name": "narrator"},
+            "light": True,
+        },
+        {
+            "method": "GET",
+            "path": "/v1/audio/speech/voices/{name}/audio",
+            "request_content_type": None,
+            "response_content_type": "audio/wav",
+            "compat": None,
+            "mcp_tool": "muse_get_voice_audio",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {"model": "<model>", "name": "narrator"},
+            "light": True,
+        },
+        {
+            "method": "PATCH",
+            "path": "/v1/audio/speech/voices/{name}",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": None,
+            "mcp_tool": "muse_update_voice",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {
+                "model": "<model>", "name": "grimbold",
+                "category": "npc/dwarf/blacksmith",
+                "tags": ["male", "gravelly"],
+                "notes": "Ironhold's blacksmith in the main quest; keep lines short.",
+            },
+            "light": True,
         },
         {
             "method": "POST",
@@ -101,10 +156,11 @@ DISCOVERY = {
             "request_content_type": None,
             "response_content_type": "application/json",
             "compat": None,
-            "mcp_tool": None,
+            "mcp_tool": "muse_delete_voice",
             "file_fields": [],
             "media_fields": [],
             "example": {"model": "<model>", "name": "grimbold"},
+            "light": True,
         },
     ],
 }
@@ -121,6 +177,7 @@ __all__ = [
     "MODALITY",
     "DISCOVERY",
     "PROBE_DEFAULTS",
+    "build_light_router",
     "build_router",
     "SpeechClient",
     "AudioChunk",

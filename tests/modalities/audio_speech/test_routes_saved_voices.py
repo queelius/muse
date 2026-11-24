@@ -1,4 +1,7 @@
-"""POST/DELETE /v1/audio/speech/voices: save and delete reference voices."""
+"""POST /v1/audio/speech/voices: save reference voices.
+
+Listing, inspecting, auditioning, editing and deleting voices are light
+routes; see test_light_routes.py."""
 import io
 import struct
 import wave
@@ -27,11 +30,9 @@ class FakeTTS:
     sample_rate = 24000
     voices = ["narrator"]
 
-    def __init__(self, save_raises=None, delete_raises=None):
+    def __init__(self, save_raises=None):
         self.saved = []
-        self.deleted = []
         self.save_raises = save_raises
-        self.delete_raises = delete_raises
 
     def save_voice(self, name, audio, sample_rate, transcript, *,
                    overwrite=False, source_filename=None, metadata=None):
@@ -47,11 +48,6 @@ class FakeTTS:
             sample_rate=sample_rate, duration_seconds=1.5, sha256="ab" * 32,
             read_only=False, identity=(0, 0),
         )
-
-    def delete_voice(self, name):
-        if self.delete_raises:
-            raise self.delete_raises
-        self.deleted.append(name)
 
 
 def _client(fake, caps=None):
@@ -201,31 +197,6 @@ def test_save_oversize_upload(monkeypatch):
     assert r.json()["error"]["code"] == "payload_too_large"
 
 
-def test_delete_ok_and_unknown():
-    fake = FakeTTS()
-    c = _client(fake)
-    r = c.delete("/v1/audio/speech/voices/grimbold")
-    assert r.status_code == 200
-    assert r.json() == {
-        "object": "audio.voice.deleted", "model": "fake-tts",
-        "name": "grimbold", "deleted": True,
-    }
-    assert fake.deleted == ["grimbold"]
-    c2 = _client(FakeTTS(delete_raises=UnknownVoiceError("nope", ["a"])))
-    r2 = c2.delete("/v1/audio/speech/voices/nope")
-    assert r2.status_code == 404
-    assert r2.json()["error"]["code"] == "voice_not_found"
-
-
-def test_delete_read_only_and_capability():
-    fake = FakeTTS(delete_raises=VoiceError("voice_read_only", "ro"))
-    r = _client(fake).delete("/v1/audio/speech/voices/x")
-    assert r.status_code == 400 and r.json()["error"]["code"] == "voice_read_only"
-    r = _client(FakeTTS(), caps={}).delete("/v1/audio/speech/voices/x")
-    assert r.status_code == 400
-    assert r.json()["error"]["code"] == "voice_saving_not_supported"
-
-
 def test_real_wav_through_real_decoder():
     pytest.importorskip("torchcodec")
     buf = io.BytesIO()
@@ -250,7 +221,9 @@ def test_discovery_lists_both_routes():
     assert post["mcp_tool"] == "muse_save_voice"
     assert post["request_content_type"] == "multipart/form-data"
     assert post["file_fields"] == ["audio"]
-    assert routes_[("DELETE", "/v1/audio/speech/voices/{name}")]["mcp_tool"] is None
+    assert not post.get("light")  # saving decodes audio in the model's venv
+    delete = routes_[("DELETE", "/v1/audio/speech/voices/{name}")]
+    assert delete["mcp_tool"] == "muse_delete_voice" and delete["light"] is True
 
 
 class StoreBackedTTS(FakeTTS):
@@ -284,13 +257,3 @@ def test_save_storage_unavailable_has_own_fixed_message(decode):
     assert "/secret" not in r.text
 
 
-def test_list_voices_unreadable_is_500_envelope():
-    class Bad(FakeTTS):
-        @property
-        def voices(self):
-            raise VoiceUnreadableError("/secret/path unreadable")
-    r = _client(Bad()).get("/v1/audio/speech/voices")
-    assert r.status_code == 500
-    err = r.json()["error"]
-    assert err["code"] == "voice_unreadable"
-    assert "/secret" not in r.text

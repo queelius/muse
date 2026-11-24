@@ -35,9 +35,16 @@ class FakeTTS:
 
 @pytest.fixture
 def client():
+    from muse.core.light import RegistryLightCatalog
+    from muse.modalities.audio_speech.light import build_light_router
+
     reg = ModalityRegistry()
     reg.register("audio/speech", FakeTTS())
-    app = create_app(registry=reg, routers={"audio/speech": build_router(reg)})
+    app = create_app(registry=reg, routers={
+        "audio/speech": build_router(reg),
+        # The voice listing is a light route (served beside the router).
+        "audio/speech:light": build_light_router(RegistryLightCatalog(reg)),
+    })
     return TestClient(app)
 
 

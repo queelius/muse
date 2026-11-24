@@ -44,38 +44,76 @@ no word timestamps, stream the whole line as one chunk, and take about 10 s
 per short line on a 12 GB GPU without flash-attn. An unknown `voice` is 400
 `voice_not_found` (also before a stream starts, via the backend's
 `check_voice`); a stored voice that cannot be read is 500 `voice_unreadable`
-with no paths. Voices are managed on `/v1/audio/speech/voices`:
-- `GET ?model=` lists them (for the Base model: `narrator` plus the saved
-  names, re-read from disk).
+with no paths. Saved voices form a catalog. Besides the clip and transcript,
+each may carry metadata (all optional; old voices without it read as null):
+`category` (a slash path of 1-4 segments `[a-z0-9][a-z0-9_-]{0,31}`, e.g.
+`narrator/epic`, `npc/human/guard`), `tags` (at most 16 of the same shape,
+deduplicated and sorted), `description` (what it sounds like, at most 500
+chars), `notes` (what it is for, at most 2000 chars) and `design`
+(`{model, instructions}`: how the take was designed, instructions at most
+4096 chars), plus server-set `created_at` / `updated_at`. Input is
+normalized (lowercased, trimmed, outer slashes stripped; a comma string is
+accepted for tags; an empty string or null clears a field); a rule violation
+is 400 `invalid_voice_metadata` naming the field. Voices are managed on
+`/v1/audio/speech/voices`; every route but `POST` is a light route
+(`muse.core.light`): the gateway answers it from disk and never loads the
+model.
+- `GET ?model=&category=&tag=&q=` returns `{"object": "list", model, voices:
+  [names], data: [entries], categories: [{path, count}]}`. `category`
+  matches the path and everything below it, `tag` repeats (all must match),
+  `q` is a case-insensitive substring of name, category, description, notes
+  and tags. `categories` always covers every voice. A model without saved
+  voices lists its preset voices (`{object, model, name, read_only}` entries;
+  the gateway forwards that case to the worker). MCP `muse_list_voices`.
+- `GET /{name}?model=` returns one entry: `{"object": "audio.voice", model,
+  name, category, tags, description, notes, design, transcript,
+  duration_seconds, sample_rate, sha256, read_only, created_at, updated_at,
+  audio_url}`. MCP `muse_get_voice`.
+- `GET /{name}/audio?model=` returns the reference clip as `audio/wav`, to
+  audition a voice without synthesizing. MCP `muse_get_voice_audio`.
+- `PATCH /{name}` (JSON `{model, category?, tags?, description?, notes?,
+  design?}`) changes only the fields sent (null clears) and returns the
+  entry; audio and transcript are not editable. 422 `invalid_request` for an
+  unknown field or wrong type. MCP `muse_update_voice`.
 - `POST` (multipart `model`, `name`, `transcript`, optional `overwrite`
-  default false, file `audio`) returns 200 `{"object": "audio.voice", model,
-  name, duration_seconds, sha256}` (sha256 of the stored WAV). Errors: 400
+  default false, file `audio`, and the optional metadata form fields
+  `category`, `tags` (comma-separated), `description`, `notes`,
+  `design_model`, `design_instructions`) returns 200 `{"object":
+  "audio.voice", model, name, duration_seconds, sha256, category, tags,
+  description, notes, design}` (sha256 of the stored WAV). Errors: 400
   `invalid_voice_name` (name must match `^[a-z0-9][a-z0-9_-]{0,63}$`),
   `invalid_transcript` (1-1000 chars), `invalid_reference_audio` (1-30 s),
-  `voice_read_only` (`narrator`), `voice_saving_not_supported`; 500
-  `voice_storage_unavailable` (fixed message, no paths; a read failure on
-  GET is `voice_unreadable`); 409
+  `invalid_voice_metadata`, `voice_read_only` (`narrator`),
+  `voice_saving_not_supported`; 500 `voice_storage_unavailable` (fixed
+  message, no paths; a read failure on GET is `voice_unreadable`); 409
   `voice_exists` (without `overwrite`) and `voice_limit_reached`; 413
   `payload_too_large` (`limits.voice_reference_max_bytes`, default 20 MB);
   415 `unsupported_media_type` (undecodable audio). MCP tool `muse_save_voice`.
-- `DELETE /v1/audio/speech/voices/{name}?model=` returns 200
-  `{"object": "audio.voice.deleted", model, name, "deleted": true}`; 404
-  `voice_not_found`, 400 `voice_read_only`. It has no MCP tool (the generator
-  has no DELETE support). The gateway routes DELETE by the `model` query
-  param.
-- Saved voices live on the server's disk (`<paths.home>/voices/<model_id>/`).
+- `DELETE /{name}?model=` returns 200 `{"object": "audio.voice.deleted",
+  model, name, "deleted": true}`; 404 `voice_not_found`, 409
+  `voice_read_only`. MCP `muse_delete_voice`.
+- Every route but `POST` answers 400 `voice_saving_not_supported` for a model
+  without saved voices (except the preset listing above), 404
+  `voice_not_found` for an unknown or malformed name, and 409
+  `voice_read_only` for PATCH or DELETE of a bundled voice.
 
 Storage: `<paths.home>/voices/<model_id>/<name>/{reference.wav, voice.json}`
 (voices are per model id; the store root is created 0700). The reference is
 decoded to mono 24 kHz and stored once as PCM16 WAV, never re-encoded;
-`voice.json` holds transcript, sample rate, duration, sha256, created time
-and source filename. Saves write a temp dir and rename it into place. The
-count cap `limits.max_saved_voices` (default 200 per model) is read when the
-model loads, so a change needs a reload. The clone prompt is cached per voice
-(LRU of 32) keyed by the files' stat identity; save and delete evict it.
-Design-then-clone, the intended workflow for a recurring character:
+`voice.json` holds transcript, sample rate, duration, sha256, created and
+updated times, source filename and the metadata above. Saves write a temp
+dir and rename it into place; metadata edits replace `voice.json` atomically.
+Every process (gateway and worker) takes the voice root's advisory lock
+`<root>/.lock` (shared for reads, exclusive for writes; `VoiceCatalog.lock`,
+stdlib-only `voice_catalog.py`), so a reader in one process never sees
+another's half-finished swap. The count cap `limits.max_saved_voices`
+(default 200 per model) is read when the model loads, so a change needs a
+reload. The clone prompt is cached per voice (LRU of 32) keyed by the files'
+stat identity, so an edit or delete from the gateway is picked up on the next
+line (a metadata edit costs one re-encode). Design-then-clone, the intended
+workflow for a recurring character:
 1. Audition on the VoiceDesign model with `instructions` until a take fits.
-2. Save that take with its exact text as the transcript: `POST /v1/audio/speech/voices` on `qwen3-tts-0.6b-base`, `name: grimbold`.
+2. Save that take with its exact text as the transcript: `POST /v1/audio/speech/voices` on `qwen3-tts-0.6b-base`, `name: grimbold`, plus `category`, `description` and the `design_instructions` you used.
 3. Speak every later line on the Base model with `voice: "grimbold"`; it holds tighter than re-describing each line.
 4. For a one-off emotional line, go back to the VoiceDesign model with `instructions`.
 

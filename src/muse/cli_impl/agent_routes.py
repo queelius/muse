@@ -18,9 +18,11 @@ from fastapi.responses import PlainTextResponse
 
 from muse.core.discovery import (
     discover_modalities,
+    light_hooks,
     modality_dirs,
     modality_discovery,
 )
+from muse.core.light import RegistryLightCatalog
 from muse.core.registry import ModalityRegistry
 
 logger = logging.getLogger(__name__)
@@ -55,10 +57,15 @@ def _slug(tag: str) -> str:
     return "".join(p.capitalize() for p in tag.replace("/", "_").split("_"))
 
 
-def _modality_schema(tag: str, build_router) -> dict | None:
+def _modality_schema(tag: str, build_router, build_light_router=None) -> dict | None:
+    """One modality's OpenAPI: its router plus its light router (if any),
+    each built over an empty registry."""
     try:
         app = FastAPI()
-        app.include_router(build_router(ModalityRegistry()))
+        registry = ModalityRegistry()
+        app.include_router(build_router(registry))
+        if build_light_router is not None:
+            app.include_router(build_light_router(RegistryLightCatalog(registry)))
         return copy.deepcopy(app.openapi())
     except Exception as exc:  # noqa: BLE001
         logger.warning("skipping %s in OpenAPI: router failed to build: %s", tag, exc)
@@ -79,12 +86,13 @@ def merge_openapi(base: dict) -> dict:
 
     try:
         routers = discover_modalities(modality_dirs())
+        light = {t: h.build_light_router for t, h in light_hooks().items()}
     except Exception as exc:  # noqa: BLE001
         logger.warning("modality discovery failed for OpenAPI: %s", exc)
-        routers = {}
+        routers, light = {}, {}
 
     for tag, build_router in sorted(routers.items()):
-        sub = _modality_schema(tag, build_router)
+        sub = _modality_schema(tag, build_router, light.get(tag))
         if sub is None:
             continue
         sub_schemas = sub.get("components", {}).get("schemas", {})
