@@ -7,7 +7,9 @@ httpx and ``muse.core.config`` only.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -73,12 +75,20 @@ class MuseClient:
         data: dict | None = None,
         files: dict | list | None = None,
         params: dict | None = None,
+        path_params: dict[str, str] | None = None,
     ) -> httpx.Response:
         """One request to a DISCOVERY route; raises on an error status.
 
         ``json`` sends a JSON body; ``data`` + ``files`` send multipart;
-        ``params`` are query parameters (GET routes).
+        ``params`` are query parameters (GET / DELETE routes);
+        ``path_params`` fill the route's ``{name}`` segments, each
+        percent-encoded whole (a ``/`` cannot leave its segment).
         """
+        path = re.sub(
+            r"{([^}]+)}",
+            lambda m: quote(str((path_params or {})[m.group(1)]), safe=""),
+            route["path"],
+        )
         kwargs: dict[str, Any] = {"params": params}
         if json is not None:
             kwargs["json"] = json
@@ -88,7 +98,7 @@ class MuseClient:
             kwargs["data"] = data
         with httpx.Client(timeout=self.timeout, transport=self.transport) as c:
             r = c.request(route["method"].upper(),
-                          f"{self.server_url}{route['path']}", **kwargs)
+                          f"{self.server_url}{path}", **kwargs)
         r.raise_for_status()
         return r
 

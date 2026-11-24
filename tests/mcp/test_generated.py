@@ -164,6 +164,72 @@ def test_get_route_sends_query_params(caps_doc, openapi_doc, fake_http, media_en
     assert _structured(blocks)["response"] == {"voices": ["af"]}
 
 
+def test_voice_tools_generated_from_real_discovery(caps_doc, openapi_doc):
+    names = {g.name for g in generate_tools(caps_doc, openapi_doc)}
+    assert {"muse_get_voice", "muse_get_voice_audio", "muse_update_voice",
+            "muse_delete_voice", "muse_list_voices", "muse_save_voice"} <= names
+
+
+def test_path_param_is_required_and_substituted(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_get_voice")
+    schema = gen.tool.inputSchema
+    assert "name" in schema["required"] and schema["properties"]["name"]["type"] == "string"
+    client = fake_http(lambda r: httpx.Response(200, json={"name": "a b"}))
+    call_generated(client, gen, {"model": "m", "name": "a b"})
+    req = fake_http.requests[-1]
+    assert req.method == "GET"
+    assert req.url.raw_path == b"/v1/audio/speech/voices/a%20b?model=m"
+
+
+def test_path_param_cannot_escape_the_route(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_get_voice")
+    client = fake_http(lambda r: httpx.Response(200, json={}))
+    call_generated(client, gen, {"model": "m", "name": "../../admin"})
+    assert fake_http.requests[-1].url.raw_path.startswith(
+        b"/v1/audio/speech/voices/..%2F..%2Fadmin")
+
+
+def test_missing_path_param_is_an_error(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_delete_voice")
+    with pytest.raises(ValueError, match="name"):
+        call_generated(fake_http(), gen, {"model": "m"})
+
+
+def test_patch_sends_json_body_and_path(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_update_voice")
+    props = gen.tool.inputSchema["properties"]
+    assert {"name", "category", "tags", "notes", "model"} <= set(props)
+    client = fake_http(lambda r: httpx.Response(200, json={"name": "g", "category": "npc"}))
+    blocks = call_generated(client, gen, {"model": "m", "name": "g", "category": "npc"})
+    req = fake_http.requests[-1]
+    assert req.method == "PATCH" and req.url.path == "/v1/audio/speech/voices/g"
+    assert json.loads(req.content) == {"model": "m", "category": "npc"}
+    assert _structured(blocks)["response"]["category"] == "npc"
+
+
+def test_delete_is_destructive_and_sends_query(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_delete_voice")
+    assert gen.tool.annotations.destructiveHint is True
+    assert _gen(caps_doc, openapi_doc, "muse_get_voice").tool.annotations.destructiveHint is False
+    client = fake_http(lambda r: httpx.Response(200, json={"deleted": True}))
+    call_generated(client, gen, {"model": "m", "name": "g"})
+    req = fake_http.requests[-1]
+    assert req.method == "DELETE" and req.url.path == "/v1/audio/speech/voices/g"
+    assert req.url.params["model"] == "m" and req.content == b""
+
+
+def test_get_voice_audio_writes_wav_file(caps_doc, openapi_doc, fake_http, media_env):
+    gen = _gen(caps_doc, openapi_doc, "muse_get_voice_audio")
+    wav = _wav()
+    client = fake_http(lambda r: httpx.Response(
+        200, content=wav, headers={"content-type": "audio/wav"}))
+    blocks = call_generated(client, gen, {"model": "m", "name": "narrator"})
+    data = _structured(blocks)
+    [f] = data["files"]
+    assert f["sha256"] == hashlib.sha256(wav).hexdigest()
+    assert f["path"].endswith(".wav")
+
+
 def test_describe_tool_shape():
     t = describe_tool()
     assert t.name == "muse_describe"

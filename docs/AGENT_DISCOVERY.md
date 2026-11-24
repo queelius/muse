@@ -139,9 +139,13 @@ re-list. A `model` argument is a string whose description lists the serving
 models, not an enum, so a model enabled mid-session is accepted; on a
 `model_optional` route it is not required. Every tool has a `title` and
 annotations. Generated inference tools are not read-only (any can write a
-local file) and not destructive (a cold load may evict idle models, which is
-not counted as destructive), and are open-world only when they take `*_url` /
-`*_urls` inputs. `muse_describe` and the admin read tools are read-only;
+local file) and not destructive except a DELETE route's tool
+(`muse_delete_voice`; a cold load may evict idle models, which is not counted
+as destructive), and are open-world only when they take `*_url` / `*_urls`
+inputs. A route path's `{name}` segment becomes a required string argument,
+percent-encoded whole when the tool is called (a `/` in it cannot reach
+another route); GET and DELETE send their arguments as query parameters,
+POST and PATCH as the body. `muse_describe` and the admin read tools are read-only;
 `muse_remove_model`, `muse_disable_model` and `muse_pull_model` (a re-pull
 replaces weights; a failed probe disables the model) are destructive;
 `muse_search_models` and `muse_pull_model` are open-world (Hugging Face Hub).

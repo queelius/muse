@@ -128,19 +128,24 @@ def test_generated_titles_read_as_actions(caps_doc, openapi_doc):
 
 
 def test_generated_annotations(caps_doc, openapi_doc):
+    from muse.mcp.generated import generate_tools
+
     tools = _tools(caps_doc, openapi_doc)
+    methods = {g.name: g.route["method"].upper()
+               for g in generate_tools(caps_doc, openapi_doc)}
     for name, t in tools.items():
         # Any generated tool can write a local file (media, a non-JSON body,
-        # or a spilled large result), so none is read-only; none changes
-        # muse's state, so none is destructive.
+        # or a spilled large result), so none is read-only; only a DELETE
+        # route's tool removes muse state, so only those are destructive.
         assert t.annotations.readOnlyHint is False, name
-        assert t.annotations.destructiveHint is False, name
+        assert t.annotations.destructiveHint is (methods[name] == "DELETE"), name
         props = t.inputSchema["properties"]
         takes_url = any(k.endswith(("_url", "_urls")) for k in props)
         assert t.annotations.openWorldHint is takes_url, name
     assert tools["muse_pixelize_image"].annotations.openWorldHint is True
     assert tools["muse_embed_text"].annotations.openWorldHint is False
     assert tools["muse_list_languages"].annotations.idempotentHint is True
+    assert tools["muse_delete_voice"].annotations.destructiveHint is True
 
 
 def test_model_argument_is_non_empty(caps_doc, openapi_doc):

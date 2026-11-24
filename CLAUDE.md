@@ -577,11 +577,14 @@ The server sends `instructions` at initialize (`muse.mcp.server.INSTRUCTIONS`:
 workflow, path-input rules, which admin tools need the token, job polling);
 an admin-only or inference-only filter sends just its half. Every tool has a
 `title` and `ToolAnnotations`: generated inference tools are never read-only
-(any can write a file) nor destructive, open-world only with `*_url` /
-`*_urls` inputs, idempotent on GET; `muse_remove_model`, `muse_disable_model`
-and `muse_pull_model` are destructive. The generated `model` argument has
-`minLength: 1` and is optional on a `model_optional` route. Full rules:
-docs/AGENT_DISCOVERY.md.
+(any can write a file), destructive only for a DELETE route
+(`muse_delete_voice`), open-world only with `*_url` / `*_urls` inputs,
+idempotent on GET; `muse_remove_model`, `muse_disable_model` and
+`muse_pull_model` are destructive. Generated tools support path parameters
+(a required string argument per `{name}` segment, percent-encoded whole),
+GET/DELETE query parameters and PATCH JSON bodies. The generated `model`
+argument has `minLength: 1` and is optional on a `model_optional` route.
+Full rules: docs/AGENT_DISCOVERY.md.
 
 I/O conventions:
 - Media outputs are written to files and returned as path, sha256, model and

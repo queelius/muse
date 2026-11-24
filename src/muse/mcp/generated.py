@@ -141,26 +141,53 @@ def _example_schema(route: dict) -> dict:
             "additionalProperties": True}
 
 
+_PATH_PARAM = re.compile(r"{([^}]+)}")
+
+
+def path_params(path: str) -> list[str]:
+    """The ``{name}`` parameters of a route path, in order."""
+    return _PATH_PARAM.findall(path)
+
+
+def _with_path_params(schema: dict, route: dict, params: list[dict], schemas: dict) -> dict:
+    """``schema`` plus the route's path parameters as required properties."""
+    names = path_params(route["path"])
+    if not names:
+        return schema
+    declared = {p["name"]: p for p in params if p.get("in") == "path"}
+    props = dict(schema.get("properties") or {})
+    for name in names:
+        p = declared.get(name) or {}
+        prop = _resolve(p.get("schema") or {}, schemas) if p else {}
+        prop = {"type": "string", **(prop if isinstance(prop, dict) else {})}
+        prop.setdefault("description", f"`{name}` in the route path {route['path']}.")
+        props[name] = prop
+    return {**schema, "properties": props,
+            "required": sorted(set(schema.get("required") or []) | set(names))}
+
+
 def _request_schema(route: dict, openapi: dict) -> tuple[dict, bool]:
-    """``(schema, from_openapi)`` for the route's request."""
+    """``(schema, from_openapi)`` for the route's request: GET/DELETE query
+    parameters, or the POST/PATCH body, plus any path parameters."""
     schemas = (openapi.get("components") or {}).get("schemas") or {}
     op = ((openapi.get("paths") or {}).get(route["path"]) or {}).get(
         route["method"].lower()) or {}
-    if route["method"].upper() == "GET":
-        params = [p for p in op.get("parameters") or [] if p.get("in") == "query"]
-        if params:
-            return {
+    params = op.get("parameters") or []
+    if route["method"].upper() in ("GET", "DELETE"):
+        query = [p for p in params if p.get("in") == "query"]
+        if query or any(p.get("in") == "path" for p in params):
+            return _with_path_params({
                 "properties": {p["name"]: _resolve(p.get("schema") or {}, schemas)
-                               for p in params},
-                "required": [p["name"] for p in params if p.get("required")],
-            }, True
+                               for p in query},
+                "required": [p["name"] for p in query if p.get("required")],
+            }, route, params, schemas), True
         return _example_schema(route), False
     content = (op.get("requestBody") or {}).get("content") or {}
     media = content.get(route.get("request_content_type") or "") or next(
         iter(content.values()), {})
     schema = _resolve(media.get("schema") or {}, schemas)
     if isinstance(schema, dict) and schema.get("properties"):
-        return schema, True
+        return _with_path_params(schema, route, params, schemas), True
     return _example_schema(route), False
 
 
@@ -318,18 +345,22 @@ def _annotations(route: dict, props: dict) -> types.ToolAnnotations:
     """Hints for clients deciding whether to confirm a call.
 
     No generated tool is read-only: any of them can write a local file (a
-    media output, a non-JSON body, or a spilled large result). None is
-    destructive: they never delete or overwrite muse state (``muse_save_voice``
-    stores a new voice, and replaces one only with ``overwrite``) and write
-    only new or explicitly named (``out_path``) files. A call can still cold-load its model, which
-    may evict other idle models from memory; that is load management, not a
-    destructive update. A tool taking ``*_url`` / ``*_urls`` inputs reaches
-    URLs outside the muse server (``openWorldHint``). A GET is idempotent.
+    media output, a non-JSON body, or a spilled large result). A DELETE
+    route's tool (``muse_delete_voice``) is destructive: it removes muse
+    state. The others are not: they never delete muse state
+    (``muse_save_voice`` stores a new voice and replaces one only with
+    ``overwrite``; ``muse_update_voice`` edits metadata the caller names)
+    and write only new or explicitly named (``out_path``) files. A call can
+    still cold-load its model, which may evict other idle models from
+    memory; that is load management, not a destructive update. A tool taking
+    ``*_url`` / ``*_urls`` inputs reaches URLs outside the muse server
+    (``openWorldHint``). A GET is idempotent.
     """
     takes_url = any(k.endswith(("_url", "_urls")) for k in props)
+    method = route["method"].upper()
     return types.ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False,
-        idempotentHint=route["method"].upper() == "GET", openWorldHint=takes_url)
+        readOnlyHint=False, destructiveHint=method == "DELETE",
+        idempotentHint=method == "GET", openWorldHint=takes_url)
 
 
 def generate_tools(capabilities: dict, openapi: dict) -> list[GeneratedTool]:
@@ -469,13 +500,18 @@ def call_generated(client: Any, gen: GeneratedTool, args: dict) -> list[dict]:
     parts = _take_files(gen, args, multipart)
     body = {**gen.defaults,
             **{gen.aliases.get(k, k): v for k, v in args.items() if v is not None}}
-    if method == "GET":
-        resp = client.call(route, params=body)
+    in_path = {}
+    for name in path_params(route["path"]):
+        if body.get(name) in (None, ""):
+            raise ValueError(f"{name} is required (it is part of the route path)")
+        in_path[name] = str(body.pop(name))
+    if method in ("GET", "DELETE"):
+        resp = client.call(route, params=body, path_params=in_path)
     elif multipart:
         resp = client.call(route, data={k: _form(v) for k, v in body.items()},
-                           files=parts)
+                           files=parts, path_params=in_path)
     else:
-        resp = client.call(route, json={**body, **gen.fixed})
+        resp = client.call(route, json={**body, **gen.fixed}, path_params=in_path)
     return _render(resp, gen, out_path=out_path, preview=preview,
                    model=body.get("model"))
 
