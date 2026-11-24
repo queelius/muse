@@ -11,6 +11,7 @@ MANIFEST = {
     "model_id": "birefnet-lite",
     "modality": "image/matting",
     "hf_repo": "ZhengPeng7/BiRefNet_lite",
+    "revision": "aa62cd87eafb9cc43056d08ef3615a14628b831d",
     "description": (
         "BiRefNet_lite: lightweight neural foreground matting and background "
         "removal for sprites, props, portraits, and scenes. MIT."
