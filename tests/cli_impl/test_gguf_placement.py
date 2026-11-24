@@ -7,6 +7,7 @@ import sys
 import time
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -430,7 +431,9 @@ def test_native_query_wait_deadline_is_actionable(native_entry, monkeypatch):
 
     class TimedOutWaiter(Future):
         def result(self, timeout=None):
-            raise TimeoutError("owner is still cleaning its owned child")
+            # What a real Future.result raises: on Python 3.10 this is not
+            # the builtin TimeoutError (they are the same class from 3.11).
+            raise FutureTimeoutError("owner is still cleaning its owned child")
 
     def slow_query(command, **kwargs):
         started.set()
