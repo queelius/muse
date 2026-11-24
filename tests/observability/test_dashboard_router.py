@@ -14,6 +14,7 @@ from muse.core import config
 from muse.observability.dashboard import _stream_model_logs, build_dashboard_router
 from muse.observability.logs import LogHub
 from muse.observability.store import TelemetryStore
+from muse.observability.events import event_to_row
 
 
 @pytest.fixture(autouse=True)
@@ -288,6 +289,94 @@ def test_dashboard_html_is_self_contained(client_with_token):
     # no external resource loads (works internet-exposed / strict CSP)
     assert not re.search(r'(src|href)\s*=\s*["\']https?://', body)
     assert body.isascii()
+    assert "VRAM over time" in body
+    assert "Cold vs hot evidence" in body
+    assert "Recent request traces" in body
+    assert '"legacy"' in body
+    assert "circle" in body
+    assert "d.queued" in body
+    assert "MAX_LOG_LINES" in body
+    assert "reqSeq" in body
+
+
+def test_report_and_traces_endpoints(client_with_token):
+    import time
+
+    state = client_with_token.state_ref
+    now = time.time()
+    state.telemetry_store.insert_many([
+        event_to_row(
+            "request", now - 7200.0, request_id="old-r", model_id="old-m",
+            modality="audio/speech", cold=False, latency_ms=100.0, status=200,
+        ),
+        event_to_row(
+            "request", now - 10.0, request_id="r1", model_id="m",
+            modality="audio/speech", cold=True, latency_ms=1000.0,
+            load_ms=700.0, peak_vram_gb=3.5,
+            evicted_models='["old"]', status=200,
+        ),
+        event_to_row(
+            "request", now - 5.0, request_id="r2", model_id="m2",
+            modality="chat/completions", cold=None, latency_ms=50.0,
+            evicted_models='"non-list-json"', status=200,
+        ),
+    ])
+    headers = {"Authorization": "Bearer t"}
+
+    report = client_with_token.get(
+        "/v1/telemetry/report?window=3600", headers=headers,
+    )
+    traces = client_with_token.get(
+        "/v1/telemetry/traces?window=3600", headers=headers,
+    )
+    filtered = client_with_token.get(
+        "/v1/telemetry/traces?window=3600&model_id=m&modality=audio/speech",
+        headers=headers,
+    )
+
+    assert report.status_code == 200
+    by_model = {r["model_id"]: r for r in report.json()["rows"]}
+    assert set(by_model) == {"m", "m2"}
+    assert by_model["m"]["evicted_models"] == ["old"]
+    assert by_model["m2"]["evicted_models"] == ["non-list-json"]
+
+    assert traces.status_code == 200
+    trace_by_id = {r["request_id"]: r for r in traces.json()["rows"]}
+    assert set(trace_by_id) == {"r1", "r2"}
+    assert trace_by_id["r1"]["cold"] is True
+    assert trace_by_id["r2"]["cold"] is None
+    assert trace_by_id["r2"]["evicted_models"] == ["non-list-json"]
+
+    assert filtered.status_code == 200
+    assert [r["request_id"] for r in filtered.json()["rows"]] == ["r1"]
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/telemetry/report", "/v1/telemetry/traces"])
+def test_report_and_traces_require_token(client_no_token, endpoint):
+    assert client_no_token.get(endpoint).status_code == 503
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/telemetry/report", "/v1/telemetry/traces"])
+def test_report_and_traces_reject_invalid_window(client_with_token, endpoint):
+    bad = client_with_token.get(
+        f"{endpoint}?window=-1", headers={"Authorization": "Bearer t"},
+    )
+    assert bad.status_code == 400
+    assert bad.json()["detail"]["error"]["code"] == "invalid_window"
+
+
+def test_dashboard_data_can_be_opened_explicitly(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSE_TELEMETRY_REQUIRE_AUTH", "false")
+    monkeypatch.delenv("MUSE_ADMIN_TOKEN", raising=False)
+    config.reset_config()
+    app, state = _make_app(tmp_path)
+    try:
+        client = TestClient(app)
+        response = client.get("/v1/telemetry/summary")
+        assert response.status_code == 200
+        assert response.json()["auth_required"] is False
+    finally:
+        state.telemetry_store.close()
 
 
 def test_dashboard_is_ungated(client_no_token):

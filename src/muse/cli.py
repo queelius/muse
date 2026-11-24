@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import sys
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -63,6 +64,11 @@ class McpFilter(str, Enum):
     inference = "inference"
 
 
+class TelemetryFormat(str, Enum):
+    json = "json"
+    csv = "csv"
+
+
 # Top-level Typer app. rich_markup_mode lets help strings use [bold]
 # and similar inline rich tags; we don't lean on it heavily but it
 # costs nothing.
@@ -91,6 +97,9 @@ doctor_app = _subapp(
     "doctor", "diagnose local muse state and owned runtime resources",
 )
 storage_app = _subapp("storage", "inspect and reclaim Muse-owned disk space")
+telemetry_app = _subapp(
+    "telemetry", "view, export, and manage request traces and resource metrics",
+)
 
 
 def _version_callback(value: bool) -> bool:
@@ -225,6 +234,93 @@ def storage_dedupe(
     from muse.cli_impl.storage import run_storage_dedupe
 
     raise typer.Exit(run_storage_dedupe(dry_run=dry_run, json_output=json_output))
+
+
+def _run_telemetry(fn, /, *, param_hint: str | None = None, **kwargs) -> None:
+    try:
+        code = fn(**kwargs)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint=param_hint) from exc
+    raise typer.Exit(code)
+
+
+@telemetry_app.command("status")
+def telemetry_status(
+    as_json: Annotated[bool, typer.Option("--json", help="machine-readable output")] = False,
+) -> None:
+    """Show the local telemetry database location, bounds, and event counts."""
+    from muse.cli_impl.telemetry import run_status
+    raise typer.Exit(run_status(as_json=as_json))
+
+
+@telemetry_app.command("summary")
+def telemetry_summary(
+    since: Annotated[str, typer.Option(help="lookback duration, e.g. 6h or 7d")] = "24h",
+    as_json: Annotated[bool, typer.Option("--json", help="machine-readable output")] = False,
+) -> None:
+    """Compare cold and hot latency, peak VRAM, and request-linked evictions."""
+    from muse.cli_impl.telemetry import run_summary
+    _run_telemetry(run_summary, param_hint="--since", since=since, as_json=as_json)
+
+
+@telemetry_app.command("traces")
+def telemetry_traces(
+    since: Annotated[str, typer.Option(help="lookback duration, e.g. 1h or 2d")] = "24h",
+    limit: Annotated[int, typer.Option(min=1, max=1000, help="maximum traces")] = 50,
+    model_id: Annotated[Optional[str], typer.Option("--model", help="exact model id filter")] = None,
+    modality: Annotated[Optional[str], typer.Option(help="exact modality filter")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="machine-readable output")] = False,
+) -> None:
+    """List individual end-to-end request traces."""
+    from muse.cli_impl.telemetry import run_traces
+    _run_telemetry(
+        run_traces,
+        param_hint="--since",
+        since=since,
+        limit=limit,
+        model_id=model_id,
+        modality=modality,
+        as_json=as_json,
+    )
+
+
+@telemetry_app.command("vram")
+def telemetry_vram(
+    since: Annotated[str, typer.Option(help="lookback duration, e.g. 1h or 24h")] = "1h",
+    width: Annotated[int, typer.Option(min=10, max=200, help="terminal graph width")] = 72,
+    as_json: Annotated[bool, typer.Option("--json", help="return bucketed VRAM series as JSON")] = False,
+) -> None:
+    """Render a terminal graph of the device-wide GPU working set."""
+    from muse.cli_impl.telemetry import run_vram
+    _run_telemetry(
+        run_vram, param_hint="--since", since=since, width=width, as_json=as_json,
+    )
+
+
+@telemetry_app.command("export")
+def telemetry_export(
+    output: Annotated[Path, typer.Argument(help="destination .json or .csv file")],
+    since: Annotated[str, typer.Option(help="lookback duration")] = "7d",
+    format: Annotated[TelemetryFormat, typer.Option(help="export encoding")] = TelemetryFormat.json,
+    force: Annotated[bool, typer.Option("--force", help="overwrite an existing file")] = False,
+) -> None:
+    """Export raw telemetry events for notebooks or a blog artifact."""
+    from muse.cli_impl.telemetry import run_export
+    _run_telemetry(
+        run_export, since=since, output=output, format=format.value, force=force,
+    )
+
+
+@telemetry_app.command("prune")
+def telemetry_prune(
+    older_than: Annotated[str, typer.Option(help="delete events older than this duration")] = "7d",
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="count without deleting")] = False,
+) -> None:
+    """Prune old telemetry events from the local SQLite store."""
+    from muse.cli_impl.telemetry import run_prune
+    _run_telemetry(
+        run_prune, param_hint="--older-than", older_than=older_than, dry_run=dry_run,
+    )
 
 
 def _resolve_serve_device(cli_device: "Device | None") -> str:

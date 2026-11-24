@@ -4,6 +4,8 @@ Wire surface:
   GET /dashboard                         -- HTMLResponse, UN-GATED shell.
   GET /v1/telemetry/summary              -- gated JSON snapshot.
   GET /v1/telemetry/series               -- gated JSON time series.
+  GET /v1/telemetry/report               -- gated cold/hot request summary.
+  GET /v1/telemetry/traces               -- gated recent request traces.
   POST /v1/telemetry/logs-ticket         -- gated (header) ticket mint.
   GET /v1/telemetry/logs/{model_id}      -- gated (ticket OR header) SSE log tail.
 
@@ -52,6 +54,7 @@ from sse_starlette.sse import EventSourceResponse
 from muse.admin.auth import _err
 from muse.core import config
 from muse.observability.dashboard_auth import check_dashboard_token, require_dashboard_auth
+from muse.observability.events import decode_evicted_models
 from muse.observability.log_tickets import LogTicketStore
 from muse.observability.recorder import get_recorder
 
@@ -130,6 +133,16 @@ def _loaded_entry_dict(model_id: str, entry, queue_depth: int | None = None) -> 
     }
 
 
+def _since_ts_for_window(window: float) -> float:
+    if not math.isfinite(window) or window <= 0:
+        raise _err(
+            400,
+            "invalid_window",
+            "Telemetry window must be a positive finite number of seconds",
+        )
+    return time.time() - window
+
+
 def build_dashboard_router(state) -> APIRouter:
     router = APIRouter()
     tickets = LogTicketStore(config.get("telemetry.log_ticket_ttl_seconds"))
@@ -181,6 +194,9 @@ def build_dashboard_router(state) -> APIRouter:
         # (which take their refcount only after the gate admits them). It
         # excludes requests waiting on a cold load or a capacity wait.
         # Federation balances on it. `in_flight_loads` counts cold loads.
+        samples = state.telemetry_store.samples(since_ts=0, limit=1)
+        latest_sample = samples[-1] if samples else None
+        store_status = state.telemetry_store.status()
         return {
             "node": _node_id(state),
             "loaded": loaded,
@@ -188,6 +204,9 @@ def build_dashboard_router(state) -> APIRouter:
             "in_flight": holding + sum(depths.values()),
             "in_flight_loads": in_flight_loads,
             "dropped_events": get_recorder().dropped,
+            "resources": latest_sample,
+            "event_counts": store_status["counts"],
+            "auth_required": bool(config.get("telemetry.require_auth")),
         }
 
     @router.get(
@@ -195,18 +214,46 @@ def build_dashboard_router(state) -> APIRouter:
         dependencies=[Depends(require_dashboard_auth)],
     )
     def series(metric: str = Query(...), window: float = Query(3600)) -> dict:
-        if not math.isfinite(window) or window <= 0:
-            raise _err(
-                400,
-                "invalid_window",
-                "Telemetry window must be a positive finite number of seconds",
-            )
-        since_ts = time.time() - window
+        since_ts = _since_ts_for_window(window)
         bucket_seconds = max(window / _TARGET_BUCKET_COUNT, 1)
         try:
             return state.telemetry_store.series(metric, since_ts, bucket_seconds)
         except ValueError:
             raise _err(400, "invalid_metric", "Unknown telemetry metric")
+
+    @router.get(
+        "/v1/telemetry/report",
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    def report(window: float = Query(86400)) -> dict:
+        rows = state.telemetry_store.request_report(
+            since_ts=_since_ts_for_window(window),
+        )
+        for row in rows:
+            row["evicted_models"] = decode_evicted_models(row.get("evicted_models"))
+        return {"window": window, "rows": rows}
+
+    @router.get(
+        "/v1/telemetry/traces",
+        dependencies=[Depends(require_dashboard_auth)],
+    )
+    def traces(
+        window: float = Query(86400),
+        limit: int = Query(100, ge=1, le=1000),
+        model_id: str | None = Query(default=None),
+        modality: str | None = Query(default=None),
+    ) -> dict:
+        rows = state.telemetry_store.recent_requests(
+            since_ts=_since_ts_for_window(window),
+            limit=limit,
+            model_id=model_id,
+            modality=modality,
+        )
+        for row in rows:
+            row["evicted_models"] = decode_evicted_models(row.get("evicted_models"))
+            if row.get("cold") is not None:
+                row["cold"] = bool(row["cold"])
+        return {"window": window, "rows": rows}
 
     @router.post(
         "/v1/telemetry/logs-ticket",
@@ -236,257 +283,183 @@ def build_dashboard_router(state) -> APIRouter:
     return router
 
 
-DASHBOARD_HTML = """<title>muse dashboard</title>
+DASHBOARD_HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muse telemetry</title>
 <style>
-  body { font-family: monospace; background: #111; color: #ddd; margin: 0; padding: 1em; }
-  h1 { font-size: 1.2em; }
-  #token-bar { margin-bottom: 1em; }
-  #token-bar input { width: 24em; padding: 0.3em; }
-  #token-bar button { padding: 0.3em 0.8em; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
-  th, td { border: 1px solid #444; padding: 0.3em 0.6em; text-align: left; }
-  th { background: #222; }
-  .panel { border: 1px solid #333; padding: 0.6em; margin-bottom: 1em; }
-  svg { background: #1a1a1a; }
-  #log-panel { height: 16em; overflow-y: auto; background: #000; padding: 0.5em; white-space: pre-wrap; }
-  select, input[type=text] { background: #222; color: #ddd; border: 1px solid #444; }
-</style>
-<h1>muse observability dashboard</h1>
-<div id="token-bar">
-  <label>Token: <input type="text" id="token-input" placeholder="admin token"></label>
-  <button id="connect-btn">Connect</button>
-  <span id="status"></span>
-</div>
-<div class="panel">
-  <h2>Loaded models</h2>
-  <table id="loaded-table">
-    <thead><tr><th>model_id</th><th>pool</th><th>gb</th><th>last_used</th></tr></thead>
-    <tbody></tbody>
-  </table>
-  <div id="counters"></div>
-</div>
-<div class="panel">
-  <h2>request_rate</h2>
-  <svg id="chart-request-rate" width="600" height="120"></svg>
-</div>
-<div class="panel">
-  <h2>latency</h2>
-  <svg id="chart-latency" width="600" height="120"></svg>
-</div>
-<div class="panel">
-  <h2>Logs</h2>
-  <label>model_id: <input type="text" id="log-model-id" value="default"></label>
-  <button id="log-connect-btn">Tail logs</button>
-  <div id="log-panel"></div>
-</div>
-<script>
-(function () {
-  "use strict";
-
-  var TOKEN_KEY = "muse_dashboard_token";
-  var POLL_MS = 2000;
-  var pollTimer = null;
-  var logSource = null;
-
-  function getToken() {
-    return sessionStorage.getItem(TOKEN_KEY) || "";
-  }
-
-  function setToken(t) {
-    sessionStorage.setItem(TOKEN_KEY, t);
-  }
-
-  function setStatus(msg) {
-    document.getElementById("status").textContent = msg;
-  }
-
-  function authHeaders() {
-    return { "Authorization": "Bearer " + getToken() };
-  }
-
-  function renderLoaded(data) {
-    var tbody = document.querySelector("#loaded-table tbody");
-    tbody.innerHTML = "";
-    var rows = data.loaded || [];
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      var tr = document.createElement("tr");
-      var cells = [r.model_id, r.pool, r.gb, r.last_used];
-      for (var j = 0; j < cells.length; j++) {
-        var td = document.createElement("td");
-        td.textContent = (cells[j] === null || cells[j] === undefined) ? "-" : cells[j];
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-    document.getElementById("counters").textContent =
-      "node=" + data.node +
-      " in_flight=" + data.in_flight +
-      " loading=" + data.in_flight_loads +
-      " dropped_events=" + data.dropped_events;
-  }
-
-  function drawSeries(svgId, points, valueKey) {
-    var svg = document.getElementById(svgId);
-    while (svg.firstChild) { svg.removeChild(svg.firstChild); }
-    if (!points || points.length === 0) { return; }
-
-    var w = svg.getAttribute("width") * 1;
-    var h = svg.getAttribute("height") * 1;
-    var pad = 10;
-
-    var values = [];
-    for (var i = 0; i < points.length; i++) {
-      var v = points[i][valueKey];
-      values.push(typeof v === "number" ? v : 0);
-    }
-    var minV = Math.min.apply(null, values);
-    var maxV = Math.max.apply(null, values);
-    if (maxV === minV) { maxV = minV + 1; }
-
-    var n = points.length;
-    var stepX = n > 1 ? (w - 2 * pad) / (n - 1) : 0;
-
-    var coords = [];
-    for (var k = 0; k < n; k++) {
-      var x = pad + k * stepX;
-      var norm = (values[k] - minV) / (maxV - minV);
-      var y = h - pad - norm * (h - 2 * pad);
-      coords.push(x.toFixed(1) + "," + y.toFixed(1));
-    }
-
-    var ns = "http://www.w3.org/2000/svg";
-    var poly = document.createElementNS(ns, "polyline");
-    poly.setAttribute("points", coords.join(" "));
-    poly.setAttribute("fill", "none");
-    poly.setAttribute("stroke", "#5ad");
-    poly.setAttribute("stroke-width", "2");
-    svg.appendChild(poly);
-  }
-
-  function fetchSummary() {
-    fetch("/v1/telemetry/summary", { headers: authHeaders() })
-      .then(function (r) {
-        if (!r.ok) { throw new Error("summary " + r.status); }
-        return r.json();
-      })
-      .then(function (data) {
-        renderLoaded(data);
-        setStatus("connected");
-      })
-      .catch(function (e) {
-        setStatus("error: " + e.message);
-      });
-  }
-
-  function fetchSeries(metric, svgId, valueKey) {
-    fetch("/v1/telemetry/series?metric=" + encodeURIComponent(metric) + "&window=3600",
-      { headers: authHeaders() })
-      .then(function (r) {
-        if (!r.ok) { throw new Error("series " + r.status); }
-        return r.json();
-      })
-      .then(function (data) {
-        drawSeries(svgId, data.points, valueKey);
-      })
-      .catch(function () {
-        // Series errors are non-fatal to the rest of the dashboard.
-      });
-  }
-
-  function pollAll() {
-    fetchSummary();
-    fetchSeries("request_rate", "chart-request-rate", "count");
-    fetchSeries("latency", "chart-latency", "avg");
-  }
-
-  function startPolling() {
-    if (pollTimer) { clearInterval(pollTimer); }
-    pollAll();
-    pollTimer = setInterval(pollAll, POLL_MS);
-  }
-
-  var LOG_RETRY_MIN_MS = 1000;
-  var LOG_RETRY_MAX_MS = 30000;
-  var logRetryMs = LOG_RETRY_MIN_MS;
-  var logRetryTimer = null;
-
-  function scheduleLogReconnect() {
-    // A reconnect after the ticket TTL gets a 401 and the browser closes
-    // the EventSource for good, so mint a fresh ticket and reopen it.
-    if (logRetryTimer) { return; }
-    setStatus("log stream closed; reconnecting in " + (logRetryMs / 1000) + "s");
-    logRetryTimer = setTimeout(function () {
-      logRetryTimer = null;
-      connectLogs();
-    }, logRetryMs);
-    logRetryMs = Math.min(logRetryMs * 2, LOG_RETRY_MAX_MS);
-  }
-
-  function connectLogs() {
-    var modelId = document.getElementById("log-model-id").value || "default";
-    if (logRetryTimer) { clearTimeout(logRetryTimer); logRetryTimer = null; }
-    if (logSource) { logSource.close(); logSource = null; }
-    fetch("/v1/telemetry/logs-ticket", { method: "POST", headers: authHeaders() })
-      .then(function (r) {
-        if (!r.ok) {
-          var err = new Error("logs-ticket " + r.status);
-          err.auth = (r.status === 401 || r.status === 403 || r.status === 503);
-          throw err;
-        }
-        return r.json();
-      })
-      .then(function (data) {
-        var url = "/v1/telemetry/logs/" + encodeURIComponent(modelId) +
-          "?ticket=" + encodeURIComponent(data.ticket);
-        var source = new EventSource(url);
-        logSource = source;
-        var panel = document.getElementById("log-panel");
-        source.onopen = function () {
-          logRetryMs = LOG_RETRY_MIN_MS;
-        };
-        source.onmessage = function (ev) {
-          var line = document.createElement("div");
-          line.textContent = ev.data;
-          panel.appendChild(line);
-          panel.scrollTop = panel.scrollHeight;
-        };
-        source.onerror = function () {
-          if (source !== logSource) { return; }
-          if (source.readyState === EventSource.CLOSED) {
-            scheduleLogReconnect();
-          } else {
-            setStatus("log stream error; retrying");
-          }
-        };
-      })
-      .catch(function (e) {
-        if (e && e.auth) {
-          setStatus("log auth failed");
-        } else {
-          scheduleLogReconnect();
-        }
-      });
-  }
-
-  document.getElementById("connect-btn").addEventListener("click", function () {
-    var t = document.getElementById("token-input").value;
-    setToken(t);
-    startPolling();
-  });
-
-  document.getElementById("log-connect-btn").addEventListener("click", function () {
-    logRetryMs = LOG_RETRY_MIN_MS;
-    connectLogs();
-  });
-
-  var existing = getToken();
-  if (existing) {
-    document.getElementById("token-input").value = existing;
-    startPolling();
-  } else {
-    setStatus("enter a token to connect");
-  }
-})();
-</script>
-"""
+:root { --bg:#0b0e13; --panel:#111720; --panel2:#151d28; --line:#263242;
+  --text:#e8edf4; --muted:#8998aa; --cyan:#55d9d0; --gold:#f6bd60;
+  --green:#7bd88f; --red:#ff6b6b; }
+* { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text);
+  font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+header { position:sticky; top:0; z-index:4; display:flex; align-items:center;
+  justify-content:space-between; gap:18px; padding:18px 28px; border-bottom:1px solid var(--line);
+  background:rgba(11,14,19,.94); backdrop-filter:blur(12px); }
+.brand { display:flex; align-items:center; gap:12px; } .mark { width:13px; height:13px;
+  background:var(--cyan); border-radius:50%; box-shadow:0 0 24px var(--cyan); }
+h1 { margin:0; font:600 19px/1.1 system-ui,sans-serif; letter-spacing:.02em; }
+.sub { color:var(--muted); font-size:11px; margin-top:4px; }
+.controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+button,select,input { color:var(--text); background:var(--panel2); border:1px solid var(--line);
+  border-radius:7px; padding:8px 10px; font:inherit; } button { cursor:pointer; }
+button:hover { border-color:var(--cyan); } main { max-width:1540px; margin:auto; padding:22px 28px 42px; }
+.auth { display:none; gap:8px; padding:12px; margin-bottom:16px; border:1px solid #5c4721;
+  border-radius:9px; background:#211b12; } .auth.show { display:flex; }
+.cards { display:grid; grid-template-columns:repeat(6,minmax(130px,1fr)); gap:10px; margin-bottom:12px; }
+.card,.panel { background:linear-gradient(145deg,var(--panel),#0f141c); border:1px solid var(--line);
+  border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,.16); }
+.card { padding:14px 16px; min-height:92px; } .label { color:var(--muted); text-transform:uppercase;
+  letter-spacing:.1em; font-size:10px; } .value { margin-top:9px; font:600 25px/1 system-ui,sans-serif; }
+.grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(310px,1fr); gap:12px; margin-bottom:12px; }
+.panel { padding:17px; min-width:0; } .panel-head { display:flex; justify-content:space-between;
+  align-items:flex-end; gap:10px; margin-bottom:14px; } h2 { margin:0; font:600 14px system-ui,sans-serif; }
+.hint { color:var(--muted); font-size:11px; } svg.chart { width:100%; height:245px; overflow:visible; }
+.legend { display:flex; gap:16px; color:var(--muted); font-size:11px; } .dot { display:inline-block;
+  width:8px; height:8px; border-radius:50%; margin-right:6px; }
+.resident { display:flex; flex-direction:column; gap:8px; max-height:245px; overflow:auto; }
+.model { padding:10px 11px; background:var(--panel2); border-radius:7px; border-left:3px solid var(--cyan); }
+.model.queued { border-left-color:var(--gold); }
+.model-top { display:flex; justify-content:space-between; gap:10px; } .model-meta { color:var(--muted); margin-top:5px; font-size:11px; }
+.wide { margin-bottom:12px; overflow:hidden; } .scroll { overflow:auto; max-height:390px; }
+table { width:100%; border-collapse:collapse; font-size:12px; } th { position:sticky; top:0; z-index:1;
+  background:var(--panel2); color:var(--muted); text-align:left; text-transform:uppercase;
+  letter-spacing:.07em; font-size:9px; } th,td { padding:10px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+tr:last-child td { border:0; } tbody tr:hover { background:#151c26; } .cold { color:var(--gold); }
+.hot { color:var(--green); } .bad { color:var(--red); } .muted { color:var(--muted); }
+.two { display:grid; grid-template-columns:1fr 1fr; gap:12px; } #logs { height:220px;
+  overflow:auto; background:#080a0e; border:1px solid var(--line); border-radius:7px; padding:10px;
+  white-space:pre-wrap; color:#b8c4d1; font-size:11px; }
+.empty { color:var(--muted); padding:26px 4px; text-align:center; } .status { color:var(--muted); }
+.status.ok { color:var(--green); } .status.error { color:var(--red); }
+@media (max-width:1050px) { .cards { grid-template-columns:repeat(3,1fr); } .grid,.two { grid-template-columns:1fr; } }
+@media (max-width:620px) { header { padding:14px; align-items:flex-start; } main { padding:14px; }
+  .cards { grid-template-columns:repeat(2,1fr); } .controls { justify-content:flex-end; } }
+</style></head><body>
+<header><div class="brand"><span class="mark"></span><div><h1>Muse telemetry</h1>
+<div class="sub" id="node">waiting for node</div></div></div>
+<div class="controls"><span id="status" class="status">connecting</span>
+<select id="window"><option value="3600">1 hour</option><option value="21600">6 hours</option>
+<option value="86400" selected>24 hours</option><option value="604800">7 days</option></select>
+<button id="refresh">Refresh</button></div></header>
+<main><div id="auth" class="auth"><input id="token" type="password" placeholder="Admin token">
+<button id="connect">Connect</button><span class="hint">Stored only in this browser tab.</span></div>
+<section class="cards">
+<div class="card"><div class="label">GPU working set</div><div class="value" id="gpu">--</div></div>
+<div class="card"><div class="label">Free VRAM</div><div class="value" id="free-vram">--</div></div>
+<div class="card"><div class="label">Resident models</div><div class="value" id="resident-count">0</div></div>
+<div class="card"><div class="label">Requests</div><div class="value" id="requests">0</div></div>
+<div class="card"><div class="label">Cold starts</div><div class="value cold" id="cold-starts">0</div></div>
+<div class="card"><div class="label">Evictions</div><div class="value" id="evictions">0</div></div>
+</section>
+<section class="grid"><div class="panel"><div class="panel-head"><div><h2>VRAM over time</h2>
+<div class="hint">Device-wide resident working set sampled faster during active requests</div></div>
+<div class="legend"><span><i class="dot" style="background:var(--cyan)"></i>peak used</span>
+<span><i class="dot" style="background:#526174"></i>free</span></div></div><svg id="vram-chart" class="chart"></svg></div>
+<div class="panel"><div class="panel-head"><div><h2>Resident working set</h2><div class="hint">Models currently loaded or queued</div></div></div>
+<div id="resident" class="resident"></div></div></section>
+<section class="panel wide"><div class="panel-head"><div><h2>Cold vs hot evidence</h2>
+<div class="hint">End-to-end request latency, request-linked evictions, and observed peak device VRAM</div></div></div>
+<div class="scroll"><table><thead><tr><th>Request</th><th>Model</th><th>Cold latency</th><th>Hot latency</th>
+<th>Peak VRAM</th><th>Evicted model</th><th>Samples</th><th>Basis</th></tr></thead><tbody id="report-body"></tbody></table></div></section>
+<section class="panel wide"><div class="panel-head"><div><h2>Recent request traces</h2>
+<div class="hint">Newest first; streaming latency runs until the response stream closes</div></div></div>
+<div class="scroll"><table><thead><tr><th>Time</th><th>Request</th><th>Model</th><th>State</th><th>Total</th>
+<th>Load</th><th>Forward</th><th>Queue</th><th>Peak VRAM</th><th>Evicted</th><th>Status</th></tr></thead>
+<tbody id="trace-body"></tbody></table></div></section>
+<section class="two"><div class="panel"><div class="panel-head"><div><h2>Latency over time</h2>
+<div class="hint">Average and maximum end-to-end milliseconds per bucket</div></div>
+<div class="legend"><span><i class="dot" style="background:var(--green)"></i>avg</span>
+<span><i class="dot" style="background:var(--gold)"></i>max</span></div></div><svg id="traffic-chart" class="chart"></svg></div>
+<div class="panel"><div class="panel-head"><div><h2>Worker logs</h2><div class="hint">Recent buffer followed by live output</div></div>
+<div><select id="log-model"><option value="">Select model</option></select> <button id="tail">Tail</button></div></div>
+<div id="logs">Choose a model to open its live log stream.</div></div></section></main>
+<script>(function(){"use strict";
+var KEY="muse_dashboard_token", MAX_LOG_LINES=500, LOG_RETRY_MIN_MS=1000, LOG_RETRY_MAX_MS=30000;
+var timer=null, logSource=null, logRetryTimer=null, logRetryMs=LOG_RETRY_MIN_MS, reqSeq=0, ns="http://www.w3.org/2000/svg";
+function el(id){return document.getElementById(id);} function token(){return sessionStorage.getItem(KEY)||"";}
+function headers(){var t=token();return t?{"Authorization":"Bearer "+t}:{};}
+function windowSeconds(){return Number(el("window").value)||86400;}
+function fmtMs(v){return typeof v==="number"?v.toFixed(v<100?1:0)+" ms":"--";}
+function fmtGb(v){return typeof v==="number"?v.toFixed(2)+" GB":"--";}
+function fmtList(v){return Array.isArray(v)&&v.length?v.join(", "):"--";}
+function friendly(v){var m={"audio/speech":"Generate speech","audio/transcriptions":"Transcribe audio",
+"audio/transcription":"Transcribe audio","images/segmentations":"Segment image","images/segmentation":"Segment image","images/segment":"Segment image",
+"images/generations":"Generate image","chat/completions":"Chat completion","embeddings":"Create embedding"};
+return m[v]||String(v||"Unknown").replace(/[_/]/g," ").replace(/\b\w/g,function(c){return c.toUpperCase();});}
+function setStatus(msg,kind){el("status").textContent=msg;el("status").className="status "+(kind||"");}
+function node(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined&&text!==null)n.textContent=text;return n;}
+function svgEl(tag,attrs,text){var n=document.createElementNS(ns,tag);Object.keys(attrs||{}).forEach(function(k){n.setAttribute(k,attrs[k]);});if(text!==undefined)n.textContent=text;return n;}
+function api(path,opts){opts=opts||{};opts.headers=headers();return fetch(path,opts).then(function(r){
+if(r.status===401||r.status===403||r.status===503){el("auth").classList.add("show");}
+if(!r.ok){return r.json().catch(function(){return {};}).then(function(b){var e=(b.detail&&b.detail.error)||b.error||{};
+var err=new Error(e.message||path+" returned "+r.status);err.auth=(r.status===401||r.status===403||r.status===503);throw err;});}return r.json();});}
+function cell(tr,value,cls){tr.appendChild(node("td",cls,value===null||value===undefined?"--":value));}
+function emptyRow(body,cols,msg){var tr=node("tr"),td=node("td","empty",msg);td.colSpan=cols;tr.appendChild(td);body.appendChild(tr);}
+function draw(svgId,series){var svg=el(svgId);while(svg.firstChild)svg.removeChild(svg.firstChild);var all=[];
+series.forEach(function(s){s.values.forEach(function(v){if(typeof v==="number")all.push(v);});});
+if(!all.length){svg.appendChild(svgEl("text",{x:"50%",y:"50%","text-anchor":"middle",fill:"#8998aa"},"No samples in this window"));return;}
+var w=900,h=245,p=28,min=0,max=Math.max.apply(null,all);if(max<=0)max=1;
+svg.setAttribute("viewBox","0 0 "+w+" "+h);[0,.5,1].forEach(function(q){var y=p+q*(h-2*p);
+svg.appendChild(svgEl("line",{x1:p,x2:w-p,y1:y,y2:y,stroke:"#263242"}));});
+series.forEach(function(s){var pts=[],n=s.values.length;s.values.forEach(function(v,i){if(typeof v!=="number")return;
+var x=p+(n<2?0.5:i/(n-1))*(w-2*p),y=h-p-(v-min)/(max-min)*(h-2*p);pts.push([x,y]);});
+if(!pts.length)return;if(pts.length===1){svg.appendChild(svgEl("circle",{cx:pts[0][0].toFixed(1),cy:pts[0][1].toFixed(1),r:4,fill:s.color}));return;}
+svg.appendChild(svgEl("polyline",{points:pts.map(function(pt){return pt[0].toFixed(1)+","+pt[1].toFixed(1);}).join(" "),fill:"none",stroke:s.color,"stroke-width":s.width||2}));});
+svg.appendChild(svgEl("text",{x:p,y:13,fill:"#8998aa","font-size":"10"},max.toFixed(max<10?2:0)));
+svg.appendChild(svgEl("text",{x:p,y:h-8,fill:"#8998aa","font-size":"10"},"0"));}
+function renderSummary(d){el("node").textContent=d.node+(d.auth_required?" / token protected":" / open telemetry");
+var loaded=d.loaded||[],queued=d.queued||[],r=d.resources||{};
+el("resident-count").textContent=loaded.length;el("gpu").textContent=fmtGb(r.gpu_used_gb);
+el("free-vram").textContent=fmtGb(r.free_vram_gb);var box=el("resident");box.innerHTML="";
+var models={};loaded.forEach(function(m){models[m.model_id]=true;var row=node("div","model"),top=node("div","model-top");
+top.appendChild(node("span","",m.model_id));top.appendChild(node("span","",fmtGb(m.gb)));row.appendChild(top);
+row.appendChild(node("div","model-meta",(m.pool||"unknown")+" pool / queue "+(m.queue_depth||0)));box.appendChild(row);});
+queued.forEach(function(m){var row=node("div","model queued"),top=node("div","model-top");
+top.appendChild(node("span","",m.model_id));top.appendChild(node("span","cold","queued"));row.appendChild(top);
+row.appendChild(node("div","model-meta","cold start / queue "+(m.queue_depth||0)));box.appendChild(row);});
+if(!loaded.length&&!queued.length)box.appendChild(node("div","empty","No models resident"));
+var sel=el("log-model"),chosen=sel.value;sel.innerHTML='<option value="">Select model</option>';
+Object.keys(models).sort().forEach(function(m){var o=node("option","",m);o.value=m;sel.appendChild(o);});
+if(models[chosen])sel.value=chosen;el("auth").classList.toggle("show",!!d.auth_required&&!token());setStatus("live","ok");}
+function renderReport(d){var body=el("report-body");body.innerHTML="";var cold=0,total=0,rows=d.rows||[];
+rows.forEach(function(r){cold+=r.cold_count||0;total+=r.request_count||0;var tr=node("tr"),basis=r.basis||"measured";
+cell(tr,friendly(r.modality));cell(tr,r.model_id);cell(tr,fmtMs(r.cold_latency_ms),"cold");
+cell(tr,fmtMs(r.hot_latency_ms),"hot");cell(tr,fmtGb(r.peak_vram_gb));cell(tr,fmtList(r.evicted_models));
+cell(tr,r.request_count);cell(tr,basis,basis==="estimated"||basis==="mixed"?"cold":"");body.appendChild(tr);});
+el("cold-starts").textContent=cold;el("requests").textContent=total;
+if(!rows.length)emptyRow(body,8,"No request traces in this window");}
+function renderTraces(d){var body=el("trace-body");body.innerHTML="";var rows=d.rows||[];
+rows.forEach(function(r){var tr=node("tr"),st=(r.cold===null||r.cold===undefined)?"legacy":(r.cold?"cold":"hot");
+cell(tr,new Date(r.ts*1000).toLocaleTimeString());cell(tr,friendly(r.modality));cell(tr,r.model_id);
+cell(tr,st,st==="legacy"?"muted":st);cell(tr,fmtMs(r.latency_ms));cell(tr,fmtMs(r.load_ms));
+cell(tr,fmtMs(r.forward_ms));cell(tr,fmtMs(r.queued_ms));cell(tr,fmtGb(r.peak_vram_gb));
+cell(tr,fmtList(r.evicted_models));cell(tr,r.status,r.status>=400?"bad":"");body.appendChild(tr);});
+if(!rows.length)emptyRow(body,11,"No request traces in this window");}
+function refresh(){var w=windowSeconds(),seq=++reqSeq;Promise.all([api("/v1/telemetry/summary"),
+api("/v1/telemetry/report?window="+w),api("/v1/telemetry/traces?window="+w+"&limit=100"),
+api("/v1/telemetry/series?metric=vram&window="+w),api("/v1/telemetry/series?metric=latency&window="+w),
+api("/v1/telemetry/series?metric=load_evict&window="+w)]).then(function(x){if(seq!==reqSeq)return;
+renderSummary(x[0]);renderReport(x[1]);renderTraces(x[2]);draw("vram-chart",[
+{values:x[3].points.map(function(p){return p.peak;}),color:"#55d9d0",width:3},
+{values:x[3].points.map(function(p){return p.free;}),color:"#526174"}]);draw("traffic-chart",[
+{values:x[4].points.map(function(p){return p.avg;}),color:"#7bd88f",width:3},
+{values:x[4].points.map(function(p){return p.max;}),color:"#f6bd60"}]);
+el("evictions").textContent=x[5].points.reduce(function(n,p){return n+(p.evicts||0);},0);})
+.catch(function(e){if(seq!==reqSeq)return;setStatus(e.message,"error");});}
+function start(){if(timer)clearInterval(timer);refresh();timer=setInterval(refresh,5000);}
+function scheduleLogReconnect(){if(logRetryTimer)return;setStatus("log stream closed; reconnecting in "+(logRetryMs/1000)+"s","error");
+logRetryTimer=setTimeout(function(){logRetryTimer=null;tail();},logRetryMs);logRetryMs=Math.min(logRetryMs*2,LOG_RETRY_MAX_MS);}
+function tail(){var m=el("log-model").value;if(!m)return;if(logRetryTimer){clearTimeout(logRetryTimer);logRetryTimer=null;}
+if(logSource){logSource.close();logSource=null;}var logs=el("logs");logs.textContent="opening "+m+"...";
+api("/v1/telemetry/logs-ticket",{method:"POST"}).then(function(t){var source=new EventSource("/v1/telemetry/logs/"+
+encodeURIComponent(m)+"?ticket="+encodeURIComponent(t.ticket));logSource=source;logs.textContent="";
+source.onopen=function(){logRetryMs=LOG_RETRY_MIN_MS;};
+source.onmessage=function(e){logs.appendChild(node("div","",e.data));while(logs.childNodes.length>MAX_LOG_LINES)logs.removeChild(logs.firstChild);
+logs.scrollTop=logs.scrollHeight;};
+source.onerror=function(){if(source!==logSource)return;if(source.readyState===EventSource.CLOSED){scheduleLogReconnect();}
+else{setStatus("log stream interrupted","error");}};})
+.catch(function(e){if(e&&e.auth){setStatus("log auth failed","error");}else{scheduleLogReconnect();}});}
+el("connect").onclick=function(){sessionStorage.setItem(KEY,el("token").value);start();};el("refresh").onclick=refresh;
+el("window").onchange=refresh;el("tail").onclick=function(){logRetryMs=LOG_RETRY_MIN_MS;tail();};el("token").value=token();start();
+})();</script></body></html>"""

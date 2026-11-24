@@ -108,6 +108,11 @@ from muse.core.memory_probe import (
 # import-light (stdlib + two observability siblings, no fastapi or torch),
 # so it is safe on the CLI import path.
 from muse.observability.recorder import record
+from muse.observability.traces import (
+    current_request_id,
+    note_model_eviction,
+    note_model_load,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -937,11 +942,13 @@ class LoadDirector:
                 )
 
         if evicted_entry is not None:
+            note_model_eviction(claim.model_id)
             # Fire-and-forget; telemetry can never break a real eviction.
             try:
                 record(
                     "model_evict",
                     model_id=claim.model_id,
+                    request_id=current_request_id(),
                     pool=evicted_entry.pool,
                     gb=evicted_entry.memory_gb,
                     reason=claim.reason,
@@ -1662,13 +1669,16 @@ class LoadDirector:
                     evicted=[],
                 ))
 
+                cold_load_seconds = time.monotonic() - load_start
+                note_model_load(model_id, cold_load_seconds)
                 try:
                     record(
                         "model_load",
                         model_id=model_id,
+                        request_id=current_request_id(),
                         pool=claim.pool,
                         gb=memory_gb,
-                        cold_load_seconds=(time.monotonic() - load_start),
+                        cold_load_seconds=cold_load_seconds,
                     )
                 except Exception:  # noqa: BLE001
                     pass

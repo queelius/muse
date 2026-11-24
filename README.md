@@ -508,6 +508,7 @@ for diagnosis. A null reason is not a dependency or inference smoke test.
 | `muse doctor resources [--repair]` | inspect Muse's owned-resource registry; optionally clean verified stale/orphan records after an unclean exit |
 | `muse doctor storage [--json]` | report Muse-owned storage, shared caches, broken references, and reclaimable space without changing files |
 | `muse storage prune [--dry-run] [--include-unreferenced]` | reclaim old partial/staging data; optionally include unregistered retained model files |
+| `muse telemetry status \| summary \| traces \| vram \| export \| prune` | inspect, graph, export, and prune local request traces and VRAM telemetry |
 | `muse mcp [--http]` | run an MCP server bridging muse to LLM clients |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.
@@ -660,13 +661,26 @@ and blocked until an explicit disable successfully releases it.
 
 ### Observability dashboard
 
-`muse serve` also ships a lightweight `/dashboard` page: loaded models, request-rate and latency charts, and a live per-model log tail, all served from a single self-contained HTML file with no build step. It is on by default (`telemetry.enabled` / `MUSE_TELEMETRY_ENABLED`, default `true`); set it to `false` to turn recording off entirely. The dashboard's data endpoints are closed-by-default and reuse the same `MUSE_ADMIN_TOKEN` as the admin API above; the page itself always loads and prompts for a token.
+`muse serve` also ships a self-contained `/dashboard` operator view. It shows the resident model working set, device-wide VRAM over time, cold-vs-hot latency, request-linked evictions, recent request traces, traffic, queue depth, and live per-model logs. It is on by default (`telemetry.enabled` / `MUSE_TELEMETRY_ENABLED`, default `true`); set it to `false` to turn recording off entirely. The dashboard's data endpoints are closed-by-default and reuse the same `MUSE_ADMIN_TOKEN` as the admin API above; the page itself always loads and prompts for a token.
 
 ```bash
 export MUSE_ADMIN_TOKEN="$(openssl rand -hex 32)"
 muse serve
 # open http://localhost:8000/dashboard and paste the token in
 ```
+
+For a trusted development or loopback-only server, the dashboard gate can be
+disabled independently with `MUSE_TELEMETRY_REQUIRE_AUTH=false` (the secure
+default remains `true`). The same evidence is available from the terminal:
+
+```bash
+muse telemetry summary --since 24h
+muse telemetry traces --since 6h
+muse telemetry vram --since 1h
+```
+
+See [request telemetry and GPU working-set traces](docs/TELEMETRY.md) for
+measurement semantics, export/prune commands, and historical recovery limits.
 
 ## MCP server (since v0.29.0)
 

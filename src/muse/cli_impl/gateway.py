@@ -76,6 +76,11 @@ from muse.core.server import _format_loaded_at, build_model_entry
 # that guarantee.
 from muse.observability.dashboard import build_dashboard_router
 from muse.observability.recorder import record
+from muse.observability.traces import (
+    begin_request_trace,
+    note_queued_ms,
+    reset_request_trace,
+)
 
 # Module-top (no import cycle: supervisor imports gateway only lazily).
 # `revalidate_servability` re-checks a stale boot unservable stamp against
@@ -272,6 +277,18 @@ class _OwnedStreamingResponse(StreamingResponse):
     ) -> None:
         self._cleanup = cleanup
         super().__init__(*args, **kwargs)
+
+    def add_cleanup(self, cleanup: Callable[[], Awaitable[None]]) -> None:
+        """Run an additional owner cleanup after the stream settles."""
+        previous = self._cleanup
+
+        async def _combined_cleanup() -> None:
+            try:
+                await previous()
+            finally:
+                await cleanup()
+
+        self._cleanup = _combined_cleanup
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         try:
@@ -1184,6 +1201,28 @@ async def _prepare_director_manifest(
     return await asyncio.shield(pending)
 
 
+def _start_vram_tracking(state: Any, request_id: str) -> Any | None:
+    vram_tracker = getattr(state, "telemetry_vram_tracker", None)
+    if vram_tracker is None:
+        return None
+    try:
+        vram_tracker.begin(request_id)
+        return vram_tracker
+    except Exception:  # noqa: BLE001
+        logger.warning("request VRAM tracking failed to start", exc_info=True)
+        return None
+
+
+def _finish_vram_tracking(tracker: Any, request_id: str) -> float | None:
+    if tracker is None:
+        return None
+    try:
+        return tracker.finish(request_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("request VRAM tracking failed to finish", exc_info=True)
+        return None
+
+
 async def _route_via_director(
     request: Request,
     full_path: str,
@@ -1193,10 +1232,80 @@ async def _route_via_director(
     *,
     cancellable_paths: frozenset[str] = frozenset(),
 ) -> Response:
-    """Director-driven request routing for lazy load.
+    """Own one end-to-end telemetry trace around director routing.
 
     `cancellable_paths` is the CANCEL_ON_DISCONNECT_PATHS set, computed once
     by build_gateway.
+    """
+    if not config.get("telemetry.enabled"):
+        return await _route_via_director_inner(
+            request, full_path, model_id, state, timeout,
+            trace=None, cancellable_paths=cancellable_paths,
+        )
+    modality = _modality_from_path(full_path)
+    trace, trace_token = begin_request_trace(model_id, modality)
+    response: Response | None = None
+    raised_status: int | None = None
+    finished = False
+    deferred = False
+    vram_tracker = _start_vram_tracking(state, trace.request_id)
+
+    def _finish_trace() -> None:
+        nonlocal finished
+        if finished:
+            return
+        finished = True
+        peak_vram_gb = _finish_vram_tracking(vram_tracker, trace.request_id)
+        is_stream = isinstance(response, StreamingResponse)
+        trace.finish_forward(force=is_stream)
+        fields = trace.record_fields(
+            status=(
+                getattr(response, "status_code", None)
+                if response is not None else raised_status
+            ),
+            stream=is_stream,
+            peak_vram_gb=peak_vram_gb,
+        )
+        try:
+            record("request", **fields)
+        except Exception:  # noqa: BLE001
+            logger.warning("telemetry record('request') failed", exc_info=True)
+
+    try:
+        response = await _route_via_director_inner(
+            request, full_path, model_id, state, timeout,
+            trace=trace, cancellable_paths=cancellable_paths,
+        )
+        if isinstance(response, _OwnedStreamingResponse):
+            async def _finish_stream_trace() -> None:
+                _finish_trace()
+
+            response.add_cleanup(_finish_stream_trace)
+            deferred = True
+        return response
+    except asyncio.CancelledError:
+        raised_status = 499
+        raise
+    except BaseException:
+        raised_status = 500
+        raise
+    finally:
+        if not deferred:
+            _finish_trace()
+        reset_request_trace(trace_token)
+
+
+async def _route_via_director_inner(
+    request: Request,
+    full_path: str,
+    model_id: str,
+    state: Any,
+    timeout: float,
+    *,
+    trace: Any,
+    cancellable_paths: frozenset[str] = frozenset(),
+) -> Response:
+    """Director-driven request routing for lazy load.
 
     Order of operations:
 
@@ -1337,15 +1446,10 @@ async def _route_via_director(
     # 3. Queueing (spec 2026-07-08). ONE deadline covers the concurrency-gate
     # wait + the capacity wait + all retries. queue_timeout_seconds == 0
     # degrades to today's no-wait behavior: an occupied slot / capacity 503
-    # surfaces immediately. `queued_ms` is initialized here so it is always
-    # defined by the time the telemetry record() call runs below. Per the
-    # spec, queued_ms measures ONLY time parked in the gate + capacity
-    # waits -- NOT the successful director.acquire cold-load span that
-    # follows, which can run tens of seconds and would otherwise conflate
-    # queue delay with load time. gate_wait_seconds and
-    # capacity_wait_seconds are each measured tightly around their own
-    # await below, not via a single wall-clock span across this whole block.
-    queued_ms = 0.0
+    # surfaces immediately. Per the spec, queued_ms measures ONLY time parked
+    # in gate/capacity/coalescing waits -- NOT the successful director.acquire
+    # cold-load span that follows. Each wait attributes its elapsed ms in a
+    # finally block so timeouts and cancellations record real queue time too.
     queue_budget = config.get("server.queue_timeout_seconds") or 0.0
     queue_t0 = time.monotonic()
     deadline = queue_t0 + max(0.0, float(queue_budget))
@@ -1377,7 +1481,9 @@ async def _route_via_director(
             503, "queue_full",
             f"queue for model {model_id!r} is full (depth {exc.depth})",
         )
-    gate_wait_seconds = time.monotonic() - gate_wait_t0
+    finally:
+        if trace is not None:
+            trace.add_queued_ms((time.monotonic() - gate_wait_t0) * 1000.0)
 
     slot_released = False
 
@@ -1403,9 +1509,9 @@ async def _route_via_director(
     fast_port = state.director.try_acquire_loaded(model_id) if hot else None
     try:
         if fast_port is not None:
-            worker_port, capacity_wait_seconds = fast_port, 0.0
+            worker_port = fast_port
         else:
-            worker_port, capacity_wait_seconds = await _acquire_with_capacity_wait(
+            worker_port, _ = await _acquire_with_capacity_wait(
                 lambda: _acquire_coalesced(state, model_id, manifest),
                 state.capacity_notifier, deadline=deadline, model_id=model_id,
             )
@@ -1445,7 +1551,6 @@ async def _route_via_director(
         # a clean 503.
         _release_slot()
         raise
-    queued_ms = (gate_wait_seconds + capacity_wait_seconds) * 1000.0
 
     # 4. Forward. `_release` returns the director refcount and the gate slot;
     # `_forward` runs it exactly once from its cleanup: before a buffered
@@ -1472,7 +1577,8 @@ async def _route_via_director(
             logger.warning("gate release failed", exc_info=True)
 
     target_url = f"http://127.0.0.1:{worker_port}/{full_path}"
-    t0 = time.monotonic()
+    if trace is not None:
+        trace.mark_forward_start()
     try:
         response = await _forward(
             request, target_url, timeout,
@@ -1493,26 +1599,8 @@ async def _route_via_director(
             502, "worker_unavailable",
             f"worker for model {model_id!r} is unavailable",
         )
-    latency_ms = (time.monotonic() - t0) * 1000.0
-    stream = isinstance(response, StreamingResponse)
-    # Fire-and-forget: telemetry must NEVER break request forwarding, even
-    # if `record` or `_modality_from_path` regresses. Latency semantic:
-    # for buffered responses this is the full request duration; for
-    # streams it is time-to-response-object only, since
-    # StreamingResponse returns before the body actually streams (the
-    # `stream` flag records which one this event measured).
-    try:
-        record(
-            "request",
-            model_id=model_id,
-            modality=_modality_from_path(full_path),
-            latency_ms=latency_ms,
-            queued_ms=queued_ms,
-            status=getattr(response, "status_code", None),
-            stream=stream,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("telemetry record('request') failed", exc_info=True)
+    if trace is not None and not isinstance(response, StreamingResponse):
+        trace.finish_forward()
     return response
 
 
@@ -1645,7 +1733,9 @@ async def _acquire_with_capacity_wait(acquire_once, notifier, *, deadline,
             except asyncio.TimeoutError:
                 raise QueueTimeout(model_id) from None
             finally:
-                waited_seconds += time.monotonic() - wait_t0
+                elapsed = time.monotonic() - wait_t0
+                waited_seconds += elapsed
+                note_queued_ms(elapsed * 1000.0)
 
 
 async def _acquire_off_loop(state, model_id, manifest, *, on_settle=None) -> int:
@@ -1720,7 +1810,11 @@ async def _acquire_coalesced(state, model_id, manifest) -> int:
 
     # WAITER: await the shared gate WITHOUT a thread. shield so cancelling THIS
     # waiter cannot cancel the shared gate and poison the whole group.
-    await asyncio.shield(gate)
+    wait_t0 = time.monotonic()
+    try:
+        await asyncio.shield(gate)
+    finally:
+        note_queued_ms((time.monotonic() - wait_t0) * 1000.0)
     failure = gate.result()
     if failure is not None:
         # Propagate the loader's failure; do NOT re-acquire. A retry herd would

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from muse.observability.sampler import Sampler
+from muse.observability.sampler import Sampler, VramTracker
 
 
 def test_sample_once_records(monkeypatch):
@@ -140,3 +140,126 @@ def test_stop_clears_an_inert_thread_whose_start_never_completed():
 
     assert s.stop() is True
     assert s._thread is None
+
+
+def test_vram_tracker_captures_peak_for_each_active_request(monkeypatch):
+    import muse.observability.sampler as smod
+    monkeypatch.setattr(smod, "gpu_free_gb", lambda: 4.0)
+    monkeypatch.setattr(smod, "gpu_total_gb", lambda: 12.0)
+    monkeypatch.setattr(smod, "cpu_free_gb", lambda: 20.0)
+    tracker = VramTracker()
+    seen = []
+    sampler = Sampler(
+        interval=10,
+        active_interval=0.01,
+        loaded_fn=lambda: {},
+        inflight_fn=lambda: 0,
+        record_fn=lambda event, **fields: seen.append((event, fields)),
+        vram_tracker=tracker,
+    )
+
+    tracker.begin("request-1")
+    sampler.sample_once()
+
+    assert tracker.finish("request-1") == 8.0
+    assert seen[0][1]["gpu_used_gb"] == 8.0
+
+
+@pytest.mark.parametrize("active_interval", [0, -1, float("inf"), float("nan"), True])
+def test_rejects_invalid_active_interval(active_interval):
+    with pytest.raises(ValueError, match="active_interval"):
+        Sampler(
+            interval=1.0,
+            active_interval=active_interval,
+            loaded_fn=lambda: {},
+            inflight_fn=lambda: 0,
+        )
+
+
+def test_vram_tracker_wakes_only_on_zero_to_one_transition():
+    wakes = []
+    tracker = VramTracker()
+    tracker.set_wake_fn(lambda: wakes.append(1))
+
+    tracker.begin("r1")
+    tracker.begin("r2")
+    tracker.begin("r3")
+    assert len(wakes) == 1
+
+    tracker.finish("r1")
+    tracker.finish("r2")
+    tracker.begin("r4")
+    assert len(wakes) == 1
+
+    tracker.finish("r3")
+    tracker.finish("r4")
+    tracker.begin("r5")
+    assert len(wakes) == 2
+
+
+def test_sampler_throttles_wake_storms_to_active_interval(monkeypatch):
+    import time
+    import muse.observability.sampler as smod
+
+    monkeypatch.setattr(smod, "gpu_free_gb", lambda: 4.0)
+    monkeypatch.setattr(smod, "gpu_total_gb", lambda: 12.0)
+    monkeypatch.setattr(smod, "cpu_free_gb", lambda: 20.0)
+
+    timestamps = []
+    tracker = VramTracker()
+    sampler = Sampler(
+        interval=10.0,
+        active_interval=0.12,
+        loaded_fn=lambda: {},
+        inflight_fn=lambda: 0,
+        record_fn=lambda _t, **_k: timestamps.append(time.monotonic()),
+        vram_tracker=tracker,
+    )
+    assert sampler.start() is True
+    try:
+        # Hammer 0->1 transitions every 5ms for ~0.2s; sampling must still be
+        # throttled to ~active_interval instead of firing per request.
+        deadline = time.monotonic() + 0.2
+        idx = 0
+        while time.monotonic() < deadline:
+            rid = f"req-{idx}"
+            idx += 1
+            tracker.begin(rid)
+            tracker.finish(rid)
+            time.sleep(0.005)
+    finally:
+        assert sampler.stop() is True
+
+    assert 1 <= len(timestamps) <= 4
+    for prev, curr in zip(timestamps, timestamps[1:]):
+        assert curr - prev >= 0.09
+
+
+def test_restart_clears_stale_wake_event(monkeypatch):
+    import time
+    import muse.observability.sampler as smod
+
+    monkeypatch.setattr(smod, "gpu_free_gb", lambda: 4.0)
+    monkeypatch.setattr(smod, "gpu_total_gb", lambda: 12.0)
+    monkeypatch.setattr(smod, "cpu_free_gb", lambda: 20.0)
+
+    seen = []
+    sampler = Sampler(
+        interval=10.0,
+        active_interval=0.25,
+        loaded_fn=lambda: {},
+        inflight_fn=lambda: 0,
+        record_fn=lambda t, **k: seen.append((t, k)),
+    )
+    assert sampler.start() is True
+    assert sampler.stop() is True
+    # Simulate a stale wake left set across stop -> start.
+    sampler.wake()
+    assert sampler._wake.is_set()
+    assert sampler.start() is True
+    try:
+        assert not sampler._wake.is_set()
+        time.sleep(0.05)
+        assert seen == []
+    finally:
+        assert sampler.stop() is True

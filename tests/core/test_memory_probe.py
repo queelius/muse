@@ -32,8 +32,8 @@ def _reset_module_sentinels():
     import muse.core.memory_probe as mod
     orig = (mod.pynvml, mod._init_attempted, mod._init_ok)
     # Start each test from a never-initialized probe: an earlier test file
-    # (e.g. the gateway's lazy-load tests) may have run the real
-    # init_pynvml, and these tests assume a fresh import.
+    # (e.g. gateway or observability tests) may have run the real init_pynvml,
+    # and these tests assume a fresh import.
     (mod.pynvml, mod._init_attempted, mod._init_ok) = (None, False, False)
     yield
     (mod.pynvml, mod._init_attempted, mod._init_ok) = orig
