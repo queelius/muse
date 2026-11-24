@@ -1261,11 +1261,11 @@ class TestForwardCleanup:
     @pytest.mark.parametrize("error", [
         httpx.ConnectError("refused"), httpx.ConnectTimeout("slow"),
     ])
-    async def test_open_failure_without_release_reraises_unchanged(self, error):
-        """Federation calls _forward with no release and fails over on these
-        exact exception types, which must surface before any response."""
+    async def test_open_failure_releases_and_reraises_unchanged(self, error):
+        """Connect errors surface unchanged, before any response, after the
+        slot is released."""
         h = _ForwardHarness(open_error=error)
         with pytest.raises(type(error)) as info:
-            await h.forward(release=None)
+            await h.forward()
         assert info.value is error
-        assert h.events == ["aclose"]  # stream never entered: no __aexit__
+        assert h.events == ["release", "aclose"]  # stream never entered: no __aexit__

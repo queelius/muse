@@ -506,20 +506,6 @@ with `secrets.compare_digest`; the SSE log tail authenticates with a short-lived
 `POST /v1/telemetry/logs-ticket` instead (EventSource cannot set headers). `model_evict` is
 emitted only after a successful teardown. Settings: `telemetry.*` (docs/CONFIG.md).
 
-## Federation
-
-`muse federate --port 8100 --node http://host:8000 ...` (or a `federation.yaml`) runs a coordinator
-in front of unmodified `muse serve` nodes (`muse.federation` plus `muse.cli_impl.federation`).
-It polls each node's `/v1/models` (and, with a per-node token, `/v1/telemetry/summary`) on a
-background interval and routes each request by model locality: nodes listing the model, loaded
-first, then lowest `in_flight` (in-flight requests; a node without telemetry is "unknown" and ties
-with the lowest), else round-robin; one retry on connect failure, never mid-stream. Default node
-names are `host:port` and must be unique. No candidate is 404, or a retryable 503 before the first
-poll, with no reachable node, or when a now-unreachable node listed the model. It refuses to start
-with zero nodes. The registry starts in the ASGI lifespan, so
-plain `TestClient(app).get` tests never start it. Details: `docs/INTERNALS.md`; design:
-`docs/superpowers/specs/2026-07-04-federation-design.md`.
-
 ## Agent discovery
 
 A muse server describes itself from only its URL (full guide: `docs/AGENT_DISCOVERY.md`,
@@ -540,9 +526,6 @@ read-only, never triggers a model load, computed off the event loop:
   (multi-component digest); chat sets `system_fingerprint` to
   `<id>@<revision[:12]>`. `/v1/models` gains `revision`. See
   `muse.core.provenance`.
-- Federation: the coordinator serves the merged `/v1/capabilities`, `/`,
-  `/llms.txt` and the first reachable node's `/openapi.json`; its `/docs` and
-  `/redoc` are disabled.
 - `model_optional` route flags, the `/llms.txt` shape and the
   `server.mcp.install` pin: docs/AGENT_DISCOVERY.md.
 

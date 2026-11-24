@@ -16,16 +16,14 @@ All are public (no token), read-only, and never trigger a model load.
 | `GET /v1/capabilities` | The main document: `server` (version, node, links, MCP install line), `modalities[]` (summary, `use_for`, `not_for`, routes with request/response content types, an example, the MCP tool name, file fields, and `model_optional`), and `models[]` (id, modality, license, `revision`, `components`, one-line `summary`, `strengths`, `limits`, `quality_tier` of best/good/draft, filtered capability flags, memory estimate, and live state: loaded, last cold-load seconds, queue depth, `unservable_reason`). Only enabled models are listed. |
 | `GET /v1/capabilities?modality=audio/speech` | The same document narrowed to one modality. `?model=<id>` narrows to one model. An unknown value is a 404. |
 | `GET /openapi.json` | Complete OpenAPI for every inference route (alignments, vectorize, systemone and the rest), generated from the same declarations. |
-| `GET /llms.txt` | A short markdown page in the llmstxt.org shape, rendered from the capabilities document: an H1, a one-line summary, the workflow (pick a modality, read `?modality=` / `?model=`, call with `model`, expect a cold load when a model is not `loaded`), relative links (correct behind any proxy; only the `MUSE_SERVER=` install line uses the request's base URL), the MCP install line, each modality that has an enabled model (linked to its filtered document, with routes, `model optional` marks, and up to 8 models, loaded first then by tier, each on one line with its tier, live state and a summary cut to 120 characters, then "and K more"), and an `Optional` section naming the modalities with no model enabled here. The coordinator's merged document sets every `model_optional` to false, since its proxy needs `model`. |
+| `GET /llms.txt` | A short markdown page in the llmstxt.org shape, rendered from the capabilities document: an H1, a one-line summary, the workflow (pick a modality, read `?modality=` / `?model=`, call with `model`, expect a cold load when a model is not `loaded`), relative links (correct behind any proxy; only the `MUSE_SERVER=` install line uses the request's base URL), the MCP install line, each modality that has an enabled model (linked to its filtered document, with routes, `model optional` marks, and up to 8 models, loaded first then by tier, each on one line with its tier, live state and a summary cut to 120 characters, then "and K more"), and an `Optional` section naming the modalities with no model enabled here. |
 | `GET /.well-known/muse.json` | Same pointer document as `/`, at a well-known path. |
 | `GET /v1/models` | Unchanged OpenAI-shape list, plus a `revision` field per model. |
 
 A route with `model_optional: true` (its package lists it in
 `MODEL_OPTIONAL_PATHS`) accepts a request without `model`: the gateway uses
 the first enabled model of that modality (pixelize, autotile, translate,
-`/languages`, alignment, audio quality, vectorize). Other routes need `model`,
-and so does every route through a `muse federate` coordinator, whose
-document reports `model_optional: false` throughout.
+`/languages`, alignment, audio quality, vectorize). Other routes need `model`.
 
 `quality_tier` is absolute within a modality across bundled and curated
 models, so an agent can pick the best model for a task without a table of ids.
@@ -160,21 +158,10 @@ The `model` argument has `minLength: 1`.
 - Pixel-art tools: `muse_pixelize_image` and `muse_autotile` (modality
   `image/pixelart`, see `docs/PIXELART.md`).
 
-## Federation
-
-`muse federate` serves the merged view of its nodes: `/v1/capabilities`
-(models from every reachable node, each annotated with the nodes that carry
-it), `/`, `/llms.txt`, and the first reachable node's `/openapi.json`.
-The coordinator's own `/docs` and `/redoc` are disabled. Inference routes
-forward as before, and the provenance headers pass through from the node that
-served the request. See the federation section of `CLAUDE.md`.
-
 ## Implementation notes
 
 `modality_discovery()` adds `model_optional` to every route (true when the
 package lists the path in `MODEL_OPTIONAL_PATHS`), returning deep copies so
-the memoized declarations are never mutated. The coordinator's merged
-document sets every `model_optional` to false (its proxy has no
-default-model seam). `server.mcp.install` pins `museq[mcp]>=<major>.<minor>`
+the memoized declarations are never mutated. `server.mcp.install` pins `museq[mcp]>=<major>.<minor>`
 for a release version and leaves dev or local builds unpinned, so uvx does
 not reuse an older cached client.

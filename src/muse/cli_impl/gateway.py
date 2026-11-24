@@ -1848,7 +1848,7 @@ async def _forward(
     target_url: str,
     timeout: float,
     *,
-    release: "Callable[[], None] | None" = None,
+    release: "Callable[[], None]",
     cancel_on_disconnect: bool = False,
     extra_headers: list[tuple[bytes, bytes]] | None = None,
 ) -> Response:
@@ -1861,8 +1861,7 @@ async def _forward(
     chunks dispatch as the worker produces them.
 
     `release` (the director refcount + concurrency-gate slot, from
-    `_route_via_director`; None for federation)
-    runs exactly once, from one idempotent cleanup that also exits the
+    `_route_via_director`) runs exactly once, from one idempotent cleanup that also exits the
     upstream stream and closes the client, in that order. Release goes first
     and is synchronous, so neither a failing close step nor a second
     cancellation landing during an await can skip it, and its own exception
@@ -1878,7 +1877,7 @@ async def _forward(
         reading the request body, opening the worker stream, or prefetching
         the response, after which the original exception is re-raised.
         Connect/timeout errors therefore reach the caller unchanged, before
-        any response has started, which federation's failover relies on.
+        any response has started.
 
     `cancel_on_disconnect` (paths a modality lists in
     CANCEL_ON_DISCONNECT_PATHS): if the client disconnects while the worker
@@ -1895,14 +1894,13 @@ async def _forward(
         if cleaned_up:
             return
         cleaned_up = True
-        if release is not None:
-            try:
-                release()
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "release callback raised during forward cleanup",
-                    exc_info=True,
-                )
+        try:
+            release()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "release callback raised during forward cleanup",
+                exc_info=True,
+            )
         if stream_entered:
             try:
                 await stream_ctx.__aexit__(None, None, None)
@@ -1922,9 +1920,8 @@ async def _forward(
 
     try:
         # The body read comes after the caller took its refcount. The
-        # gateway proxy has already cached it, but a caller that has not
-        # (federation) reads it here for the first time and can fail on a
-        # client disconnect, so it sits inside the cleanup guard too.
+        # gateway proxy has normally cached it already; if not, the read can
+        # fail on a client disconnect, so it sits inside the cleanup guard.
         body = await request.body()
         client = httpx.AsyncClient(timeout=timeout)
         stream_ctx = client.stream(

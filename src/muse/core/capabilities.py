@@ -215,7 +215,7 @@ def build_document(
 def filter_document(
     doc: dict, *, modality: str | None = None, model: str | None = None,
 ) -> dict:
-    """Slice a built (or federation-merged) capabilities document. Pure.
+    """Slice a built capabilities document. Pure.
 
     Returns a new document; other top-level keys (server,
     unreachable_nodes, ...) are kept. `modality` keeps that modality and

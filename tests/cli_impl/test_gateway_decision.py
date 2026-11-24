@@ -373,7 +373,7 @@ async def test_other_paths_do_not_watch_for_disconnect():
     with patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
         _hanging_client(mock_cls, opened, cancelled)
         call = asyncio.ensure_future(_forward(
-            request, "http://127.0.0.1:9001/v1/x", 30.0,
+            request, "http://127.0.0.1:9001/v1/x", 30.0, release=lambda: None,
         ))
         await asyncio.wait_for(opened.wait(), 5)
         gone.set()

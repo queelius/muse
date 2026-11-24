@@ -62,11 +62,8 @@ with no paths. Voices are managed on `/v1/audio/speech/voices`:
   `{"object": "audio.voice.deleted", model, name, "deleted": true}`; 404
   `voice_not_found`, 400 `voice_read_only`. It has no MCP tool (the generator
   has no DELETE support). The gateway routes DELETE by the `model` query
-  param; `muse federate` forwards only GET and POST, so delete through a node
-  directly.
-- Saved voices live on one node's disk. Under `muse federate`, save and speak
-  through the same node: a voice saved on node A is unknown (400
-  `voice_not_found`) on node B.
+  param.
+- Saved voices live on the server's disk (`<paths.home>/voices/<model_id>/`).
 
 Storage: `<paths.home>/voices/<model_id>/<name>/{reference.wav, voice.json}`
 (voices are per model id; the store root is created 0700). The reference is

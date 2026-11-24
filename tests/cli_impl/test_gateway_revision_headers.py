@@ -52,7 +52,8 @@ async def _run(kind, extra_headers):
     request.query_params = {}
     with patch("muse.cli_impl.gateway.httpx.AsyncClient", return_value=client):
         kw = {} if extra_headers is None else {"extra_headers": extra_headers}
-        response = await _forward(request, "http://127.0.0.1:9/x", 1.0, **kw)
+        response = await _forward(
+            request, "http://127.0.0.1:9/x", 1.0, release=lambda: None, **kw)
     if hasattr(response, "body_iterator"):
         _ = [c async for c in response.body_iterator]
     return response

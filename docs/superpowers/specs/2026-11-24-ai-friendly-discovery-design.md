@@ -63,7 +63,6 @@ well and does not build pipelines.
 - New CLI verbs for voices (the CLI stays the admin surface; generation and
   voices are HTTP).
 - LLM-written descriptions shipped without a person reviewing them.
-- Cross-node voice sync under federation (each node keeps its own voices).
 - Auth on voice writes: the owner decided (2026-11-24) that anyone on the
   LAN may save, edit and delete voices without the admin token.
 
@@ -195,13 +194,8 @@ found without importing the runtime, by a hidden manifest capability on
 `qwen3-tts-0.6b-base` naming the bundled voice files (my call; the builder
 can pick another light mechanism).
 
-Federation (my call): voices are per node and stay that way. The merged
-capabilities document keeps the first node's `options.voices`, and a request
-may land on another node, so with two nodes serving the same voice model an
-agent can save on one and get `voice_not_found` on the other. This is
-documented as a known limitation in docs/AGENT_DISCOVERY.md; the owner runs
-one node today. Routing all voice traffic for a model to one node is a
-possible later change.
+(`muse federate` was removed on 2026-11-24, so there is no multi-node case
+to design for.)
 
 #### Voices in discovery
 
@@ -384,7 +378,6 @@ model (asserted with a registry that raises on load).
   strict-parser routes gain a documentation-only schema.
 - The error-code scan follows shared helpers through their `ERROR_CODES`
   tuples and treats exception pass-throughs as covered.
-- Federation keeps voices per node, documented as a known limitation.
 
 ## Left to the builder
 

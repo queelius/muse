@@ -67,18 +67,18 @@ def test_bad_env_warns_and_defaults(tmp_path, monkeypatch, caplog):
 def test_non_finite_env_warns_and_defaults(
     tmp_path, monkeypatch, caplog, raw,
 ):
-    monkeypatch.setenv("MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS", raw)
+    monkeypatch.setenv("MUSE_TELEMETRY_LOG_TICKET_TTL_SECONDS", raw)
     c = _cfg(tmp_path)
     with caplog.at_level("WARNING"):
-        assert c.get("federation.refresh_interval_seconds") == 3.0
+        assert c.get("telemetry.log_ticket_ttl_seconds") == 60.0
     assert any("must be finite" in r.message for r in caplog.records)
 
 
 def test_out_of_domain_env_warns_and_defaults(tmp_path, monkeypatch, caplog):
-    monkeypatch.setenv("MUSE_FEDERATION_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MUSE_TELEMETRY_LOG_TICKET_TTL_SECONDS", "0")
     c = _cfg(tmp_path)
     with caplog.at_level("WARNING"):
-        assert c.get("federation.refresh_interval_seconds") == 3.0
+        assert c.get("telemetry.log_ticket_ttl_seconds") == 60.0
     assert any("must be > 0" in r.message for r in caplog.records)
 
 

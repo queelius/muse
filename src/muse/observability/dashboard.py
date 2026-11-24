@@ -193,7 +193,7 @@ def build_dashboard_router(state) -> APIRouter:
         # a model (refcounts) plus requests parked on a concurrency gate
         # (which take their refcount only after the gate admits them). It
         # excludes requests waiting on a cold load or a capacity wait.
-        # Federation balances on it. `in_flight_loads` counts cold loads.
+        # `in_flight_loads` counts cold loads.
         samples = state.telemetry_store.samples(since_ts=0, limit=1)
         latest_sample = samples[-1] if samples else None
         store_status = state.telemetry_store.status()

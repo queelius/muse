@@ -550,8 +550,8 @@ async def test_stream_model_logs_streams_live_lines_and_unsubscribes_on_close():
 
 def test_summary_in_flight_counts_requests_not_cold_loads(client_with_token):
     """`in_flight` is in-flight REQUESTS (requests holding a director
-    refcount plus requests parked on a concurrency gate), the load signal
-    federation balances on. Cold loads in progress are a separate key."""
+    refcount plus requests parked on a concurrency gate). Cold loads in
+    progress are a separate key."""
     from muse.cli_impl.queueing import ConcurrencyGate
 
     state = client_with_token.state_ref

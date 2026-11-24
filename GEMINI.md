@@ -8,7 +8,7 @@ Concise engineering guide for Gemini / Antigravity agents working in this reposi
 - **Purpose**: Self-hostable, model-agnostic multi-modality AI server with OpenAI-compatible (plus Cohere, LibreTranslate, TypeSafe System One, and muse-native) HTTP endpoints.
 - **Scale (live codebase)**: **28 modalities** under `src/muse/modalities/`, **34 bundled model scripts** under `src/muse/models/`, **12 admin endpoints**, and a dynamic **MCP server** (11 fixed admin tools + `muse_describe` + dynamic per-route inference tools generated from `/v1/capabilities` + `/openapi.json`).
 - **Package Data**: `src/muse/curated.yaml`, `src/muse/chat_formats.yaml`, and bundled speech reference voices (`src/muse/modalities/audio_speech/data/*.{wav,json}`) are shipped as wheel package data and loaded via `importlib.resources`.
-- **CLI Philosophy**: Deliberately admin-only (`serve`, `pull`, `search`, `models`, `config`, `doctor`, `storage`, `telemetry`, `federate`, `mcp`). Never add per-modality CLI verbs (`muse speak`, etc.); inference belongs on HTTP and MCP.
+- **CLI Philosophy**: Deliberately admin-only (`serve`, `pull`, `search`, `models`, `config`, `doctor`, `storage`, `telemetry`, `mcp`). Never add per-modality CLI verbs (`muse speak`, etc.); inference belongs on HTTP and MCP.
 
 ## 2. Repository Layout & Key Modules
 
@@ -24,7 +24,6 @@ src/muse/
 │   ├── idle_sweeper.py      # Background idle-timeout eviction thread
 │   ├── queueing.py          # Event-loop ConcurrencyGate + CapacityNotifier
 │   ├── telemetry.py         # Local `muse telemetry` CLI implementation
-│   ├── federation.py        # `muse federate` coordinator ASGI app
 │   ├── mcp_server.py        # `muse mcp` stdio / HTTP+SSE entrypoint
 │   ├── resource_doctor.py   # `muse doctor resources [--repair]`
 │   ├── storage.py           # `muse doctor storage`, `muse storage prune`, `muse storage dedupe`
@@ -50,7 +49,6 @@ src/muse/
 ├── models/<model_id>.py     # 34 bundled drop-in model scripts (MANIFEST + Model)
 ├── admin/                   # `/v1/admin/*` routes, shared bearer auth, JobStore, operations, AdminClient
 ├── observability/           # TelemetryStore (SQLite WAL), events, recorder, traces, sampler, logs, dashboard, `_lifecycle`
-├── federation/              # Static node membership, NodeRegistry polling, model-locality router
 └── mcp/                     # Dynamic MCPServer (`muse.mcp.generated` + `tools/admin.py`), MuseClient, binary_io
 scripts/                     # preflight.py, smoke_fresh_venv.py, validate_installed_distribution.py, bench/
 tests/                       # Mirrors src/muse/ + integration/ + test_cli.py + audit/meta tests
@@ -98,7 +96,7 @@ Python directory names use underscores; runtime `MODALITY` tags are MIME-style (
   - Bootstrap keys `paths.catalog_dir` (`MUSE_CATALOG_DIR`) and `paths.config_file` (`MUSE_CONFIG`) resolve from env+default only.
   - `config.get()` is lenient (warns + falls back to default); `muse config set` is strict. Server-global settings live in `config.yaml`; per-model state (`enabled`, `device_override`, `gpu_layers_override`, `measurements`) lives in `catalog.json`.
 
-## 4. Admin API, Observability, Federation, Agent Discovery & MCP
+## 4. Admin API, Observability, Agent Discovery & MCP
 
 - **Admin REST API (`src/muse/admin/`)**: 12 endpoints under `/v1/admin/*` — `POST /models/{id}/{enable,disable,warmup,probe,pull}`, `DELETE /models/{id}?purge=bool`, `GET /models/{id}/status`, `GET /workers`, `POST /workers/{port}/restart`, `GET /memory`, `GET /jobs`, `GET /jobs/{job_id}`. Closed-by-default (`503 admin_disabled`) until `MUSE_ADMIN_TOKEN` (`admin.token`) is set; uses shared `http_bearer_check` (`Authorization: Bearer <token>`, case-insensitive scheme, constant-time compare). Async ops (`enable`, `probe`, `pull`) return `202 + job_id` via `JobStore` (10-minute retention). `install_admin_error_handler` unwraps OpenAI-shaped auth errors. **Never echo the admin token** in errors, logs, or jobs.
 - **Observability (`src/muse/observability/`, `docs/TELEMETRY.md`)**:
@@ -109,7 +107,6 @@ Python directory names use underscores; runtime `MODALITY` tags are MIME-style (
   - **Dashboard & HTTP API (`dashboard.py`)**: `GET /dashboard` (un-gated HTML shell with automatic SSE log-ticket reconnect), gated `GET /v1/telemetry/{summary,series,report,traces}`, `POST /v1/telemetry/logs-ticket`, and `GET /v1/telemetry/logs/{model_id}` (SSE via `LogHub.subscribe_with_snapshot`, authenticated by short-lived `?ticket=` or `Authorization: Bearer`, never `?access_token=`). Reuses `admin.token`; gated by `telemetry.require_auth` (`MUSE_TELEMETRY_REQUIRE_AUTH`, default `true` — only set `false` on trusted loopback dev hosts).
   - **CLI (`src/muse/cli_impl/telemetry.py`)**: `muse telemetry {status,summary,traces,vram,export,prune}`. Summary rows distinguish `measured`, `estimated`, and `mixed` bases; `export` validates upfront, writes CSV headers even when empty, and refuses overwrite without `--force`.
 - **Agent Discovery (`src/muse/cli_impl/agent_routes.py`, `docs/AGENT_DISCOVERY.md`)**: Exposes `GET /llms.txt`, `GET /v1/capabilities` (including `last_cold_load_seconds` and provenance/artifact digests), and merged `/openapi.json` across discovered modalities.
-- **Federation (`src/muse/federation/`, `src/muse/cli_impl/federation.py`)**: `muse federate --port 8100 --node <url> [--config <yaml>]` fronts unmodified `muse serve` nodes. `NodeRegistry` polls `/v1/models`, `/health`, and (if a per-node token is configured) `/v1/telemetry/summary` every `federation.refresh_interval_seconds` (`3.0s`). `select_node` routes by model-locality (prefer already `loaded`, tie-break lowest `in_flight` requests, else round-robin) with one connect/timeout failover retry. Exposes aggregated `GET /v1/models`, `GET /health`, and `GET /v1/federation/nodes`.
 - **MCP Server (`src/muse/mcp/`, `src/muse/cli_impl/mcp_server.py`)**: `muse mcp` (stdio default; `--http --port 8088` for Starlette `/mcp`; `--filter all|admin|inference`; lightweight install via `museq[mcp]`). Dynamically generates inference tools from the live server's `/v1/capabilities` + `/openapi.json` alongside `muse_describe` and 11 fixed admin tools (requiring `MUSE_ADMIN_TOKEN`), plus `muse://capabilities` and `muse://models/{id}` resources. Binary inputs accept mutually exclusive `<name>_b64`, `<name>_url`, or `<name>_path` (guarded by `fetch.mcp_allowed_path_prefixes`).
 
 ## 5. Build, Preflight & Test Commands
@@ -160,7 +157,7 @@ muse telemetry status && muse telemetry summary --since 24h
   - Audio protocol boundary: `float32` in `[-1, 1]` (codecs convert to int16 PCM via `* 32768` + `np.clip`). Images: `Any` (codecs normalize PIL/numpy/torch via `muse.modalities._common.images`).
   - Chat responses must return the Muse catalog `model_id`, never an internal GGUF file path.
 - **Testing**:
-  - Mirror source layout (`tests/core/`, `tests/modalities/<name>/`, `tests/models/`, `tests/cli_impl/`, `tests/observability/`, `tests/admin/`, `tests/federation/`, `tests/mcp/`).
+  - Mirror source layout (`tests/core/`, `tests/modalities/<name>/`, `tests/models/`, `tests/cli_impl/`, `tests/observability/`, `tests/admin/`, `tests/mcp/`).
   - Use `FakeModel` classes and fresh `ModalityRegistry()` instances in unit tests (no real weights; mock heavy libs at their module-level import sentinels).
   - Mark subprocess end-to-end tests with `@pytest.mark.slow`. In `tests/integration/`, prefix hard invariants `test_protocol_*` and model-behavior watchdogs `test_observe_*`.
   - Every bug fix must include a regression test.

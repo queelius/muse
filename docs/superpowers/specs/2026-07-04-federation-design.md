@@ -1,5 +1,9 @@
 # muse federation (coordinator) -- design
 
+> **Removed 2026-11-24.** `muse federate` and `muse.federation` were deleted
+> (unused, with known routing bugs; see git history before the removal
+> commit). Kept as a historical record.
+
 > **Status:** DRAFT for Alex's review. The core architectural choices below were
 > made on best judgment while you were away (you'd said "we're ready" and picked
 > the recommended options all through the observability arc). Every decision I made

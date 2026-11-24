@@ -18,7 +18,7 @@ _DISCOVERY_TIMEOUT = 10.0
 
 
 class MuseClient:
-    """HTTP client of one muse server (a node or a federation coordinator).
+    """HTTP client of one muse server.
 
     ``transport`` is an optional ``httpx`` transport (tests pass an
     ``httpx.MockTransport``); every request goes through it.

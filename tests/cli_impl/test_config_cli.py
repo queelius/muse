@@ -93,7 +93,7 @@ def test_config_set_out_of_domain_value_nonzero(monkeypatch, tmp_path):
     monkeypatch.setenv("MUSE_CATALOG_DIR", str(tmp_path))
     cfg.reset_config()
     r = runner.invoke(
-        app, ["config", "set", "federation.refresh_interval_seconds", "0"]
+        app, ["config", "set", "telemetry.log_ticket_ttl_seconds", "0"]
     )
     assert r.exit_code == 2
     assert "must be > 0" in r.stderr

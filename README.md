@@ -725,36 +725,6 @@ Tools split into two groups:
 
 **Inference:** generated from the server at start, one per route (for example `muse_chat`, `muse_speak`, `muse_transcribe`, `muse_generate_image`, `muse_align`, `muse_moderate`). Media outputs are written to files (`out_path`, else `mcp.output_dir`) and returned as path, sha256, model and revision. Path inputs are limited to the working directory (never `/`) and `mcp.output_dir`, or, when `fetch.mcp_allowed_path_prefixes` is set, to its directories instead (the output dir stays writable). Multipart `*_url` inputs are fetched by the MCP process through the SSRF guard; JSON `*_url` inputs are fetched by the server. An unfiltered `muse_describe` on a full server writes the document to a file and returns an index; with `modality` or `model` it returns the document inline.
 
-## Federation
-
-`muse federate` runs a thin coordinator in front of a fixed list of
-unmodified muse `serve` nodes, so one OpenAI-compatible endpoint fronts
-your whole cluster instead of clients having to know which box has
-which model.
-
-```bash
-muse federate --port 8100 \
-    --node http://192.168.0.204:8000 \
-    --node http://192.168.0.50:8000
-# or: muse federate --config ~/.muse/federation.yaml
-```
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://coordinator:8100/v1", api_key="not-used")
-client.chat.completions.create(model="qwen3.5-4b-q4", messages=[...])
-```
-
-Requests are routed by model-locality (a node that already has the
-model loaded wins over one that would have to cold-load it), with an
-in-flight-count tie-break. `GET /v1/models`, `/health`, and
-`/v1/federation/nodes` on the coordinator aggregate across the cluster.
-Inference requests through the coordinator require an explicit `model`,
-including translation requests. Model-free LibreTranslate calls should use a
-`muse serve` node directly. The coordinator applies the same configured
-`server.max_request_body_mb` limit as the gateway.
-See the "Federation" section of `CLAUDE.md` for the full design.
-
 ## Architecture
 
 - `muse.core`: modality-agnostic discovery, registry, catalog, venv management, HF downloader, pip auto-install, FastAPI app factory.
