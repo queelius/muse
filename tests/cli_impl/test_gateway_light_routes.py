@@ -195,6 +195,31 @@ def test_openapi_lists_voice_light_routes_with_descriptions(client):
     assert "catalog" in item["patch"]["description"]
 
 
+def test_capabilities_include_voice_options_without_acquire(client, director, _env):
+    _voice(_env, "sage", category="narrator/epic")
+    doc = client.get("/v1/capabilities").json()
+    by_id = {m["id"]: m for m in doc["models"]}
+    voices = by_id["fake-clone"]["options"]["voices"]
+    assert voices["count"] == 2 and [s["name"] for s in voices["sample"]] == ["narrator", "sage"]
+    assert by_id["fake-preset"]["options"] == {}
+    full = client.get("/v1/capabilities?model=fake-clone").json()["models"][0]
+    assert [i["name"] for i in full["options"]["voices"]["items"]] == ["narrator", "sage"]
+    assert director.acquire_calls == 0
+
+
+def test_capabilities_survive_an_options_failure(client, monkeypatch):
+    from muse.core.discovery import LightHooks
+
+    def boom(model_id, caps):
+        raise RuntimeError("disk on fire")
+
+    hooks = {"audio/speech": LightHooks(None, boom)}
+    monkeypatch.setattr(gw, "light_hooks", lambda: hooks)
+    r = client.get("/v1/capabilities")
+    assert r.status_code == 200
+    assert {m["id"]: m for m in r.json()["models"]}["fake-clone"]["options"] == {}
+
+
 @pytest.mark.parametrize("method,headers,body", [
     ("PATCH", {"content-type": "application/json"}, b'{"model": "m1"}'),
     ("POST", {"content-type": "application/json"}, b'{"model": "m1"}'),

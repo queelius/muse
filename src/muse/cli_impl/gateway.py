@@ -1105,7 +1105,33 @@ def _capabilities_document(
         models=pairs,
         modality=modality,
         model=model,
+        options=_model_options([facts for facts, _ in pairs]),
     )
+
+
+def _model_options(facts: list[ModelFacts]) -> dict[str, dict]:
+    """{model id: named options} from each modality's ``model_options`` hook
+    (muse.core.light), e.g. a saved-voice model's voices. Blocking (reads
+    disk); never loads a model. A failing hook is logged and leaves that
+    model without options."""
+    try:
+        hooks = light_hooks()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("/v1/capabilities: light hooks failed: %s", e)
+        return {}
+    out: dict[str, dict] = {}
+    for f in facts:
+        hook = getattr(hooks.get(f.modality), "model_options", None)
+        if hook is None:
+            continue
+        try:
+            opts = hook(f.id, f.capabilities)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("/v1/capabilities: options for %s failed: %s", f.id, e)
+            continue
+        if isinstance(opts, dict) and opts:
+            out[f.id] = opts
+    return out
 
 
 def _unloaded_catalog_entries(state: Any, loaded: list[dict]) -> list[dict]:

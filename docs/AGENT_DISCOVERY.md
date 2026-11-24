@@ -39,6 +39,16 @@ route that cannot answer from disk (a preset-voice listing) forwards through
 the director like any proxied request. Request validation errors on the
 gateway's own routes use the same 422 `invalid_request` envelope as workers.
 
+Every model entry in `/v1/capabilities` has `options`: the named values an
+agent could not guess, keyed by option (`{}` when there are none). A model
+with saved voices has `options.voices = {count, categories: [{path, count}],
+items: [{name, category, tags, description}], list_route}`. The unfiltered
+document replaces `items` with `sample` (the first 10) to stay bounded;
+`?model=` or `?modality=` lists every item, and `list_route` is the full
+listing with filters. A package supplies these through an optional
+`model_options(model_id, capabilities)` export (read from disk, never a model
+load); a failing hook leaves that model's `options` empty.
+
 `quality_tier` is absolute within a modality across bundled and curated
 models, so an agent can pick the best model for a task without a table of ids.
 Model notes live next to each model (bundled script MANIFEST or curated

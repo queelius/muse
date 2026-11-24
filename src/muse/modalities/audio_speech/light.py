@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
+from urllib.parse import quote
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -87,6 +88,21 @@ def _preset_entry(name: str) -> VoiceEntry:
         name=name, transcript="", sample_rate=0, duration_seconds=0.0, sha256=None,
         read_only=True, category=None, tags=(), description=None, notes=None,
         design=None, created_at=None, updated_at=None)
+
+
+def model_options(model_id: str, capabilities: Mapping[str, Any]) -> dict | None:
+    """The saved voices of a ``supports_saved_voices`` model, for the
+    capabilities document (blocking: reads the voice catalog from disk)."""
+    if not capabilities.get("supports_saved_voices"):
+        return None
+    entries = VoiceCatalog.for_model(model_id).entries()
+    return {"voices": {
+        "count": len(entries),
+        "categories": category_counts(entries),
+        "items": [{"name": e.name, "category": e.category, "tags": list(e.tags),
+                   "description": e.description} for e in entries],
+        "list_route": f"/v1/audio/speech/voices?model={quote(model_id, safe='')}",
+    }}
 
 
 def build_light_router(catalog: LightCatalog) -> APIRouter:

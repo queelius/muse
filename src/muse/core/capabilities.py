@@ -8,7 +8,7 @@
      "models": [{id, modality, hf_repo, license, revision, components,
                  summary, strengths, limits, quality_tier, capabilities,
                  loaded, memory_gb, last_cold_load_seconds, queue_depth,
-                 unservable_reason}]}
+                 unservable_reason, options}]}
 
 Facts about a model split in two: `ModelFacts` (identity, notes,
 capabilities, size) change only when the catalog does, so callers cache them;
@@ -146,7 +146,28 @@ def server_block(*, version: str, node: str, base_url: str) -> dict:
     }
 
 
-def _model_entry(facts: ModelFacts, state: ModelState | None) -> dict:
+OPTIONS_SAMPLE = 10
+
+
+def _options(options: Mapping[str, Any] | None, *, full: bool) -> dict:
+    """A model's named options (e.g. saved voices), copied. ``full`` keeps
+    each option's ``items``; otherwise they become ``sample`` (the first
+    OPTIONS_SAMPLE) so the unfiltered document stays bounded."""
+    out: dict = {}
+    for name, opt in (options or {}).items():
+        if not isinstance(opt, Mapping):
+            continue
+        opt = copy.deepcopy(dict(opt))
+        if not full and isinstance(opt.get("items"), list):
+            opt["sample"] = opt.pop("items")[:OPTIONS_SAMPLE]
+        out[name] = opt
+    return out
+
+
+def _model_entry(
+    facts: ModelFacts, state: ModelState | None,
+    options: Mapping[str, Any] | None = None, *, full: bool = True,
+) -> dict:
     notes = facts.notes
     rev = facts.revision
     return {
@@ -169,6 +190,7 @@ def _model_entry(facts: ModelFacts, state: ModelState | None) -> dict:
         "last_cold_load_seconds": None if state is None else state.last_cold_load_seconds,
         "queue_depth": None if state is None else state.queue_depth,
         "unservable_reason": None if state is None else state.unservable_reason,
+        "options": _options(options, full=full),
     }
 
 
@@ -179,6 +201,7 @@ def build_document(
     models: list[tuple[ModelFacts, ModelState | None]],
     modality: str | None = None,
     model: str | None = None,
+    options: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict:
     """Assemble the capabilities document. Pure: no I/O.
 
@@ -187,9 +210,16 @@ def build_document(
     `discovery` plus any modality a model serves that declares no
     DISCOVERY. `modality` / `model` slice the document; an unknown value
     (or a model outside the requested modality) raises UnknownFilter.
+
+    `options` maps a model id to its named options (``{"voices": {count,
+    categories, items, list_route}}``). The unfiltered document caps each
+    option's ``items`` to a ``sample``; a filtered one lists them all.
     """
+    full = modality is not None or model is not None
+    options = options or {}
     entries = sorted(
-        (_model_entry(f, s) for f, s in models), key=lambda e: e["id"],
+        (_model_entry(f, s, options.get(f.id), full=full) for f, s in models),
+        key=lambda e: e["id"],
     )
     tags = set(discovery) | {e["modality"] for e in entries if e["modality"]}
     modalities = []

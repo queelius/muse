@@ -112,8 +112,9 @@ def test_document_shape_and_filters():
         "id", "modality", "hf_repo", "license", "revision", "components",
         "summary", "strengths", "limits", "quality_tier", "capabilities",
         "loaded", "memory_gb", "last_cold_load_seconds", "queue_depth",
-        "unservable_reason",
+        "unservable_reason", "options",
     ]
+    assert kokoro["options"] == {}
     assert kokoro["revision"] == REV
     assert kokoro["components"] == [
         {"role": "weights", "repo": "hexgrad/Kokoro-82M", "revision": REV},
@@ -433,3 +434,31 @@ def test_llms_txt_stays_small_for_a_huge_catalog():
         if line.lstrip().startswith("- "):
             assert len(line) < 1000, line[:80]
     assert text.count("  - model ") == 16
+
+
+def _voice_options(n):
+    return {"voices": {"count": n, "categories": [{"path": "narrator", "count": n}],
+                       "items": [{"name": f"v{i}"} for i in range(n)],
+                       "list_route": "/v1/audio/speech/voices?model=kokoro-82m"}}
+
+
+def test_unfiltered_options_are_capped_to_a_sample():
+    doc = _doc([(_facts(), _state())], options={"kokoro-82m": _voice_options(12)})
+    v = doc["models"][0]["options"]["voices"]
+    assert "items" not in v and [s["name"] for s in v["sample"]] == [f"v{i}" for i in range(10)]
+    assert v["count"] == 12 and v["list_route"].endswith("model=kokoro-82m")
+    assert v["categories"] == [{"path": "narrator", "count": 12}]
+
+
+@pytest.mark.parametrize("flt", [{"model": "kokoro-82m"}, {"modality": "audio/speech"}])
+def test_filtered_options_are_complete(flt):
+    doc = _doc([(_facts(), _state())], options={"kokoro-82m": _voice_options(12)}, **flt)
+    v = doc["models"][0]["options"]["voices"]
+    assert len(v["items"]) == 12 and "sample" not in v
+
+
+def test_options_do_not_alias_the_callers_dict():
+    opts = {"kokoro-82m": _voice_options(2)}
+    doc = _doc([(_facts(), _state())], options=opts, model="kokoro-82m")
+    doc["models"][0]["options"]["voices"]["items"].clear()
+    assert len(opts["kokoro-82m"]["voices"]["items"]) == 2

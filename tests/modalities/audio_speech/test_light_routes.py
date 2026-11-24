@@ -240,6 +240,25 @@ def test_unknown_model_is_404_model_not_found(home):
     assert r.status_code == 404 and r.json()["error"]["code"] == "model_not_found"
 
 
+def test_model_options_lists_bundled_and_saved_voices(home):
+    from muse.modalities.audio_speech import model_options
+
+    _voice(home, "sage", category="narrator/epic", tags=["deep"], description="Old and slow.")
+    o = model_options(MODEL, {"supports_saved_voices": True})["voices"]
+    assert o["count"] == 2 and o["list_route"] == f"/v1/audio/speech/voices?model={MODEL}"
+    assert [i["name"] for i in o["items"]] == ["narrator", "sage"]
+    assert o["items"][1] == {"name": "sage", "category": "narrator/epic",
+                             "tags": ["deep"], "description": "Old and slow."}
+    assert {"path": "narrator/epic", "count": 1} in o["categories"]
+
+
+def test_model_options_is_none_without_saved_voices(home):
+    from muse.modalities.audio_speech import model_options
+
+    assert model_options("kokoro", {}) is None
+    assert light_hooks()["audio/speech"].model_options is model_options
+
+
 def test_default_model_is_the_registry_default(home):
     body = _client(SAVED, PRESET).get("/v1/audio/speech/voices").json()
     assert body["model"] == MODEL and "narrator" in body["voices"]

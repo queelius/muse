@@ -17,7 +17,7 @@ from muse.modalities.audio_speech.protocol import (
     VoiceError,
     VoiceUnreadableError,
 )
-from muse.modalities.audio_speech.light import build_light_router
+from muse.modalities.audio_speech.light import build_light_router, model_options
 from muse.modalities.audio_speech.routes import build_router
 
 MODALITY = "audio/speech"
@@ -179,6 +179,7 @@ __all__ = [
     "PROBE_DEFAULTS",
     "build_light_router",
     "build_router",
+    "model_options",
     "SpeechClient",
     "AudioChunk",
     "AudioResult",
