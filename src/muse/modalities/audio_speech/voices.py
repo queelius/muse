@@ -12,7 +12,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import shutil
 import threading
 import wave
@@ -28,9 +27,12 @@ from muse.modalities.audio_speech.protocol import (
     VoiceError,
     VoiceUnreadableError,
 )
+from muse.modalities.audio_speech.voice_catalog import (  # noqa: F401  (re-exported)
+    NAME_PATTERN,
+    voice_store_root,
+)
 
 VOICE_SAMPLE_RATE = 24000
-NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 MIN_SECONDS = 1.0
 MAX_SECONDS = 30.0
 MAX_TRANSCRIPT_CHARS = 1000
@@ -44,16 +46,6 @@ def _muse_home() -> Path:
     home = Path(config.get("paths.home")).expanduser()
     home.mkdir(parents=True, exist_ok=True)
     return home
-
-
-def voice_store_root(model_id: str) -> Path:
-    """Where a model's VoiceStore lives (``<paths.home>/voices/<model_id>``).
-
-    Not created here: the store creates it mode 0700 on first save, and
-    rejects a group/other-writable directory such as ``voices_dir`` makes
-    under a permissive umask.
-    """
-    return Path(config.get("paths.home")).expanduser() / "voices" / model_id
 
 
 def voices_dir(model_id: str) -> Path:
