@@ -150,6 +150,12 @@ _PLUGIN_CASES = (
         case_id="image-generation-lora",
     ),
     _case(
+        "muse.modalities.image_matting.hf",
+        "ZhengPeng7/BiRefNet_lite",
+        files=("config.json", "model.safetensors", "birefnet.py"),
+        tags=("image-segmentation",),
+    ),
+    _case(
         "muse.modalities.image_ocr.hf",
         "microsoft/trocr-base-printed",
         tags=("image-to-text",),
@@ -169,6 +175,12 @@ _PLUGIN_CASES = (
         "muse.modalities.model_3d_generation.hf",
         "stabilityai/TripoSR",
         tags=("image-to-3d",),
+    ),
+    _case(
+        "muse.modalities.music_midi.hf",
+        "sander-wood/text-to-music",
+        files=("config.json", "model.safetensors", "tokenizer.json"),
+        tags=("text-generation", "symbolic-music"),
     ),
     _case(
         "muse.modalities.text_classification.hf",
