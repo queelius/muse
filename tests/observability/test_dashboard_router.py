@@ -292,31 +292,77 @@ def test_dashboard_html_is_self_contained(client_with_token):
     assert "VRAM over time" in body
     assert "Cold vs hot evidence" in body
     assert "Recent request traces" in body
+    assert '"legacy"' in body
+    assert "circle" in body
+    assert "d.queued" in body
+    assert "MAX_LOG_LINES" in body
+    assert "reqSeq" in body
 
 
 def test_report_and_traces_endpoints(client_with_token):
+    import time
+
     state = client_with_token.state_ref
+    now = time.time()
     state.telemetry_store.insert_many([
         event_to_row(
-            "request", 9999999999.0, request_id="r1", model_id="m",
+            "request", now - 7200.0, request_id="old-r", model_id="old-m",
+            modality="audio/speech", cold=False, latency_ms=100.0, status=200,
+        ),
+        event_to_row(
+            "request", now - 10.0, request_id="r1", model_id="m",
             modality="audio/speech", cold=True, latency_ms=1000.0,
             load_ms=700.0, peak_vram_gb=3.5,
             evicted_models='["old"]', status=200,
+        ),
+        event_to_row(
+            "request", now - 5.0, request_id="r2", model_id="m2",
+            modality="chat/completions", cold=None, latency_ms=50.0,
+            evicted_models='"non-list-json"', status=200,
         ),
     ])
     headers = {"Authorization": "Bearer t"}
 
     report = client_with_token.get(
-        "/v1/telemetry/report?window=9999999999", headers=headers,
+        "/v1/telemetry/report?window=3600", headers=headers,
     )
     traces = client_with_token.get(
-        "/v1/telemetry/traces?window=9999999999", headers=headers,
+        "/v1/telemetry/traces?window=3600", headers=headers,
+    )
+    filtered = client_with_token.get(
+        "/v1/telemetry/traces?window=3600&model_id=m&modality=audio/speech",
+        headers=headers,
     )
 
     assert report.status_code == 200
-    assert report.json()["rows"][0]["evicted_models"] == ["old"]
+    by_model = {r["model_id"]: r for r in report.json()["rows"]}
+    assert set(by_model) == {"m", "m2"}
+    assert by_model["m"]["evicted_models"] == ["old"]
+    assert by_model["m2"]["evicted_models"] == ["non-list-json"]
+
     assert traces.status_code == 200
-    assert traces.json()["rows"][0]["cold"] is True
+    trace_by_id = {r["request_id"]: r for r in traces.json()["rows"]}
+    assert set(trace_by_id) == {"r1", "r2"}
+    assert trace_by_id["r1"]["cold"] is True
+    assert trace_by_id["r2"]["cold"] is None
+    assert trace_by_id["r2"]["evicted_models"] == ["non-list-json"]
+
+    assert filtered.status_code == 200
+    assert [r["request_id"] for r in filtered.json()["rows"]] == ["r1"]
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/telemetry/report", "/v1/telemetry/traces"])
+def test_report_and_traces_require_token(client_no_token, endpoint):
+    assert client_no_token.get(endpoint).status_code == 503
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/telemetry/report", "/v1/telemetry/traces"])
+def test_report_and_traces_reject_invalid_window(client_with_token, endpoint):
+    bad = client_with_token.get(
+        f"{endpoint}?window=-1", headers={"Authorization": "Bearer t"},
+    )
+    assert bad.status_code == 400
+    assert bad.json()["detail"]["error"]["code"] == "invalid_window"
 
 
 def test_dashboard_data_can_be_opened_explicitly(tmp_path, monkeypatch):

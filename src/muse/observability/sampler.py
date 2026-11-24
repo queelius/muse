@@ -33,6 +33,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STOP_TIMEOUT = 5.0
 
 
+def _validate_positive_float(name: str, value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a positive finite number")
+    return float(value)
+
+
 class VramTracker:
     """Associate global GPU working-set peaks with active request ids.
 
@@ -53,8 +64,9 @@ class VramTracker:
 
     def begin(self, request_id: str) -> None:
         with self._lock:
+            was_empty = not self._active
             self._active[request_id] = None
-        if self._wake_fn is not None:
+        if was_empty and self._wake_fn is not None:
             self._wake_fn()
 
     def observe(self, used_gb: float | None) -> None:
@@ -98,36 +110,17 @@ class Sampler:
         vram_tracker: VramTracker | None = None,
         active_interval: float = 0.25,
     ) -> None:
-        if (
-            isinstance(interval, bool)
-            or not isinstance(interval, (int, float))
-            or not math.isfinite(interval)
-            or interval <= 0
-        ):
-            raise ValueError("interval must be a positive finite number")
-        if (
-            isinstance(stop_timeout, bool)
-            or not isinstance(stop_timeout, (int, float))
-            or not math.isfinite(stop_timeout)
-            or stop_timeout <= 0
-        ):
-            raise ValueError("stop_timeout must be a positive finite number")
-        if (
-            isinstance(active_interval, bool)
-            or not isinstance(active_interval, (int, float))
-            or not math.isfinite(active_interval)
-            or active_interval <= 0
-        ):
-            raise ValueError("active_interval must be a positive finite number")
-        self.interval = float(interval)
+        self.interval = _validate_positive_float("interval", interval)
+        self._stop_timeout = _validate_positive_float("stop_timeout", stop_timeout)
+        self.active_interval = _validate_positive_float(
+            "active_interval", active_interval,
+        )
         self.loaded_fn = loaded_fn
         self.inflight_fn = inflight_fn
         self.record_fn = record_fn
         self._owns_stop = stop_event is None
         self._stop = stop_event if stop_event is not None else threading.Event()
-        self._stop_timeout = float(stop_timeout)
         self.vram_tracker = vram_tracker
-        self.active_interval = float(active_interval)
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
@@ -173,6 +166,7 @@ class Sampler:
                 # Clearing a supervisor-owned Event here could resurrect its
                 # monitor/sweeper after SIGINT raced telemetry initialization.
                 return False
+            self._wake.clear()
             thread = threading.Thread(
                 target=self._run, name="telemetry-sampler", daemon=True
             )
@@ -214,17 +208,31 @@ class Sampler:
             return True
 
     def _run(self) -> None:
+        last_sample_at: float | None = None
+        min_spacing = min(self.interval, self.active_interval)
         while not self._stop.is_set():
             active = self.vram_tracker is not None and self.vram_tracker.active_count > 0
             interval = self.active_interval if active else self.interval
             # There is no stdlib primitive that waits on both Events. Poll the
             # shared supervisor stop at a low-cost 250ms ceiling while using
-            # _wake for immediate transition from idle to active cadence.
-            deadline = time.monotonic() + interval
+            # _wake for immediate transition from idle to active cadence without
+            # ever bypassing the minimum active_interval spacing.
+            now = time.monotonic()
+            deadline = now + interval
+            min_next = (
+                last_sample_at + min_spacing
+                if last_sample_at is not None
+                else now
+            )
             while not self._stop.is_set():
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or self._wake.wait(min(remaining, 0.25)):
+                if remaining <= 0:
                     break
+                if self._wake.wait(min(remaining, 0.25)):
+                    self._wake.clear()
+                    if self._stop.is_set():
+                        break
+                    deadline = min(deadline, max(time.monotonic(), min_next))
             self._wake.clear()
             if self._stop.is_set():
                 break
@@ -232,3 +240,4 @@ class Sampler:
                 self.sample_once()
             except Exception:
                 logger.warning("sampler: sample_once failed", exc_info=True)
+            last_sample_at = time.monotonic()

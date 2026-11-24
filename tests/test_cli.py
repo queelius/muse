@@ -130,46 +130,50 @@ def test_telemetry_commands_expose_view_export_and_management_surface():
 
 
 def test_telemetry_summary_and_vram_render_recorded_data(tmp_path):
+    import time
+
     from muse.observability.events import event_to_row
     from muse.observability.store import TelemetryStore
 
     catalog = tmp_path / "catalog"
     catalog.mkdir()
-    store = TelemetryStore(catalog / "telemetry.db")
-    try:
-        now = 2_000_000_000.0
+    now = time.time()
+    with TelemetryStore(catalog / "telemetry.db") as store:
         store.insert_many([
             event_to_row(
-                "request", now, model_id="tts", modality="audio/speech",
+                "request", now - 3 * 86400.0, model_id="ancient",
+                modality="audio/speech", cold=False, latency_ms=50.0, status=200,
+            ),
+            event_to_row(
+                "request", now - 10.0, model_id="tts", modality="audio/speech",
                 cold=True, latency_ms=1234.0, peak_vram_gb=4.5,
                 evicted_models='["whisper"]', status=200,
             ),
             event_to_row(
-                "sample", now, gpu_used_gb=4.5, free_vram_gb=7.5,
+                "sample", now - 10.0, gpu_used_gb=4.5, free_vram_gb=7.5,
             ),
         ])
-    finally:
-        store.close()
 
-    summary = _run("telemetry", "summary", "--since", "3000d")
-    graph = _run("telemetry", "vram", "--since", "3000d", "--width", "20")
+    summary = _run("telemetry", "summary", "--since", "1h")
+    graph = _run("telemetry", "vram", "--since", "1h", "--width", "20")
 
     assert summary.returncode == 0, summary.stdout + summary.stderr
     assert "Generate speech" in summary.stdout
     assert "whisper" in summary.stdout
+    assert "ancient" not in summary.stdout
     assert graph.returncode == 0, graph.stdout + graph.stderr
     assert "GPU working set" in graph.stdout
     assert "4.50 GB" in graph.stdout
 
     export_path = tmp_path / "trace.json"
     exported = _run(
-        "telemetry", "export", str(export_path), "--since", "3000d",
+        "telemetry", "export", str(export_path), "--since", "1h",
     )
     refused = _run(
-        "telemetry", "export", str(export_path), "--since", "3000d",
+        "telemetry", "export", str(export_path), "--since", "1h",
     )
     forced = _run(
-        "telemetry", "export", str(export_path), "--since", "3000d", "--force",
+        "telemetry", "export", str(export_path), "--since", "1h", "--force",
     )
     assert exported.returncode == 0
     assert json.loads(export_path.read_text())[0]["model_id"] == "tts"

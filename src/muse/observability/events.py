@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import json
 from typing import Any
 
 EVENT_COLUMNS: tuple[str, ...] = (
@@ -21,3 +23,20 @@ def event_to_row(type: str, ts: float, **fields: Any) -> dict[str, Any]:
     row["type"] = type
     row.update(fields)
     return row
+
+
+def decode_evicted_models(raw: Any) -> list[str]:
+    """Decode stored ``evicted_models`` into a normalized list of model ids."""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return [str(raw)]
+    if parsed is None or parsed == "":
+        return []
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return [str(parsed)]

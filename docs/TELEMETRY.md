@@ -44,10 +44,31 @@ post. `traces` retains individual measurements. `vram` renders a simple
 terminal graph. `export` is the safest way to move a consistent snapshot off a
 running remote node without copying SQLite WAL files directly.
 
-Summary rows sourced from the new request fields are labeled `measured`.
-Pre-upgrade rows are labeled `estimated`: Muse combines recorded model-load
-duration with historical forward latency and parses lifecycle eviction reasons.
-It does not silently present that reconstruction as an exact request trace.
+Summary rows sourced solely from the new request trace fields are labeled
+`measured`. Pre-upgrade rows are labeled `estimated`: Muse combines recorded
+legacy model-load duration with historical forward latency and parses lifecycle
+eviction reasons rather than silently presenting that reconstruction as an exact
+request trace. Rows spanning both pre-upgrade and post-upgrade requests in the
+same window are labeled `mixed`.
+
+## HTTP endpoints
+
+When `telemetry.enabled` is true, the gateway exposes:
+
+- `GET /dashboard` — static HTML shell (always un-gated so the browser can
+  prompt for a token when auth is enabled).
+- `GET /v1/telemetry/summary` — live node summary, resident/queued models,
+  latest resource sample, and event counts.
+- `GET /v1/telemetry/series?metric=<name>&window=<seconds>` — bucketed time
+  series (`request_rate`, `latency`, `vram`, `ram`, `load_evict`).
+- `GET /v1/telemetry/report?window=<seconds>` — cold/hot latency, peak VRAM,
+  and request-linked eviction summary grouped by request modality and model.
+- `GET /v1/telemetry/traces?window=<seconds>&limit=<n>&model_id=<id>&modality=<m>`
+  — newest individual request traces with optional exact filters.
+- `POST /v1/telemetry/logs-ticket` — mint a short-lived ticket for browser
+  `EventSource` log streaming.
+- `GET /v1/telemetry/logs/{model_id}` — SSE stream of buffered + live worker
+  logs (authenticated by `?ticket=` or `Authorization: Bearer`).
 
 ## Dashboard authentication
 

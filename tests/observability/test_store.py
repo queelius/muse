@@ -202,3 +202,108 @@ def test_request_report_estimates_legacy_cold_hot_and_eviction(store):
     assert row["legacy_count"] == 1
     assert row["evicted_models"] == '["old"]'
     assert row["basis"] == "estimated"
+
+
+def test_request_report_excludes_non_2xx_from_cold_hot_stats(store):
+    store.insert_many([
+        event_to_row(
+            "request", 100.0, request_id="ok-hot", model_id="tts",
+            modality="audio/speech", cold=False, latency_ms=200.0, status=200,
+        ),
+        event_to_row(
+            "request", 101.0, request_id="err-503", model_id="tts",
+            modality="audio/speech", cold=False, latency_ms=9000.0, status=503,
+        ),
+        event_to_row(
+            "request", 102.0, request_id="err-404", model_id="bogus-model",
+            modality="audio/speech", cold=False, latency_ms=0.2, status=404,
+        ),
+    ])
+
+    report = store.request_report(since_ts=0.0)
+    assert len(report) == 1
+    assert report[0]["model_id"] == "tts"
+    assert report[0]["hot_latency_ms"] == 200.0
+    assert report[0]["request_count"] == 1
+    # Failed traces remain queryable via recent_requests.
+    assert len(store.recent_requests(since_ts=0.0, limit=10)) == 3
+
+
+def test_request_report_mixed_window_caps_legacy_cold_and_ignores_measured_loads(store):
+    store.insert_many([
+        event_to_row(
+            "request", 90.0, model_id="tts", modality="audio/speech",
+            latency_ms=150.0, status=200,
+        ),
+        event_to_row(
+            "model_load", 89.0, model_id="tts", cold_load_seconds=1.0,
+        ),
+        event_to_row(
+            "model_load", 95.0, model_id="tts", request_id="m-1", cold_load_seconds=5.0,
+        ),
+        event_to_row(
+            "request", 100.0, request_id="m-2", model_id="tts",
+            modality="audio/speech", cold=False, latency_ms=100.0, status=200,
+        ),
+    ])
+
+    row = store.request_report(since_ts=0.0)[0]
+    assert row["basis"] == "mixed"
+    assert row["hot_latency_ms"] == 100.0
+    assert row["cold_latency_ms"] == 1150.0
+    assert row["cold_count"] == 1
+    assert row["legacy_count"] == 1
+
+
+def test_request_report_legacy_null_latency_does_not_mark_estimated(store):
+    store.insert_many([
+        event_to_row(
+            "request", 100.0, model_id="tts", modality="audio/speech",
+            latency_ms=None, status=200,
+        ),
+    ])
+    row = store.request_report(since_ts=0.0)[0]
+    assert row["estimated"] is False
+    assert row["hot_latency_ms"] is None
+    assert row["basis"] == "measured"
+
+
+def test_vram_series_clamps_reconstructed_legacy_used_to_zero(store):
+    store.insert_many([
+        event_to_row("sample", 61.0, free_vram_gb=14.0),
+        event_to_row("sample", 65.0, free_vram_gb=6.0, gpu_used_gb=6.0),
+    ])
+    point = store.series("vram", since_ts=0.0, bucket_seconds=60.0)["points"][0]
+    assert point["used"] == 3.0
+    assert point["peak"] == 6.0
+
+
+def test_store_migration_assigns_column_affinities_and_context_manager(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "migrated.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE events (ts REAL NOT NULL, type TEXT NOT NULL)")
+    conn.commit()
+    conn.close()
+
+    with TelemetryStore(path) as migrated:
+        info = {
+            row[1]: row[2]
+            for row in migrated._conn.execute("PRAGMA table_info(events)")
+        }
+        assert info["latency_ms"] == "REAL"
+        assert info["cold"] == "INTEGER"
+        assert info["request_id"] == "TEXT"
+        migrated.insert_many([
+            event_to_row("request", 10.0, request_id="r1", model_id="m", status=200),
+            event_to_row("sample", 20.0, free_ram_gb=8.0),
+        ])
+        status = migrated.status()
+        assert status["total"] == 2
+        assert status["first_ts"] == 10.0
+        assert status["last_ts"] == 20.0
+        assert status["counts"] == {"request": 1, "sample": 1}
+        exported = migrated.export_events(since_ts=0.0)
+        assert [r["type"] for r in exported] == ["request", "sample"]
+    assert migrated._closed is True

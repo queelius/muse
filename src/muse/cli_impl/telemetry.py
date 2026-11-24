@@ -1,17 +1,21 @@
 """Implementation for the local ``muse telemetry`` command group."""
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import math
+import os
 import sys
+import tempfile
 import time
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
-from muse.core import config
-from muse.observability.store import TelemetryStore
+from muse.observability.events import EVENT_COLUMNS, decode_evicted_models
+from muse.observability.store import TelemetryStore, default_telemetry_db_path
 
 
 _DURATION_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
@@ -46,12 +50,17 @@ def parse_duration(value: str) -> float:
 
 
 def telemetry_path() -> Path:
-    return Path(config.get("paths.catalog_dir")).expanduser() / "telemetry.db"
+    return default_telemetry_db_path()
 
 
-def _open_existing() -> TelemetryStore | None:
+@contextlib.contextmanager
+def _existing_store() -> Iterator[TelemetryStore | None]:
     path = telemetry_path()
-    return TelemetryStore(path) if path.is_file() else None
+    if not path.is_file():
+        yield None
+        return
+    with TelemetryStore(path) as store:
+        yield store
 
 
 def _request_name(modality: Any) -> str:
@@ -59,24 +68,28 @@ def _request_name(modality: Any) -> str:
     return _REQUEST_NAMES.get(value, value.replace("_", " ").replace("/", " ").title())
 
 
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
 def _fmt_ms(value: Any) -> str:
-    if not isinstance(value, (int, float)):
+    if not _is_finite_number(value):
         return "--"
     return f"{value:.1f}" if value < 100 else f"{value:.0f}"
 
 
 def _fmt_gb(value: Any) -> str:
-    return "--" if not isinstance(value, (int, float)) else f"{value:.2f}"
+    return f"{value:.2f}" if _is_finite_number(value) else "--"
 
 
-def _decode_evictions(raw: Any) -> list[str]:
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return [str(raw)]
-    return [str(item) for item in value] if isinstance(value, list) else [str(value)]
+def _fmt_utc(ts: Any) -> str:
+    if not _is_finite_number(ts):
+        return "--"
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _print_table(
@@ -95,19 +108,28 @@ def _print_table(
 
 
 def run_status(*, as_json: bool = False) -> int:
-    store = _open_existing()
-    if store is None:
-        payload = {"path": str(telemetry_path()), "exists": False, "total": 0, "counts": {}}
-    else:
-        try:
+    with _existing_store() as store:
+        if store is None:
+            payload: dict[str, Any] = {
+                "path": str(telemetry_path()),
+                "exists": False,
+                "total": 0,
+                "first_ts": None,
+                "last_ts": None,
+                "counts": {},
+            }
+        else:
             payload = {"exists": True, **store.status()}
-        finally:
-            store.close()
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"Telemetry DB: {payload['path']}")
         print(f"Events: {payload['total']}")
+        if payload["first_ts"] is not None and payload["last_ts"] is not None:
+            print(
+                f"Range (UTC): {_fmt_utc(payload['first_ts'])} .. "
+                f"{_fmt_utc(payload['last_ts'])}"
+            )
         for event_type, count in payload.get("counts", {}).items():
             print(f"  {event_type}: {count}")
         if not payload["exists"]:
@@ -117,30 +139,29 @@ def run_status(*, as_json: bool = False) -> int:
 
 def run_summary(*, since: str = "24h", as_json: bool = False) -> int:
     seconds = parse_duration(since)
-    store = _open_existing()
-    rows: list[dict[str, Any]] = []
-    if store is not None:
-        try:
-            rows = store.request_report(since_ts=time.time() - seconds)
-        finally:
-            store.close()
+    with _existing_store() as store:
+        rows = (
+            store.request_report(since_ts=time.time() - seconds)
+            if store is not None else []
+        )
     for row in rows:
-        row["evicted_models"] = _decode_evictions(row.get("evicted_models"))
+        row["evicted_models"] = decode_evicted_models(row.get("evicted_models"))
     if as_json:
         print(json.dumps({"window_seconds": seconds, "rows": rows}, indent=2))
         return 0
     if not rows:
         print(f"No request traces in the last {since}.")
         return 0
-    table = []
-    for row in rows:
-        table.append([
+    table = [
+        [
             _request_name(row["modality"]), row["model_id"],
             _fmt_ms(row["cold_latency_ms"]), _fmt_ms(row["hot_latency_ms"]),
             _fmt_gb(row["peak_vram_gb"]),
             ", ".join(row["evicted_models"]) or "--", row["request_count"],
             row.get("basis", "measured"),
-        ])
+        ]
+        for row in rows
+    ]
     _print_table(
         ["Request", "Model", "Cold ms", "Hot ms", "Peak VRAM GB", "Evicted model", "Samples", "Basis"],
         table,
@@ -157,20 +178,18 @@ def run_traces(
     as_json: bool = False,
 ) -> int:
     seconds = parse_duration(since)
-    store = _open_existing()
-    rows: list[dict[str, Any]] = []
-    if store is not None:
-        try:
-            rows = store.recent_requests(
+    with _existing_store() as store:
+        rows = (
+            store.recent_requests(
                 since_ts=time.time() - seconds,
                 limit=limit,
                 model_id=model_id,
                 modality=modality,
             )
-        finally:
-            store.close()
+            if store is not None else []
+        )
     for row in rows:
-        row["evicted_models"] = _decode_evictions(row.get("evicted_models"))
+        row["evicted_models"] = decode_evicted_models(row.get("evicted_models"))
         if row.get("cold") is not None:
             row["cold"] = bool(row["cold"])
     if as_json:
@@ -181,16 +200,19 @@ def run_traces(
         return 0
     table = []
     for row in rows:
-        stamp = datetime.fromtimestamp(row["ts"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         state = "cold" if row.get("cold") else "hot" if row.get("cold") is not None else "legacy"
         table.append([
-            stamp, _request_name(row["modality"]), row["model_id"], state,
+            _fmt_utc(row["ts"]), _request_name(row["modality"]), row["model_id"], state,
             _fmt_ms(row["latency_ms"]), _fmt_ms(row["load_ms"]),
-            _fmt_ms(row["forward_ms"]), _fmt_gb(row["peak_vram_gb"]),
+            _fmt_ms(row["forward_ms"]), _fmt_ms(row["queued_ms"]),
+            _fmt_gb(row["peak_vram_gb"]),
             ", ".join(row["evicted_models"]) or "--", row["status"],
         ])
     _print_table(
-        ["UTC", "Request", "Model", "State", "Total ms", "Load ms", "Forward ms", "Peak GB", "Evicted", "Status"],
+        [
+            "UTC", "Request", "Model", "State", "Total ms", "Load ms",
+            "Forward ms", "Queue ms", "Peak GB", "Evicted", "Status",
+        ],
         table,
     )
     return 0
@@ -209,17 +231,15 @@ def _downsample(values: list[float], width: int) -> list[float]:
 
 def run_vram(*, since: str = "1h", width: int = 72, as_json: bool = False) -> int:
     seconds = parse_duration(since)
-    store = _open_existing()
-    points: list[dict[str, Any]] = []
-    if store is not None:
-        try:
-            points = store.series(
+    with _existing_store() as store:
+        points = (
+            store.series(
                 "vram",
                 since_ts=time.time() - seconds,
                 bucket_seconds=max(seconds / width, 0.1),
             )["points"]
-        finally:
-            store.close()
+            if store is not None else []
+        )
     if as_json:
         print(json.dumps({"window_seconds": seconds, "points": points}, indent=2))
         return 0
@@ -233,11 +253,12 @@ def run_vram(*, since: str = "1h", width: int = 72, as_json: bool = False) -> in
         return 0
     values = _downsample(values, width)
     high = max(values)
+    scale = high if high > 0 else 1.0
     rows = 10
     print(f"GPU working set over {since} (peak {high:.2f} GB)")
     for level in range(rows, 0, -1):
-        threshold = high * level / rows
-        line = "".join("#" if value >= threshold else " " for value in values)
+        threshold = scale * level / rows
+        line = "".join("#" if value > 0 and value >= threshold else " " for value in values)
         print(f"{threshold:7.2f} |{line}")
     print("        +" + "-" * len(values))
     print(f"         oldest{' ' * max(1, len(values) - 12)}newest")
@@ -246,27 +267,46 @@ def run_vram(*, since: str = "1h", width: int = 72, as_json: bool = False) -> in
 
 def run_export(*, since: str, output: Path, format: str, force: bool = False) -> int:
     seconds = parse_duration(since)
-    store = _open_existing()
-    rows: list[dict[str, Any]] = []
-    if store is not None:
-        try:
-            rows = store.export_events(since_ts=time.time() - seconds)
-        finally:
-            store.close()
+    if format not in ("json", "csv"):
+        raise ValueError("format must be json or csv")
     output = output.expanduser()
+    if output.is_dir():
+        raise ValueError(f"output path {output} is a directory")
     if output.exists() and not force:
         raise ValueError(f"refusing to overwrite {output}; pass --force")
+    with _existing_store() as store:
+        rows = (
+            store.export_events(since_ts=time.time() - seconds)
+            if store is not None else []
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
-    if format == "json":
-        output.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
-    elif format == "csv":
-        with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else [])
-            if rows:
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = handle.name
+            if format == "json":
+                handle.write(json.dumps(rows, indent=2) + "\n")
+            else:
+                writer = csv.DictWriter(handle, fieldnames=list(EVENT_COLUMNS))
                 writer.writeheader()
-                writer.writerows(rows)
-    else:
-        raise ValueError("format must be json or csv")
+                if rows:
+                    writer.writerows(rows)
+        os.replace(tmp_path, output)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     print(f"Exported {len(rows)} events to {output}")
     return 0
 
@@ -274,16 +314,11 @@ def run_export(*, since: str, output: Path, format: str, force: bool = False) ->
 def run_prune(*, older_than: str, dry_run: bool = False) -> int:
     seconds = parse_duration(older_than)
     cutoff = time.time() - seconds
-    store = _open_existing()
-    if store is None:
-        print("No telemetry database exists; nothing to prune.")
-        return 0
-    try:
-        count = store.count_before(cutoff)
-        if not dry_run:
-            count = store.prune(cutoff)
-    finally:
-        store.close()
+    with _existing_store() as store:
+        if store is None:
+            print("No telemetry database exists; nothing to prune.")
+            return 0
+        count = store.count_before(cutoff) if dry_run else store.prune(cutoff)
     action = "Would prune" if dry_run else "Pruned"
     print(f"{action} {count} events older than {older_than}.")
     return 0

@@ -1684,20 +1684,6 @@ class LoadDirector:
                     )
                     self.recent_decisions.append(decision)
 
-                    # Task 9: fire-and-forget telemetry event for this
-                    # eviction. Guarded the same way as the load-site record()
-                    # call above: telemetry can never break a real eviction.
-                    try:
-                        record(
-                            "model_evict",
-                            model_id=victim_id,
-                            request_id=current_request_id(),
-                            pool=self._resolve_pool_device(device),
-                            reason=f"evicted_for_{model_id}",
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-
             # ---- lock released ----
             if capacity_failure is not None:
                 # Earlier victims in THIS call may have freed memory; notify
@@ -1764,6 +1750,19 @@ class LoadDirector:
                     disable_failed = True
                 else:
                     note_model_eviction(victim_id)
+                    # Task 9: fire-and-forget telemetry event for this
+                    # eviction. Emitted only after disable_fn succeeds so a
+                    # failed teardown never records a spurious eviction.
+                    try:
+                        record(
+                            "model_evict",
+                            model_id=victim_id,
+                            request_id=current_request_id(),
+                            pool=target_pool,
+                            reason=f"evicted_for_{model_id}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     # The shutdown owner has settled, so configured-budget
                     # bookkeeping may now release the victim. Keep the
                     # `evicting` marker itself until the whole iteration

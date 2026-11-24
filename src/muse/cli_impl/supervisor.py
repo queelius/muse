@@ -50,7 +50,7 @@ from muse.core.resource_registry import (
     unregister_process,
 )
 
-from muse.observability.store import TelemetryStore
+from muse.observability.store import TelemetryStore, default_telemetry_db_path
 from muse.observability.recorder import init_recorder, reset_recorder
 from muse.observability.sampler import Sampler, VramTracker
 from muse.observability.logs import LogHub
@@ -2415,7 +2415,7 @@ def _init_telemetry(state: SupervisorState) -> None:
             "logs are available without an admin token"
         )
 
-    store_path = Path(config.get("paths.catalog_dir")).expanduser() / "telemetry.db"
+    store_path = default_telemetry_db_path()
     store = TelemetryStore(store_path)
     state.telemetry_store = store
     try:

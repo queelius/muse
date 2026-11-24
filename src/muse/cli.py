@@ -262,6 +262,14 @@ def storage_prune(
     ))
 
 
+def _run_telemetry(fn, /, *, param_hint: str | None = None, **kwargs) -> None:
+    try:
+        code = fn(**kwargs)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint=param_hint) from exc
+    raise typer.Exit(code)
+
+
 @telemetry_app.command("status")
 def telemetry_status(
     as_json: Annotated[bool, typer.Option("--json", help="machine-readable output")] = False,
@@ -278,11 +286,7 @@ def telemetry_summary(
 ) -> None:
     """Compare cold and hot latency, peak VRAM, and request-linked evictions."""
     from muse.cli_impl.telemetry import run_summary
-    try:
-        code = run_summary(since=since, as_json=as_json)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--since") from exc
-    raise typer.Exit(code)
+    _run_telemetry(run_summary, param_hint="--since", since=since, as_json=as_json)
 
 
 @telemetry_app.command("traces")
@@ -295,29 +299,28 @@ def telemetry_traces(
 ) -> None:
     """List individual end-to-end request traces."""
     from muse.cli_impl.telemetry import run_traces
-    try:
-        code = run_traces(
-            since=since, limit=limit, model_id=model_id,
-            modality=modality, as_json=as_json,
-        )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--since") from exc
-    raise typer.Exit(code)
+    _run_telemetry(
+        run_traces,
+        param_hint="--since",
+        since=since,
+        limit=limit,
+        model_id=model_id,
+        modality=modality,
+        as_json=as_json,
+    )
 
 
 @telemetry_app.command("vram")
 def telemetry_vram(
     since: Annotated[str, typer.Option(help="lookback duration, e.g. 1h or 24h")] = "1h",
     width: Annotated[int, typer.Option(min=10, max=200, help="terminal graph width")] = 72,
-    as_json: Annotated[bool, typer.Option("--json", help="return raw samples")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="return bucketed VRAM series as JSON")] = False,
 ) -> None:
     """Render a terminal graph of the device-wide GPU working set."""
     from muse.cli_impl.telemetry import run_vram
-    try:
-        code = run_vram(since=since, width=width, as_json=as_json)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--since") from exc
-    raise typer.Exit(code)
+    _run_telemetry(
+        run_vram, param_hint="--since", since=since, width=width, as_json=as_json,
+    )
 
 
 @telemetry_app.command("export")
@@ -329,13 +332,9 @@ def telemetry_export(
 ) -> None:
     """Export raw telemetry events for notebooks or a blog artifact."""
     from muse.cli_impl.telemetry import run_export
-    try:
-        code = run_export(
-            since=since, output=output, format=format.value, force=force,
-        )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    raise typer.Exit(code)
+    _run_telemetry(
+        run_export, since=since, output=output, format=format.value, force=force,
+    )
 
 
 @telemetry_app.command("prune")
@@ -345,11 +344,9 @@ def telemetry_prune(
 ) -> None:
     """Prune old telemetry events from the local SQLite store."""
     from muse.cli_impl.telemetry import run_prune
-    try:
-        code = run_prune(older_than=older_than, dry_run=dry_run)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--older-than") from exc
-    raise typer.Exit(code)
+    _run_telemetry(
+        run_prune, param_hint="--older-than", older_than=older_than, dry_run=dry_run,
+    )
 
 
 def _resolve_serve_device(cli_device: "Device | None") -> str:

@@ -1,8 +1,13 @@
 """Bearer-token verification for the observability dashboard.
 
-Mirrors muse.admin.auth's closed-by-default policy: with no admin.token
+Mirrors muse.admin.auth's closed-by-default policy when
+``telemetry.require_auth`` is true (the default): with no admin.token
 configured (either the MUSE_ADMIN_TOKEN env var or admin.token in
 config.yaml), every dashboard/telemetry request is rejected with 503.
+Operators on a trusted loopback/dev host may explicitly opt out by setting
+``telemetry.require_auth`` / ``MUSE_TELEMETRY_REQUIRE_AUTH`` to ``false``,
+which bypasses dashboard/telemetry token checks without disabling `/v1/admin/*`
+authentication.
 With a token configured, the request must carry it as an
 Authorization: Bearer <token> header. HEADER-ONLY: there is no
 ?access_token= query-param fallback here (that path put the admin

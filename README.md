@@ -444,6 +444,7 @@ governs each load's admission and any same-pool eviction.
 | `muse doctor resources [--repair]` | inspect Muse's owned-resource registry; optionally clean verified stale/orphan records after an unclean exit |
 | `muse doctor storage [--json]` | report Muse-owned storage, shared caches, broken references, and reclaimable space without changing files |
 | `muse storage prune [--dry-run] [--include-unreferenced]` | reclaim old partial/staging data; optionally include unregistered retained model files |
+| `muse telemetry status \| summary \| traces \| vram \| export \| prune` | inspect, graph, export, and prune local request traces and VRAM telemetry |
 | `muse mcp [--http]` | run an MCP server bridging muse to LLM clients (31 tools) |
 
 No per-modality subcommands (`muse speak`, `muse audio ...`). Those would be hardcoded modality-to-verb mappings that grow with every new modality. Keeping the CLI modality-agnostic means embeddings, transcriptions, and video land without CLI churn.

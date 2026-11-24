@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from muse.cli_impl.gateway import build_gateway
@@ -31,18 +32,27 @@ from tests.cli_impl.test_gateway_lazy import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_gateway_config():
+    config.reset_config()
+    yield
+    config.reset_config()
+
+
+def _capture_records(monkeypatch) -> list[tuple[str, dict]]:
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "muse.cli_impl.gateway.record",
+        lambda event_type, **fields: captured.append((event_type, fields)),
+    )
+    return captured
+
+
 class TestRequestTelemetry:
     def test_forwarded_request_records_one_request_event(self, monkeypatch):
-        captured: list[tuple[str, dict]] = []
-
-        def _fake_record(event_type: str, **fields) -> None:
-            captured.append((event_type, fields))
-
-        monkeypatch.setattr("muse.cli_impl.gateway.record", _fake_record)
-
+        captured = _capture_records(monkeypatch)
         state = _make_state_with_director(acquire_port=9001)
-        app = build_gateway(state=state)
-        client = TestClient(app)
+        client = TestClient(build_gateway(state=state))
 
         with _patch_get_manifest(), \
              patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
@@ -76,8 +86,7 @@ class TestRequestTelemetry:
         monkeypatch.setattr("muse.cli_impl.gateway.record", _boom)
 
         state = _make_state_with_director(acquire_port=9001)
-        app = build_gateway(state=state)
-        client = TestClient(app)
+        client = TestClient(build_gateway(state=state))
 
         with _patch_get_manifest(), \
              patch("muse.cli_impl.gateway.httpx.AsyncClient") as mock_cls:
@@ -92,11 +101,7 @@ class TestRequestTelemetry:
     def test_cold_annotation_crosses_asyncio_to_thread_context(self, monkeypatch):
         from muse.observability.traces import note_model_eviction, note_model_load
 
-        captured = []
-        monkeypatch.setattr(
-            "muse.cli_impl.gateway.record",
-            lambda event_type, **fields: captured.append((event_type, fields)),
-        )
+        captured = _capture_records(monkeypatch)
         state = _make_state_with_director(acquire_port=9001)
 
         def acquire(model_id, *, manifest):
@@ -107,8 +112,7 @@ class TestRequestTelemetry:
             return 9001
 
         state.director.acquire.side_effect = acquire
-        app = build_gateway(state=state)
-        client = TestClient(app)
+        client = TestClient(build_gateway(state=state))
         with _patch_get_manifest(), patch(
             "muse.cli_impl.gateway.httpx.AsyncClient"
         ) as mock_cls:
@@ -125,13 +129,9 @@ class TestRequestTelemetry:
         assert fields["evicted_models"] == '["old-model"]'
 
     def test_stream_trace_finishes_after_the_response_body(self, monkeypatch):
-        captured = []
+        captured = _capture_records(monkeypatch)
         chunks_seen = []
         finish_at = []
-        monkeypatch.setattr(
-            "muse.cli_impl.gateway.record",
-            lambda event_type, **fields: captured.append((event_type, fields)),
-        )
         state = _make_state_with_director(acquire_port=9001)
 
         class Tracker:
@@ -144,8 +144,7 @@ class TestRequestTelemetry:
                 return 5.5
 
         state.telemetry_vram_tracker = Tracker()
-        app = build_gateway(state=state)
-        client = TestClient(app)
+        client = TestClient(build_gateway(state=state))
         chunks = [b"data: one\n\n", b"event: done\ndata: \n\n"]
         with _patch_get_manifest(), patch(
             "muse.cli_impl.gateway.httpx.AsyncClient"
@@ -189,28 +188,112 @@ class TestRequestTelemetry:
             ),
         )
         state = _make_state_with_director(acquire_port=9001)
-        app = build_gateway(state=state)
-        client = TestClient(app)
-        try:
-            with _patch_get_manifest(), patch(
-                "muse.cli_impl.gateway.httpx.AsyncClient"
-            ) as mock_cls:
-                _wire_async_client_json(mock_cls, response_status=200)
-                response = client.post(
-                    "/v1/chat/completions",
-                    json={"model": "fake-model", "messages": []},
+        client = TestClient(build_gateway(state=state))
+        with _patch_get_manifest(), patch(
+            "muse.cli_impl.gateway.httpx.AsyncClient"
+        ) as mock_cls:
+            _wire_async_client_json(mock_cls, response_status=200)
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "fake-model", "messages": []},
+            )
+        assert response.status_code == 200
+
+    def test_worker_timeout_records_forward_ms(self, monkeypatch):
+        import time
+        import httpx
+
+        captured = _capture_records(monkeypatch)
+        state = _make_state_with_director(acquire_port=9001)
+        client = TestClient(build_gateway(state=state))
+
+        with _patch_get_manifest(), patch(
+            "muse.cli_impl.gateway.httpx.AsyncClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_client.aclose = AsyncMock()
+            stream_ctx = MagicMock()
+
+            async def _slow_timeout():
+                time.sleep(0.02)
+                raise httpx.ReadTimeout("worker timed out")
+
+            stream_ctx.__aenter__ = AsyncMock(side_effect=_slow_timeout)
+            mock_client.stream.return_value = stream_ctx
+            mock_cls.return_value = mock_client
+
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "fake-model", "messages": []},
+            )
+
+        assert response.status_code == 504
+        fields = [fields for event, fields in captured if event == "request"][0]
+        assert fields["status"] == 504
+        assert fields["forward_ms"] >= 15.0
+
+    def test_queue_timeout_records_queued_ms(self, monkeypatch):
+        import asyncio
+        from muse.cli_impl.queueing import QueueTimeout
+
+        captured = _capture_records(monkeypatch)
+        state = _make_state_with_director(acquire_port=9001)
+
+        async def _slow_queue_timeout(_model_id, _cap, *, deadline):
+            await asyncio.sleep(0.02)
+            raise QueueTimeout("fake-model")
+
+        state.concurrency_gate.acquire_slot = _slow_queue_timeout
+        client = TestClient(build_gateway(state=state))
+
+        with _patch_get_manifest():
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "fake-model", "messages": []},
+            )
+
+        assert response.status_code == 503
+        fields = [fields for event, fields in captured if event == "request"][0]
+        assert fields["status"] == 503
+        assert fields["queued_ms"] >= 15.0
+        assert fields["forward_ms"] == 0.0
+
+    def test_coalesced_cold_load_waiter_records_queued_ms(self, monkeypatch):
+        import asyncio
+        from muse.cli_impl.gateway import _acquire_coalesced
+        from muse.observability.traces import begin_request_trace, reset_request_trace
+
+        state = _make_state_with_director(acquire_port=9001)
+
+        async def _run():
+            loop = asyncio.get_running_loop()
+            gate = loop.create_future()
+            state.cold_load_gates["fake-model"] = gate
+
+            async def _release_gate():
+                await asyncio.sleep(0.02)
+                gate.set_result(("ok", None))
+
+            trace, token = begin_request_trace("fake-model", "chat/completions")
+            try:
+                releaser = asyncio.create_task(_release_gate())
+                port = await _acquire_coalesced(
+                    state, "fake-model", {"model_id": "fake-model"},
                 )
-            assert response.status_code == 200
-        finally:
-            config.reset_config()
+                await releaser
+                return port, trace.snapshot()
+            finally:
+                reset_request_trace(token)
+
+        port, snap = asyncio.run(_run())
+        assert port == 9001
+        assert snap["queued_ms"] >= 15.0
 
 
 class TestDashboardMount:
     def test_dashboard_mounted_when_telemetry_enabled_and_state_present(self):
-        config.reset_config()
         state = _make_state_with_director(acquire_port=9001)
-        app = build_gateway(state=state)
-        client = TestClient(app)
+        client = TestClient(build_gateway(state=state))
 
         r = client.get("/dashboard")
         assert r.status_code == 200
@@ -222,25 +305,19 @@ class TestDashboardMount:
         # "not mounted" signal here.
         monkeypatch.setenv("MUSE_TELEMETRY_ENABLED", "false")
         config.reset_config()
-        try:
-            state = _make_state_with_director(acquire_port=9001)
-            app = build_gateway(state=state)
-            client = TestClient(app, raise_server_exceptions=False)
+        state = _make_state_with_director(acquire_port=9001)
+        client = TestClient(build_gateway(state=state), raise_server_exceptions=False)
 
-            r = client.get("/dashboard")
-            assert r.status_code == 400
-            assert r.json()["error"]["code"] == "model_required"
-        finally:
-            config.reset_config()
+        r = client.get("/dashboard")
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "model_required"
 
     def test_dashboard_absent_in_legacy_static_routes_mode(self):
         """state=None (legacy static-routes mode) has no supervisor to
         serve telemetry from, so the dashboard router is not mounted
         even though telemetry.enabled defaults to true. Falls through to
         the catch-all proxy's 400 model_required, same signal as above."""
-        config.reset_config()
-        app = build_gateway([])
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(build_gateway([]), raise_server_exceptions=False)
 
         r = client.get("/dashboard")
         assert r.status_code == 400
