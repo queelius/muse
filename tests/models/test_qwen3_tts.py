@@ -113,8 +113,34 @@ def test_dtype_is_bf16_on_cuda_and_fp32_on_cpu(monkeypatch):
     _design()
     on_cuda, on_cpu = FakeQwenTTS.instances
     assert on_cuda.path == "r"  # no local_dir: load from the repo id
-    assert on_cuda.load_kwargs == {"device_map": "cuda:0", "dtype": "BF16"}
+    assert on_cuda.load_kwargs == {
+        "device_map": "cuda:0", "dtype": "BF16", "attn_implementation": "sdpa"}
     assert on_cpu.load_kwargs == {"device_map": "cpu", "dtype": "FP32"}
+
+
+def test_fast_code_predictor_installed_unless_disabled(monkeypatch):
+    installed = []
+    monkeypatch.setattr(rt.qwen3_tts_fast, "install",
+                        lambda tts, *, torch, use_cuda_graphs: installed.append(
+                            (tts, use_cuda_graphs)) or True)
+    _design()
+    _clone(fast_code_predictor=False)
+    assert installed == [(FakeQwenTTS.instances[0], False)]
+
+
+def test_fast_code_predictor_uses_cuda_graphs_on_cuda(monkeypatch):
+    from types import SimpleNamespace
+
+    installed = []
+    monkeypatch.setattr(rt, "torch", SimpleNamespace(
+        bfloat16="BF16", float16="FP16", float32="FP32"))
+    monkeypatch.setattr(rt.qwen3_tts_fast, "install",
+                        lambda tts, *, torch, use_cuda_graphs: installed.append(
+                            use_cuda_graphs) or True)
+    rt.Qwen3TTSRuntime(hf_repo="r", device="cuda", model_id=DESIGN_ID, mode="design")
+    rt.Qwen3TTSRuntime(hf_repo="r", device="cuda", model_id=DESIGN_ID, mode="design",
+                       cuda_graphs=False)
+    assert installed == [True, False]
 
 
 def test_design_uses_instructions_and_auto_language():
@@ -190,9 +216,21 @@ def test_clone_prompt_cached_and_evicted_on_overwrite():
         m.synthesize("Four.", voice="grimbold")
 
 
-def test_clone_prompt_cache_is_bounded(monkeypatch):
-    monkeypatch.setattr(rt, "PROMPT_CACHE_SIZE", 2)
+def test_clone_prompt_cache_holds_every_saved_voice(monkeypatch):
+    monkeypatch.setenv("MUSE_MAX_SAVED_VOICES", "40")
     m = _clone()
+    fake = FakeQwenTTS.instances[0]
+    names = [f"v{i}" for i in range(40)]
+    for name in names:
+        m.save_voice(name, _tone(1.0), 24000, f"Voice {name}.")
+    for name in ["narrator", *names, "narrator", *names]:
+        m.synthesize("Hi.", voice=name)
+    assert len(fake.named("prompt")) == 41  # each voice prepared once
+
+
+def test_clone_prompt_cache_is_lru_bounded():
+    m = _clone()
+    m._prompt_cache_size = 2
     fake = FakeQwenTTS.instances[0]
     for name in ("a", "b", "c"):
         m.save_voice(name, _tone(), 24000, f"Voice {name}.")

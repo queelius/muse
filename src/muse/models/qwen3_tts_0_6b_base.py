@@ -26,7 +26,7 @@ MANIFEST = {
     "limits": [
         "Clone quality follows the reference: noisy or wrongly transcribed clips clone poorly",
         "No word timestamps, no speed control (`speed` is ignored), no streaming (one chunk)",
-        "Slow: ~10 s per short line on a 12 GB GPU without flash-attn",
+        "About 2.5 s per short line on a 12 GB GPU (RTF ~0.8); much slower on CPU",
     ],
     "quality_tier": "good",
     "license": "Apache-2.0",
@@ -44,6 +44,7 @@ MANIFEST = {
         "sample_rate": 24000,
         "device": "auto",
         # Spike: peak 2.5 GB VRAM (bf16, torch max allocated) on short lines.
+        # 2026-11-25 with the CUDA-graphed code predictor: peak 2.3 GB.
         "memory_gb": 3.0,
         "mode": "clone",
         "supports_saved_voices": True,

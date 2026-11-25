@@ -40,8 +40,19 @@ speaks from that description (a neutral default when omitted) and ignores
 (`supports_saved_voices`) clones a saved voice named by `voice`, defaults to
 the bundled read-only `narrator` (about 4 s, package data under
 `audio_speech/data/`), and refuses `instructions`. Both ignore `speed`, have
-no word timestamps, stream the whole line as one chunk, and take about 10 s
-per short line on a 12 GB GPU without flash-attn. An unknown `voice` is 400
+no word timestamps and stream the whole line as one chunk. On CUDA both load
+with SDPA attention, and the talker's per-frame code-predictor `generate()`
+(a 15-token HF `generate()` loop per 12 Hz frame, ~150 ms each) is replaced
+by a static-KV decoder captured as a CUDA graph per batch shape
+(`audio_speech/runtimes/qwen3_tts_fast.py`, ~16 ms per frame; greedy tokens
+match upstream, sampling draws from the same distribution). It is installed
+only for qwen-tts 0.1.1 with the expected module layout; any other version,
+layout or call shape uses upstream `generate()`, and an unexpected failure
+switches it off for the process. Constructor kwargs `fast_code_predictor` /
+`cuda_graphs` (default on) turn it, or just the graphs, off. On an RTX 3060 a
+short line takes about 2.5 s on the 0.6B (RTF ~0.8) and about 4 s on the 1.7B
+(RTF ~1.3), from about 7 s and 11 s. Every saved voice's clone prompt stays
+cached once used (capacity `limits.max_saved_voices` plus bundled). An unknown `voice` is 400
 `voice_not_found` (also before a stream starts, via the backend's
 `check_voice`); a stored voice that cannot be read is 500 `voice_unreadable`
 with no paths. Saved voices form a catalog. Besides the clip and transcript,

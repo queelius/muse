@@ -9,6 +9,10 @@ One class serves both bundled scripts, selected by ``mode``:
   plus its transcript, from a :class:`VoiceStore` under
   ``<paths.home>/voices/<model_id>/`` with the bundled read-only ``narrator``.
 
+On CUDA the checkpoint loads with SDPA attention, and the talker's per-frame
+code-predictor ``generate()`` is replaced by a static, CUDA-graphed decoder
+(:mod:`.qwen3_tts_fast`, ``fast_code_predictor`` / ``cuda_graphs`` kwargs).
+
 qwen-tts has no speed control (``speed`` is ignored) and no streaming
 (``synthesize_stream`` yields one chunk). ``language=None`` is qwen-tts's
 "Auto" detection.
@@ -32,6 +36,7 @@ from muse.core.runtime_helpers import (
     select_device,
     set_inference_mode,
 )
+from muse.modalities.audio_speech.runtimes import qwen3_tts_fast
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, VoiceError
 from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES, VoiceEntry
 from muse.modalities.audio_speech.voices import (
@@ -52,7 +57,6 @@ DEFAULT_INSTRUCTIONS = (
     "A clear, neutral adult narrator with an even, friendly tone, "
     "speaking at a moderate pace."
 )
-PROMPT_CACHE_SIZE = 32
 
 
 def _ensure_deps() -> None:
@@ -90,6 +94,8 @@ class Qwen3TTSRuntime:
         mode: Literal["design", "clone"],
         dtype: str = "bf16",
         default_instructions: str | None = None,
+        fast_code_predictor: bool = True,
+        cuda_graphs: bool = True,
         **_: Any,
     ) -> None:
         if mode not in ("design", "clone"):
@@ -101,12 +107,15 @@ class Qwen3TTSRuntime:
         self._prompts: OrderedDict[tuple, Any] = OrderedDict()
         self._prompts_lock = threading.Lock()
         self._store: VoiceStore | None = None
+        # Every saved voice stays cached once touched (a prompt is a speaker
+        # embedding plus the reference codes: tiny next to the model).
+        self._prompt_cache_size = 1
         if mode == "clone":
+            bundled = bundled_voices()
+            max_voices = int(config.get_positive("limits.max_saved_voices"))
             self._store = VoiceStore(
-                voice_store_root(model_id),
-                bundled=bundled_voices(),
-                max_voices=int(config.get_positive("limits.max_saved_voices")),
-            )
+                voice_store_root(model_id), bundled=bundled, max_voices=max_voices)
+            self._prompt_cache_size = max_voices + len(bundled)
 
         resolved = select_device(device, torch_module=torch)
         device_map = "cuda:0" if resolved == "cuda" else resolved
@@ -115,10 +124,17 @@ class Qwen3TTSRuntime:
             dtype if resolved.startswith("cuda") else "fp32", torch)
         if torch_dtype is not None:
             load_kwargs["dtype"] = torch_dtype
+        on_cuda = resolved.startswith("cuda")
+        if on_cuda:
+            # Without flash-attn, transformers would otherwise pick eager.
+            load_kwargs["attn_implementation"] = "sdpa"
         src = local_dir or hf_repo
         with LoadTimer(model_id, logger):
             self._tts = QwenTTS.from_pretrained(src, **load_kwargs)
         set_inference_mode(getattr(self._tts, "model", None))
+        if fast_code_predictor:
+            qwen3_tts_fast.install(
+                self._tts, torch=torch, use_cuda_graphs=bool(cuda_graphs) and on_cuda)
         self._device = device_map
 
     # -- protocol ------------------------------------------------------------
@@ -227,7 +243,7 @@ class Qwen3TTSRuntime:
         with self._prompts_lock:
             self._prompts[(name, stored.identity)] = prompt
             self._prompts.move_to_end((name, stored.identity))
-            while len(self._prompts) > PROMPT_CACHE_SIZE:
+            while len(self._prompts) > self._prompt_cache_size:
                 self._prompts.popitem(last=False)
         return prompt
 
