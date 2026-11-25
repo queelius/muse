@@ -412,7 +412,7 @@ def _pull_uri_as(uri: str, model_id: str, *, base_override: str | None) -> str:
     """`pull(uri, model_id=...)`: install a resolver URI under an explicit id."""
     if "://" not in uri:
         raise ValueError(
-            f"--id only applies to resolver URIs (hf://...), not {uri!r}"
+            f"--id only applies to resolver URIs (hf://..., file://...), not {uri!r}"
         )
     _validate_model_id_for_fs(model_id)
     curated_owner = find_curated(model_id)
@@ -1120,34 +1120,42 @@ def _pull_resolved_transaction(
 
     weights_cache = _catalog_dir() / "weights"
     _ensure_owned_directory(weights_cache, private=True)
+    hf_repo = manifest.get("hf_repo") or ""
+    use_hf_seed = bool(hf_repo) and uri.startswith("hf://")
     # Seed only the files the download will fetch: a GGUF repo can hold
     # many quants, and hashing and linking all of them would be wasted work.
-    seed_patterns = getattr(resolved, "allow_patterns", None)
-    if seed_patterns is None:
-        seed_patterns = next(
-            (
-                item.get("allow_patterns") for item in artifact_provenance
-                if item.get("repo_id") == manifest["hf_repo"]
-            ),
-            None,
-        )
+    seed_patterns = None
+    if use_hf_seed:
+        seed_patterns = getattr(resolved, "allow_patterns", None)
+        if seed_patterns is None:
+            seed_patterns = next(
+                (
+                    item.get("allow_patterns") for item in artifact_provenance
+                    if item.get("repo_id") == hf_repo
+                ),
+                None,
+            )
     with _storage_cache_lock():
-        seeded = seed_repo(
-            weights_cache, manifest["hf_repo"],
-            allow_patterns=seed_patterns, revision=manifest.get("revision"),
+        seeded = (
+            seed_repo(
+                weights_cache, hf_repo,
+                allow_patterns=seed_patterns, revision=manifest.get("revision"),
+            )
+            if use_hf_seed
+            else ()
         )
         try:
             with _hf_quiet_if_needed():
                 local_dir = resolved.download(weights_cache)
         finally:
-            drop_unused_seeds(seeded)
+            if seeded:
+                drop_unused_seeds(seeded)
         # Commit the reference before releasing the storage lock; see the
         # bundled path above for the cleaner race this prevents.
         with _CATALOG_WRITE_LOCK:
             catalog = _read_catalog()
             entry = {
                 "pulled_at": datetime.now(timezone.utc).isoformat(),
-                "hf_repo": manifest["hf_repo"],
                 "local_dir": str(local_dir),
                 "venv_path": str(venv_path),
                 "python_path": str(venv_python(venv_path)),
@@ -1155,6 +1163,8 @@ def _pull_resolved_transaction(
                 "source": uri,
                 "manifest": manifest,
             }
+            if hf_repo:
+                entry["hf_repo"] = hf_repo
             resolved_revision = manifest.get("revision")
             if resolved_revision:
                 entry["revision"] = resolved_revision

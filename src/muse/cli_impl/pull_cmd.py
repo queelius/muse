@@ -35,11 +35,13 @@ def run_pull(
     # for scheme 'hf'". Importing is near-free (heavy huggingface_hub
     # imports happen on actual resolve(), not on module import).
     import muse.core.resolvers_hf  # noqa: F401  (registers HFResolver on import)
+    import muse.core.resolvers_file  # noqa: F401  (registers FileResolver on import)
 
     if model_id is not None:
         if "://" not in identifier:
             typer.echo(
-                "error: --id only applies to resolver URIs (hf://...)", err=True,
+                "error: --id only applies to resolver URIs (hf://..., file://...)",
+                err=True,
             )
             return 2
         try:

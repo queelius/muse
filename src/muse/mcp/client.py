@@ -120,10 +120,11 @@ class MuseClient:
         resolver registers itself on import.
         """
         import muse.core.resolvers_hf  # noqa: F401  (registers HFResolver)
+        import muse.core.resolvers_file  # noqa: F401  (registers FileResolver)
         from muse.core.resolvers import search as _resolver_search
 
         rows = list(_resolver_search(
-            query, backend=None, modality=modality, limit=limit,
+            query, backend="hf", modality=modality, limit=limit,
         ))
         if max_size_gb is not None:
             rows = [r for r in rows if r.size_gb is None or r.size_gb <= max_size_gb]

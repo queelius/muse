@@ -187,3 +187,28 @@ def test_telemetry_settings_present():
     ]:
         assert key in cfg.SETTINGS_BY_KEY, key
         assert cfg.SETTINGS_BY_KEY[key].default == default
+
+
+def test_llama_server_and_gguf_dir_settings_present():
+    assert cfg.SETTINGS_BY_KEY["paths.gguf_dir"].env == "MUSE_GGUF_DIR"
+    assert cfg.SETTINGS_BY_KEY["paths.gguf_dir"].default == "~/.muse/gguf"
+
+    binary = cfg.SETTINGS_BY_KEY["llama_server.binary_path"]
+    assert binary.env == "MUSE_LLAMA_SERVER_BINARY"
+    assert binary.type == "opt_str"
+    assert binary.default is None
+
+    tag = cfg.SETTINGS_BY_KEY["llama_server.release_tag"]
+    assert tag.env == "MUSE_LLAMA_SERVER_RELEASE"
+    assert tag.default == "b5490"
+
+    variant = cfg.SETTINGS_BY_KEY["llama_server.variant"]
+    assert variant.env == "MUSE_LLAMA_SERVER_VARIANT"
+    assert variant.default == "auto"
+    assert variant.choices == ("auto", "cpu", "cuda")
+
+    timeout = cfg.SETTINGS_BY_KEY["llama_server.startup_timeout_seconds"]
+    assert timeout.env == "MUSE_LLAMA_SERVER_STARTUP_TIMEOUT"
+    assert timeout.type == "float"
+    assert timeout.default == 120.0
+    assert timeout.minimum == 1.0

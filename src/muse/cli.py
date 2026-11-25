@@ -456,11 +456,11 @@ def search(
     backend: Annotated[
         Optional[str],
         typer.Option(
-            help="resolver backend (default: only-registered, or pick when ambiguous)",
+            help="resolver backend (default: hf; use --backend file for local GGUF dir)",
         ),
     ] = None,
 ) -> None:
-    """Search resolvers (e.g. HuggingFace) for pullable models."""
+    """Search resolvers (e.g. HuggingFace or local GGUF dir) for pullable models."""
     from muse.cli_impl.search import run_search
     from muse.core.discovery import modality_tags
     if modality is not None and modality not in modality_tags():
@@ -469,12 +469,13 @@ def search(
             f"unknown modality {modality!r}; valid: {valid}",
             param_hint="--modality",
         )
-    # Register resolver backends. Today only HF; future backends slot
-    # in by importing their resolvers_<scheme> module here.
+    # Register resolver backends. Default to "hf" when --backend is omitted
+    # so registering multiple backends (hf, file) stays ergonomic.
     import muse.core.resolvers_hf  # noqa: F401
+    import muse.core.resolvers_file  # noqa: F401
     raise typer.Exit(run_search(
         query=query, modality=modality, limit=limit, sort=sort.value,
-        max_size_gb=max_size_gb, backend=backend,
+        max_size_gb=max_size_gb, backend=backend or "hf",
     ) or 0)
 
 

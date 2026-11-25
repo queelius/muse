@@ -183,16 +183,28 @@ _CATALOG_WRITE_LOCK = _CatalogWriteLock()
 
 
 def _validated_persisted_manifest(
-    catalog_model_id: str, manifest: object,
+    catalog_model_id: str,
+    manifest: object,
+    *,
+    allow_empty_hf_repo: bool = False,
 ) -> dict:
     """Validate one resolver manifest without poisoning unrelated entries."""
     if not isinstance(manifest, dict):
         raise ValueError("manifest must be a JSON object")
-    required = ("model_id", "modality", "backend_path", "hf_repo")
-    for field_name in required:
+    for field_name in ("model_id", "modality", "backend_path"):
         value = manifest.get(field_name)
         if not isinstance(value, str) or not value:
             raise ValueError(f"manifest {field_name} must be a non-empty string")
+    raw_provenance = manifest.get("artifact_provenance")
+    has_file_provenance = isinstance(raw_provenance, (list, tuple)) and any(
+        isinstance(item, dict) and item.get("kind") == "file"
+        for item in raw_provenance
+    )
+    hf_repo = manifest.get("hf_repo")
+    if not isinstance(hf_repo, str) or (
+        not hf_repo and not allow_empty_hf_repo and not has_file_provenance
+    ):
+        raise ValueError("manifest hf_repo must be a non-empty string")
     if manifest["model_id"] != catalog_model_id:
         raise ValueError(
             f"manifest model_id {manifest['model_id']!r} does not match "
@@ -349,8 +361,34 @@ def _validate_code_receipt_item(item: dict, *, path: str) -> None:
         )
 
 
+_FILE_RECEIPT_KEYS = frozenset({"kind", "path", "filename", "sha256", "size_bytes"})
+
+
+def _validate_file_receipt_item(item: dict, *, path: str) -> None:
+    """A local file:// model's receipt: resolved path, filename, digest, size."""
+    unknown = set(item) - _FILE_RECEIPT_KEYS
+    if unknown:
+        raise _CatalogSchemaError(f"{path} has unknown keys: {sorted(unknown)}")
+    for field_name in ("path", "filename"):
+        field = item.get(field_name)
+        if not isinstance(field, str) or not field:
+            raise _CatalogSchemaError(
+                f"{path}.{field_name} must be a non-empty string"
+            )
+    digest = item.get("sha256")
+    if not isinstance(digest, str) or SHA256_HEX_RE.fullmatch(digest) is None:
+        raise _CatalogSchemaError(
+            f"{path}.sha256 must be a 64-character SHA-256 hex digest"
+        )
+    size_bytes = item.get("size_bytes")
+    if type(size_bytes) is not int or size_bytes <= 0:
+        raise _CatalogSchemaError(
+            f"{path}.size_bytes must be a positive integer"
+        )
+
+
 def _validate_artifact_receipt(
-    value: Any, *, path: str, allow_code: bool = False,
+    value: Any, *, path: str, allow_code: bool = False, allow_file: bool = True,
 ) -> None:
     if (
         isinstance(value, (str, bytes))
@@ -364,6 +402,9 @@ def _validate_artifact_receipt(
             raise _CatalogSchemaError(f"{item_path} must be an object")
         if allow_code and item.get("kind") == "code":
             _validate_code_receipt_item(item, path=item_path)
+            continue
+        if allow_file and item.get("kind") == "file":
+            _validate_file_receipt_item(item, path=item_path)
             continue
         try:
             validate_receipt_item(item, label=item_path)
@@ -444,8 +485,16 @@ def _validate_catalog_entry(
             allow_code=True,
         )
     if strict_manifest and "manifest" in entry:
+        source = entry.get("source")
+        is_non_hf_source = (
+            isinstance(source, str)
+            and "://" in source
+            and not source.startswith("hf://")
+        )
         try:
-            manifest = _validated_persisted_manifest(model_id, entry["manifest"])
+            manifest = _validated_persisted_manifest(
+                model_id, entry["manifest"], allow_empty_hf_repo=is_non_hf_source,
+            )
         except ValueError as exc:
             raise _CatalogSchemaError(f"{path}.manifest is invalid: {exc}") from exc
         if "artifact_provenance" in manifest:

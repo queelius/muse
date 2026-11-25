@@ -126,6 +126,72 @@
   capabilities:
     memory_gb: 6.5
 
+# Borrowed Stars v2.1 NPC dialogue GGUFs (small, fast, multi-slot llama-server).
+- id: borrowed-stars-npc-qwen3.5-0.8b
+  uri: hf://queelius/borrowed-stars-npc-qwen3.5-0.8b-32k-GGUF@q4_k_m
+  modality: chat/completion
+  size_gb: 0.33
+  description: "Borrowed Stars v2.1 NPC Qwen3.5 0.8B (Q4_K_M): compact NPC dialogue model, Apache 2.0"
+  summary: "Compact Qwen3.5 0.8B fine-tuned for Borrowed Stars NPC dialogue with continuous batching"
+  strengths:
+    - "Tiny ~330 MB Q4_K_M footprint; runs fast on CPU or small GPU"
+    - "Configured for 4 parallel slots with prompt caching"
+    - "Apache 2.0"
+  limits:
+    - "Domain-tuned for NPC dialogue; not a general-purpose assistant"
+    - "0.8B parameters: limited world knowledge and reasoning"
+  quality_tier: good
+  capabilities:
+    device: auto
+    memory_gb: 0.6
+    parallel: 4
+    cont_batching: true
+    cache_prompt: true
+    no_jinja: true
+    context_length: 8192
+
+- id: borrowed-stars-npc-lfm2.5-350m
+  uri: hf://queelius/borrowed-stars-npc-lfm2.5-350m-GGUF@q4_k_m
+  modality: chat/completion
+  size_gb: 0.22
+  description: "Borrowed Stars v2.1 NPC LFM2.5 350M (Q4_K_M): ultra-lightweight NPC dialogue model"
+  summary: "Ultra-lightweight 350M LFM2.5 fine-tuned for low-latency Borrowed Stars NPC dialogue"
+  strengths:
+    - "Ultra-small ~220 MB Q4_K_M footprint; very fast on CPU or GPU"
+    - "Configured for 4 parallel slots with prompt caching"
+  limits:
+    - "Domain-tuned for NPC dialogue; not a general-purpose assistant"
+    - "350M parameters: short, focused turns only"
+  quality_tier: good
+  capabilities:
+    device: auto
+    memory_gb: 0.45
+    parallel: 4
+    cont_batching: true
+    cache_prompt: true
+    context_length: 8192
+
+- id: borrowed-stars-npc-gemma3-1b
+  uri: hf://queelius/borrowed-stars-npc-gemma3-1b-32k-GGUF@q4_k_m
+  modality: chat/completion
+  size_gb: 0.50
+  description: "Borrowed Stars v2.1 NPC Gemma 3 1B (Q4_K_M): expressive NPC dialogue model"
+  summary: "Gemma 3 1B fine-tuned for Borrowed Stars NPC dialogue with continuous batching"
+  strengths:
+    - "Compact ~500 MB Q4_K_M footprint with stronger phrasing than sub-1B peers"
+    - "Configured for 4 parallel slots with prompt caching"
+  limits:
+    - "Domain-tuned for NPC dialogue; not a general-purpose assistant"
+    - "Gemma Terms of Use apply"
+  quality_tier: good
+  capabilities:
+    device: auto
+    memory_gb: 0.85
+    parallel: 4
+    cont_batching: true
+    cache_prompt: true
+    context_length: 8192
+
 # ---------- chat/completion: vision-language models (v0.42.0+) ----------
 # All transformers-runtime VLMs. Bundled smolvlm-256m-instruct is the
 # CPU-friendly default; the entries below are quality steps that need
