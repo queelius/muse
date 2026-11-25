@@ -66,6 +66,38 @@ class ChatChunk:
     metadata: dict = field(default_factory=dict)
 
 
+@dataclass
+class CompletionChoice:
+    """One choice in a non-streaming text completion response."""
+    index: int
+    text: str
+    finish_reason: str | None = None
+    logprobs: dict | None = None
+
+
+@dataclass
+class CompletionResult:
+    """Non-streaming text completion response. Mirrors OpenAI Completion."""
+    id: str
+    model_id: str
+    created: int
+    choices: list[CompletionChoice]
+    usage: dict
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class CompletionChunk:
+    """Streaming text completion delta. Mirrors OpenAI Completion chunk."""
+    id: str
+    model_id: str
+    created: int
+    choice_index: int
+    text: str
+    finish_reason: str | None = None
+    metadata: dict = field(default_factory=dict)
+
+
 @runtime_checkable
 class ChatModel(Protocol):
     """Backend protocol. Implementations satisfy this structurally;

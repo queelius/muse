@@ -53,18 +53,10 @@ class ChatClient:
         r.raise_for_status()
         return r.json()
 
-    def chat_stream(
-        self,
-        *,
-        model: str | None = None,
-        messages: list[dict],
-        **kwargs,
-    ) -> Iterator[dict]:
-        body = {"model": model, "messages": messages, "stream": True, **kwargs}
-        body = {k: v for k, v in body.items() if v is not None}
+    def _stream_post(self, path: str, body: dict, label: str) -> Iterator[dict]:
         with httpx.stream(
             "POST",
-            f"{self.base_url}/v1/chat/completions",
+            f"{self.base_url}{path}",
             json=body,
             timeout=self.timeout,
         ) as r:
@@ -73,7 +65,7 @@ class ChatClient:
             if "text/event-stream" not in content_type.lower():
                 raise ChatStreamError({
                     "code": "invalid_stream_response",
-                    "message": "chat stream response is not text/event-stream",
+                    "message": f"{label} stream response is not text/event-stream",
                     "type": "server_error",
                 })
             # The server signals a mid-stream backend failure with an
@@ -95,6 +87,39 @@ class ChatClient:
                     logger.warning("malformed SSE chunk: %s (%s)", payload, e)
             raise ChatStreamError({
                 "code": "incomplete_stream",
-                "message": "chat stream ended before the [DONE] sentinel",
+                "message": f"{label} stream ended before the [DONE] sentinel",
                 "type": "server_error",
             })
+
+    def chat_stream(
+        self,
+        *,
+        model: str | None = None,
+        messages: list[dict],
+        **kwargs,
+    ) -> Iterator[dict]:
+        body = {"model": model, "messages": messages, "stream": True, **kwargs}
+        body = {k: v for k, v in body.items() if v is not None}
+        yield from self._stream_post("/v1/chat/completions", body, "chat")
+
+    def complete(self, *, model: str | None = None, prompt: str, **kwargs) -> dict:
+        body = {"model": model, "prompt": prompt, "stream": False, **kwargs}
+        body = {k: v for k, v in body.items() if v is not None}
+        r = httpx.post(
+            f"{self.base_url}/v1/completions",
+            json=body,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def complete_stream(
+        self,
+        *,
+        model: str | None = None,
+        prompt: str,
+        **kwargs,
+    ) -> Iterator[dict]:
+        body = {"model": model, "prompt": prompt, "stream": True, **kwargs}
+        body = {k: v for k, v in body.items() if v is not None}
+        yield from self._stream_post("/v1/completions", body, "completion")

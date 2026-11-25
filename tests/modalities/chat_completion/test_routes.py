@@ -249,6 +249,63 @@ def test_tools_passthrough_to_backend():
     assert seen["temperature"] == 0.2
 
 
+def test_grammar_and_cache_prompt_passthrough_to_backend():
+    """POST /v1/chat/completions forwards raw GBNF grammar and cache_prompt."""
+    reg = ModalityRegistry()
+    seen = {}
+
+    class _Capturing:
+        model_id = "cap-gbnf"
+
+        def chat(self, messages, **kwargs):
+            seen.update(kwargs)
+            return ChatResult(
+                id="x", model_id=self.model_id, created=0,
+                choices=[ChatChoice(
+                    index=0,
+                    message={"role": "assistant", "content": "yes"},
+                    finish_reason="stop",
+                )],
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            )
+
+        def chat_stream(self, messages, **kwargs):
+            return iter([])
+
+    reg.register("chat/completion", _Capturing())
+    app = create_app(registry=reg, routers={"chat/completion": build_router(reg)})
+    client = TestClient(app)
+    gbnf = 'root ::= "yes" | "no"'
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "cap-gbnf",
+            "messages": [{"role": "user", "content": "answer?"}],
+            "grammar": gbnf,
+            "cache_prompt": False,
+        },
+    )
+    assert r.status_code == 200
+    assert seen["grammar"] == gbnf
+    assert seen["cache_prompt"] is False
+
+
+@pytest.mark.parametrize("bad_extra", [
+    {"grammar": 'root ::= "a"'},
+    {"cache_prompt": True},
+])
+def test_extra_body_cannot_override_grammar_or_cache_prompt(client, bad_extra):
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "fake-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "extra_body": bad_extra,
+        },
+    )
+    assert r.status_code == 422
+
+
 # --- v0.11.5: tools-with-unknown-support warning ---------------------------
 
 

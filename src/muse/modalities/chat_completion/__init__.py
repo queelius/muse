@@ -16,21 +16,30 @@ from muse.modalities.chat_completion.protocol import (
     ChatMessage,
     ChatModel,
     ChatResult,
+    CompletionChoice,
+    CompletionChunk,
+    CompletionResult,
 )
 from muse.modalities.chat_completion.routes import build_router
 
 MODALITY = "chat/completion"
 
+# Native llama-server clients omit `model` on POST /completion; the gateway
+# resolves the first enabled chat/completion model in the catalog.
+MODEL_OPTIONAL_PATHS = ("/completion",)
+
 DISCOVERY = {
     "summary": (
         "Chat and vision-language completion. Answers messages with a "
         "language model, with optional tool calls, structured output, "
-        "streaming and image inputs for vision models."
+        "streaming and image inputs for vision models, plus raw text "
+        "completions."
     ),
     "use_for": [
         "writing, summarizing, reasoning and drafting text",
         "describing or answering questions about images (vision models)",
         "tool-using agents through OpenAI-style tools",
+        "raw prompt completions with optional GBNF grammar constraints",
     ],
     "not_for": [
         "bulk embedding (use embedding/text)",
@@ -57,6 +66,37 @@ DISCOVERY = {
                 "stream": False,
             },
         },
+        {
+            "method": "POST",
+            "path": "/v1/completions",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "openai:completions",
+            "mcp_tool": "muse_complete",
+            "file_fields": [],
+            "media_fields": [],
+            "example": {
+                "model": "<model>",
+                "prompt": "Once upon a time,",
+                "max_tokens": 32,
+                "stream": False,
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/completion",
+            "request_content_type": "application/json",
+            "response_content_type": "application/json",
+            "compat": "llama_server:completion",
+            "mcp_tool": None,
+            "file_fields": [],
+            "media_fields": [],
+            "example": {
+                "prompt": "Once upon a time,",
+                "n_predict": 32,
+                "stream": False,
+            },
+        },
     ],
 }
 
@@ -74,6 +114,7 @@ PROBE_DEFAULTS = {
 
 __all__ = [
     "MODALITY",
+    "MODEL_OPTIONAL_PATHS",
     "DISCOVERY",
     "PROBE_DEFAULTS",
     "build_router",
@@ -84,4 +125,7 @@ __all__ = [
     "ChatMessage",
     "ChatModel",
     "ChatResult",
+    "CompletionChoice",
+    "CompletionChunk",
+    "CompletionResult",
 ]

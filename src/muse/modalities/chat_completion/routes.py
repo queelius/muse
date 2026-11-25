@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+import uuid
 from typing import Any
 
 from fastapi import APIRouter
@@ -30,7 +32,16 @@ from muse.modalities._native_offload import run_native_offload
 from muse.modalities.chat_completion.codec import (
     DONE_SENTINEL,
     chunk_to_sse_data,
+    completion_chunk_to_llama_sse_data,
+    completion_chunk_to_sse_data,
+    completion_result_to_llama_dict,
+    completion_result_to_openai_dict,
     result_to_openai_dict,
+)
+from muse.modalities.chat_completion.protocol import (
+    CompletionChoice,
+    CompletionChunk,
+    CompletionResult,
 )
 from muse.modalities._common.images import (
     ImageInputError,
@@ -54,6 +65,11 @@ _STREAM_POLL_SECONDS = 0.1
 _STANDARD_BACKEND_KEYS = frozenset({
     "temperature", "top_p", "max_tokens", "stop", "seed", "tools",
     "tool_choice", "response_format", "logprobs", "top_logprobs",
+    "grammar", "cache_prompt",
+})
+_COMPLETION_STANDARD_BACKEND_KEYS = frozenset({
+    "temperature", "top_p", "max_tokens", "n_predict", "stop", "seed",
+    "cache_prompt", "grammar", "logprobs", "echo",
 })
 
 
@@ -72,6 +88,8 @@ class ChatCompletionRequest(BaseModel):
     response_format: dict | None = None
     logprobs: bool | None = None
     top_logprobs: int | None = Field(default=None, ge=0, le=20)
+    grammar: str | None = None
+    cache_prompt: bool | None = None
     extra_body: dict | None = None
 
     @field_validator("messages")
@@ -112,7 +130,7 @@ class ChatCompletionRequest(BaseModel):
         for key in (
             "temperature", "top_p", "max_tokens", "stop", "seed",
             "tools", "tool_choice", "response_format", "logprobs",
-            "top_logprobs",
+            "top_logprobs", "grammar", "cache_prompt",
         ):
             val = getattr(self, key)
             if val is not None:
@@ -120,6 +138,183 @@ class ChatCompletionRequest(BaseModel):
         if self.extra_body:
             out.update(self.extra_body)
         return out
+
+
+class TextCompletionRequest(BaseModel):
+    """OpenAI `/v1/completions` and native llama-server `/completion` request."""
+    model: str | None = None
+    prompt: str | list[str]
+    max_tokens: int | None = Field(default=None, ge=1, le=_MAX_OUTPUT_TOKENS)
+    n_predict: int | None = Field(default=None, ge=1, le=_MAX_OUTPUT_TOKENS)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    stop: str | list[str] | None = None
+    seed: int | None = None
+    stream: bool = False
+    cache_prompt: bool | None = None
+    grammar: str | None = None
+    logprobs: int | None = Field(default=None, ge=0, le=20)
+    echo: bool = False
+    extra_body: dict | None = None
+
+    @field_validator("extra_body")
+    @classmethod
+    def _no_standard_key_override(cls, value: dict | None) -> dict | None:
+        if not value:
+            return value
+        overlap = sorted(_COMPLETION_STANDARD_BACKEND_KEYS.intersection(value))
+        if overlap:
+            raise ValueError(
+                "extra_body cannot override validated top-level fields: "
+                + ", ".join(overlap)
+            )
+        token_aliases = sorted({"max_new_tokens", "max_length"}.intersection(value))
+        if token_aliases:
+            raise ValueError(
+                "use the bounded top-level max_tokens field instead of: "
+                + ", ".join(token_aliases)
+            )
+        return value
+
+    def effective_max_tokens(self) -> int | None:
+        return self.max_tokens if self.max_tokens is not None else self.n_predict
+
+    def effective_prompt(self) -> str:
+        if isinstance(self.prompt, str):
+            return self.prompt
+        if len(self.prompt) == 0:
+            raise ValueError("prompt list must be non-empty")
+        if len(self.prompt) > 1:
+            raise ValueError(
+                "batch prompts (list with more than 1 element) are not "
+                "supported; pass a single string prompt"
+            )
+        return self.prompt[0]
+
+    def backend_kwargs(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        max_tokens = self.effective_max_tokens()
+        if max_tokens is not None:
+            out["max_tokens"] = max_tokens
+        for key in (
+            "temperature", "top_p", "stop", "seed",
+            "cache_prompt", "grammar", "logprobs",
+        ):
+            val = getattr(self, key)
+            if val is not None:
+                out[key] = val
+        if self.echo:
+            out["echo"] = True
+        if self.extra_body:
+            out.update(self.extra_body)
+        return out
+
+
+def _normalize_completion_result(
+    raw: Any, *, model_id: str,
+) -> CompletionResult:
+    """Normalize either a CompletionResult or a native dict into CompletionResult."""
+    if isinstance(raw, CompletionResult):
+        return raw
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"completion backend returned unsupported type {type(raw).__name__}"
+        )
+
+    text = str(raw.get("content") if "content" in raw else raw.get("text", ""))
+    finish_reason = raw.get("finish_reason")
+    if finish_reason is None:
+        if raw.get("stopped_limit") or raw.get("stop_type") == "limit":
+            finish_reason = "length"
+        elif (
+            raw.get("stopped_eos")
+            or raw.get("stopped_word")
+            or raw.get("stop_type") in ("eos", "word")
+            or raw.get("stop")
+        ):
+            finish_reason = "stop"
+        else:
+            finish_reason = "stop"
+
+    prompt_tokens = int(
+        raw.get("tokens_evaluated", raw.get("prompt_tokens", 0)) or 0
+    )
+    completion_tokens = int(
+        raw.get("tokens_predicted", raw.get("completion_tokens", 0)) or 0
+    )
+    if isinstance(raw.get("usage"), dict):
+        usage = raw["usage"]
+    else:
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    metadata: dict[str, Any] = {
+        "tokens_evaluated": prompt_tokens,
+        "tokens_predicted": completion_tokens,
+    }
+    for key in (
+        "timings", "stopped_eos", "stopped_limit",
+        "stopped_word", "stopping_word", "stop_type",
+    ):
+        if key in raw:
+            metadata[key] = raw[key]
+
+    return CompletionResult(
+        id=str(raw.get("id") or f"cmpl-{uuid.uuid4().hex[:24]}"),
+        model_id=model_id,
+        created=int(raw.get("created") or int(time.time())),
+        choices=[CompletionChoice(
+            index=0,
+            text=text,
+            finish_reason=finish_reason,
+            logprobs=raw.get("logprobs"),
+        )],
+        usage=usage,
+        metadata=metadata,
+    )
+
+
+def _normalize_completion_chunk(
+    raw: Any, *, model_id: str, comp_id: str, created: int,
+) -> CompletionChunk:
+    """Normalize either a CompletionChunk or a native stream dict into CompletionChunk."""
+    if isinstance(raw, CompletionChunk):
+        return raw
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"completion stream backend yielded unsupported type {type(raw).__name__}"
+        )
+
+    text = str(raw.get("content") if "content" in raw else raw.get("text", ""))
+    finish_reason = raw.get("finish_reason")
+    if finish_reason is None and raw.get("stop"):
+        if raw.get("stopped_limit") or raw.get("stop_type") == "limit":
+            finish_reason = "length"
+        else:
+            finish_reason = "stop"
+
+    metadata = {
+        key: raw[key]
+        for key in (
+            "tokens_predicted", "tokens_evaluated", "timings",
+            "stopped_eos", "stopped_limit", "stopped_word",
+            "stopping_word", "stop_type",
+        )
+        if key in raw
+    }
+
+    return CompletionChunk(
+        id=str(raw.get("id") or comp_id),
+        model_id=model_id,
+        created=int(raw.get("created") or created),
+        choice_index=int(raw.get("index", 0)),
+        text=text,
+        finish_reason=finish_reason,
+        metadata=metadata,
+    )
 
 
 class _ImageDecodeError(Exception):
@@ -293,9 +488,9 @@ def _decoded_message_images(messages: list[dict]) -> list[Any]:
 
 
 def build_router(registry: ModalityRegistry) -> APIRouter:
-    router = APIRouter(prefix="/v1", tags=["chat/completion"])
+    router = APIRouter(tags=["chat/completion"])
 
-    @router.post("/chat/completions")
+    @router.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest):
         model = registry.get_or_404(MODALITY, req.model)
 
@@ -407,5 +602,107 @@ def build_router(registry: ModalityRegistry) -> APIRouter:
             poll_seconds=_STREAM_POLL_SECONDS,
             on_finish=lambda: close_decoded_images(decoded_images),
         )
+
+    async def _handle_completion(
+        req: TextCompletionRequest, *, llama_native: bool,
+    ):
+        model = registry.get_or_404(MODALITY, req.model)
+        effective_id = model.model_id
+
+        try:
+            prompt = req.effective_prompt()
+        except ValueError as e:
+            return error_response(400, "invalid_prompt", str(e))
+
+        kwargs = req.backend_kwargs()
+
+        if not req.stream:
+            complete_fn = getattr(model, "complete", None)
+            if not callable(complete_fn):
+                return error_response(
+                    400,
+                    "completions_not_supported",
+                    f"model {effective_id!r} does not support text completions",
+                )
+
+            fingerprint = None
+            if not llama_native:
+                from muse.core.provenance import lookup_revision, system_fingerprint
+                fingerprint = system_fingerprint(
+                    await asyncio.to_thread(lookup_revision, effective_id)
+                )
+
+            def _call_complete():
+                with model._inference_lock:
+                    return complete_fn(prompt, **kwargs)
+
+            raw = await run_native_offload(_call_complete)
+            result = _normalize_completion_result(raw, model_id=effective_id)
+            if llama_native:
+                return completion_result_to_llama_dict(result)
+            return completion_result_to_openai_dict(
+                result, system_fingerprint=fingerprint,
+            )
+
+        complete_stream_fn = getattr(model, "complete_stream", None)
+        if not callable(complete_stream_fn):
+            return error_response(
+                400,
+                "completions_not_supported",
+                f"model {effective_id!r} does not support streaming text completions",
+            )
+
+        fingerprint = None
+        if not llama_native:
+            from muse.core.provenance import lookup_revision, system_fingerprint
+            fingerprint = system_fingerprint(
+                await asyncio.to_thread(lookup_revision, effective_id)
+            )
+
+        comp_id = f"cmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+
+        def _error_event() -> dict:
+            payload = {"error": {
+                "code": "internal_error",
+                "message": "completion streaming backend failed; see server logs",
+                "type": "server_error",
+            }}
+            return {"event": "error", "data": json.dumps(payload)}
+
+        def _encode_chunk(raw_chunk: Any) -> dict:
+            chunk = _normalize_completion_chunk(
+                raw_chunk,
+                model_id=effective_id,
+                comp_id=comp_id,
+                created=created,
+            )
+            if llama_native:
+                return {"data": completion_chunk_to_llama_sse_data(chunk)}
+            return {
+                "data": completion_chunk_to_sse_data(
+                    chunk, system_fingerprint=fingerprint,
+                ),
+            }
+
+        done_events = () if llama_native else ({"data": DONE_SENTINEL},)
+        return threaded_sse_response(
+            lock=model._inference_lock,
+            open_stream=lambda: complete_stream_fn(prompt, **kwargs),
+            encode=_encode_chunk,
+            done_events=done_events,
+            error_event=_error_event,
+            label="completion",
+            queue_depth=_STREAM_QUEUE_DEPTH,
+            poll_seconds=_STREAM_POLL_SECONDS,
+        )
+
+    @router.post("/v1/completions")
+    async def text_completions(req: TextCompletionRequest):
+        return await _handle_completion(req, llama_native=False)
+
+    @router.post("/completion")
+    async def llama_completion(req: TextCompletionRequest):
+        return await _handle_completion(req, llama_native=True)
 
     return router
