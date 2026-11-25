@@ -13,6 +13,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -41,11 +42,17 @@ from muse.core.owned_process import (
     supports_pinned_leader,
     validated_isolated_group,
 )
-from muse.core.ports import find_free_port
+
+
+def _pick_ephemeral_port(host: str = "127.0.0.1") -> int:
+    """Bind port 0 to obtain an OS-assigned ephemeral port outside worker range."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RELEASE_TAG = "b5490"
+DEFAULT_RELEASE_TAG = "b12728"
 DEFAULT_VARIANT = "auto"
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 120.0
 
@@ -58,6 +65,7 @@ _GITHUB_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
 
 _CUDA_DEVICE_RE = re.compile(r"\bCUDA\d*\b", re.IGNORECASE)
 _METAL_DEVICE_RE = re.compile(r"\bMetal\b", re.IGNORECASE)
+_VULKAN_DEVICE_RE = re.compile(r"\bVulkan\d*\b", re.IGNORECASE)
 
 
 def _config_get(key: str, default: Any, env: str | None = None) -> Any:
@@ -135,6 +143,78 @@ def _detect_auto_variant(*, system: str | None = None) -> str:
     return "cpu"
 
 
+def _release_asset_names(
+    release_tag: str,
+    variant: str,
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+) -> list[str]:
+    """Return upstream ``ggml-org/llama.cpp`` release archive filenames.
+
+    CUDA builds require both the main binary archive and the companion
+    ``cudart`` shared-library archive so ``llama-server`` runs without a
+    system-wide CUDA toolkit installed.
+    """
+    sys_name = (system or platform.system()).lower()
+    arch = (machine or platform.machine()).lower()
+    is_arm = arch in ("arm64", "aarch64")
+    is_x64 = arch in ("x86_64", "amd64", "x64")
+
+    if sys_name == "linux":
+        if is_x64:
+            if variant == "cuda":
+                return [
+                    f"llama-{release_tag}-bin-ubuntu-cuda-12.8-x64.tar.gz",
+                    f"cudart-llama-{release_tag}-bin-ubuntu-cuda-12.8-x64.tar.gz",
+                ]
+            if variant == "vulkan":
+                return [f"llama-{release_tag}-bin-ubuntu-vulkan-x64.tar.gz"]
+            return [f"llama-{release_tag}-bin-ubuntu-x64.tar.gz"]
+        if is_arm:
+            if variant == "vulkan":
+                return [f"llama-{release_tag}-bin-ubuntu-vulkan-arm64.tar.gz"]
+            if variant == "cpu":
+                return [f"llama-{release_tag}-bin-ubuntu-arm64.tar.gz"]
+        raise RuntimeError(
+            f"no prebuilt llama-server binary for Linux {arch!r} ({variant}); "
+            "set llama_server.binary_path to a local build"
+        )
+
+    if sys_name == "darwin":
+        if is_arm:
+            return [f"llama-{release_tag}-bin-macos-arm64.tar.gz"]
+        if is_x64:
+            return [f"llama-{release_tag}-bin-macos-x64.tar.gz"]
+        raise RuntimeError(
+            f"no prebuilt llama-server binary for macOS architecture {arch!r}"
+        )
+
+    if sys_name == "windows":
+        if is_x64:
+            if variant == "cuda":
+                return [
+                    f"llama-{release_tag}-bin-win-cuda-12.4-x64.zip",
+                    "cudart-llama-bin-win-cuda-12.4-x64.zip",
+                ]
+            if variant == "vulkan":
+                return [f"llama-{release_tag}-bin-win-vulkan-x64.zip"]
+            return [f"llama-{release_tag}-bin-win-cpu-x64.zip"]
+        if is_arm:
+            if variant == "vulkan":
+                return [f"llama-{release_tag}-bin-win-vulkan-arm64.zip"]
+            if variant == "cpu":
+                return [f"llama-{release_tag}-bin-win-cpu-arm64.zip"]
+        raise RuntimeError(
+            f"no prebuilt llama-server binary for Windows {arch!r} ({variant}); "
+            "set llama_server.binary_path to a local build"
+        )
+
+    raise RuntimeError(
+        f"unsupported platform for llama-server auto-download: {sys_name}/{arch}"
+    )
+
+
 def _release_asset_name(
     release_tag: str,
     variant: str,
@@ -142,43 +222,10 @@ def _release_asset_name(
     system: str | None = None,
     machine: str | None = None,
 ) -> str:
-    """Return the upstream ``ggml-org/llama.cpp`` release archive filename."""
-    sys_name = (system or platform.system()).lower()
-    arch = (machine or platform.machine()).lower()
-    is_arm = arch in ("arm64", "aarch64")
-    is_x64 = arch in ("x86_64", "amd64", "x64")
-
-    if sys_name == "linux":
-        if not is_x64:
-            raise RuntimeError(
-                f"no prebuilt llama-server binary for Linux architecture {arch!r}; "
-                "set llama_server.binary_path to a local build"
-            )
-        if variant == "cuda":
-            return f"llama-{release_tag}-bin-ubuntu-cuda-cu12.4-x64.zip"
-        return f"llama-{release_tag}-bin-ubuntu-x64.zip"
-
-    if sys_name == "darwin":
-        if is_arm:
-            return f"llama-{release_tag}-bin-macos-arm64.zip"
-        if is_x64:
-            return f"llama-{release_tag}-bin-macos-x64.zip"
-        raise RuntimeError(
-            f"no prebuilt llama-server binary for macOS architecture {arch!r}"
-        )
-
-    if sys_name == "windows":
-        if not is_x64:
-            raise RuntimeError(
-                f"no prebuilt llama-server binary for Windows architecture {arch!r}"
-            )
-        if variant == "cuda":
-            return f"llama-{release_tag}-bin-win-cuda-cu12.4-x64.zip"
-        return f"llama-{release_tag}-bin-win-cpu-x64.zip"
-
-    raise RuntimeError(
-        f"unsupported platform for llama-server auto-download: {sys_name}/{arch}"
-    )
+    """Return the primary upstream ``ggml-org/llama.cpp`` release archive filename."""
+    return _release_asset_names(
+        release_tag, variant, system=system, machine=machine
+    )[0]
 
 
 def _is_needed_archive_member(name: str) -> bool:
@@ -195,7 +242,12 @@ def _is_needed_archive_member(name: str) -> bool:
     return False
 
 
-def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
+def _extract_archive(
+    archive_path: Path,
+    dest_dir: Path,
+    *,
+    require_binary: bool = True,
+) -> Path | None:
     """Extract ``llama-server`` and bundled shared libraries into ``dest_dir``."""
     extracted_binary: Path | None = None
 
@@ -208,6 +260,8 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
                     continue
                 basename = Path(info.filename).name
                 target = dest_dir / basename
+                if target.exists() or target.is_symlink():
+                    target.unlink()
                 with zf.open(info, "r") as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 if basename == _BINARY_NAME:
@@ -215,15 +269,25 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
     elif tarfile.is_tarfile(archive_path):
         with tarfile.open(archive_path, "r:*") as tf:
             for member in tf.getmembers():
-                if not member.isfile():
-                    continue
                 if not _is_needed_archive_member(member.name):
                     continue
                 basename = Path(member.name).name
                 target = dest_dir / basename
+                if member.issym():
+                    link_target = Path(member.linkname).name
+                    if not link_target or link_target == basename:
+                        continue
+                    if target.exists() or target.is_symlink():
+                        target.unlink()
+                    os.symlink(link_target, target)
+                    continue
+                if not member.isfile():
+                    continue
                 src = tf.extractfile(member)
                 if src is None:
                     continue
+                if target.exists() or target.is_symlink():
+                    target.unlink()
                 with src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 if basename == _BINARY_NAME:
@@ -231,12 +295,12 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
     else:
         raise RuntimeError(f"unsupported llama-server archive format: {archive_path.name}")
 
-    if extracted_binary is None or not extracted_binary.is_file():
+    if require_binary and (extracted_binary is None or not extracted_binary.is_file()):
         raise RuntimeError(
             f"downloaded archive {archive_path.name} did not contain {_BINARY_NAME}"
         )
 
-    if os.name == "posix":
+    if extracted_binary is not None and os.name == "posix":
         extracted_binary.chmod(
             stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
         )
@@ -274,7 +338,7 @@ def ensure_llama_server_binary(
 
     tag = str(
         release_tag
-        or _config_get("llama_server.release_tag", DEFAULT_RELEASE_TAG, "MUSE_LLAMA_SERVER_RELEASE_TAG")
+        or _config_get("llama_server.release_tag", DEFAULT_RELEASE_TAG, "MUSE_LLAMA_SERVER_RELEASE")
     ).strip()
     raw_variant = str(
         variant
@@ -282,28 +346,28 @@ def ensure_llama_server_binary(
     ).strip().lower()
     resolved_variant = _detect_auto_variant() if raw_variant == "auto" else raw_variant
 
-    asset_name = _release_asset_name(tag, resolved_variant)
-    url = f"{_GITHUB_RELEASE_BASE}/{tag}/{asset_name}"
+    asset_names = _release_asset_names(tag, resolved_variant)
 
     bin_dir = _managed_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     install_dir = bin_dir / f"llama-server-{tag}-{resolved_variant}"
 
-    logger.info("downloading llama-server %s (%s) from %s", tag, resolved_variant, url)
     tmp_root = Path(tempfile.mkdtemp(prefix=".llama-server-dl-", dir=bin_dir))
     try:
-        archive_path = tmp_root / asset_name
-        with httpx.stream(
-            "GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS,
-        ) as resp:
-            resp.raise_for_status()
-            with open(archive_path, "wb") as fh:
-                for chunk in resp.iter_bytes():
-                    fh.write(chunk)
-
         stage_dir = tmp_root / "extracted"
         stage_dir.mkdir()
-        _extract_archive(archive_path, stage_dir)
+        for idx, asset_name in enumerate(asset_names):
+            url = f"{_GITHUB_RELEASE_BASE}/{tag}/{asset_name}"
+            logger.info("downloading llama-server %s (%s) from %s", tag, resolved_variant, url)
+            archive_path = tmp_root / asset_name
+            with httpx.stream(
+                "GET", url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+            ) as resp:
+                resp.raise_for_status()
+                with open(archive_path, "wb") as fh:
+                    for chunk in resp.iter_bytes():
+                        fh.write(chunk)
+            _extract_archive(archive_path, stage_dir, require_binary=(idx == 0))
 
         if install_dir.exists():
             shutil.rmtree(install_dir)
@@ -352,6 +416,8 @@ def probe_llama_server(binary: Path | None = None) -> tuple[bool, str | None]:
         return (True, "cuda")
     if _METAL_DEVICE_RE.search(output):
         return (True, "metal")
+    if _VULKAN_DEVICE_RE.search(output):
+        return (True, "vulkan")
     return (False, None)
 
 
@@ -409,7 +475,7 @@ class LlamaServerProcess:
         self.type_k = type_k
         self.type_v = type_v
         self.host = host
-        self.port = int(port) if port is not None else find_free_port()
+        self.port = int(port) if port is not None else _pick_ephemeral_port(host)
         self.base_url = f"http://{self.host}:{self.port}"
         if startup_timeout is None:
             raw_timeout = _config_get(

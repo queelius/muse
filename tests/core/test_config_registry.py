@@ -200,12 +200,12 @@ def test_llama_server_and_gguf_dir_settings_present():
 
     tag = cfg.SETTINGS_BY_KEY["llama_server.release_tag"]
     assert tag.env == "MUSE_LLAMA_SERVER_RELEASE"
-    assert tag.default == "b5490"
+    assert tag.default == "b12728"
 
     variant = cfg.SETTINGS_BY_KEY["llama_server.variant"]
     assert variant.env == "MUSE_LLAMA_SERVER_VARIANT"
     assert variant.default == "auto"
-    assert variant.choices == ("auto", "cpu", "cuda")
+    assert variant.choices == ("auto", "cpu", "cuda", "vulkan")
 
     timeout = cfg.SETTINGS_BY_KEY["llama_server.startup_timeout_seconds"]
     assert timeout.env == "MUSE_LLAMA_SERVER_STARTUP_TIMEOUT"

@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import sys
+import tarfile
 import textwrap
 import zipfile
 from pathlib import Path
@@ -78,19 +79,58 @@ def test_find_binary_returns_none_when_absent(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("system", "machine", "variant", "expected"),
     [
-        ("Linux", "x86_64", "cpu", "llama-b5490-bin-ubuntu-x64.zip"),
-        ("Linux", "x86_64", "cuda", "llama-b5490-bin-ubuntu-cuda-cu12.4-x64.zip"),
-        ("Darwin", "arm64", "metal", "llama-b5490-bin-macos-arm64.zip"),
-        ("Darwin", "x86_64", "metal", "llama-b5490-bin-macos-x64.zip"),
-        ("Windows", "AMD64", "cpu", "llama-b5490-bin-win-cpu-x64.zip"),
-        ("Windows", "AMD64", "cuda", "llama-b5490-bin-win-cuda-cu12.4-x64.zip"),
+        ("Linux", "x86_64", "cpu", ["llama-b12728-bin-ubuntu-x64.tar.gz"]),
+        (
+            "Linux",
+            "x86_64",
+            "cuda",
+            [
+                "llama-b12728-bin-ubuntu-cuda-12.8-x64.tar.gz",
+                "cudart-llama-b12728-bin-ubuntu-cuda-12.8-x64.tar.gz",
+            ],
+        ),
+        ("Linux", "x86_64", "vulkan", ["llama-b12728-bin-ubuntu-vulkan-x64.tar.gz"]),
+        ("Linux", "aarch64", "cpu", ["llama-b12728-bin-ubuntu-arm64.tar.gz"]),
+        ("Darwin", "arm64", "metal", ["llama-b12728-bin-macos-arm64.tar.gz"]),
+        ("Darwin", "x86_64", "metal", ["llama-b12728-bin-macos-x64.tar.gz"]),
+        ("Windows", "AMD64", "cpu", ["llama-b12728-bin-win-cpu-x64.zip"]),
+        (
+            "Windows",
+            "AMD64",
+            "cuda",
+            [
+                "llama-b12728-bin-win-cuda-12.4-x64.zip",
+                "cudart-llama-bin-win-cuda-12.4-x64.zip",
+            ],
+        ),
     ],
 )
-def test_release_asset_name(system, machine, variant, expected):
+def test_release_asset_names(system, machine, variant, expected):
     assert (
-        llama_server._release_asset_name("b5490", variant, system=system, machine=machine)
+        llama_server._release_asset_names("b12728", variant, system=system, machine=machine)
         == expected
     )
+    assert (
+        llama_server._release_asset_name("b12728", variant, system=system, machine=machine)
+        == expected[0]
+    )
+
+
+def _make_tar_gz(entries: list[tuple[str, bytes | None, str | None]]) -> bytes:
+    """Build an in-memory .tar.gz with regular files (bytes) and symlinks (linkname)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data, linkname in entries:
+            info = tarfile.TarInfo(name=name)
+            if linkname is not None:
+                info.type = tarfile.SYMTYPE
+                info.linkname = linkname
+                tf.addfile(info)
+            else:
+                assert data is not None
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 def test_ensure_binary_downloads_extracts_and_symlinks(tmp_path, monkeypatch):
@@ -100,14 +140,26 @@ def test_ensure_binary_downloads_extracts_and_symlinks(tmp_path, monkeypatch):
     monkeypatch.setattr(llama_server.platform, "system", lambda: "Linux")
     monkeypatch.setattr(llama_server.platform, "machine", lambda: "x86_64")
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("build/bin/llama-server", b"#!/bin/sh\necho ok\n")
-        zf.writestr("build/bin/libllama.so.0", b"ELF-shared-lib")
-        zf.writestr("build/bin/README.md", b"ignored")
-    archive_bytes = buf.getvalue()
+    main_tar = _make_tar_gz([
+        ("llama-b12728/llama-server", b"#!/bin/sh\necho ok\n", None),
+        ("llama-b12728/libllama.so.0.0.12728", b"ELF-shared-lib", None),
+        ("llama-b12728/libllama.so.0", None, "libllama.so.0.0.12728"),
+        ("llama-b12728/README.md", b"ignored", None),
+    ])
+    cudart_tar = _make_tar_gz([
+        ("cudart/libcudart.so.12.8.0", b"CUDA-RT", None),
+        ("cudart/libcudart.so.12", None, "libcudart.so.12.8.0"),
+    ])
+
+    payloads = {
+        "https://github.com/ggml-org/llama.cpp/releases/download/b12728/llama-b12728-bin-ubuntu-cuda-12.8-x64.tar.gz": main_tar,
+        "https://github.com/ggml-org/llama.cpp/releases/download/b12728/cudart-llama-b12728-bin-ubuntu-cuda-12.8-x64.tar.gz": cudart_tar,
+    }
 
     class _FakeStreamResp:
+        def __init__(self, data: bytes):
+            self._data = data
+
         def __enter__(self):
             return self
 
@@ -118,29 +170,31 @@ def test_ensure_binary_downloads_extracts_and_symlinks(tmp_path, monkeypatch):
             return None
 
         def iter_bytes(self):
-            yield archive_bytes[:32]
-            yield archive_bytes[32:]
+            yield self._data[:32]
+            yield self._data[32:]
 
     seen_urls: list[str] = []
 
     def _fake_stream(method, url, **kwargs):
         seen_urls.append(url)
-        return _FakeStreamResp()
+        return _FakeStreamResp(payloads[url])
 
     monkeypatch.setattr(llama_server.httpx, "stream", _fake_stream)
 
-    result = llama_server.ensure_llama_server_binary(variant="cpu", release_tag="b5490")
+    result = llama_server.ensure_llama_server_binary(variant="cuda", release_tag="b12728")
     assert result == tmp_path / "bin" / llama_server._BINARY_NAME
     assert result.is_symlink() or result.is_file()
     assert os.access(result, os.X_OK)
-    install_dir = tmp_path / "bin" / "llama-server-b5490-cpu"
+    install_dir = tmp_path / "bin" / "llama-server-b12728-cuda"
     assert (install_dir / "llama-server").is_file()
-    assert (install_dir / "libllama.so.0").is_file()
+    assert (install_dir / "libllama.so.0.0.12728").is_file()
+    assert (install_dir / "libllama.so.0").is_symlink()
+    assert os.readlink(install_dir / "libllama.so.0") == "libllama.so.0.0.12728"
+    assert (install_dir / "libcudart.so.12.8.0").is_file()
+    assert (install_dir / "libcudart.so.12").is_symlink()
     assert not (install_dir / "README.md").exists()
     assert stat.S_IMODE((install_dir / "llama-server").stat().st_mode) & 0o111
-    assert seen_urls == [
-        "https://github.com/ggml-org/llama.cpp/releases/download/b5490/llama-b5490-bin-ubuntu-x64.zip"
-    ]
+    assert seen_urls == list(payloads.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +206,7 @@ def test_ensure_binary_downloads_extracts_and_symlinks(tmp_path, monkeypatch):
     [
         ("Available devices:\n  CUDA0: NVIDIA RTX 4090 (24564 MiB)\n", (True, "cuda")),
         ("Available devices:\n  Metal: Apple M3 Max\n", (True, "metal")),
+        ("Available devices:\n  Vulkan0: NVIDIA RTX 3060\n", (True, "vulkan")),
         ("Available devices:\n", (False, None)),
     ],
 )
@@ -175,6 +230,18 @@ def test_probe_llama_server_handles_timeout(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # LlamaServerProcess command building & real subprocess lifecycle
 # ---------------------------------------------------------------------------
+
+def test_default_port_avoids_worker_port_range(tmp_path):
+    """Auto-assigned llama-server ports must not collide with worker ports (9001..9999)."""
+    ports = [
+        llama_server.LlamaServerProcess(
+            binary=tmp_path / "llama-server",
+            model_path=tmp_path / "model.gguf",
+        ).port
+        for _ in range(5)
+    ]
+    assert all(not (9001 <= p <= 9999) for p in ports), ports
+
 
 def test_build_command_flags(tmp_path):
     proc = llama_server.LlamaServerProcess(
