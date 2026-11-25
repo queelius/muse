@@ -44,8 +44,11 @@ def native_placement(
     return Placement(device, "cpu" if target == "mps" else "cuda", n_gpu_layers)
 
 
+LLAMA_SERVER_BACKEND = "muse.modalities.chat_completion.runtimes.llama_server:LlamaServerModel"
+
 NATIVE_GGUF_BACKENDS = frozenset({
     "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel",
+    LLAMA_SERVER_BACKEND,
     "muse.modalities.decision_evaluation.runtimes.llama_cpp:DecisionLlamaCppModel",
 })
 
@@ -239,12 +242,19 @@ def resolve_model_placement(
         supported = False
         backend = None
         if device != "cpu" and layers != 0:
-            python = entry.get("python_path")
-            if not python:
-                raise RuntimeError(
-                    "could not query native GGUF GPU offload: no recorded model interpreter"
+            if manifest.get("backend_path") == LLAMA_SERVER_BACKEND:
+                from muse.core.llama_server import probe_llama_server
+                binary_override = caps.get("binary_path")
+                supported, backend = probe_llama_server(
+                    Path(binary_override) if binary_override else None,
                 )
-            supported, backend = _interpreter_capability(python)
+            else:
+                python = entry.get("python_path")
+                if not python:
+                    raise RuntimeError(
+                        "could not query native GGUF GPU offload: no recorded model interpreter"
+                    )
+                supported, backend = _interpreter_capability(python)
         return native_placement(device, layers, gpu_offload=supported, gpu_backend=backend)
     from muse.core import memory_probe
     auto = device in ("", "auto")

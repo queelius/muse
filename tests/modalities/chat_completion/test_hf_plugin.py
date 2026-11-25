@@ -24,7 +24,7 @@ def test_plugin_has_all_required_keys():
 def test_plugin_metadata_correct():
     assert HF_PLUGIN["modality"] == "chat/completion"
     assert HF_PLUGIN["runtime_path"] == (
-        "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
+        "muse.modalities.chat_completion.runtimes.llama_server:LlamaServerModel"
     )
     assert HF_PLUGIN["priority"] == 100
 
@@ -56,7 +56,7 @@ def test_resolve_returns_resolved_model_with_correct_manifest():
     assert result.manifest["modality"] == "chat/completion"
     assert result.manifest["hf_repo"] == "org/Model-GGUF"
     assert result.manifest["capabilities"]["gguf_file"] == "model-q4_k_m.gguf"
-    assert result.backend_path.endswith(":LlamaCppModel")
+    assert result.backend_path.endswith(":LlamaServerModel")
 
 
 def test_resolve_names_only_the_variant_files_for_seeding():

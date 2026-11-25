@@ -36,8 +36,8 @@ _VARIANT_RE = re.compile(
     r"(q\d+_[a-z0-9_]+|iq\d+_[a-z0-9]+|f16|bf16|f32)", re.IGNORECASE,
 )
 
-_RUNTIME_PATH = "muse.modalities.chat_completion.runtimes.llama_cpp:LlamaCppModel"
-_PIP_EXTRAS = ("llama-cpp-python>=0.2.90",)
+_RUNTIME_PATH = "muse.modalities.chat_completion.runtimes.llama_server:LlamaServerModel"
+_PIP_EXTRAS: tuple[str, ...] = ()
 
 # VLM detection constants
 _VLM_MULTI_IMAGE_MODEL_TYPES = frozenset({
@@ -217,6 +217,9 @@ def _resolve(repo_id: str, variant: str | None, info) -> ResolvedModel:
     capabilities: dict[str, Any] = {
         "gguf_file": matched,
         "supports_tools": hints.get("supports_tools", supports_tools),
+        "parallel": 4,
+        "cont_batching": True,
+        "cache_prompt": True,
     }
     if "chat_format" in hints:
         capabilities["chat_format"] = hints["chat_format"]

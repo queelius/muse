@@ -100,7 +100,7 @@ def test_sniff_gguf_repo_claims_it():
     assert HF_PLUGIN["sniff"](info) is True
 
 
-def test_resolve_gguf_returns_llama_cpp_backend():
+def test_resolve_gguf_returns_llama_server_backend():
     info = _fake_repo_info(
         tags=[],
         files=["model-q4_k_m.gguf"],
@@ -110,7 +110,7 @@ def test_resolve_gguf_returns_llama_cpp_backend():
          patch("muse.modalities.chat_completion.hf.lookup_chat_format", return_value={}):
         resolved = HF_PLUGIN["resolve"]("org/SomeModel-GGUF", "q4_k_m", info)
     assert isinstance(resolved, ResolvedModel)
-    assert resolved.backend_path.endswith(":LlamaCppModel")
+    assert resolved.backend_path.endswith(":LlamaServerModel")
     assert resolved.manifest["capabilities"]["gguf_file"] == "model-q4_k_m.gguf"
 
 

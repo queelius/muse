@@ -141,6 +141,7 @@ def _run_worker_with_leases(
             "worker exiting (exit 2): %d/%d assigned models failed to load: %s",
             len(failures), len(models), failures,
         )
+        _close_registry_backends(registry)
         return 2
 
     # Always mount every discovered modality router so empty-registry
@@ -170,5 +171,23 @@ def _run_worker_with_leases(
     # run_uvicorn sets a bounded timeout_graceful_shutdown so a standalone
     # `muse _worker` process (or one whose supervisor SIGTERMs it) exits
     # promptly on Ctrl-C instead of hanging on an in-flight connection.
-    run_uvicorn(app, host=host, port=port)
+    try:
+        run_uvicorn(app, host=host, port=port)
+    finally:
+        _close_registry_backends(registry)
     return 0
+
+
+def _close_registry_backends(registry: ModalityRegistry) -> None:
+    """Close every registered backend exposing a callable ``close()``."""
+    for info in registry.list_all():
+        try:
+            backend = registry.get(info.modality, info.model_id)
+        except KeyError:
+            continue
+        close_fn = getattr(backend, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:  # noqa: BLE001
+                log.exception("error closing backend %s", info.model_id)
