@@ -60,3 +60,20 @@ def test_rms_norm_rope_matches_norm_then_rope(dtype):
     tol = 2e-2 if dtype == torch.bfloat16 else 1e-5
     assert got.shape == want.shape
     assert torch.allclose(got.float(), want.float(), atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("pos", [0, 63, 64, 200])
+def test_decode_attention_matches_masked_sdpa(pos):
+    torch.manual_seed(2)
+    q = torch.randn(1, 1, 16, 128, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
+    keys = torch.randn(1, 8, 512, 128, device="cuda", dtype=torch.bfloat16)
+    values = torch.randn(1, 8, 512, 128, device="cuda", dtype=torch.bfloat16)
+    keys[:, :, pos + 1:] = 1e4  # stale slots past the live length must not leak in
+    p = torch.tensor([pos], device="cuda")
+    allowed = (torch.arange(512, device="cuda") <= pos)[None, None, None]
+    with torch.no_grad():
+        want = torch.nn.functional.scaled_dot_product_attention(
+            q, keys, values, attn_mask=allowed, scale=128 ** -0.5, enable_gqa=True)
+        got = k.decode_attention(q, keys, values, p, 128 ** -0.5)
+    assert got.shape == want.shape
+    assert torch.allclose(got.float(), want.float(), atol=2e-2, rtol=2e-2)

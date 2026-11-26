@@ -100,3 +100,51 @@ def rms_norm_rope(module: Any, x: Any, cos: Any, sin: Any) -> Any:
         x, module.weight, cos, sin, y, heads, tokens, x.stride(1), x.stride(2), n,
         float(module.variance_epsilon), BLOCK=triton.next_power_of_2(n))
     return y
+
+
+@triton.jit
+def _decode_attention_kernel(q_ptr, k_ptr, v_ptr, o_ptr, pos_ptr, stride_qh,
+                             stride_kh, stride_kc, group, scale,
+                             D: tl.constexpr, BLOCK: tl.constexpr):
+    # One query token per head over keys 0..pos (read on device, so a CUDA
+    # graph replays it at any length); online softmax in fp32.
+    h = tl.program_id(0)
+    kvh = h // group
+    length = tl.load(pos_ptr) + 1
+    d = tl.arange(0, D)
+    q = tl.load(q_ptr + h * stride_qh + d).to(tl.float32) * scale
+    m = tl.full((), float("-inf"), tl.float32)
+    total = tl.zeros((), tl.float32)
+    acc = tl.zeros((D,), tl.float32)
+    base = kvh * stride_kh
+    for start in range(0, length, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        valid = offs < length
+        ptrs = base + offs[:, None] * stride_kc + d[None, :]
+        k = tl.load(k_ptr + ptrs, mask=valid[:, None], other=0.0).to(tl.float32)
+        s = tl.where(valid, tl.sum(k * q[None, :], axis=1), float("-inf"))
+        m_new = tl.maximum(m, tl.max(s, axis=0))
+        p = tl.exp(s - m_new)
+        alpha = tl.exp(m - m_new)
+        v = tl.load(v_ptr + ptrs, mask=valid[:, None], other=0.0).to(tl.float32)
+        total = total * alpha + tl.sum(p, axis=0)
+        acc = acc * alpha + tl.sum(p[:, None] * v, axis=0)
+        m = m_new
+    tl.store(o_ptr + h * D + d, (acc / total).to(o_ptr.dtype.element_ty))
+
+
+def decode_attention(q: Any, keys: Any, values: Any, pos: Any, scale: float) -> Any:
+    """Attention of one query token ``q`` ``[1, heads, 1, dim]`` over cache
+    slots ``0..pos`` of ``keys`` / ``values`` ``[1, kv_heads, capacity, dim]``
+    (``pos`` a 1-element device tensor). Returns ``[1, heads, 1, dim]``."""
+    _, heads, _, dim = q.shape
+    kv_heads = keys.shape[1]
+    if keys.stride(-1) != 1 or values.stride() != keys.stride():
+        keys, values = keys.contiguous(), values.contiguous()
+    if q.stride(-1) != 1:
+        q = q.contiguous()
+    out = torch.empty((1, heads, 1, dim), dtype=q.dtype, device=q.device)
+    _decode_attention_kernel[(heads,)](
+        q, keys, values, out, pos, q.stride(1), keys.stride(1), keys.stride(2),
+        heads // kv_heads, float(scale), D=dim, BLOCK=64)
+    return out

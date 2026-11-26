@@ -641,10 +641,11 @@ class FastTalker:
         sdpa = torch.nn.functional.scaled_dot_product_attention
         batch, n, _ = x.shape
         rep = self.heads // self.kv_heads
+        kernels = _kernels(x) if masked else None
         if masked:
             cos = st.cos.index_select(0, st.pos)
             sin = st.sin.index_select(0, st.pos)
-            allowed = (st.positions <= st.pos)[None, None, None]
+            allowed = None if kernels is not None else (st.positions <= st.pos)[None, None, None]
         else:
             end = start + n
             cos, sin = st.cos[start:end][None, None], st.sin[start:end][None, None]
@@ -670,8 +671,12 @@ class FastTalker:
             if masked:
                 st.keys[i].index_copy_(2, st.pos, k)
                 st.values[i].index_copy_(2, st.pos, v)
-                out = sdpa(q, st.keys[i], st.values[i], attn_mask=allowed,
-                           scale=attn.scaling, enable_gqa=rep > 1)
+                if kernels is not None:  # reads only the live keys 0..pos
+                    out = kernels.decode_attention(q, st.keys[i], st.values[i], st.pos,
+                                                   attn.scaling)
+                else:
+                    out = sdpa(q, st.keys[i], st.values[i], attn_mask=allowed,
+                               scale=attn.scaling, enable_gqa=rep > 1)
             else:
                 st.keys[i][:, :, start:end] = k
                 st.values[i][:, :, start:end] = v
