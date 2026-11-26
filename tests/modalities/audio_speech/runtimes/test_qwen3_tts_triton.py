@@ -183,3 +183,28 @@ def test_linear_uses_a_gemv_for_up_to_four_rows(rows, monkeypatch):
     monkeypatch.setattr(torch.nn.functional, "linear", refuse)
     with torch.no_grad():
         assert k.linear(x, w).shape == (1, rows, 1024)
+
+
+@pytest.mark.parametrize("tokens,pos", [(1, 0), (1, 37), (2, 5)])
+def test_norm_rope_store_writes_rope_k_and_v_into_their_cache_slots(tokens, pos):
+    torch.manual_seed(8)
+    dtype = torch.bfloat16
+    norm = RMSNorm(128).to("cuda", dtype)
+    fused = torch.randn(1, tokens, 4096, device="cuda", dtype=dtype)
+    kh = fused[..., 2048:3072].view(1, tokens, 8, 128)  # k and v sliced from a fused QKV
+    vh = fused[..., 3072:].view(1, tokens, 8, 128)
+    ang = torch.randn(tokens, 128, device="cuda")
+    cos, sin = ang.cos().to(dtype), ang.sin().to(dtype)
+    keys = torch.full((1, 8, 64, 128), 7.0, device="cuda", dtype=dtype)
+    values = torch.full_like(keys, 7.0)
+    with torch.no_grad():
+        y = norm(kh)
+        want_k = (y * cos[None, :, None] + _rotate_half(y) * sin[None, :, None]).transpose(1, 2)
+        k.norm_rope_store(norm, kh, vh, cos, sin, keys, values,
+                          torch.tensor([pos], device="cuda"))
+    live = slice(pos, pos + tokens)
+    assert torch.allclose(keys[:, :, live].float(), want_k.float(), atol=2e-2, rtol=2e-2)
+    assert torch.equal(values[:, :, live], vh.transpose(1, 2))
+    others = torch.ones(64, dtype=torch.bool)
+    others[live] = False
+    assert bool((keys[:, :, others] == 7).all()) and bool((values[:, :, others] == 7).all())

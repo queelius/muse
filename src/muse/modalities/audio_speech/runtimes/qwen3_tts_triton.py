@@ -59,32 +59,56 @@ def rms_norm(module: Any, x: Any) -> Any:
 
 
 @triton.jit
-def _rms_norm_rope_kernel(x_ptr, w_ptr, cos_ptr, sin_ptr, y_ptr, heads, tokens,
-                          stride_t, stride_h, n, eps, BLOCK: tl.constexpr):
-    # Per-head RMSNorm then rotary embedding, rounding where upstream does:
-    # norm -> dtype, * weight -> dtype, then (y * cos) and
-    # (rotate_half(y) * sin) each -> dtype, and their sum -> dtype.
-    row = tl.program_id(0)
-    t = row // heads
-    base = t * stride_t + (row % heads) * stride_h
+def _norm_rope_row(x_ptr, w_ptr, cos_ptr, sin_ptr, n, eps, dt, BLOCK: tl.constexpr):
+    # One head's RMSNorm then rotary embedding (x_ptr / cos_ptr / sin_ptr at
+    # the row), rounding where upstream does: norm -> dtype, * weight ->
+    # dtype, then (y * cos) and (rotate_half(y) * sin) each -> dtype, and
+    # their sum -> dtype.
     cols = tl.arange(0, BLOCK)
     half = n // 2
     mask = cols < n
     perm = tl.where(cols < half, cols + half, cols - half)
-    dt = y_ptr.dtype.element_ty
-    x = tl.load(x_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-    xp = tl.load(x_ptr + base + perm, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    xp = tl.load(x_ptr + perm, mask=mask, other=0.0).to(tl.float32)
     inv = tl.math.rsqrt(tl.sum(x * x, axis=0) / n + eps)
     w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     wp = tl.load(w_ptr + perm, mask=mask, other=0.0).to(tl.float32)
     y = (w * (x * inv).to(dt).to(tl.float32)).to(dt).to(tl.float32)
     yp = (wp * (xp * inv).to(dt).to(tl.float32)).to(dt).to(tl.float32)
     rot = tl.where(cols < half, -yp, yp)
-    pos = (t % tokens) * n
-    c = tl.load(cos_ptr + pos + cols, mask=mask, other=0.0).to(tl.float32)
-    s = tl.load(sin_ptr + pos + cols, mask=mask, other=0.0).to(tl.float32)
-    out = (y * c).to(dt).to(tl.float32) + (rot * s).to(dt).to(tl.float32)
-    tl.store(y_ptr + row * n + cols, out.to(dt), mask=mask)
+    c = tl.load(cos_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    s = tl.load(sin_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    return ((y * c).to(dt).to(tl.float32) + (rot * s).to(dt).to(tl.float32)).to(dt)
+
+
+@triton.jit
+def _rms_norm_rope_kernel(x_ptr, w_ptr, cos_ptr, sin_ptr, y_ptr, heads, tokens,
+                          stride_t, stride_h, n, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    t = row // heads
+    cols = tl.arange(0, BLOCK)
+    out = _norm_rope_row(x_ptr + t * stride_t + (row % heads) * stride_h, w_ptr,
+                         cos_ptr + (t % tokens) * n, sin_ptr + (t % tokens) * n, n, eps,
+                         y_ptr.dtype.element_ty, BLOCK)
+    tl.store(y_ptr + row * n + cols, out, mask=cols < n)
+
+
+@triton.jit
+def _norm_rope_store_kernel(k_ptr, v_ptr, w_ptr, cos_ptr, sin_ptr, keys_ptr, values_ptr,
+                            pos_ptr, heads, stride_t, stride_h, stride_vt, stride_vh,
+                            stride_ch, stride_cs, n, eps, BLOCK: tl.constexpr):
+    # Token t, kv head h: rope(norm(k)) and v into cache slot pos + t.
+    row = tl.program_id(0)
+    t = row // heads
+    h = row % heads
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n
+    slot = h * stride_ch + (tl.load(pos_ptr) + t) * stride_cs
+    out = _norm_rope_row(k_ptr + t * stride_t + h * stride_h, w_ptr, cos_ptr + t * n,
+                         sin_ptr + t * n, n, eps, keys_ptr.dtype.element_ty, BLOCK)
+    tl.store(keys_ptr + slot + cols, out, mask=mask)
+    v = tl.load(v_ptr + t * stride_vt + h * stride_vh + cols, mask=mask)
+    tl.store(values_ptr + slot + cols, v, mask=mask)
 
 
 def rms_norm_rope(module: Any, x: Any, cos: Any, sin: Any) -> Any:
@@ -100,6 +124,24 @@ def rms_norm_rope(module: Any, x: Any, cos: Any, sin: Any) -> Any:
         x, module.weight, cos, sin, y, heads, tokens, x.stride(1), x.stride(2), n,
         float(module.variance_epsilon), BLOCK=triton.next_power_of_2(n))
     return y
+
+
+def norm_rope_store(module: Any, k: Any, v: Any, cos: Any, sin: Any, keys: Any,
+                    values: Any, pos: Any) -> None:
+    """Write ``rope(module(k))`` and ``v`` (``[1, tokens, kv_heads, dim]``, unit
+    last-dim stride) for token ``t`` into slot ``pos + t`` of ``keys`` /
+    ``values`` (``[1, kv_heads, capacity, dim]``); ``pos`` is a 1-element
+    device tensor and ``cos`` / ``sin`` are ``[tokens, dim]``. One kernel."""
+    _, tokens, heads, n = k.shape
+    if k.stride(-1) != 1:
+        k = k.contiguous()
+    if v.stride(-1) != 1:
+        v = v.contiguous()
+    cos, sin = cos.contiguous(), sin.contiguous()
+    _norm_rope_store_kernel[(tokens * heads,)](
+        k, v, module.weight, cos, sin, keys, values, pos, heads, k.stride(1), k.stride(2),
+        v.stride(1), v.stride(2), keys.stride(1), keys.stride(2), n,
+        float(module.variance_epsilon), BLOCK=triton.next_power_of_2(n))
 
 
 @triton.jit

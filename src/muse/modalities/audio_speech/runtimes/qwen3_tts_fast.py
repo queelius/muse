@@ -345,8 +345,9 @@ class FastCodePredictor:
         end = start + n
         c, s = cos[start:end], sin[start:end]
         rep = self.heads // self.kv_heads
-        kernels = _kernels(x) if n == 1 and batch == 1 else None
-        if kernels is not None:  # the last slot, as a device tensor for the kernel
+        kernels = _kernels(x) if batch == 1 else None
+        if kernels is not None:  # first and last slots, as device tensors for kernels
+            first = self._positions(x)[start:start + 1]
             last = self._positions(x)[end - 1:end]
         if self._fused is None:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.cp.model.layers]
@@ -356,11 +357,14 @@ class FastCodePredictor:
             attn, fused = layer.self_attn, self._fused[i]
             q, k, v = fused.project(layer, h, torch)
             q = _norm_rope(attn.q_norm, q.view(batch, n, self.heads, self.head_dim), c, s, torch)
-            k = _norm_rope(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim), c, s, torch)
-            v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
-            keys[i][:, :, start:end] = k
-            values[i][:, :, start:end] = v
-            if kernels is not None:
+            k = k.view(batch, n, self.kv_heads, self.head_dim)
+            v = v.view(batch, n, self.kv_heads, self.head_dim)
+            if kernels is not None:  # K and V straight into slots start..end-1
+                kernels.norm_rope_store(attn.k_norm, k, v, c, s, keys[i], values[i], first)
+            else:
+                keys[i][:, :, start:end] = _norm_rope(attn.k_norm, k, c, s, torch)
+                values[i][:, :, start:end] = v.transpose(1, 2)
+            if kernels is not None and n == 1:
                 out = kernels.decode_attention(q, keys[i], values[i], last, attn.scaling)
             else:
                 out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
@@ -712,8 +716,19 @@ class FastTalker:
                 q, k, v = self._fused[i].project(layer, h, torch)
                 q = _norm_rope(attn.q_norm, q.view(batch, n, self.heads, self.head_dim),
                                cos, sin, torch)
-                k = _norm_rope(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim),
-                               cos, sin, torch)
+                k = k.view(batch, n, self.kv_heads, self.head_dim)
+                v = v.view(batch, n, self.kv_heads, self.head_dim)
+                if kernels is not None:  # K and V go straight to slot pos;
+                    kernels.norm_rope_store(attn.k_norm, k, v, cos, sin, st.keys[i],
+                                            st.values[i], st.pos)
+                    # attention reads only the live keys 0..pos
+                    out = kernels.decode_attention(q, st.keys[i], st.values[i], st.pos,
+                                                   attn.scaling)
+                else:
+                    st.keys[i].index_copy_(2, st.pos, _norm_rope(attn.k_norm, k, cos, sin, torch))
+                    st.values[i].index_copy_(2, st.pos, v.transpose(1, 2))
+                    out = sdpa(q, st.keys[i], st.values[i], attn_mask=allowed,
+                               scale=attn.scaling, enable_gqa=rep > 1)
             else:  # exact path: the upstream modules, as upstream calls them
                 h = layer.input_layernorm(x)
                 q, k, v = attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)
@@ -721,17 +736,7 @@ class FastTalker:
                 k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim)).transpose(1, 2)
                 q = q * cos + _rotate_half(q, torch) * sin
                 k = k * cos + _rotate_half(k, torch) * sin
-            v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
-            if masked:
-                st.keys[i].index_copy_(2, st.pos, k)
-                st.values[i].index_copy_(2, st.pos, v)
-                if kernels is not None:  # reads only the live keys 0..pos
-                    out = kernels.decode_attention(q, st.keys[i], st.values[i], st.pos,
-                                                   attn.scaling)
-                else:
-                    out = sdpa(q, st.keys[i], st.values[i], attn_mask=allowed,
-                               scale=attn.scaling, enable_gqa=rep > 1)
-            else:
+                v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
                 st.keys[i][:, :, start:end] = k
                 st.values[i][:, :, start:end] = v
                 out = sdpa(q, st.keys[i][:, :, :end], st.values[i][:, :, :end],
