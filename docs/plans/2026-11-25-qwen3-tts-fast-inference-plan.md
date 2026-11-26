@@ -179,7 +179,25 @@ Gates for int8 runs: talker KL <= 1.1e-3 as before; predictor KL <= 4x its bf16 
 
 What was tried: int8 heads too (talker KL 1.25e-3, over its gate, for 0.08 ms: no). Offline on the real weights, per-row int8 sits at ~41 dB SNR; finer scale groups (256 / 128 / 64 columns) gain 1.2 / 1.9 / 2.7 dB and row-and-column equilibration nothing, because the weights are close to Gaussian. Getting meaningfully closer needs calibration data (GPTQ-style rounding), i.e. a published quantized checkpoint.
 
-Open: the int8 copies sit beside the float weights (+0.5 GiB on the 0.6B, +1.4 GiB on the 1.7B). Storing the layers as int8 only (float weights dropped, prefill and fallbacks reading dequantized weights) would turn that into a saving of the same size, at the cost of the in-process exact reference.
+The table above is the first form, with the int8 copies beside the float weights (+0.5 GiB on the 0.6B, +1.4 GiB on the 1.7B, float prefill). A blind listening test on it (owner, 14 pairs, 8 mixed pairs judged): bf16 preferred in 3, int8 in 3, no difference in 2; one take preferred in 3 of the 4 bf16-only control pairs.
+
+### int8-only storage (2026-11-26): memory falls instead of rising
+
+`_FusedLayer.quantize` now stores the int8 and drops the float weights: each bias-free projection module gets its rows of the fused int8 matrix, `weight = None`, and a `forward` that computes from them, so upstream's own calls of the modules (prefill, larger batches, fallbacks) keep working. Few-row products use the int8 GEMV; anything else dequantizes per call with a one-pass Triton kernel into `F.linear`. Decoders quantize at construction, so every request computes from the same weights. Quantization runs in 1024-row chunks to keep the load-time temporaries small.
+
+| | bf16 | int8 only |
+| --- | ---: | ---: |
+| 0.6B frame GPU ms / RTF, 48 takes | 11.56 / 0.174 | 7.22 / 0.123 |
+| 1.7B frame GPU ms / RTF, 48 takes | 17.61 / 0.244 | 10.20 / 0.154 |
+| 0.6B prefill, 72 tokens | 41.0 ms | 57.6 ms |
+| 0.6B talker KL vs a float copy / predictor KL vs fp32 | 7.5e-4 / 1.44e-3 | 1.87e-3 / 4.45e-3 |
+| 1.7B talker KL / predictor KL | 4.6e-4 / 8.4e-4 | 1.37e-3 / 2.97e-3 |
+| 0.6B ASR errors / UTMOS, 48 takes | 2/628 / 4.465 | 2/628 / 4.460 |
+| 1.7B ASR errors / UTMOS, 48 takes | 2/628 / 4.396 | 2/628 / 4.406 |
+| 0.6B peak GiB: load / short line / 25 s paragraph | - / 2.33 / 2.80 | 2.0 / 1.85 / 2.34 |
+| 1.7B peak GiB: load / short line / 25 s paragraph | - / 4.03 / 4.70 | 3.94 / 2.64 / 3.32 |
+
+Cost of dropping the floats: the prefill is int8 too, so the talker's KL against a float copy rises from 0.9e-3 (float prefill) to 1.4-1.9e-3, above the 1.1e-3 gate used for the float path; the int8 gate is 2.5e-3, set after ASR and UTMOS came back unchanged (paired UTMOS differences -0.005 +/- 0.013 and +0.009 +/- 0.017). The exact path still equals upstream token for token (both now read the int8 layers), and graphed still equals masked-eager. The process holds no float reference any more: the harness deep-copies the talker and predictor before install for its KL gates. The prefill's extra 17 ms is mostly the launch overhead of ~200 dequantize kernels; dequantizing the fused q/k/v and gate/up once each would roughly halve it.
 
 ---
 

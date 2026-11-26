@@ -672,23 +672,25 @@ def test_quantize_rows_rounds_each_row_to_its_own_int8_grid():
     assert bool((err <= scale[:, None] * 0.5001).all())  # the nearest grid point
 
 
+def test_quantize_rows_is_the_same_past_one_chunk_of_rows():
+    torch.manual_seed(1)
+    w = torch.randn(2500, 6)
+    q, scale = fast.quantize_rows(w, torch)
+    want_scale = w.abs().amax(1) / 127
+    assert torch.equal(scale, want_scale)
+    assert torch.equal(q, torch.round(w / want_scale[:, None]).to(torch.int8))
+
+
 def _with_silu(model):
     """qwen-tts's MLPs name their activation; the fused gate/up needs it."""
     for layer in model.layers:
         layer.mlp.act_fn = nn.SiLU()
 
 
-def _quantized(model):
-    """Quantize ``model``'s layers as an int8 decoder does on CUDA; the int8
-    tensors by identity."""
-    _with_silu(model)
-    owned = set()
-    for layer in model.layers:
-        fused = fast._FusedLayer.of(layer, torch)
-        fused.quantize(layer, torch)
-        assert set(fused.int8) == {"qkv", "o", "gate_up", "down"}
-        owned |= {id(q) for q, _ in fused.int8.values()}
-    return owned
+def _projections(layer):
+    attn, mlp = layer.self_attn, layer.mlp
+    return [attn.q_proj, attn.k_proj, attn.v_proj, attn.o_proj,
+            mlp.gate_proj, mlp.up_proj, mlp.down_proj]
 
 
 def _spy_linears(monkeypatch):
@@ -702,16 +704,28 @@ def _spy_linears(monkeypatch):
     return calls
 
 
-def test_fused_layer_int8_copies_match_their_float_weights(cp):
-    _quantized(cp.model)
+def test_quantize_stores_a_layer_as_int8_only_and_its_modules_still_compute(cp):
+    _with_silu(cp.model)
     layer = cp.model.layers[0]
-    fused = fast._FusedLayer.of(layer, torch)
-    floats = {"qkv": fused.qkv, "gate_up": fused.gate_up,
-              "o": layer.self_attn.o_proj.weight, "down": layer.mlp.down_proj.weight}
-    for name, (q, scale) in fused.int8.items():
-        w = floats[name].detach()
-        assert q.shape == w.shape and q.dtype == torch.int8
-        assert torch.allclose(q.float() * scale[:, None], w, atol=float(scale.max()) * 0.51)
+    modules = _projections(layer)
+    torch.manual_seed(3)
+    xs = [torch.randn(2, 7, m.in_features) for m in modules]
+    floats = [m.weight.detach().clone() for m in modules]
+    with torch.no_grad():
+        want = [m(x) for m, x in zip(modules, xs)]
+        fused = fast._FusedLayer.of(layer, torch)
+        fused.quantize(layer, torch)
+        got = [m(x) for m, x in zip(modules, xs)]  # as upstream calls them
+    assert set(fused.int8) == {"qkv", "o", "gate_up", "down"}
+    assert fused.qkv is None and fused.gate_up is None  # the float copies are gone
+    for m, w, a, b, x in zip(modules, floats, want, got, xs):
+        assert m.weight is None and m.bias is None
+        q, scale = vars(m)["_muse_int8"]
+        assert q.dtype == torch.int8 and q.shape == w.shape
+        dequant = q.float() * scale[:, None]
+        assert torch.allclose(dequant, w, atol=float(scale.max()) * 0.51)
+        assert torch.allclose(b, nn.functional.linear(x, dequant), atol=1e-5)
+        assert torch.allclose(b, a, atol=0.1) and not torch.equal(b, a)
     before = dict(fused.int8)
     fused.quantize(layer, torch)  # idempotent
     assert all(fused.int8[n][0] is before[n][0] for n in before)
@@ -719,51 +733,72 @@ def test_fused_layer_int8_copies_match_their_float_weights(cp):
 
 def test_fused_layers_are_quantized_only_for_an_int8_decoder_with_kernels(cp, monkeypatch):
     _with_silu(cp.model)
-    layers, x = cp.model.layers, torch.zeros(1)
-    assert not any(f.int8 for f in fast._fused_layers(layers, x, True, torch))  # CPU
+    layers = cp.model.layers
+    assert not any(f.int8 for f in fast._fused_layers(layers, True, torch))  # CPU: no int8 GEMV
     monkeypatch.setattr(fast, "_kernels", lambda t: object())
-    assert not any(f.int8 for f in fast._fused_layers(layers, x, False, torch))
+    assert not any(f.int8 for f in fast._fused_layers(layers, False, torch))
     assert all(set(f.int8) == {"qkv", "o", "gate_up", "down"}
-               for f in fast._fused_layers(layers, x, True, torch))
+               for f in fast._fused_layers(layers, True, torch))
 
 
-def test_int8_predictor_reads_layer_weights_quantized_and_heads_in_float(cp, embeds,
-                                                                         monkeypatch):
-    owned = _quantized(cp.model)
+def _int8_decoders(talker, monkeypatch):
+    """Decoders built as on CUDA with Triton: their layers stored as int8."""
+    _with_silu(talker.model)
+    _with_silu(talker.code_predictor.model)
+    with monkeypatch.context() as m:
+        m.setattr(fast, "_kernels", lambda t: object())
+        cp = fast.FastCodePredictor(talker.code_predictor, torch=torch, int8=True)
+        ft = fast.FastTalker(talker, cp, torch=torch, int8=True)
+    for model in (talker.model, talker.code_predictor.model):
+        assert all(m.weight is None for layer in model.layers for m in _projections(layer))
+    return cp, ft
+
+
+def test_int8_decoders_on_cpu_keep_the_float_weights(talker):
+    _with_silu(talker.model)
+    cp = fast.FastCodePredictor(talker.code_predictor, torch=torch, int8=True)
+    fast.FastTalker(talker, cp, torch=torch, int8=True)
+    for model in (talker.model, talker.code_predictor.model):
+        assert all(m.weight is not None for layer in model.layers for m in _projections(layer))
+
+
+def test_int8_predictor_matches_a_reference_over_the_same_int8_layers(talker, embeds,
+                                                                      monkeypatch):
+    dec, _ = _int8_decoders(talker, monkeypatch)
+    cp = talker.code_predictor
     calls = _spy_linears(monkeypatch)
-    args = dict(inputs_embeds=embeds, max_new_tokens=STEPS, do_sample=False,
-                top_p=1.0, top_k=50, temperature=0.9)
     with torch.no_grad():
-        want = fast.FastCodePredictor(cp, torch=torch).generate(**args).sequences
-        assert calls and all(quant is None for _, quant in calls)
-        calls.clear()
-        got = fast.FastCodePredictor(cp, torch=torch, int8=True).generate(**args).sequences
-    assert torch.equal(got, want)  # no int8 kernel on CPU: the same float products
+        seq = dec.generate(inputs_embeds=embeds, max_new_tokens=STEPS, do_sample=False,
+                           top_p=1.0, top_k=50, temperature=0.9).sequences
+        seen = list(calls)
+        ref = reference_logits(cp, embeds, seq)
+    for step, logits in enumerate(ref):
+        assert torch.equal(seq[:, step], logits.argmax(-1)), step
+    assert cp.upstream_calls == []
+    # layers read int8 (no float weight left); the output heads stay float
     heads = {id(h.weight) for h in cp.lm_head}
-    head_calls = [quant for weight, quant in calls if id(weight) in heads]
-    body_calls = [quant for weight, quant in calls if id(weight) not in heads]
-    assert head_calls and all(quant is None for quant in head_calls)
-    assert body_calls and all(quant is not None for quant in body_calls)
-    assert {id(quant[0]) for quant in body_calls} == owned
+    head = [quant for weight, quant in seen if weight is not None and id(weight) in heads]
+    body = [(weight, quant) for weight, quant in seen
+            if weight is None or id(weight) not in heads]
+    assert len(head) == STEPS and all(quant is None for quant in head)
+    assert body and all(weight is None and quant[0].dtype == torch.int8
+                        for weight, quant in body)
 
 
-def test_int8_talker_quantizes_graphed_frames_and_leaves_the_exact_path(talker, prompt,
-                                                                        monkeypatch):
-    owned = _quantized(talker.model)
-    _quantized(talker.code_predictor.model)
+@pytest.mark.parametrize("masked", [False, True], ids=["exact", "masked"])
+def test_int8_talker_matches_a_reference_over_the_same_int8_layers(talker, prompt, masked,
+                                                                   monkeypatch):
+    _, ft = _int8_decoders(talker, monkeypatch)
+    if masked:
+        monkeypatch.setattr(ft, "_step",
+                            lambda st, p, pos: ft._frame(st, p, start=pos, masked=True))
     with torch.no_grad():
+        result = ft.generate(**_talker_kwargs(prompt))
         ref = reference_talker(talker, **prompt, max_new=12)
-        calls = _spy_linears(monkeypatch)
-        exact = _fast_talker(talker, int8=True).generate(**_talker_kwargs(prompt))
-        assert not any(quant is not None and id(quant[0]) in owned for _, quant in calls)
-        calls.clear()
-        masked = _fast_talker(talker, masked=True, monkeypatch=monkeypatch,
-                              int8=True).generate(**_talker_kwargs(prompt))
-    _assert_matches_reference(exact, ref)
-    _assert_matches_reference(masked, ref)
-    assert {id(quant[0]) for _, quant in calls if quant is not None} >= owned
-    head = [quant for weight, quant in calls if weight is talker.codec_head.weight]
-    assert head and all(quant is None for quant in head)
+    _assert_matches_reference(result, ref)
+    assert talker.upstream_calls == [] and talker.code_predictor.upstream_calls == []
+    assert talker.codec_head.weight is not None
+    assert all(h.weight is not None for h in talker.code_predictor.lm_head)
 
 
 def test_installs_pass_int8_to_the_decoders(talker, monkeypatch):

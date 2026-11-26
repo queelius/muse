@@ -311,26 +311,49 @@ _GEMV_INT8_ROWS_CONFIGS = {1024: (4, 512, 2, 2), 2048: (4, 256, 2, 2), 3072: (4,
 _GEMV_INT8_ROWS_DEFAULT = (4, 256, 2, 2)
 
 
+@triton.jit
+def _dequant_kernel(q_ptr, s_ptr, w_ptr, K, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < K
+    q = tl.load(q_ptr + row * K + offs, mask=mask, other=0)
+    scale = tl.load(s_ptr + row)
+    tl.store(w_ptr + row * K + offs, (q.to(tl.float32) * scale).to(w_ptr.dtype.element_ty),
+             mask=mask)
+
+
+def dequantize(q: Any, scale: Any, dtype: Any) -> Any:
+    """``q * scale[:, None]`` as a ``dtype`` weight: one pass, no fp32 copy."""
+    q = q.contiguous()
+    n, kdim = q.shape
+    w = torch.empty((n, kdim), dtype=dtype, device=q.device)
+    block = min(1024, triton.next_power_of_2(kdim))
+    _dequant_kernel[(n, triton.cdiv(kdim, block))](q, scale.contiguous(), w, kdim, BLOCK=block)
+    return w
+
+
 def linear(x: Any, weight: Any, quant: Any = None) -> Any:
     """``F.linear(x, weight)`` (no bias). Up to four rows of ``x`` use a
     Triton GEMV, which beats cuBLAS on these bandwidth-bound shapes;
     anything else is ``F.linear``.
 
-    ``quant`` is ``weight`` as ``(int8 [n, k], fp32 scale [n])`` (see
-    ``qwen3_tts_fast.quantize_rows``): the GEMV then reads those instead,
-    half the bytes, and computes ``(q @ x) * scale``."""
-    n, kdim = weight.shape
+    ``quant`` is the weight as ``(int8 [n, k], fp32 scale [n])`` (see
+    ``qwen3_tts_fast.quantize_rows``), with ``weight`` None: the GEMV reads
+    half the bytes and computes ``(q @ x) * scale``; ``F.linear`` gets the
+    dequantized weight."""
+    matrix, scale = (weight, weight) if quant is None else quant
+    n, kdim = matrix.shape
     m = x.numel() // kdim if x.shape[-1] == kdim else 0
     if quant is None:
         table, default = ((_GEMV_CONFIGS, _GEMV_DEFAULT) if m == 1
                           else (_GEMV_ROWS_CONFIGS, _GEMV_ROWS_DEFAULT))
-        matrix = scale = weight
     else:
         table, default = ((_GEMV_INT8_CONFIGS, _GEMV_INT8_DEFAULT) if m == 1
                           else (_GEMV_INT8_ROWS_CONFIGS, _GEMV_INT8_ROWS_DEFAULT))
-        matrix, scale = quant
     block_n, block_k, warps, stages = table.get(kdim, default)
     if not 0 < m <= _GEMV_MAX_ROWS or kdim % block_k or matrix.stride() != (kdim, 1):
+        if quant is not None:
+            weight = dequantize(matrix, scale, x.dtype)
         return torch.nn.functional.linear(x, weight)
     y = torch.empty((*x.shape[:-1], n), dtype=x.dtype, device=x.device)
     grid = (triton.cdiv(n, block_n),)

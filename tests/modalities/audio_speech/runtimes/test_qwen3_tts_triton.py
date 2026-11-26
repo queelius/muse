@@ -182,19 +182,29 @@ def test_linear_with_int8_weights_matches_the_dequantized_fp32_product(n, kdim, 
     x = torch.randn(1, rows, kdim, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         want = torch.nn.functional.linear(x.float(), q.float() * scale[:, None])
-        # the float weight is unread: zeros would show up in the result
-        got = k.linear(x, torch.zeros_like(w), (q, scale))
+        got = k.linear(x, None, (q, scale))
     assert got.shape == (1, rows, n) and got.dtype == torch.bfloat16
     assert torch.allclose(got.float(), want, atol=1e-2, rtol=8e-3)
 
 
-def test_linear_with_int8_weights_uses_the_float_weight_off_the_few_row_case():
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_dequantize_is_the_fp32_product_rounded_once(dtype):
+    torch.manual_seed(9)
+    w = torch.randn(300, 1000, device="cuda", dtype=torch.bfloat16)
+    q, scale = fast.quantize_rows(w, torch)
+    q, scale = q[40:260], scale[40:260]  # a module's rows of a fused matrix
+    want = (q.float() * scale[:, None]).to(dtype)
+    assert torch.equal(k.dequantize(q, scale, dtype), want)
+
+
+def test_linear_with_int8_weights_dequantizes_off_the_few_row_case():
     torch.manual_seed(8)
     w = torch.randn(512, 1024, device="cuda", dtype=torch.bfloat16)
+    q, scale = fast.quantize_rows(w, torch)
     x = torch.randn(1, 5, 1024, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
-        got = k.linear(x, w, fast.quantize_rows(w, torch))
-        assert torch.equal(got, torch.nn.functional.linear(x, w))
+        want = torch.nn.functional.linear(x, (q.float() * scale[:, None]).to(x.dtype))
+        assert torch.equal(k.linear(x, None, (q, scale)), want)
 
 
 @pytest.mark.parametrize("rows", [1, 2, 4])
