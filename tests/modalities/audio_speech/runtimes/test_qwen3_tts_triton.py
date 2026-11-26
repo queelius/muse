@@ -105,3 +105,26 @@ def test_add_rms_norm_matches_add_then_norm(dtype):
     tol = 1e-2 if dtype == torch.bfloat16 else 1e-5
     assert torch.equal(got_x, want_x)
     assert torch.allclose(got_y.float(), want_y.float(), atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("n,kdim", [(4096, 1024), (1024, 2048), (1024, 3072), (2048, 1024),
+                                     (3000, 1024)])
+def test_linear_on_one_row_matches_an_fp32_product(n, kdim):
+    torch.manual_seed(5)
+    w = torch.randn(n, kdim, device="cuda", dtype=torch.bfloat16) * 0.02
+    x = torch.randn(1, 1, kdim, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        want = torch.nn.functional.linear(x.float(), w.float())
+        got = k.linear(x, w)
+    assert got.shape == (1, 1, n) and got.dtype == torch.bfloat16
+    # fp32 accumulation, one rounding to bf16 (as cuBLAS)
+    assert torch.allclose(got.float(), want, atol=1e-2, rtol=8e-3)
+
+
+@pytest.mark.parametrize("shape,kdim", [((1, 2), 1024), ((1, 1), 1000)])
+def test_linear_falls_back_to_torch_off_the_one_row_tiled_case(shape, kdim):
+    torch.manual_seed(6)
+    w = torch.randn(512, kdim, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(*shape, kdim, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        assert torch.equal(k.linear(x, w), torch.nn.functional.linear(x, w))

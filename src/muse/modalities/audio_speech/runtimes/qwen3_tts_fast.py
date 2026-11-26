@@ -130,6 +130,19 @@ def _norm(module: Any, x: Any) -> Any:
     return k.rms_norm(module, x) if k is not None else module(x)
 
 
+def _linear(x: Any, weight: Any, torch: Any) -> Any:
+    """``F.linear(x, weight)``; a one-row product is a Triton GEMV on CUDA."""
+    k = _kernels(x)
+    return k.linear(x, weight) if k is not None else torch.nn.functional.linear(x, weight)
+
+
+def _proj(module: Any, x: Any, torch: Any) -> Any:
+    """``module(x)`` for a Linear; bias-free ones go through :func:`_linear`."""
+    if not isinstance(module, torch.nn.Linear) or module.bias is not None:
+        return module(x)
+    return _linear(x, module.weight, torch)
+
+
 def _add_norm(x: Any, delta: Any, module: Any) -> tuple[Any, Any]:
     """``(x + delta, module(x + delta))``: one Triton kernel on CUDA."""
     k = _kernels(x)
@@ -175,15 +188,15 @@ class _FusedLayer:
         if self.qkv is None:
             attn = layer.self_attn
             return attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)
-        return torch.nn.functional.linear(h, self.qkv).split(self.sizes, dim=-1)
+        return _linear(h, self.qkv, torch).split(self.sizes, dim=-1)
 
     def mlp(self, layer: Any, x: Any, torch: Any) -> Any:
         if self.gate_up is None:
             return layer.mlp(x)
-        gate_up = torch.nn.functional.linear(x, self.gate_up)
+        gate_up = _linear(x, self.gate_up, torch)
         kernels = _kernels(gate_up)
         if kernels is not None:
-            return layer.mlp.down_proj(kernels.silu_mul(gate_up))
+            return _proj(layer.mlp.down_proj, kernels.silu_mul(gate_up), torch)
         gate, up = gate_up.chunk(2, dim=-1)
         return layer.mlp.down_proj(torch.nn.functional.silu(gate) * up)
 
@@ -306,7 +319,7 @@ class FastCodePredictor:
 
         def next_token(step: int, x: Any, start: int) -> Any:
             hidden = self._forward(x, start, keys, values, cos, sin)
-            return sample_next(cp.lm_head[step](hidden), torch=torch,
+            return sample_next(_proj(cp.lm_head[step], hidden, torch), torch=torch,
                                do_sample=do_sample, temperature=temperature,
                                top_k=top_k, top_p=top_p)
 
@@ -340,8 +353,8 @@ class FastCodePredictor:
             values[i][:, :, start:end] = v
             out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
                        scale=attn.scaling, enable_gqa=rep > 1)
-            x, post = _add_norm(x, attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1)),
-                                layer.post_attention_layernorm)
+            out = out.transpose(1, 2).reshape(batch, n, -1)
+            x, post = _add_norm(x, _proj(attn.o_proj, out, torch), layer.post_attention_layernorm)
             following = (layers[i + 1].input_layernorm if i + 1 < len(layers)
                          else self.cp.model.norm)
             x, h = _add_norm(x, fused.mlp(layer, post, torch), following)
@@ -612,7 +625,9 @@ class FastTalker:
         hidden = self._layers(x, st, start=start, masked=masked)
         st.hidden.copy_(hidden)
         st.pos.add_(1)
-        self._choose(self.talker.codec_head(hidden)[:, -1].float(), st, p)
+        head = self.talker.codec_head
+        scores = _proj(head, hidden, torch) if masked else head(hidden)
+        self._choose(scores[:, -1].float(), st, p)
         return codes
 
     def _choose(self, scores: Any, st: _TalkerState, p: _TalkerParams) -> None:
@@ -701,7 +716,8 @@ class FastTalker:
                 st.values[i][:, :, start:end] = v
                 out = sdpa(q, st.keys[i][:, :, :end], st.values[i][:, :, :end],
                            is_causal=n > 1, scale=attn.scaling, enable_gqa=rep > 1)
-            attn_out = attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
+            out = out.transpose(1, 2).reshape(batch, n, -1)
+            attn_out = _proj(attn.o_proj, out, torch) if masked else attn.o_proj(out)
             if masked:
                 x, post = _add_norm(x, attn_out, layer.post_attention_layernorm)
                 following = (layers[i + 1].input_layernorm if i + 1 < len(layers)

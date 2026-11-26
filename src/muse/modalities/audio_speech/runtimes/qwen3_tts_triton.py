@@ -205,3 +205,41 @@ def add_rms_norm(x: Any, delta: Any, module: Any) -> tuple[Any, Any]:
                                             float(module.variance_epsilon),
                                             BLOCK=triton.next_power_of_2(n))
     return out, y
+
+
+@triton.jit
+def _gemv_kernel(w_ptr, x_ptr, y_ptr, N, K, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    # y = W @ x for one row x: BLOCK_N outputs per program, fp32 accumulation,
+    # one rounding at the end (as cuBLAS). Weights stream through once, so
+    # they are marked evict-first to leave L2 to the activations.
+    rows = tl.program_id(0) * BLOCK_N + tl.arange(0, BLOCK_N)
+    rmask = rows < N
+    acc = tl.zeros((BLOCK_N, BLOCK_K), tl.float32)
+    for start in range(0, K, BLOCK_K):
+        cols = start + tl.arange(0, BLOCK_K)
+        w = tl.load(w_ptr + rows[:, None] * K + cols[None, :], mask=rmask[:, None],
+                    other=0.0, eviction_policy="evict_first")
+        x = tl.load(x_ptr + cols)
+        acc += w.to(tl.float32) * x.to(tl.float32)[None, :]
+    tl.store(y_ptr + rows, tl.sum(acc, axis=1).to(y_ptr.dtype.element_ty), mask=rmask)
+
+
+# (BLOCK_N, BLOCK_K, num_warps, num_stages) by input width, tuned on an
+# RTX 3060 for the Qwen3-TTS decode shapes; other widths use the default.
+_GEMV_CONFIGS = {1024: (2, 512, 2, 3), 2048: (4, 256, 4, 3), 3072: (8, 128, 8, 3)}
+_GEMV_DEFAULT = (4, 256, 4, 3)
+
+
+def linear(x: Any, weight: Any) -> Any:
+    """``F.linear(x, weight)`` (no bias). A one-row ``x`` uses a Triton GEMV,
+    which beats cuBLAS's on these bandwidth-bound shapes; anything else is
+    ``F.linear``."""
+    n, kdim = weight.shape
+    block_n, block_k, warps, stages = _GEMV_CONFIGS.get(kdim, _GEMV_DEFAULT)
+    if x.numel() != kdim or kdim % block_k or weight.stride() != (kdim, 1):
+        return torch.nn.functional.linear(x, weight)
+    y = torch.empty((*x.shape[:-1], n), dtype=x.dtype, device=x.device)
+    _gemv_kernel[(triton.cdiv(n, block_n),)](weight, x.contiguous(), y, n, kdim,
+                                             BLOCK_N=block_n, BLOCK_K=block_k,
+                                             num_warps=warps, num_stages=stages)
+    return y
