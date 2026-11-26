@@ -251,25 +251,30 @@ def add_rms_norm(x: Any, delta: Any, module: Any) -> tuple[Any, Any]:
 
 
 @triton.jit
-def _gemv_kernel(w_ptr, x_ptr, y_ptr, N, K, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+def _gemv_kernel(w_ptr, s_ptr, x_ptr, y_ptr, N, K, SCALED: tl.constexpr,
+                 BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
     # y = W @ x for one row x: BLOCK_N outputs per program, fp32 accumulation,
     # one rounding at the end (as cuBLAS). Weights stream through once, so
-    # they are marked evict-first to leave L2 to the activations.
+    # they are marked evict-first to leave L2 to the activations. SCALED: W is
+    # int8 with one fp32 scale per output row (half the bytes to stream).
     rows = tl.program_id(0) * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < N
     acc = tl.zeros((BLOCK_N, BLOCK_K), tl.float32)
     for start in range(0, K, BLOCK_K):
         cols = start + tl.arange(0, BLOCK_K)
         w = tl.load(w_ptr + rows[:, None] * K + cols[None, :], mask=rmask[:, None],
-                    other=0.0, eviction_policy="evict_first")
+                    other=0, eviction_policy="evict_first")
         x = tl.load(x_ptr + cols)
         acc += w.to(tl.float32) * x.to(tl.float32)[None, :]
-    tl.store(y_ptr + rows, tl.sum(acc, axis=1).to(y_ptr.dtype.element_ty), mask=rmask)
+    y = tl.sum(acc, axis=1)
+    if SCALED:
+        y = y * tl.load(s_ptr + rows, mask=rmask, other=0.0)
+    tl.store(y_ptr + rows, y.to(y_ptr.dtype.element_ty), mask=rmask)
 
 
 @triton.jit
-def _gemv_rows_kernel(w_ptr, x_ptr, y_ptr, M, N, K, ROWS: tl.constexpr,
-                      BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+def _gemv_rows_kernel(w_ptr, s_ptr, x_ptr, y_ptr, M, N, K, SCALED: tl.constexpr,
+                      ROWS: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
     # As _gemv_kernel for 2..4 rows of x: each weight tile is read once and
     # applied to every row (a two-token step costs about one GEMV, where
     # cuBLAS's small-M GEMM costs 10-25% more).
@@ -281,11 +286,13 @@ def _gemv_rows_kernel(w_ptr, x_ptr, y_ptr, M, N, K, ROWS: tl.constexpr,
     for start in range(0, K, BLOCK_K):
         cols = start + tl.arange(0, BLOCK_K)
         w = tl.load(w_ptr + rows[:, None] * K + cols[None, :], mask=rmask[:, None],
-                    other=0.0, eviction_policy="evict_first")
+                    other=0, eviction_policy="evict_first")
         x = tl.load(x_ptr + m[:, None] * K + cols[None, :], mask=mmask[:, None], other=0.0)
         acc += w.to(tl.float32)[None, :, :] * x.to(tl.float32)[:, None, :]
-    tl.store(y_ptr + m[:, None] * N + rows[None, :],
-             tl.sum(acc, axis=2).to(y_ptr.dtype.element_ty),
+    y = tl.sum(acc, axis=2)
+    if SCALED:
+        y = y * tl.load(s_ptr + rows, mask=rmask, other=0.0)[None, :]
+    tl.store(y_ptr + m[:, None] * N + rows[None, :], y.to(y_ptr.dtype.element_ty),
              mask=mmask[:, None] & rmask[None, :])
 
 
@@ -296,26 +303,44 @@ _GEMV_DEFAULT = (4, 256, 4, 3)
 _GEMV_ROWS_CONFIGS = {1024: (2, 512, 2, 3), 2048: (4, 256, 2, 2), 3072: (4, 256, 2, 3)}
 _GEMV_ROWS_DEFAULT = (2, 256, 2, 3)
 _GEMV_MAX_ROWS = 4  # more rows than this are a GEMM: F.linear
+# int8 weights: half the bytes per tile, so wider tiles
+_GEMV_INT8_CONFIGS = {1024: (1, 256, 2, 3), 2048: (4, 512, 4, 3), 3072: (4, 512, 4, 3),
+                      6144: (1, 1024, 8, 2)}
+_GEMV_INT8_DEFAULT = (4, 256, 4, 3)
+_GEMV_INT8_ROWS_CONFIGS = {1024: (4, 512, 2, 2), 2048: (4, 256, 2, 2), 3072: (4, 256, 2, 2)}
+_GEMV_INT8_ROWS_DEFAULT = (4, 256, 2, 2)
 
 
-def linear(x: Any, weight: Any) -> Any:
+def linear(x: Any, weight: Any, quant: Any = None) -> Any:
     """``F.linear(x, weight)`` (no bias). Up to four rows of ``x`` use a
     Triton GEMV, which beats cuBLAS on these bandwidth-bound shapes;
-    anything else is ``F.linear``."""
+    anything else is ``F.linear``.
+
+    ``quant`` is ``weight`` as ``(int8 [n, k], fp32 scale [n])`` (see
+    ``qwen3_tts_fast.quantize_rows``): the GEMV then reads those instead,
+    half the bytes, and computes ``(q @ x) * scale``."""
     n, kdim = weight.shape
     m = x.numel() // kdim if x.shape[-1] == kdim else 0
-    table, default = ((_GEMV_CONFIGS, _GEMV_DEFAULT) if m == 1
-                      else (_GEMV_ROWS_CONFIGS, _GEMV_ROWS_DEFAULT))
+    if quant is None:
+        table, default = ((_GEMV_CONFIGS, _GEMV_DEFAULT) if m == 1
+                          else (_GEMV_ROWS_CONFIGS, _GEMV_ROWS_DEFAULT))
+        matrix = scale = weight
+    else:
+        table, default = ((_GEMV_INT8_CONFIGS, _GEMV_INT8_DEFAULT) if m == 1
+                          else (_GEMV_INT8_ROWS_CONFIGS, _GEMV_INT8_ROWS_DEFAULT))
+        matrix, scale = quant
     block_n, block_k, warps, stages = table.get(kdim, default)
-    if not 0 < m <= _GEMV_MAX_ROWS or kdim % block_k or weight.stride() != (kdim, 1):
+    if not 0 < m <= _GEMV_MAX_ROWS or kdim % block_k or matrix.stride() != (kdim, 1):
         return torch.nn.functional.linear(x, weight)
     y = torch.empty((*x.shape[:-1], n), dtype=x.dtype, device=x.device)
     grid = (triton.cdiv(n, block_n),)
+    scaled = quant is not None
     if m == 1:
-        _gemv_kernel[grid](weight, x.contiguous(), y, n, kdim, BLOCK_N=block_n,
-                           BLOCK_K=block_k, num_warps=warps, num_stages=stages)
+        _gemv_kernel[grid](matrix, scale, x.contiguous(), y, n, kdim, SCALED=scaled,
+                           BLOCK_N=block_n, BLOCK_K=block_k, num_warps=warps,
+                           num_stages=stages)
     else:
-        _gemv_rows_kernel[grid](weight, x.contiguous(), y, m, n, kdim,
+        _gemv_rows_kernel[grid](matrix, scale, x.contiguous(), y, m, n, kdim, SCALED=scaled,
                                 ROWS=triton.next_power_of_2(m), BLOCK_N=block_n,
                                 BLOCK_K=block_k, num_warps=warps, num_stages=stages)
     return y

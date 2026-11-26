@@ -100,6 +100,7 @@ class Qwen3TTSRuntime:
         fast_code_predictor: bool = True,
         fast_talker: bool = True,
         fast_decoder: bool = True,
+        int8_weights: bool = False,
         cuda_graphs: bool = True,
         **_: Any,
     ) -> None:
@@ -139,9 +140,11 @@ class Qwen3TTSRuntime:
         set_inference_mode(getattr(self._tts, "model", None))
         graphs = bool(cuda_graphs) and on_cuda
         if fast_code_predictor:
-            qwen3_tts_fast.install(self._tts, torch=torch, use_cuda_graphs=graphs)
+            qwen3_tts_fast.install(self._tts, torch=torch, use_cuda_graphs=graphs,
+                                   int8=bool(int8_weights))
             if fast_talker:
-                qwen3_tts_fast.install_talker(self._tts, torch=torch, use_cuda_graphs=graphs)
+                qwen3_tts_fast.install_talker(self._tts, torch=torch, use_cuda_graphs=graphs,
+                                              int8=bool(int8_weights))
         if fast_decoder:
             qwen3_tts_fast.install_decoder(self._tts, torch=torch)
         self._device = device_map

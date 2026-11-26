@@ -121,7 +121,7 @@ def test_dtype_is_bf16_on_cuda_and_fp32_on_cpu(monkeypatch):
 def test_fast_code_predictor_installed_unless_disabled(monkeypatch):
     installed = []
     monkeypatch.setattr(rt.qwen3_tts_fast, "install",
-                        lambda tts, *, torch, use_cuda_graphs: installed.append(
+                        lambda tts, *, torch, use_cuda_graphs, int8: installed.append(
                             (tts, use_cuda_graphs)) or True)
     _design()
     _clone(fast_code_predictor=False)
@@ -131,9 +131,9 @@ def test_fast_code_predictor_installed_unless_disabled(monkeypatch):
 def test_fast_talker_installed_after_the_predictor_unless_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr(rt.qwen3_tts_fast, "install",
-                        lambda tts, *, torch, use_cuda_graphs: calls.append("predictor") or True)
+                        lambda tts, *, torch, use_cuda_graphs, int8: calls.append("predictor") or True)
     monkeypatch.setattr(rt.qwen3_tts_fast, "install_talker",
-                        lambda tts, *, torch, use_cuda_graphs: calls.append("talker") or True)
+                        lambda tts, *, torch, use_cuda_graphs, int8: calls.append("talker") or True)
     _design()
     assert calls == ["predictor", "talker"]
     calls.clear()
@@ -158,6 +158,18 @@ def test_fast_decoder_installed_unless_disabled(monkeypatch):
     assert calls == []
 
 
+def test_int8_weights_is_opt_in_and_reaches_both_installs(monkeypatch):
+    seen = []
+    for name in ("install", "install_talker"):
+        monkeypatch.setattr(rt.qwen3_tts_fast, name,
+                            lambda tts, *, torch, use_cuda_graphs, int8, name=name:
+                            seen.append((name, int8)) or True)
+    _design()
+    _clone(int8_weights=True)
+    assert seen == [("install", False), ("install_talker", False),
+                    ("install", True), ("install_talker", True)]
+
+
 def test_fast_code_predictor_uses_cuda_graphs_on_cuda(monkeypatch):
     from types import SimpleNamespace
 
@@ -166,7 +178,7 @@ def test_fast_code_predictor_uses_cuda_graphs_on_cuda(monkeypatch):
         bfloat16="BF16", float16="FP16", float32="FP32"))
     for name in ("install", "install_talker"):
         monkeypatch.setattr(rt.qwen3_tts_fast, name,
-                            lambda tts, *, torch, use_cuda_graphs: installed.append(
+                            lambda tts, *, torch, use_cuda_graphs, int8: installed.append(
                                 use_cuda_graphs) or True)
     rt.Qwen3TTSRuntime(hf_repo="r", device="cuda", model_id=DESIGN_ID, mode="design")
     rt.Qwen3TTSRuntime(hf_repo="r", device="cuda", model_id=DESIGN_ID, mode="design",

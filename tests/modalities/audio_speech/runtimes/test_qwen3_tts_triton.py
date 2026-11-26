@@ -8,6 +8,7 @@ pytest.importorskip("triton")
 if not torch.cuda.is_available():
     pytest.skip("needs CUDA", allow_module_level=True)
 
+from muse.modalities.audio_speech.runtimes import qwen3_tts_fast as fast  # noqa: E402
 from muse.modalities.audio_speech.runtimes import qwen3_tts_triton as k  # noqa: E402
 
 
@@ -162,8 +163,6 @@ def test_sample_top_k_keeps_ties_with_the_kth_value():
 
 
 def test_sample_next_uses_the_kernel_on_cuda_without_top_p(monkeypatch):
-    from muse.modalities.audio_speech.runtimes import qwen3_tts_fast as fast
-
     def refuse(*a, **kw):
         raise AssertionError("used torch.topk")
     logits = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
@@ -171,6 +170,31 @@ def test_sample_next_uses_the_kernel_on_cuda_without_top_p(monkeypatch):
     token = fast.sample_next(logits, torch=torch, do_sample=True, temperature=0.9,
                              top_k=50, top_p=1.0)
     assert token.shape == (1,) and 0 <= int(token) < 2048
+
+
+@pytest.mark.parametrize("rows", [1, 2, 3])
+@pytest.mark.parametrize("n,kdim", [(4096, 1024), (1024, 2048), (1024, 3072), (3000, 1024),
+                                     (512, 6144)])
+def test_linear_with_int8_weights_matches_the_dequantized_fp32_product(n, kdim, rows):
+    torch.manual_seed(7)
+    w = torch.randn(n, kdim, device="cuda", dtype=torch.bfloat16) * 0.02
+    q, scale = fast.quantize_rows(w, torch)
+    x = torch.randn(1, rows, kdim, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        want = torch.nn.functional.linear(x.float(), q.float() * scale[:, None])
+        # the float weight is unread: zeros would show up in the result
+        got = k.linear(x, torch.zeros_like(w), (q, scale))
+    assert got.shape == (1, rows, n) and got.dtype == torch.bfloat16
+    assert torch.allclose(got.float(), want, atol=1e-2, rtol=8e-3)
+
+
+def test_linear_with_int8_weights_uses_the_float_weight_off_the_few_row_case():
+    torch.manual_seed(8)
+    w = torch.randn(512, 1024, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(1, 5, 1024, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        got = k.linear(x, w, fast.quantize_rows(w, torch))
+        assert torch.equal(got, torch.nn.functional.linear(x, w))
 
 
 @pytest.mark.parametrize("rows", [1, 2, 4])
