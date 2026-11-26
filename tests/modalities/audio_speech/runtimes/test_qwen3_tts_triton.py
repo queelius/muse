@@ -77,3 +77,16 @@ def test_decode_attention_matches_masked_sdpa(pos):
         got = k.decode_attention(q, keys, values, p, 128 ** -0.5)
     assert got.shape == want.shape
     assert torch.allclose(got.float(), want.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_silu_mul_matches_torch(dtype):
+    torch.manual_seed(3)
+    gu = torch.randn(1, 2, 6144, device="cuda", dtype=dtype)
+    gate, up = gu.chunk(2, dim=-1)
+    with torch.no_grad():
+        want = torch.nn.functional.silu(gate) * up
+        got = k.silu_mul(gu)
+    tol = 2e-2 if dtype == torch.bfloat16 else 1e-5
+    assert got.shape == want.shape
+    assert torch.allclose(got.float(), want.float(), atol=tol, rtol=tol)

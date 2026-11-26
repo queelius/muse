@@ -148,3 +148,28 @@ def decode_attention(q: Any, keys: Any, values: Any, pos: Any, scale: float) -> 
         q, keys, values, out, pos, q.stride(1), keys.stride(1), keys.stride(2),
         heads // kv_heads, float(scale), D=dim, BLOCK=64)
     return out
+
+
+@triton.jit
+def _silu_mul_kernel(gu_ptr, y_ptr, n, BLOCK: tl.constexpr):
+    # silu(gate) * up over a fused [gate | up] row, rounding where upstream
+    # does (the activation's output, then the product).
+    row = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n
+    dt = y_ptr.dtype.element_ty
+    g = tl.load(gu_ptr + row * 2 * n + offs, mask=mask, other=0.0).to(tl.float32)
+    u = tl.load(gu_ptr + row * 2 * n + n + offs, mask=mask, other=0.0).to(tl.float32)
+    act = (g / (1.0 + tl.exp(-g))).to(dt).to(tl.float32)
+    tl.store(y_ptr + row * n + offs, (act * u).to(dt), mask=mask)
+
+
+def silu_mul(gate_up: Any) -> Any:
+    """``silu(gate) * up`` for ``gate_up`` ``[..., 2 * n]`` = ``[gate | up]``."""
+    gate_up = gate_up.contiguous()
+    n = gate_up.shape[-1] // 2
+    rows = gate_up.numel() // (2 * n)
+    y = torch.empty((*gate_up.shape[:-1], n), dtype=gate_up.dtype, device=gate_up.device)
+    block = 1024
+    _silu_mul_kernel[(rows, triton.cdiv(n, block))](gate_up, y, n, BLOCK=block)
+    return y

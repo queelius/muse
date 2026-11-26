@@ -171,7 +171,11 @@ class _FusedLayer:
     def mlp(self, layer: Any, x: Any, torch: Any) -> Any:
         if self.gate_up is None:
             return layer.mlp(x)
-        gate, up = torch.nn.functional.linear(x, self.gate_up).chunk(2, dim=-1)
+        gate_up = torch.nn.functional.linear(x, self.gate_up)
+        kernels = _kernels(gate_up)
+        if kernels is not None:
+            return layer.mlp.down_proj(kernels.silu_mul(gate_up))
+        gate, up = gate_up.chunk(2, dim=-1)
         return layer.mlp.down_proj(torch.nn.functional.silu(gate) * up)
 
 
