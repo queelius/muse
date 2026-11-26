@@ -128,3 +128,45 @@ def test_linear_falls_back_to_torch_off_the_one_row_tiled_case(shape, kdim):
     x = torch.randn(*shape, kdim, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         assert torch.equal(k.linear(x, w), torch.nn.functional.linear(x, w))
+
+
+def reference_draw(logits, noise, temperature, top_k):
+    scaled = logits.float() / temperature
+    kth = torch.topk(scaled, min(top_k, scaled.shape[-1]), dim=-1).values[..., -1:]
+    probs = scaled.masked_fill(scaled < kth, float("-inf")).softmax(-1)
+    return (probs / noise.clamp_min(1e-10)).argmax(-1)
+
+
+@pytest.mark.parametrize("vocab", [2048, 3072])
+@pytest.mark.parametrize("top_k", [1, 50, 4096])
+def test_sample_top_k_draws_what_the_torch_processors_draw_for_the_same_noise(vocab, top_k):
+    torch.manual_seed(7)
+    logits = torch.randn(64, vocab, device="cuda") * 4
+    noise = torch.empty_like(logits).exponential_(1)
+    got = k.sample_top_k(logits, noise, 0.9, top_k)
+    assert got.dtype == torch.int64 and got.shape == (64,)
+    assert torch.equal(got, reference_draw(logits, noise, 0.9, top_k))
+
+
+def test_sample_top_k_keeps_ties_with_the_kth_value():
+    logits = torch.full((1, 2048), -5.0, device="cuda")
+    logits[0, :3] = 2.0
+    logits[0, 100:110] = 1.0  # k = 5 lands inside this tie: all ten stay
+    noise = torch.ones_like(logits)
+    noise[0, :3] = 1e6        # make the top three lose
+    noise[0, 109] = 1e-6      # the last tied token must still be drawable
+    assert int(k.sample_top_k(logits, noise, 1.0, 5)) == 109
+    noise[0, 500] = 1e-30     # outside the top k: never drawn
+    assert int(k.sample_top_k(logits, noise, 1.0, 5)) == 109
+
+
+def test_sample_next_uses_the_kernel_on_cuda_without_top_p(monkeypatch):
+    from muse.modalities.audio_speech.runtimes import qwen3_tts_fast as fast
+
+    def refuse(*a, **kw):
+        raise AssertionError("used torch.topk")
+    logits = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setattr(torch, "topk", refuse)
+    token = fast.sample_next(logits, torch=torch, do_sample=True, temperature=0.9,
+                             top_k=50, top_p=1.0)
+    assert token.shape == (1,) and 0 <= int(token) < 2048

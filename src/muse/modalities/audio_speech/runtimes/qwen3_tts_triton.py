@@ -243,3 +243,45 @@ def linear(x: Any, weight: Any) -> Any:
                                              BLOCK_N=block_n, BLOCK_K=block_k,
                                              num_warps=warps, num_stages=stages)
     return y
+
+
+@triton.jit
+def _sample_top_k_kernel(logits_ptr, noise_ptr, out_ptr, vocab, stride,
+                         temperature, top_k, BLOCK: tl.constexpr):
+    # One row per program: scale by the temperature, keep the top_k largest
+    # (ties with the k-th kept, as HF's processor), then Gumbel-max with the
+    # given Exp(1) noise: argmax(p / E) == argmax(scaled - log E) over kept.
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    valid = cols < vocab
+    raw = tl.load(logits_ptr + row * stride + cols, mask=valid, other=float("-inf"))
+    scaled = raw.to(tl.float32) / temperature
+    # k-th largest by binary search on order-preserving integer keys
+    bits = scaled.to(tl.int32, bitcast=True)
+    keys = (bits ^ ((bits >> 31) & 0x7FFFFFFF)).to(tl.int64)
+    lo = tl.full((), -2147483648, tl.int64)  # count(keys >= lo) >= top_k always
+    hi = tl.full((), 2147483648, tl.int64)   # count(keys >= hi) == 0 < top_k
+    for _ in range(33):
+        mid = (lo + hi) // 2
+        enough = tl.sum((keys >= mid).to(tl.int32), axis=0) >= top_k
+        lo = tl.where(enough, mid, lo)
+        hi = tl.where(enough, hi, mid)
+    kept = valid & (keys >= lo)
+    noise = tl.load(noise_ptr + row * vocab + cols, mask=valid, other=1.0)
+    score = tl.where(kept, scaled - tl.log(tl.maximum(noise, 1e-10)), float("-inf"))
+    tl.store(out_ptr + row, tl.argmax(score, axis=0).to(tl.int64))
+
+
+def sample_top_k(logits: Any, noise: Any, temperature: float, top_k: int) -> Any:
+    """Token per row of ``logits`` ``[batch, vocab]``: HF's temperature and
+    top-k processors, then a draw by Gumbel-max with Exp(1) ``noise``
+    (same shape, fp32). Returns int64 ``[batch]``."""
+    batch, vocab = logits.shape
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    out = torch.empty(batch, dtype=torch.int64, device=logits.device)
+    _sample_top_k_kernel[(batch,)](logits, noise.contiguous(), out, vocab, logits.stride(0),
+                                   float(temperature),
+                                   min(int(top_k), vocab), BLOCK=triton.next_power_of_2(vocab),
+                                   num_warps=4)
+    return out

@@ -65,9 +65,15 @@ def _qwen_tts_version() -> str | None:
 def sample_next(logits: Any, *, torch: Any, do_sample: bool, temperature: float,
                 top_k: int, top_p: float) -> Any:
     """Next token per row of ``logits`` (``[batch, vocab]``), like HF generate."""
-    logits = logits.float()
     if not do_sample:
-        return logits.argmax(-1)
+        return logits.float().argmax(-1)
+    kernels = _kernels(logits)
+    if (kernels is not None and logits.dim() == 2 and (top_p is None or top_p >= 1.0)
+            and temperature is not None and temperature > 0):
+        # one kernel: temperature, top-k and the Gumbel-max draw on torch's noise
+        noise = torch.empty(logits.shape, device=logits.device).exponential_(1)
+        return kernels.sample_top_k(logits, noise, temperature, top_k or logits.shape[-1])
+    logits = logits.float()
     if temperature is not None and temperature != 1.0:
         logits = logits / temperature
     neg_inf = float("-inf")
