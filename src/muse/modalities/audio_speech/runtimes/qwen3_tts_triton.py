@@ -12,6 +12,7 @@ from typing import Any
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 
 @triton.jit
@@ -360,3 +361,38 @@ def sample_top_k(logits: Any, noise: Any, temperature: float, top_k: int) -> Any
                                    min(int(top_k), vocab), BLOCK=triton.next_power_of_2(vocab),
                                    num_warps=4)
     return out
+
+
+@triton.jit
+def _snake_beta_kernel(x_ptr, alpha_ptr, beta_ptr, y_ptr, channels, length, eps,
+                       BLOCK: tl.constexpr):
+    # SnakeBeta, x + 1 / (exp(beta) + eps) * sin(x * exp(alpha))^2, per channel,
+    # rounding to the dtype after each op as upstream's chain of torch ops.
+    row = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < length
+    dt = y_ptr.dtype.element_ty
+    c = row % channels
+    # libdevice's accurate exp / sin and an IEEE divide, as torch's (tl.exp,
+    # tl.sin and "/" may lower to the fast approximations)
+    a = libdevice.exp(tl.load(alpha_ptr + c).to(tl.float32)).to(dt).to(tl.float32)
+    b = libdevice.exp(tl.load(beta_ptr + c).to(tl.float32)).to(dt).to(tl.float32)
+    inv = tl.div_rn(1.0, (b + eps).to(dt).to(tl.float32)).to(dt).to(tl.float32)
+    x = tl.load(x_ptr + row * length + offs, mask=mask, other=0.0).to(tl.float32)
+    sn = libdevice.sin((x * a).to(dt).to(tl.float32)).to(dt).to(tl.float32)
+    m = (inv * (sn * sn).to(dt).to(tl.float32)).to(dt).to(tl.float32)
+    tl.store(y_ptr + row * length + offs, (x + m).to(dt), mask=mask)
+
+
+def snake_beta(module: Any, x: Any) -> Any:
+    """``module(x)`` for qwen-tts's SnakeBeta over ``x`` ``[batch, channels, time]``:
+    one read and one write instead of about seven passes; bit-identical to
+    the module."""
+    x = x.contiguous()
+    batch, channels, length = x.shape
+    y = torch.empty_like(x)
+    block = 1024
+    _snake_beta_kernel[(batch * channels, triton.cdiv(length, block))](
+        x, module.alpha, module.beta, y, channels, length, float(module.no_div_by_zero),
+        BLOCK=block, enable_fp_fusion=False)  # an FMA would skip upstream's rounding
+    return y

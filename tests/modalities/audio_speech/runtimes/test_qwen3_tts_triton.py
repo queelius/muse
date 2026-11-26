@@ -208,3 +208,32 @@ def test_norm_rope_store_writes_rope_k_and_v_into_their_cache_slots(tokens, pos)
     others = torch.ones(64, dtype=torch.bool)
     others[live] = False
     assert bool((keys[:, :, others] == 7).all()) and bool((values[:, :, others] == 7).all())
+
+
+class SnakeBeta(torch.nn.Module):  # qwen-tts 12 Hz tokenizer's activation
+    def __init__(self, channels):
+        super().__init__()
+        self.alpha = torch.nn.Parameter(0.3 * torch.randn(channels))
+        self.beta = torch.nn.Parameter(0.3 * torch.randn(channels))
+        self.no_div_by_zero = 0.000000001
+
+    def forward(self, hidden_states):
+        alpha = torch.exp(self.alpha.unsqueeze(0).unsqueeze(-1))
+        beta = torch.exp(self.beta.unsqueeze(0).unsqueeze(-1))
+        return hidden_states + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
+            torch.sin(hidden_states * alpha), 2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("shape", [(1, 96, 5000), (2, 1536, 37)])
+def test_snake_beta_matches_the_module(dtype, shape):
+    torch.manual_seed(10)
+    snake = SnakeBeta(shape[1]).to("cuda", dtype)
+    x = 3 * torch.randn(*shape, device="cuda", dtype=dtype)
+    with torch.no_grad():
+        want, got = snake(x), k.snake_beta(snake, x)
+    assert got.shape == want.shape and got.dtype == want.dtype
+    if dtype == torch.bfloat16:  # every rounding as upstream's
+        assert torch.equal(got, want)
+    else:
+        assert torch.allclose(got, want, atol=1e-5, rtol=1e-5)

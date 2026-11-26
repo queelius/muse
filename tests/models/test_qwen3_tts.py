@@ -144,6 +144,20 @@ def test_fast_talker_installed_after_the_predictor_unless_disabled(monkeypatch):
     assert calls == []
 
 
+def test_fast_decoder_installed_unless_disabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rt.qwen3_tts_fast, "install_decoder",
+                        lambda tts, *, torch: calls.append("decoder") or True)
+    _design()
+    assert calls == ["decoder"]
+    calls.clear()
+    _clone(fast_code_predictor=False)  # independent of the talker patches
+    assert calls == ["decoder"]
+    calls.clear()
+    _clone(fast_decoder=False)
+    assert calls == []
+
+
 def test_fast_code_predictor_uses_cuda_graphs_on_cuda(monkeypatch):
     from types import SimpleNamespace
 

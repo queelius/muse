@@ -36,6 +36,7 @@ torch is passed in (``torch=``) so the module imports without it.
 """
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import logging
 from types import SimpleNamespace
@@ -895,3 +896,38 @@ def install_talker(tts: Any, *, torch: Any, use_cuda_graphs: bool = False) -> bo
                       upstream=current)
     talker.generate = fast.generate
     return True
+
+
+# -- speech decoder -------------------------------------------------------------
+
+
+def _snake_forward(module: Any, upstream: Any, x: Any) -> Any:
+    """SnakeBeta's forward: one Triton kernel on CUDA (bit-identical), else
+    the module's own."""
+    kernels = _kernels(x)
+    if kernels is None or x.dim() != 3 or x.shape[1] != module.alpha.numel():
+        return upstream(x)
+    return kernels.snake_beta(module, x)
+
+
+def install_decoder(tts: Any, *, torch: Any) -> bool:
+    """Route the speech decoder's SnakeBeta activations (about a third of its
+    GPU time, as seven elementwise passes each) through one kernel; True when
+    any are routed. Independent of the talker and code predictor patches."""
+    version = _qwen_tts_version()
+    if version not in SUPPORTED_QWEN_TTS:
+        logger.info("qwen-tts %s: fast speech decoder not installed (checked: %s)",
+                    version, ", ".join(sorted(SUPPORTED_QWEN_TTS)))
+        return False
+    model = getattr(getattr(getattr(tts, "model", None), "speech_tokenizer", None),
+                    "model", None)
+    if not callable(getattr(model, "modules", None)):
+        return False
+    snakes = [m for m in model.modules() if type(m).__name__ == "SnakeBeta"
+              and all(hasattr(m, name) for name in ("alpha", "beta", "no_div_by_zero"))]
+    for snake in snakes:
+        if "_muse_upstream_forward" not in vars(snake):
+            upstream = snake.forward
+            vars(snake)["_muse_upstream_forward"] = upstream
+            vars(snake)["forward"] = functools.partial(_snake_forward, snake, upstream)
+    return bool(snakes)

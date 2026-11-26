@@ -13,7 +13,8 @@ On CUDA the checkpoint loads with SDPA attention, and qwen-tts's two
 ``generate()`` loops (the talker's, and its per-frame code predictor's) are
 replaced by static-KV decoders that run each 12 Hz frame as one CUDA graph
 (:mod:`.qwen3_tts_fast`; ``fast_code_predictor`` / ``fast_talker`` /
-``cuda_graphs`` kwargs).
+``cuda_graphs`` kwargs). The speech decoder's SnakeBeta activations run as
+one Triton kernel each (``fast_decoder``), bit-identical to upstream.
 
 qwen-tts has no speed control (``speed`` is ignored) and no streaming
 (``synthesize_stream`` yields one chunk). ``language=None`` is qwen-tts's
@@ -98,6 +99,7 @@ class Qwen3TTSRuntime:
         default_instructions: str | None = None,
         fast_code_predictor: bool = True,
         fast_talker: bool = True,
+        fast_decoder: bool = True,
         cuda_graphs: bool = True,
         **_: Any,
     ) -> None:
@@ -140,6 +142,8 @@ class Qwen3TTSRuntime:
             qwen3_tts_fast.install(self._tts, torch=torch, use_cuda_graphs=graphs)
             if fast_talker:
                 qwen3_tts_fast.install_talker(self._tts, torch=torch, use_cuda_graphs=graphs)
+        if fast_decoder:
+            qwen3_tts_fast.install_decoder(self._tts, torch=torch)
         self._device = device_map
 
     # -- protocol ------------------------------------------------------------

@@ -596,3 +596,61 @@ def test_install_talker_refuses_unsupported_qwen_tts(talker, monkeypatch):
     fast.install(tts, torch=torch)
     monkeypatch.setattr(fast, "_qwen_tts_version", lambda: "0.2.0")
     assert fast.install_talker(tts, torch=torch) is False
+
+
+# -- speech decoder ---------------------------------------------------------------
+
+
+class SnakeBeta(nn.Module):  # name and attributes of qwen-tts's 12 Hz decoder activation
+    def __init__(self, channels):
+        super().__init__()
+        self.alpha = nn.Parameter(0.3 * torch.randn(channels))
+        self.beta = nn.Parameter(0.3 * torch.randn(channels))
+        self.no_div_by_zero = 0.000000001
+
+    def forward(self, x):
+        alpha = torch.exp(self.alpha.unsqueeze(0).unsqueeze(-1))
+        beta = torch.exp(self.beta.unsqueeze(0).unsqueeze(-1))
+        return x + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(torch.sin(x * alpha), 2)
+
+
+def _decoder_tts(*modules):
+    return SimpleNamespace(model=SimpleNamespace(
+        speech_tokenizer=SimpleNamespace(model=nn.Sequential(*modules))))
+
+
+def test_install_decoder_routes_snake_activations_and_keeps_their_output(monkeypatch):
+    monkeypatch.setattr(fast, "_qwen_tts_version", lambda: "0.1.1")
+    snakes = [SnakeBeta(4), SnakeBeta(4)]
+    tts = _decoder_tts(nn.Conv1d(4, 4, 1), *snakes)
+    x = torch.randn(1, 4, 9)
+    want = [s(x) for s in snakes]
+    assert fast.install_decoder(tts, torch=torch) is True
+    assert all("forward" in vars(s) for s in snakes)
+    with torch.no_grad():  # CPU: the upstream forward, unchanged
+        assert all(torch.equal(s(x), w) for s, w in zip(snakes, want))
+    patched = [vars(s)["forward"] for s in snakes]
+    assert fast.install_decoder(tts, torch=torch) is True  # idempotent
+    assert [vars(s)["forward"] for s in snakes] == patched
+
+
+def test_install_decoder_sends_cuda_input_to_the_kernel(monkeypatch):
+    monkeypatch.setattr(fast, "_qwen_tts_version", lambda: "0.1.1")
+    seen = []
+    kernels = SimpleNamespace(snake_beta=lambda m, x: seen.append(m) or "kernel")
+    monkeypatch.setattr(fast, "_kernels", lambda x: kernels)
+    snake = SnakeBeta(4)
+    fast.install_decoder(_decoder_tts(snake), torch=torch)
+    assert snake(torch.randn(1, 4, 9)) == "kernel" and seen == [snake]
+    with pytest.raises(RuntimeError):  # channel mismatch: upstream's forward, and its error
+        snake(torch.randn(1, 3, 9))
+    assert seen == [snake]
+
+
+@pytest.mark.parametrize("version", ["0.1.2", None])
+def test_install_decoder_refuses_unsupported_qwen_tts_or_layouts(monkeypatch, version):
+    monkeypatch.setattr(fast, "_qwen_tts_version", lambda: version)
+    assert fast.install_decoder(_decoder_tts(SnakeBeta(4)), torch=torch) is False
+    monkeypatch.setattr(fast, "_qwen_tts_version", lambda: "0.1.1")
+    assert fast.install_decoder(_decoder_tts(nn.Conv1d(4, 4, 1)), torch=torch) is False
+    assert fast.install_decoder(SimpleNamespace(), torch=torch) is False
