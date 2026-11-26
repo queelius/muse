@@ -292,12 +292,8 @@ class FastCodePredictor:
             k = k * c + _rotate_half(k, torch) * s
             keys[i][:, :, start:end] = k
             values[i][:, :, start:end] = v
-            k_all = keys[i][:, :, :end]
-            v_all = values[i][:, :, :end]
-            if rep > 1:
-                k_all = k_all.repeat_interleave(rep, dim=1)
-                v_all = v_all.repeat_interleave(rep, dim=1)
-            out = sdpa(q, k_all, v_all, is_causal=n > 1, scale=attn.scaling)
+            out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
+                       scale=attn.scaling, enable_gqa=rep > 1)
             x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
             x = x + fused.mlp(layer, layer.post_attention_layernorm(x), torch)
         return self.cp.model.norm(x)[:, -1]
@@ -637,11 +633,8 @@ class FastTalker:
             if masked:
                 st.keys[i].index_copy_(2, st.pos, k)
                 st.values[i].index_copy_(2, st.pos, v)
-                keys, values = st.keys[i], st.values[i]
-                if rep > 1:
-                    keys = keys.repeat_interleave(rep, dim=1)
-                    values = values.repeat_interleave(rep, dim=1)
-                out = sdpa(q, keys, values, attn_mask=allowed, scale=attn.scaling)
+                out = sdpa(q, st.keys[i], st.values[i], attn_mask=allowed,
+                           scale=attn.scaling, enable_gqa=rep > 1)
             else:
                 st.keys[i][:, :, start:end] = k
                 st.values[i][:, :, start:end] = v
