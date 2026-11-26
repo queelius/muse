@@ -9,9 +9,11 @@ One class serves both bundled scripts, selected by ``mode``:
   plus its transcript, from a :class:`VoiceStore` under
   ``<paths.home>/voices/<model_id>/`` with the bundled read-only ``narrator``.
 
-On CUDA the checkpoint loads with SDPA attention, and the talker's per-frame
-code-predictor ``generate()`` is replaced by a static, CUDA-graphed decoder
-(:mod:`.qwen3_tts_fast`, ``fast_code_predictor`` / ``cuda_graphs`` kwargs).
+On CUDA the checkpoint loads with SDPA attention, and qwen-tts's two
+``generate()`` loops (the talker's, and its per-frame code predictor's) are
+replaced by static-KV decoders that run each 12 Hz frame as one CUDA graph
+(:mod:`.qwen3_tts_fast`; ``fast_code_predictor`` / ``fast_talker`` /
+``cuda_graphs`` kwargs).
 
 qwen-tts has no speed control (``speed`` is ignored) and no streaming
 (``synthesize_stream`` yields one chunk). ``language=None`` is qwen-tts's
@@ -95,6 +97,7 @@ class Qwen3TTSRuntime:
         dtype: str = "bf16",
         default_instructions: str | None = None,
         fast_code_predictor: bool = True,
+        fast_talker: bool = True,
         cuda_graphs: bool = True,
         **_: Any,
     ) -> None:
@@ -132,9 +135,11 @@ class Qwen3TTSRuntime:
         with LoadTimer(model_id, logger):
             self._tts = QwenTTS.from_pretrained(src, **load_kwargs)
         set_inference_mode(getattr(self._tts, "model", None))
+        graphs = bool(cuda_graphs) and on_cuda
         if fast_code_predictor:
-            qwen3_tts_fast.install(
-                self._tts, torch=torch, use_cuda_graphs=bool(cuda_graphs) and on_cuda)
+            qwen3_tts_fast.install(self._tts, torch=torch, use_cuda_graphs=graphs)
+            if fast_talker:
+                qwen3_tts_fast.install_talker(self._tts, torch=torch, use_cuda_graphs=graphs)
         self._device = device_map
 
     # -- protocol ------------------------------------------------------------

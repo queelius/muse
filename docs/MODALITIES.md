@@ -41,18 +41,29 @@ speaks from that description (a neutral default when omitted) and ignores
 the bundled read-only `narrator` (about 4 s, package data under
 `audio_speech/data/`), and refuses `instructions`. Both ignore `speed`, have
 no word timestamps and stream the whole line as one chunk. On CUDA both load
-with SDPA attention, and the talker's per-frame code-predictor `generate()`
-(a 15-token HF `generate()` loop per 12 Hz frame, ~150 ms each) is replaced
-by a static-KV decoder captured as a CUDA graph per batch shape
-(`audio_speech/runtimes/qwen3_tts_fast.py`, ~16 ms per frame; greedy tokens
-match upstream, sampling draws from the same distribution). It is installed
-only for qwen-tts 0.1.1 with the expected module layout; any other version,
-layout or call shape uses upstream `generate()`, and an unexpected failure
-switches it off for the process. Constructor kwargs `fast_code_predictor` /
-`cuda_graphs` (default on) turn it, or just the graphs, off. On an RTX 3060 a
-short line takes about 2.5 s on the 0.6B (RTF ~0.8) and about 4 s on the 1.7B
-(RTF ~1.3), from about 7 s and 11 s. Every saved voice's clone prompt stays
-cached once used (capacity `limits.max_saved_voices` plus bundled). An unknown `voice` is 400
+with SDPA attention, and qwen-tts's two nested HF `generate()` loops (the
+talker's, and the 15-token code predictor it runs per 12 Hz frame) are
+replaced by static-KV decoders (`audio_speech/runtimes/qwen3_tts_fast.py`).
+On CUDA each frame (code predictor, codec-embedding sum, one talker token,
+transformers' repetition-penalty / min-new-tokens / suppress-tokens
+processors and sampling) is one CUDA graph, captured per KV capacity and
+sampling parameters (about 1 s on a first request); the talker cache starts
+at 512 tokens and doubles as a line needs it. Prefill runs eagerly. Without
+graphs, greedy decoding reproduces upstream token for token; a graphed frame
+attends over the whole cache with a mask, which rounds differently in bf16
+(teacher-forced logits within 3 bf16 steps, mean KL 7e-4), and sampling
+draws from the same distributions with a different random stream. Only batch
+1 is handled (larger batches use upstream). Both are installed only for
+qwen-tts 0.1.1 with the expected module layout and a default talker
+generation config; any other version, layout or call shape uses upstream
+`generate()`, and an unexpected failure switches the failing one off for the
+process. Constructor kwargs `fast_code_predictor` / `fast_talker` /
+`cuda_graphs` (default on) turn them, or just the graphs, off (the talker
+needs the fast predictor). On an RTX 3060 a short line takes about 1 s on
+either model (RTF ~0.3-0.45) and a 10-15 s paragraph about 3.5 s on the 0.6B
+and 5 s on the 1.7B, from about 7 s and 11 s per short line before. Every
+saved voice's clone prompt stays cached once used (capacity
+`limits.max_saved_voices` plus bundled). An unknown `voice` is 400
 `voice_not_found` (also before a stream starts, via the backend's
 `check_voice`); a stored voice that cannot be read is 500 `voice_unreadable`
 with no paths. Saved voices form a catalog. Besides the clip and transcript,

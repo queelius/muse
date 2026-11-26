@@ -128,19 +128,36 @@ def test_fast_code_predictor_installed_unless_disabled(monkeypatch):
     assert installed == [(FakeQwenTTS.instances[0], False)]
 
 
+def test_fast_talker_installed_after_the_predictor_unless_disabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rt.qwen3_tts_fast, "install",
+                        lambda tts, *, torch, use_cuda_graphs: calls.append("predictor") or True)
+    monkeypatch.setattr(rt.qwen3_tts_fast, "install_talker",
+                        lambda tts, *, torch, use_cuda_graphs: calls.append("talker") or True)
+    _design()
+    assert calls == ["predictor", "talker"]
+    calls.clear()
+    _clone(fast_talker=False)
+    assert calls == ["predictor"]
+    calls.clear()
+    _clone(fast_code_predictor=False)  # the talker needs the fast predictor
+    assert calls == []
+
+
 def test_fast_code_predictor_uses_cuda_graphs_on_cuda(monkeypatch):
     from types import SimpleNamespace
 
     installed = []
     monkeypatch.setattr(rt, "torch", SimpleNamespace(
         bfloat16="BF16", float16="FP16", float32="FP32"))
-    monkeypatch.setattr(rt.qwen3_tts_fast, "install",
-                        lambda tts, *, torch, use_cuda_graphs: installed.append(
-                            use_cuda_graphs) or True)
+    for name in ("install", "install_talker"):
+        monkeypatch.setattr(rt.qwen3_tts_fast, name,
+                            lambda tts, *, torch, use_cuda_graphs: installed.append(
+                                use_cuda_graphs) or True)
     rt.Qwen3TTSRuntime(hf_repo="r", device="cuda", model_id=DESIGN_ID, mode="design")
     rt.Qwen3TTSRuntime(hf_repo="r", device="cuda", model_id=DESIGN_ID, mode="design",
                        cuda_graphs=False)
-    assert installed == [True, False]
+    assert installed == [True, True, False, False]
 
 
 def test_design_uses_instructions_and_auto_language():

@@ -90,7 +90,7 @@ Note on `x_vector_only_mode=True`: measured `6.51 s` for `2.08 s` audio (`RTF 3.
 
 ---
 
-### Phase 1 status (2026-11-25): done except the talker backbone
+### Phase 1 status (2026-11-25): done, talker backbone included (option b)
 
 Implemented in `src/muse/modalities/audio_speech/runtimes/qwen3_tts_fast.py` (new) and `qwen3_tts.py`:
 SDPA on CUDA; `FastCodePredictor` (unrolled 15-step static-KV decoder reusing the predictor's own modules, HF-order sampling via Gumbel-max, one CUDA graph per batch shape / sampling params, capped at 16); `install()` gated on qwen-tts 0.1.1 plus a layout check, upstream fallback for any other call shape, and a process-wide switch-off on unexpected failure (OOM re-raised); constructor kwargs `fast_code_predictor` / `cuda_graphs` (default on, graphs CUDA only); prompt cache sized `limits.max_saved_voices + bundled`.
@@ -110,10 +110,27 @@ Measured on this host (RTX 3060, i5-4460):
 
 ASR round-trip (`qwen3-asr-1.7b`) transcribes every fast-path output exactly. `muse models probe` was not re-run (it refuses while the live server has the model loaded); `memory_gb: 3.0` still covers the measured peak.
 
-**Talker backbone (not shipped; decision needed).** With the predictor fast, `talker.model` is ~70% of wall time (1.63 s of 2.33 s for a short line, ~50 ms per 12 Hz step).
-- Whole-module `torch.compile(talker.model.forward, mode="default", dynamic=True)`: talker 1.63 s -> 0.52 s, short line end to end 2.33 s -> 1.22 s (RTF ~0.5). Cost on this CPU: **~290 s** first compile with a cold inductor cache, **~100 s** with a warm one (3 graphs: prefill + 2 decode variants). Too close to `server.worker_ready_timeout_seconds` (300 s) to warm at load by default, and too slow to pay on a first request.
-- Regional compile (`layer.compile()` per decoder layer, PyTorch's recipe for cutting compile time): no gain; `layer_idx` specialises each layer, so it recompiles per layer, hits dynamo's recompile limit and falls back to eager.
-- Options: (a) opt-in capability (`torch_compile`, already a hidden key) with load-time warmup, documented as needing a larger `worker_ready_timeout_seconds` and a persistent `TORCHINDUCTOR_CACHE_DIR`; (b) a hand-written static-KV talker decode step captured as a CUDA graph, like the predictor (no compile cost, but it must replace the talker's HF `generate()` loop, including its logits processors, EOS handling and left-padding mask); (c) stop here (RTF < 1 already met).
+**Talker backbone: chose (b), a hand-written CUDA-graphed talker.** With the predictor fast, `talker.model` was ~70% of wall time (~50 ms per 12 Hz step). Options considered:
+- Whole-module `torch.compile`: short line 2.33 s -> 1.22 s, but ~290 s first compile on a cold inductor cache and ~100 s warm, paid on every cold load (the compiled code dies with the worker on eviction); too close to the 300 s `worker_ready_timeout_seconds`. Regional per-layer compile gave no gain (recompiles per `layer_idx`). Not shipped.
+- (b) `FastTalker` (same module), patched over `talker.generate` by `install_talker()` (after `install()`; constructor kwarg `fast_talker`, default on). Batch 1 only (anything else, a padded mask, an unknown kwarg or a non-default talker `generation_config` uses upstream). Eager prefill, then one CUDA graph per 12 Hz frame: predictor decode, codec-embedding sum + trailing text, one talker token over a static KV cache (512 tokens, doubling on demand; graphs recaptured after growth in a fresh memory pool), transformers' processors in order (repetition penalty, min new tokens, suppress tokens, then temperature / top-k / top-p) and sampling. It returns the `hidden_states` tuple qwen-tts reads.
+
+Results (RTX 3060, nothing else running; Phase 1 = fast predictor only):
+
+| | Phase 1 | + fast talker |
+| --- | ---: | ---: |
+| exact (eager) greedy vs upstream, real inputs | n/a | 149/149 + 149/149 frames, hidden states bit-identical (0.6B); 35/35 (1.7B) |
+| graphed frame vs the same frame run eagerly | n/a | 59/59 identical (capture is faithful) |
+| graphed vs exact, teacher-forced 60 steps | n/a | max logit diff 0.375 (3 bf16 steps), mean KL 7e-4, 1 argmax flip at a 0.125 tie |
+| talker per frame | 70-110 ms | 25-30 ms |
+| 0.6B short line, in process warm | 2.33 s / 2.56 s audio | 0.95 s / 2.16 s audio (RTF 0.44) |
+| 0.6B paragraph, in process warm | 10.48 s / 10.3 s audio | 3.44 s / 11.0 s audio (RTF 0.31) |
+| 1.7B short line, in process warm | 3.95 s / 3.0 s audio | 0.95 s / 3.1 s audio (RTF 0.31) |
+| 1.7B paragraph, in process warm | 16.8 s / 12.1 s audio | 5.0 s / 14.2 s audio (RTF 0.35) |
+| HTTP warm, 0.6B saved voice / 1.7B design | n/a | ~1.9 s / 6.1 s audio; ~2.0 s / 5.3 s audio |
+| first request after load (graph capture) | n/a | ~+1 s |
+| peak VRAM (torch max allocated) | 2.29 GiB (0.6B) | 2.57 GiB (0.6B), 4.42 GiB (1.7B) |
+
+ASR (`qwen3-asr-1.7b`) transcribed every HTTP output exactly (8 short lines, a 34 s and a 68 s paragraph). The 68 s paragraph found a bug, now fixed: after cache growth the recapture reused the dropped graphs' pool handle and failed an allocator assert; the fallback served the line through upstream (slowly, correctly). The remaining per-frame cost is mostly the predictor's ~1500 tiny kernels (16 ms); fusing them would need a compiler.
 
 ---
 
@@ -146,6 +163,7 @@ ASR round-trip (`qwen3-asr-1.7b`) transcribes every fast-path output exactly. `m
        - **Batch latency coupling**: the talker loop runs until **every** item emits EOS (`modeling_qwen3_tts.py:2284`), so a short line (`"Hello!"`) batched with a three-sentence line waits for the long one. Throughput improves but per-request latency of short lines regresses — which is what an NPC bark feels. Bucket by input length (or cap the length ratio within a batch), and add a per-request acceptance check that a short line's wall time is not much worse batched than solo.
        - Check variable-length output trimming (upstream trims per item via `effective_lengths` and cuts the reference prefix per item, `qwen3_tts_model.py:626`; still verify live): verify `qwen_tts` properly trims padding/EOS per item in `wavs[i]` when batching a short line (`"Hello!"`) with a long line (3 sentences) in the same batch! (Write a test/live check specifically for this!)
        - Clean shutdown (`close()` / daemon worker thread) so tests and worker teardowns never hang.
+   - **`FastTalker` is batch 1 only** (Phase 1): a batched `generate_voice_clone` call falls back to the upstream talker loop (~70-110 ms per frame instead of ~25-30 ms), so batching only wins once `FastTalker` handles batch > 1: left-padded prefill with a key-padding mask (and unmasked fully-padded query rows, or pad K/V becomes NaN), per-row RoPE offsets (`rope_deltas`), per-row finished flags padding with EOS, and graphs keyed by batch size. Measure batch-4 throughput against four batch-1 runs at ~1 s each before building the batcher; at RTF ~0.3 serial may already suffice.
    - Check gateway/worker concurrency limits:
      - Ensure `qwen3-tts-0.6b-base` does **not** cap `max_concurrency: 1` (currently unset -> defaults to `0` = unlimited in `LoadDirector`, which allows concurrent requests to reach the worker's micro-batcher).
 

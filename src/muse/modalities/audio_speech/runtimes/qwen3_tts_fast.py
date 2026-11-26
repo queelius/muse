@@ -1,4 +1,10 @@
-"""Fast code predictor for qwen-tts 0.1.1 (Qwen3-TTS 12 Hz checkpoints).
+"""Fast decoding for qwen-tts 0.1.1 (Qwen3-TTS 12 Hz checkpoints).
+
+Two drop-ins replace qwen-tts's two nested transformers ``generate()`` loops:
+:class:`FastCodePredictor` (below) and :class:`FastTalker` (the outer loop,
+which on CUDA runs each 12 Hz frame, code predictor included, as one CUDA
+graph; see its docstring). :func:`install` and :func:`install_talker` patch
+them in.
 
 For every 12 Hz codec frame, qwen-tts's talker calls
 ``talker.code_predictor.generate(...)``: a full transformers ``generate()``
@@ -33,7 +39,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +262,381 @@ class FastCodePredictor:
         return table
 
 
+# -- talker -------------------------------------------------------------------
+
+# First KV capacity (tokens) of the talker cache; doubles when a line needs more.
+TALKER_CAPACITY = 512
+# talker.generate() kwargs qwen-tts 0.1.1 passes (Qwen3TTSForConditionalGeneration.generate).
+_TALKER_KWARGS = frozenset({
+    "inputs_embeds", "attention_mask", "trailing_text_hidden", "tts_pad_embed",
+    "max_new_tokens", "min_new_tokens", "do_sample", "top_k", "top_p", "temperature",
+    "subtalker_dosample", "subtalker_top_k", "subtalker_top_p", "subtalker_temperature",
+    "eos_token_id", "repetition_penalty", "suppress_tokens",
+    "output_hidden_states", "return_dict_in_generate",
+})
+# GenerationConfig fields that would add logits processors or change decoding
+# beyond what FastTalker implements; each must keep its default.
+_TALKER_FIXED_CONFIG = (
+    "num_beams", "num_beam_groups", "penalty_alpha", "guidance_scale",
+    "no_repeat_ngram_size", "encoder_no_repeat_ngram_size", "bad_words_ids",
+    "force_words_ids", "sequence_bias", "forced_bos_token_id", "forced_eos_token_id",
+    "begin_suppress_tokens", "exponential_decay_length_penalty", "remove_invalid_values",
+    "renormalize_logits", "min_p", "typical_p", "epsilon_cutoff", "eta_cutoff",
+    "watermarking_config", "prefill_chunk_size", "stop_strings", "diversity_penalty",
+    "encoder_repetition_penalty", "low_memory",
+)
+
+
+class _TalkerParams(NamedTuple):
+    """Per-request decoding parameters; hashable, so they key the CUDA graphs."""
+
+    sample: tuple          # (do_sample, temperature, top_k, top_p)
+    repetition_penalty: float
+    min_new: int
+    eos: int
+    suppress: tuple        # sorted token ids
+    sub: tuple             # code predictor's (do_sample, temperature, top_k, top_p)
+
+
+class _TalkerState:
+    """Preallocated decode state for batch 1. CUDA graphs capture these
+    tensors' addresses, so a request resets them in place."""
+
+    def __init__(self, fast: "FastTalker", like: Any, capacity: int) -> None:
+        torch = fast.torch
+        self.capacity = capacity
+        device = like.device
+        shape = (1, fast.kv_heads, capacity, fast.head_dim)
+        self.keys = [like.new_zeros(shape) for _ in range(fast.layers)]
+        self.values = [like.new_zeros(shape) for _ in range(fast.layers)]
+        self.positions = torch.arange(capacity, device=device)
+        probe = like.new_zeros(1, capacity, fast.head_dim)
+        cos, sin = fast.talker.model.rotary_emb(
+            probe, self.positions[None, None].expand(3, 1, capacity))
+        # Text-only positions are equal across the three M-RoPE sections, so
+        # the multimodal rotation reduces to section 0's.
+        self.cos, self.sin = cos[0, 0], sin[0, 0]
+        self.trailing = like.new_zeros(1, capacity, fast.hidden)
+        self.pos = torch.zeros(1, dtype=torch.long, device=device)
+        self.n = torch.zeros(1, dtype=torch.long, device=device)
+        self.token = torch.zeros(1, dtype=torch.long, device=device)
+        self.hidden = like.new_zeros(1, 1, fast.hidden)
+        self.unfinished = torch.ones(1, dtype=torch.bool, device=device)
+        self.seen = torch.zeros(1, fast.vocab, dtype=torch.bool, device=device)
+
+    def scalars(self) -> list:
+        return [self.pos, self.n, self.token, self.hidden, self.unfinished, self.seen]
+
+    def matches(self, like: Any) -> bool:
+        return self.trailing.device == like.device and self.trailing.dtype == like.dtype
+
+
+class FastTalker:
+    """Drop-in for ``talker.generate`` on qwen-tts's batch-1 call.
+
+    Prefill runs eagerly (its length varies per request). Each later step is
+    one 12 Hz frame: the 15-token code predictor, the summed codec
+    embeddings plus that step's trailing text, one talker token over a static
+    KV cache, transformers' logits processors (repetition penalty, min new
+    tokens, suppressed tokens) and sampling. On CUDA the frame is one CUDA
+    graph per (cache capacity, parameters); the host syncs once per frame on
+    the stop flag.
+
+    Without graphs, attention reads exactly the live keys, as upstream does,
+    so greedy decoding reproduces upstream. A graphed frame attends over the
+    whole cache with a mask, which is equal in exact arithmetic but rounds
+    differently.
+    """
+
+    def __init__(self, talker: Any, code_predictor: FastCodePredictor, *, torch: Any,
+                 use_cuda_graphs: bool = False, upstream: Any = None) -> None:
+        self.talker = talker
+        self.cp = code_predictor
+        self.torch = torch
+        self.upstream = upstream if upstream is not None else talker.generate
+        cfg = talker.config
+        self.layers = int(cfg.num_hidden_layers)
+        self.heads = int(cfg.num_attention_heads)
+        self.kv_heads = int(cfg.num_key_value_heads)
+        self.head_dim = int(cfg.head_dim)
+        self.hidden = int(cfg.hidden_size)
+        self.vocab = int(cfg.vocab_size)
+        self.use_cuda_graphs = bool(use_cuda_graphs)
+        self.disabled = False
+        self._state: _TalkerState | None = None
+        self._graphs: dict[tuple, tuple[Any, Any]] = {}
+        self._pool: Any = None
+        self._masks: dict[tuple, tuple[Any, Any]] = {}
+        gen_cfg = getattr(talker, "generation_config", None)
+        self._defaults = {k: getattr(gen_cfg, k, v) if gen_cfg is not None else v
+                          for k, v in _DEFAULTS.items()}
+
+    # -- entry point -----------------------------------------------------------
+
+    def generate(self, **kwargs: Any) -> Any:
+        params = self._params(kwargs)
+        if params is None:
+            return self.upstream(**kwargs)
+        try:
+            with self.torch.no_grad():
+                entries = self._generate(
+                    kwargs["inputs_embeds"], kwargs["trailing_text_hidden"],
+                    kwargs["tts_pad_embed"], params, int(kwargs["max_new_tokens"]))
+        except Exception as exc:
+            if type(exc).__name__ == "OutOfMemoryError":
+                raise
+            logger.warning(
+                "fast Qwen3-TTS talker failed; using qwen-tts generate() "
+                "for the rest of this process", exc_info=True)
+            self.disabled = True
+            self._state = None
+            self._drop_graphs()
+            return self.upstream(**kwargs)
+        return SimpleNamespace(hidden_states=tuple(entries))
+
+    def _params(self, kw: dict) -> _TalkerParams | None:
+        """Decoding parameters, or None when the call is not the one handled."""
+        if self.disabled or not set(kw) <= _TALKER_KWARGS:
+            return None
+        embeds, trailing, pad = (kw.get("inputs_embeds"), kw.get("trailing_text_hidden"),
+                                 kw.get("tts_pad_embed"))
+        mask, eos, max_new = kw.get("attention_mask"), kw.get("eos_token_id"), kw.get("max_new_tokens")
+        if not (_is_batch1(embeds, self.hidden) and embeds.shape[1] >= 2
+                and _is_batch1(trailing, self.hidden) and _is_batch1(pad, self.hidden)
+                and pad.shape[1] == 1):
+            return None
+        if kw.get("output_hidden_states") is False or kw.get("return_dict_in_generate") is False:
+            return None
+        if not isinstance(eos, int) or isinstance(eos, bool) or not isinstance(max_new, int) or max_new < 1:
+            return None
+        if mask is not None and (tuple(mask.shape) != tuple(embeds.shape[:2]) or not bool(mask.all())):
+            return None
+        sample = (
+            bool(self._pick("do_sample", kw.get("do_sample"))),
+            float(self._pick("temperature", kw.get("temperature"))),
+            int(self._pick("top_k", kw.get("top_k")) or 0),
+            float(self._pick("top_p", kw.get("top_p"))),
+        )
+        sub = (
+            bool(self.cp._pick("do_sample", kw.get("subtalker_dosample"))),
+            float(self.cp._pick("temperature", kw.get("subtalker_temperature"))),
+            int(self.cp._pick("top_k", kw.get("subtalker_top_k")) or 0),
+            float(self.cp._pick("top_p", kw.get("subtalker_top_p"))),
+        )
+        penalty = kw.get("repetition_penalty")
+        suppress = tuple(sorted({int(t) for t in kw.get("suppress_tokens") or ()}))
+        if any(not 0 <= t < self.vocab for t in suppress) or not 0 <= eos < self.vocab:
+            return None
+        return _TalkerParams(sample, 1.0 if penalty is None else float(penalty),
+                             int(kw.get("min_new_tokens") or 0), eos, suppress, sub)
+
+    def _pick(self, name: str, value: Any) -> Any:
+        return self._defaults[name] if value is None else value
+
+    # -- generation loop -------------------------------------------------------
+
+    def _generate(self, embeds: Any, trailing: Any, pad: Any, p: _TalkerParams,
+                  max_new: int) -> list:
+        """The ``hidden_states`` tuple HF generate returns, as qwen-tts reads
+        it: entry 0 is ``((prefill hidden,), None)``, entry k is
+        ``((hidden_k,), codec ids of frame k-1)``."""
+        length, text = embeds.shape[1], trailing.shape[1]
+        st = self._ready_state(embeds, max(length, text) + 1)
+        st.trailing[:, :text] = trailing
+        st.trailing[:, text:] = pad
+        st.seen.zero_()
+        st.unfinished.fill_(True)
+        st.n.zero_()
+        hidden = self._layers(embeds, st, start=0, masked=False)
+        st.hidden.copy_(hidden[:, -1:])
+        st.pos.fill_(length)
+        self._choose(self.talker.codec_head(hidden)[:, -1].float(), st, p)
+        entries = [((st.hidden.clone(),), None)]
+        pos, produced = length, 1
+        while produced < max_new and bool(st.unfinished):
+            if pos >= st.capacity:
+                st = self._grow(st, 2 * st.capacity)
+            codes = self._step(st, p, pos)
+            entries.append(((st.hidden.clone(),), codes.clone()))
+            pos, produced = pos + 1, produced + 1
+        return entries
+
+    def _step(self, st: _TalkerState, p: _TalkerParams, pos: int) -> Any:
+        if not (self.use_cuda_graphs and st.trailing.is_cuda):
+            return self._frame(st, p, start=pos, masked=False)
+        key = (st.capacity, p)
+        entry = self._graphs.get(key)
+        if entry is None:
+            if len(self._graphs) >= MAX_GRAPHS:
+                return self._frame(st, p, start=pos, masked=False)
+            entry = self._graphs[key] = self._capture(st, p, pos)
+        graph, codes = entry
+        graph.replay()
+        return codes
+
+    def _capture(self, st: _TalkerState, p: _TalkerParams, pos: int) -> tuple[Any, Any]:
+        torch = self.torch
+        device = st.trailing.device
+        saved = [t.clone() for t in st.scalars()]
+        side = torch.cuda.Stream(device=device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            for _ in range(2):  # warm cuBLAS / allocator; the KV slot written is unread
+                self._frame(st, p, start=pos, masked=True)
+                for live, copy in zip(st.scalars(), saved):
+                    live.copy_(copy)
+        torch.cuda.current_stream(device).wait_stream(side)
+        if self._pool is None:
+            self._pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self._pool):
+            codes = self._frame(st, p, start=pos, masked=True)
+        logger.info("captured Qwen3-TTS talker CUDA graph (KV capacity %d)", st.capacity)
+        return graph, codes
+
+    # -- one frame -------------------------------------------------------------
+
+    def _frame(self, st: _TalkerState, p: _TalkerParams, *, start: int, masked: bool) -> Any:
+        """Expand the last talker token into a frame's 16 codes, then predict
+        the next talker token. Returns the frame's codes ``[1, groups]``."""
+        torch = self.torch
+        token = st.token[:, None]
+        last = self.talker.model.codec_embedding(token)
+        pair = torch.cat((st.hidden, last), dim=1)
+        sub = self.cp._decode(pair, p.sub) if masked else self.cp._run(pair, p.sub)
+        # Built now: ``token`` views st.token, which _choose overwrites.
+        codes = torch.cat((token, sub), dim=-1)
+        embeds = [last] + [emb(sub[..., i:i + 1])
+                           for i, emb in enumerate(self.cp.cp.model.codec_embedding)]
+        x = torch.cat(embeds, dim=1).sum(1, keepdim=True)
+        # Step g = n - 1 adds trailing text row g; rows past the text hold the pad.
+        x = x + st.trailing.index_select(1, (st.n - 1).clamp(max=st.capacity - 1))
+        hidden = self._layers(x, st, start=start, masked=masked)
+        st.hidden.copy_(hidden)
+        st.pos.add_(1)
+        self._choose(self.talker.codec_head(hidden)[:, -1].float(), st, p)
+        return codes
+
+    def _choose(self, scores: Any, st: _TalkerState, p: _TalkerParams) -> None:
+        """transformers' processors in its order, then sampling; updates the
+        token, stop flag, repetition set and token count in place."""
+        torch = self.torch
+        eos_mask, suppress_mask = self._token_masks(scores.device, p)
+        if p.repetition_penalty != 1.0:
+            rp = p.repetition_penalty
+            scores = torch.where(st.seen, torch.where(scores < 0, scores * rp, scores / rp), scores)
+        if p.min_new > 0:
+            scores = scores.masked_fill(eos_mask & (st.n < p.min_new), float("-inf"))
+        if suppress_mask is not None:
+            scores = scores.masked_fill(suppress_mask, float("-inf"))
+        do_sample, temperature, top_k, top_p = p.sample
+        token = sample_next(scores, torch=torch, do_sample=do_sample,
+                            temperature=temperature, top_k=top_k, top_p=top_p)
+        token = torch.where(st.unfinished, token, p.eos)
+        st.unfinished.logical_and_(token != p.eos)
+        st.seen.scatter_(1, token[:, None], True)
+        st.token.copy_(token)
+        st.n.add_(1)
+
+    def _token_masks(self, device: Any, p: _TalkerParams) -> tuple[Any, Any]:
+        key = (device, p.eos, p.suppress)
+        masks = self._masks.get(key)
+        if masks is None:
+            ids = self.torch.arange(self.vocab, device=device)
+            suppress = None
+            if p.suppress:
+                suppress = self.torch.isin(ids, self.torch.tensor(p.suppress, device=device))
+            masks = self._masks[key] = (ids == p.eos, suppress)
+        return masks
+
+    def _layers(self, x: Any, st: _TalkerState, *, start: int, masked: bool) -> Any:
+        """Talker decoder layers plus final norm over ``x`` (``[1, n, hidden]``)
+        at cache positions ``start..``, writing K/V into the cache.
+
+        ``masked`` (a graphed frame, ``n == 1``) reads the position from
+        ``st.pos`` and attends over the whole cache with a mask; otherwise
+        attention reads exactly the first ``start + n`` keys, as upstream."""
+        torch = self.torch
+        sdpa = torch.nn.functional.scaled_dot_product_attention
+        batch, n, _ = x.shape
+        rep = self.heads // self.kv_heads
+        if masked:
+            cos = st.cos.index_select(0, st.pos)[None, None]
+            sin = st.sin.index_select(0, st.pos)[None, None]
+            allowed = (st.positions <= st.pos)[None, None, None]
+        else:
+            end = start + n
+            cos, sin = st.cos[start:end][None, None], st.sin[start:end][None, None]
+        for i, layer in enumerate(self.talker.model.layers):
+            attn = layer.self_attn
+            h = layer.input_layernorm(x)
+            q = attn.q_norm(attn.q_proj(h).view(batch, n, self.heads, self.head_dim)).transpose(1, 2)
+            k = attn.k_norm(attn.k_proj(h).view(batch, n, self.kv_heads, self.head_dim)).transpose(1, 2)
+            v = attn.v_proj(h).view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
+            q = q * cos + _rotate_half(q, torch) * sin
+            k = k * cos + _rotate_half(k, torch) * sin
+            if masked:
+                st.keys[i].index_copy_(2, st.pos, k)
+                st.values[i].index_copy_(2, st.pos, v)
+                keys, values = st.keys[i], st.values[i]
+                if rep > 1:
+                    keys = keys.repeat_interleave(rep, dim=1)
+                    values = values.repeat_interleave(rep, dim=1)
+                out = sdpa(q, keys, values, attn_mask=allowed, scale=attn.scaling)
+            else:
+                st.keys[i][:, :, start:end] = k
+                st.values[i][:, :, start:end] = v
+                out = sdpa(q, st.keys[i][:, :, :end], st.values[i][:, :, :end],
+                           is_causal=n > 1, scale=attn.scaling, enable_gqa=rep > 1)
+            x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
+            x = x + layer.mlp(layer.post_attention_layernorm(x))
+        return self.talker.model.norm(x)
+
+    # -- cache capacity --------------------------------------------------------
+
+    def _ready_state(self, like: Any, need: int) -> _TalkerState:
+        st = self._state
+        if st is None or not st.matches(like):
+            self._drop_graphs()
+            capacity = TALKER_CAPACITY
+            while capacity < need:
+                capacity *= 2
+            st = self._state = _TalkerState(self, like, capacity)
+        elif st.capacity < need:
+            capacity = st.capacity
+            while capacity < need:
+                capacity *= 2
+            st = self._grow(st, capacity)
+        return st
+
+    def _drop_graphs(self) -> None:
+        # A pool is released once every graph using it is gone; capturing into
+        # the stale handle fails an allocator assert, so start a fresh pool.
+        self._graphs.clear()
+        self._pool = None
+
+    def _grow(self, old: _TalkerState, capacity: int) -> _TalkerState:
+        """A bigger cache holding ``old``'s contents. Graphs captured the old
+        buffers, so they are dropped and recaptured on demand."""
+        new = _TalkerState(self, old.trailing, capacity)
+        size = old.capacity
+        for dst, src in zip(new.keys + new.values, old.keys + old.values):
+            dst[:, :, :size] = src
+        new.trailing[:, :size] = old.trailing
+        new.trailing[:, size:] = old.trailing[:, size - 1:]  # the last row is the pad
+        for dst, src in zip(new.scalars(), old.scalars()):
+            dst.copy_(src)
+        self._drop_graphs()
+        self._state = new
+        logger.info("Qwen3-TTS talker KV capacity grown to %d tokens", capacity)
+        return new
+
+
+def _is_batch1(t: Any, hidden: int) -> bool:
+    return (getattr(t, "dim", lambda: 0)() == 3 and t.shape[0] == 1
+            and t.shape[-1] == hidden)
+
+
 def _supported_layout(cp: Any) -> bool:
     try:
         cfg = cp.config
@@ -299,4 +680,57 @@ def install(tts: Any, *, torch: Any, use_cuda_graphs: bool = False) -> bool:
     fast = FastCodePredictor(cp, torch=torch, use_cuda_graphs=use_cuda_graphs,
                              upstream=current)
     cp.generate = fast.generate
+    return True
+
+
+def _supported_talker(talker: Any) -> bool:
+    try:
+        cfg = talker.config
+        model = talker.model
+        layers = list(model.layers)
+        attn = layers[0].self_attn
+        gen_cfg = talker.generation_config
+        defaults = type(gen_cfg)()
+        return (
+            len(layers) == int(cfg.num_hidden_layers)
+            and getattr(cfg, "sliding_window", None) is None
+            and int(cfg.num_attention_heads) % int(cfg.num_key_value_heads) == 0
+            and all(callable(getattr(obj, name, None)) for obj, name in (
+                (talker, "codec_head"), (model, "norm"), (model, "rotary_emb"),
+                (model, "codec_embedding")))
+            and all(hasattr(attn, name) for name in (
+                "q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm", "scaling"))
+            and all(hasattr(layer, name) for layer in layers for name in (
+                "input_layernorm", "post_attention_layernorm", "mlp"))
+            and all(getattr(gen_cfg, name, None) == getattr(defaults, name, None)
+                    for name in _TALKER_FIXED_CONFIG)
+        )
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return False
+
+
+def install_talker(tts: Any, *, torch: Any, use_cuda_graphs: bool = False) -> bool:
+    """Patch ``tts.model.talker.generate``; True when active. Needs the fast
+    code predictor (:func:`install`) first."""
+    version = _qwen_tts_version()
+    if version not in SUPPORTED_QWEN_TTS:
+        logger.info("qwen-tts %s: fast talker not installed (checked: %s)",
+                    version, ", ".join(sorted(SUPPORTED_QWEN_TTS)))
+        return False
+    talker = getattr(getattr(tts, "model", None), "talker", None)
+    cp_fast = getattr(getattr(getattr(talker, "code_predictor", None), "generate", None),
+                      "__self__", None)
+    if not isinstance(cp_fast, FastCodePredictor):
+        logger.info("fast talker needs the fast code predictor; not installed")
+        return False
+    if not _supported_talker(talker):
+        logger.warning("unexpected qwen-tts talker layout or generation config; "
+                       "fast talker not installed")
+        return False
+    current = getattr(talker, "generate", None)
+    if isinstance(getattr(current, "__self__", None), FastTalker):
+        return True
+    fast = FastTalker(talker, cp_fast, torch=torch, use_cuda_graphs=use_cuda_graphs,
+                      upstream=current)
+    talker.generate = fast.generate
     return True
