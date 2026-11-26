@@ -90,3 +90,18 @@ def test_silu_mul_matches_torch(dtype):
     tol = 2e-2 if dtype == torch.bfloat16 else 1e-5
     assert got.shape == want.shape
     assert torch.allclose(got.float(), want.float(), atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_add_rms_norm_matches_add_then_norm(dtype):
+    torch.manual_seed(4)
+    norm = RMSNorm(1024).to("cuda", dtype)
+    x = torch.randn(1, 2, 1024, device="cuda", dtype=dtype)
+    d = torch.randn(1, 2, 1024, device="cuda", dtype=dtype)
+    with torch.no_grad():
+        want_x = x + d
+        want_y = norm(want_x)
+        got_x, got_y = k.add_rms_norm(x, d, norm)
+    tol = 1e-2 if dtype == torch.bfloat16 else 1e-5
+    assert torch.equal(got_x, want_x)
+    assert torch.allclose(got_y.float(), want_y.float(), atol=tol, rtol=tol)

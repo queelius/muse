@@ -173,3 +173,35 @@ def silu_mul(gate_up: Any) -> Any:
     block = 1024
     _silu_mul_kernel[(rows, triton.cdiv(n, block))](gate_up, y, n, BLOCK=block)
     return y
+
+
+@triton.jit
+def _add_rms_norm_kernel(x_ptr, d_ptr, w_ptr, xo_ptr, y_ptr, n, eps,
+                         BLOCK: tl.constexpr):
+    # Residual add (rounded to the dtype, as upstream's add) followed by the
+    # next RMSNorm; writes both the new residual and its normalised form.
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n
+    dt = y_ptr.dtype.element_ty
+    x = tl.load(x_ptr + row * n + cols, mask=mask, other=0.0).to(tl.float32)
+    d = tl.load(d_ptr + row * n + cols, mask=mask, other=0.0).to(tl.float32)
+    xs = (x + d).to(dt)
+    tl.store(xo_ptr + row * n + cols, xs, mask=mask)
+    x32 = xs.to(tl.float32)
+    inv = tl.math.rsqrt(tl.sum(x32 * x32, axis=0) / n + eps)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    y = (w * (x32 * inv).to(dt).to(tl.float32)).to(dt)
+    tl.store(y_ptr + row * n + cols, y, mask=mask)
+
+
+def add_rms_norm(x: Any, delta: Any, module: Any) -> tuple[Any, Any]:
+    """``(x + delta, module(x + delta))`` for an RMSNorm over the last dim."""
+    x, delta = x.contiguous(), delta.contiguous()
+    n = x.shape[-1]
+    out = torch.empty_like(x)
+    y = torch.empty_like(x)
+    _add_rms_norm_kernel[(x.numel() // n,)](x, delta, module.weight, out, y, n,
+                                            float(module.variance_epsilon),
+                                            BLOCK=triton.next_power_of_2(n))
+    return out, y

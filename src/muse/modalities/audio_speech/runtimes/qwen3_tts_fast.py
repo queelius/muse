@@ -130,6 +130,15 @@ def _norm(module: Any, x: Any) -> Any:
     return k.rms_norm(module, x) if k is not None else module(x)
 
 
+def _add_norm(x: Any, delta: Any, module: Any) -> tuple[Any, Any]:
+    """``(x + delta, module(x + delta))``: one Triton kernel on CUDA."""
+    k = _kernels(x)
+    if k is not None:
+        return k.add_rms_norm(x, delta, module)
+    x = x + delta
+    return x, module(x)
+
+
 def _norm_rope(module: Any, x: Any, cos: Any, sin: Any, torch: Any) -> Any:
     """Per-head RMSNorm then RoPE: ``x`` ``[batch, tokens, heads, dim]``,
     ``cos`` / ``sin`` ``[tokens, dim]``; returns ``[batch, heads, tokens, dim]``.
@@ -319,9 +328,10 @@ class FastCodePredictor:
         rep = self.heads // self.kv_heads
         if self._fused is None:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.cp.model.layers]
-        for i, layer in enumerate(self.cp.model.layers):
+        layers = self.cp.model.layers
+        h = _norm(layers[0].input_layernorm, x)
+        for i, layer in enumerate(layers):
             attn, fused = layer.self_attn, self._fused[i]
-            h = _norm(layer.input_layernorm, x)
             q, k, v = fused.project(layer, h, torch)
             q = _norm_rope(attn.q_norm, q.view(batch, n, self.heads, self.head_dim), c, s, torch)
             k = _norm_rope(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim), c, s, torch)
@@ -330,9 +340,12 @@ class FastCodePredictor:
             values[i][:, :, start:end] = v
             out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
                        scale=attn.scaling, enable_gqa=rep > 1)
-            x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
-            x = x + fused.mlp(layer, _norm(layer.post_attention_layernorm, x), torch)
-        return _norm(self.cp.model.norm, x)[:, -1]
+            x, post = _add_norm(x, attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1)),
+                                layer.post_attention_layernorm)
+            following = (layers[i + 1].input_layernorm if i + 1 < len(layers)
+                         else self.cp.model.norm)
+            x, h = _add_norm(x, fused.mlp(layer, post, torch), following)
+        return h[:, -1]
 
     def _rope_table(self, like: Any) -> tuple[Any, Any]:
         """cos / sin for positions 0..length-1 from the model's own rotary module."""
@@ -655,10 +668,12 @@ class FastTalker:
             cos, sin = st.cos[start:end][None, None], st.sin[start:end][None, None]
         if masked and self._fused is None:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.talker.model.layers]
-        for i, layer in enumerate(self.talker.model.layers):
+        layers = self.talker.model.layers
+        if masked:
+            h = _norm(layers[0].input_layernorm, x)
+        for i, layer in enumerate(layers):
             attn = layer.self_attn
             if masked:  # graphed path: fused projections, norms and RoPE
-                h = _norm(layer.input_layernorm, x)
                 q, k, v = self._fused[i].project(layer, h, torch)
                 q = _norm_rope(attn.q_norm, q.view(batch, n, self.heads, self.head_dim),
                                cos, sin, torch)
@@ -686,12 +701,16 @@ class FastTalker:
                 st.values[i][:, :, start:end] = v
                 out = sdpa(q, st.keys[i][:, :, :end], st.values[i][:, :, :end],
                            is_causal=n > 1, scale=attn.scaling, enable_gqa=rep > 1)
-            x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
+            attn_out = attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
             if masked:
-                x = x + self._fused[i].mlp(layer, _norm(layer.post_attention_layernorm, x), torch)
+                x, post = _add_norm(x, attn_out, layer.post_attention_layernorm)
+                following = (layers[i + 1].input_layernorm if i + 1 < len(layers)
+                             else self.talker.model.norm)
+                x, h = _add_norm(x, self._fused[i].mlp(layer, post, torch), following)
             else:
+                x = x + attn_out
                 x = x + layer.mlp(layer.post_attention_layernorm(x))
-        return _norm(self.talker.model.norm, x) if masked else self.talker.model.norm(x)
+        return h if masked else self.talker.model.norm(x)
 
     # -- cache capacity --------------------------------------------------------
 
