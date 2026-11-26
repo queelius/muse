@@ -67,7 +67,18 @@ generation config; any other version, layout or call shape uses upstream
 `generate()`, and an unexpected failure switches the failing one off for the
 process. Constructor kwargs `fast_code_predictor` / `fast_talker` /
 `fast_decoder` / `cuda_graphs` (default on) turn them, or just the graphs,
-off (the talker needs the fast predictor). On an RTX 3060 a short line
+off (the talker needs the fast predictor). `int8_weights` (default off; CUDA
+with Triton) quantizes each talker and predictor layer's projections to int8
+with one scale per output row at first use, and the graphed frames' GEMVs
+read those: half the bytes on a bandwidth-bound loop, so a frame takes 7.2 ms
+on the 0.6B and 10.2 ms on the 1.7B (RTF ~0.12 and ~0.15). Output heads,
+prefill and every fallback keep the float weights, which stay loaded, so
+peak VRAM rises to 2.8 / 3.3 GiB (0.6B, short line / 25 s paragraph) and
+5.6 / 6.1 GiB (1.7B): raise `memory_gb` with it. It moves the token
+distributions slightly (talker KL against the exact path 9e-4, predictor KL
+against fp32 3-4.5e-3 where bf16's own is 0.9-1.5e-3); over 48 takes per arm
+and model, ASR errors were identical and UTMOS naturalness differed by under
+0.02. On an RTX 3060 a short line
 takes about 0.5 s on the 0.6B and 0.8 s on the 1.7B (RTF ~0.17 and ~0.24;
 a frame is 11.5 ms and 17.6 ms of GPU time), from about 7 s and 11 s per
 short line with upstream's loops. Every

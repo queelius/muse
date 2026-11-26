@@ -15,6 +15,9 @@ replaced by static-KV decoders that run each 12 Hz frame as one CUDA graph
 (:mod:`.qwen3_tts_fast`; ``fast_code_predictor`` / ``fast_talker`` /
 ``cuda_graphs`` kwargs). The speech decoder's SnakeBeta activations run as
 one Triton kernel each (``fast_decoder``), bit-identical to upstream.
+``int8_weights`` (off by default) has the graphed frames read int8 copies of
+the layer weights: about 40% less frame time for a small, measured change in
+the token distributions and more VRAM for the copies.
 
 qwen-tts has no speed control (``speed`` is ignored) and no streaming
 (``synthesize_stream`` yields one chunk). ``language=None`` is qwen-tts's

@@ -160,6 +160,27 @@ Final state (RTX 3060, in process, warm): 0.6B short line ~0.5 s, RTF ~0.17-0.18
 
 Where the frame goes now: GEMV ~10.3 of 11.5 ms at ~92% of the 360 GB/s floor (the predictor re-reads its 154 MB of weights 15 times per frame). Kernel-level work is near its end; the next large lever is fewer bytes (weight-only int8 would roughly halve GEMV time), which changes numerics and needs a quality decision. Lessons: `tl.sin` / `tl.exp` are fast approximations (use libdevice for bit-exactness), and Triton's default FP fusion contracts a multiply-add across explicit bf16 round trips, so a kernel that must match upstream's rounding needs `enable_fp_fusion=False`.
 
+### int8 layer weights (2026-11-26): frame 11.6 -> 7.2 ms, opt-in
+
+Branch `autoresearch/qwen3-tts-int8`. `int8_weights=True` quantizes every talker and code-predictor layer projection (fused q/k/v, o, fused gate/up, down) per output row (symmetric, row absmax -> 127) at the first graphed frame, from the loaded bf16 checkpoint; the GEMV kernels gained a `SCALED` variant that reads int8 tiles and multiplies each output by its row scale. Output heads, the eager prefill and every fallback keep the float weights. Off, the kernels compile to the same code as before (both KL gates reproduced to the last digit).
+
+| | bf16 | int8 layers |
+| --- | ---: | ---: |
+| 0.6B frame GPU ms / RTF | 11.57 / 0.176 | 7.23 / 0.120 |
+| 1.7B frame GPU ms / RTF | 17.61 / 0.243 | 10.19 / 0.148 |
+| 0.6B talker KL vs exact / predictor KL vs fp32 (bf16 floor 1.52e-3) | 7.5e-4 / 1.44e-3 | 9.4e-4 / 4.45e-3 |
+| 1.7B talker KL / predictor KL (floor 8.5e-4) | 4.6e-4 / 8.4e-4 | 8.9e-4 / 2.97e-3 |
+| 0.6B ASR errors / UTMOS, 48 takes | 2/628 / 4.465 | 2/628 / 4.450 |
+| 1.7B ASR errors / UTMOS, 48 takes | 2/628 / 4.396 | 2/628 / 4.390 |
+| 0.6B peak GiB, short line / 25 s paragraph | 2.33 / 2.80 | 2.83 / 3.31 |
+| 1.7B peak GiB | 4.03 / 4.70 | 5.59 / 6.09 |
+
+Gates for int8 runs: talker KL <= 1.1e-3 as before; predictor KL <= 4x its bf16 floor; the rest unchanged. Perceptual check: 24 lines x 2 seeds per arm and model, `qwen3-asr-1.7b` word errors (all four are "traveller" heard as "traveler") and UTMOS (paired differences -0.014 +/- 0.011 and -0.006 +/- 0.015).
+
+What was tried: int8 heads too (talker KL 1.25e-3, over its gate, for 0.08 ms: no). Offline on the real weights, per-row int8 sits at ~41 dB SNR; finer scale groups (256 / 128 / 64 columns) gain 1.2 / 1.9 / 2.7 dB and row-and-column equilibration nothing, because the weights are close to Gaussian. Getting meaningfully closer needs calibration data (GPTQ-style rounding), i.e. a published quantized checkpoint.
+
+Open: the int8 copies sit beside the float weights (+0.5 GiB on the 0.6B, +1.4 GiB on the 1.7B). Storing the layers as int8 only (float weights dropped, prefill and fallbacks reading dequantized weights) would turn that into a saving of the same size, at the cost of the in-process exact reference.
+
 ---
 
 ### Phase 2: Dynamic Multi-Voice Micro-Batching (Concurrency Win)
