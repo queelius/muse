@@ -132,6 +132,34 @@ Results (RTX 3060, nothing else running; Phase 1 = fast predictor only):
 
 ASR (`qwen3-asr-1.7b`) transcribed every HTTP output exactly (8 short lines, a 34 s and a 68 s paragraph). The 68 s paragraph found a bug, now fixed: after cache growth the recapture reused the dropped graphs' pool handle and failed an allocator assert; the fallback served the line through upstream (slowly, correctly). The remaining per-frame cost is mostly the predictor's ~1500 tiny kernels (16 ms); fusing them would need a compiler.
 
+### Kernel hill-climb (2026-11-26): frame 22.3 -> 11.5 ms, decoder -20%
+
+Karpathy-style autoresearch on branch `autoresearch/qwen3-tts-speed`: one change per experiment, kept only if the metric improved beyond noise (~0.3%) and every gate passed. Metric: CUDA-event GPU time of one graphed 12 Hz frame (immune to host load), timing the default-sampling graph (the first eleven rows timed the greedy one; the harness was fixed and the baseline re-measured). Gates: exact eager talker == upstream token for token; graphed == masked-eager; talker teacher-forced KL <= 1.1e-3; code predictor KL against an fp32 reference <= 1.5x upstream bf16's own KL (its floor) under teacher forcing; graphed predictor == eager; decoded waveform == upstream's on the same codes; unit tests. A harness run is marked contaminated if any other GPU process appears during it.
+
+| experiment | frame GPU ms | kept |
+| --- | ---: | --- |
+| baseline (option b, main) | 22.28 | |
+| fuse q/k/v and gate/up GEMMs (parameters become views of the fused weight, no extra memory) | 20.73 | yes |
+| SDPA `enable_gqa` instead of repeated K/V | 19.64 | yes |
+| Triton RMSNorm (strided per-head rows) | 16.42 | yes |
+| fused per-head RMSNorm + RoPE | 14.70 | yes |
+| Triton decode attention over the live keys only (length read on device) | 13.70 | yes |
+| fused SiLU * up | 13.48 | yes |
+| fused residual add + next RMSNorm | 13.31 | yes |
+| Triton GEMV for one-row projections (cuBLAS's M=1 GEMV ran 66-89% of bandwidth) | 12.11 | yes |
+| up-to-4-row GEMV in the same kernel | 19.95 (contended) | no: M=2 no faster, M=1 numerics moved |
+| decode attention for the predictor's one-token steps | 11.88 | yes |
+| re-measured on the sampling graph | 12.70 | |
+| one-kernel temperature + top-k + Gumbel-max sampler (k-th largest by binary search on order-preserving int keys; torch's Exp(1) noise, so RNG stays graph-safe) | 11.96 | yes |
+| separate few-row GEMV for the predictor's two-token step | 11.91 | yes |
+| K/V written into the caches by the norm + RoPE kernel (~200 fewer kernels) | 11.57 | yes |
+| SiLU fused into the down-projection GEMV input | 11.54 | no: -0.25%, noise level |
+| one-kernel SnakeBeta in the speech decoder (bit-identical) | 11.55; decode 115.0 -> 92.1 ms | yes |
+
+Final state (RTX 3060, in process, warm): 0.6B short line ~0.5 s, RTF ~0.17-0.18; 1.7B frame 17.6 ms, short line ~0.8 s, RTF ~0.24, decode 88.6 -> 72.7 ms; both pass every gate (1.7B predictor KL 8.4e-4 vs floor 8.5e-4, talker KL 4.6e-4). Peak VRAM (torch max allocated): 0.6B 2.33 GiB short line / 2.80 GiB 25 s paragraph, 1.7B 4.03 / 4.70 GiB. ASR (`qwen3-asr-1.7b`, six lines per model and path): fast-path WER equals upstream's (1/81 on both models; the one miss everywhere is "traveller" spelled "traveler"), except one 0.6B fast draw heard "roots" as "routes" (2/81), within sampling variation.
+
+Where the frame goes now: GEMV ~10.3 of 11.5 ms at ~92% of the 360 GB/s floor (the predictor re-reads its 154 MB of weights 15 times per frame). Kernel-level work is near its end; the next large lever is fewer bytes (weight-only int8 would roughly halve GEMV time), which changes numerics and needs a quality decision. Lessons: `tl.sin` / `tl.exp` are fast approximations (use libdevice for bit-exactness), and Triton's default FP fusion contracts a multiply-add across explicit bf16 round trips, so a kernel that must match upstream's rounding needs `enable_fp_fusion=False`.
+
 ---
 
 ### Phase 2: Dynamic Multi-Voice Micro-Batching (Concurrency Win)

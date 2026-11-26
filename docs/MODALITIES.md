@@ -49,19 +49,28 @@ transformers' repetition-penalty / min-new-tokens / suppress-tokens
 processors and sampling) is one CUDA graph, captured per KV capacity and
 sampling parameters (about 1 s on a first request); the talker cache starts
 at 512 tokens and doubles as a line needs it. Prefill runs eagerly. Without
-graphs, greedy decoding reproduces upstream token for token; a graphed frame
-attends over the whole cache with a mask, which rounds differently in bf16
-(teacher-forced logits within 3 bf16 steps, mean KL 7e-4), and sampling
-draws from the same distributions with a different random stream. Only batch
+graphs, greedy decoding reproduces upstream token for token. The graphed
+frame fuses q/k/v and gate/up projections, and on CUDA with Triton
+(`audio_speech/runtimes/qwen3_tts_triton.py`, lazily imported; torch ops
+otherwise) runs its one- and two-row projections as Triton GEMVs and its
+RMSNorms, residual adds, q/k norm + RoPE (writing K/V straight into the
+cache), SiLU gating, decode attention over the live keys and
+temperature/top-k/Gumbel-max sampling as fused kernels. That rounds
+differently in bf16 (talker teacher-forced mean KL 5-8e-4; the code
+predictor's error against an fp32 reference stays at or below upstream
+bf16's own), and sampling draws from the same distributions with a
+different random stream. The speech decoder's SnakeBeta activations run as
+one Triton kernel each, bit-identical to upstream (`fast_decoder`). Only batch
 1 is handled (larger batches use upstream). Both are installed only for
 qwen-tts 0.1.1 with the expected module layout and a default talker
 generation config; any other version, layout or call shape uses upstream
 `generate()`, and an unexpected failure switches the failing one off for the
 process. Constructor kwargs `fast_code_predictor` / `fast_talker` /
-`cuda_graphs` (default on) turn them, or just the graphs, off (the talker
-needs the fast predictor). On an RTX 3060 a short line takes about 1 s on
-either model (RTF ~0.3-0.45) and a 10-15 s paragraph about 3.5 s on the 0.6B
-and 5 s on the 1.7B, from about 7 s and 11 s per short line before. Every
+`fast_decoder` / `cuda_graphs` (default on) turn them, or just the graphs,
+off (the talker needs the fast predictor). On an RTX 3060 a short line
+takes about 0.5 s on the 0.6B and 0.8 s on the 1.7B (RTF ~0.17 and ~0.24;
+a frame is 11.5 ms and 17.6 ms of GPU time), from about 7 s and 11 s per
+short line with upstream's loops. Every
 saved voice's clone prompt stays cached once used (capacity
 `limits.max_saved_voices` plus bundled). An unknown `voice` is 400
 `voice_not_found` (also before a stream starts, via the backend's

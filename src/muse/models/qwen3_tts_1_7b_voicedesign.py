@@ -29,7 +29,7 @@ MANIFEST = {
         "The same description gives a somewhat different voice each call; save a take "
         "to qwen3-tts-0.6b-base to keep a character consistent",
         "No word timestamps, no speed control (`speed` is ignored), `voice` is ignored (describe the voice in `instructions`), no streaming (one chunk)",
-        "About 1 s per short line on a 12 GB GPU (RTF ~0.3-0.4); much slower on CPU",
+        "About 0.8 s per short line on a 12 GB GPU (RTF ~0.24); much slower on CPU",
     ],
     "quality_tier": "good",
     "license": "Apache-2.0",
@@ -44,6 +44,8 @@ MANIFEST = {
         "device": "auto",
         # Spike: peak 4.4 GB VRAM (bf16, torch max allocated) on short lines.
         # 2026-11-25 with the CUDA-graphed talker + code predictor: still 4.4 GB.
+        # 2026-11-26 with the Triton kernels: 4.03 GiB on a short line, 4.70 GiB
+        # on a 25 s paragraph.
         "memory_gb": 5.0,
         "mode": "design",
         "default_instructions": DEFAULT_INSTRUCTIONS,
