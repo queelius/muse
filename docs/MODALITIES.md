@@ -67,7 +67,8 @@ generation config; any other version, layout or call shape uses upstream
 `generate()`, and an unexpected failure switches the failing one off for the
 process. Constructor kwargs `fast_code_predictor` / `fast_talker` /
 `fast_decoder` / `cuda_graphs` (default on) turn them, or just the graphs,
-off (the talker needs the fast predictor). `int8_weights` (runtime default off; CUDA with Triton) stores each talker
+off (the talker needs the fast predictor). `int8_weights` (runtime default off, set by both bundled manifests; CUDA
+with Triton) stores each talker
 and predictor layer's projections as int8 only, one scale per output row,
 quantized from the loaded checkpoint at construction; the float layer weights
 are dropped. The frames' GEMVs read the int8 directly (half the bytes on a
