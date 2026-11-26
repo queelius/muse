@@ -339,6 +339,9 @@ class FastCodePredictor:
         end = start + n
         c, s = cos[start:end], sin[start:end]
         rep = self.heads // self.kv_heads
+        kernels = _kernels(x) if n == 1 and batch == 1 else None
+        if kernels is not None:  # the last slot, as a device tensor for the kernel
+            last = self._positions(x)[end - 1:end]
         if self._fused is None:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.cp.model.layers]
         layers = self.cp.model.layers
@@ -351,14 +354,25 @@ class FastCodePredictor:
             v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
             keys[i][:, :, start:end] = k
             values[i][:, :, start:end] = v
-            out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
-                       scale=attn.scaling, enable_gqa=rep > 1)
+            if kernels is not None:
+                out = kernels.decode_attention(q, keys[i], values[i], last, attn.scaling)
+            else:
+                out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
+                           scale=attn.scaling, enable_gqa=rep > 1)
             out = out.transpose(1, 2).reshape(batch, n, -1)
             x, post = _add_norm(x, _proj(attn.o_proj, out, torch), layer.post_attention_layernorm)
             following = (layers[i + 1].input_layernorm if i + 1 < len(layers)
                          else self.cp.model.norm)
             x, h = _add_norm(x, fused.mlp(layer, post, torch), following)
         return h[:, -1]
+
+    def _positions(self, like: Any) -> Any:
+        """0..length-1 on ``like``'s device (cached: graphs hold its address)."""
+        table = self._rope.get(("positions", like.device))
+        if table is None:
+            table = self._rope[("positions", like.device)] = self.torch.arange(
+                self.length, device=like.device)
+        return table
 
     def _rope_table(self, like: Any) -> tuple[Any, Any]:
         """cos / sin for positions 0..length-1 from the model's own rotary module."""
