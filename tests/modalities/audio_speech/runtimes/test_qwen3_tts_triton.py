@@ -107,22 +107,23 @@ def test_add_rms_norm_matches_add_then_norm(dtype):
     assert torch.allclose(got_y.float(), want_y.float(), atol=tol, rtol=tol)
 
 
+@pytest.mark.parametrize("rows", [1, 2, 3])
 @pytest.mark.parametrize("n,kdim", [(4096, 1024), (1024, 2048), (1024, 3072), (2048, 1024),
                                      (3000, 1024)])
-def test_linear_on_one_row_matches_an_fp32_product(n, kdim):
+def test_linear_on_a_few_rows_matches_an_fp32_product(n, kdim, rows):
     torch.manual_seed(5)
     w = torch.randn(n, kdim, device="cuda", dtype=torch.bfloat16) * 0.02
-    x = torch.randn(1, 1, kdim, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(1, rows, kdim, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         want = torch.nn.functional.linear(x.float(), w.float())
         got = k.linear(x, w)
-    assert got.shape == (1, 1, n) and got.dtype == torch.bfloat16
+    assert got.shape == (1, rows, n) and got.dtype == torch.bfloat16
     # fp32 accumulation, one rounding to bf16 (as cuBLAS)
     assert torch.allclose(got.float(), want, atol=1e-2, rtol=8e-3)
 
 
-@pytest.mark.parametrize("shape,kdim", [((1, 2), 1024), ((1, 1), 1000)])
-def test_linear_falls_back_to_torch_off_the_one_row_tiled_case(shape, kdim):
+@pytest.mark.parametrize("shape,kdim", [((1, 5), 1024), ((1, 1), 1000)])
+def test_linear_falls_back_to_torch_off_the_few_row_tiled_case(shape, kdim):
     torch.manual_seed(6)
     w = torch.randn(512, kdim, device="cuda", dtype=torch.bfloat16)
     x = torch.randn(*shape, kdim, device="cuda", dtype=torch.bfloat16)
@@ -170,3 +171,15 @@ def test_sample_next_uses_the_kernel_on_cuda_without_top_p(monkeypatch):
     token = fast.sample_next(logits, torch=torch, do_sample=True, temperature=0.9,
                              top_k=50, top_p=1.0)
     assert token.shape == (1,) and 0 <= int(token) < 2048
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4])
+def test_linear_uses_a_gemv_for_up_to_four_rows(rows, monkeypatch):
+    w = torch.randn(1024, 1024, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(1, rows, 1024, device="cuda", dtype=torch.bfloat16)
+
+    def refuse(*a, **kw):
+        raise AssertionError("fell back to F.linear")
+    monkeypatch.setattr(torch.nn.functional, "linear", refuse)
+    with torch.no_grad():
+        assert k.linear(x, w).shape == (1, rows, 1024)
