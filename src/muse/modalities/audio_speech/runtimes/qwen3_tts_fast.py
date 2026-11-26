@@ -92,6 +92,54 @@ def _rotate_half(x: Any, torch: Any) -> Any:
     return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
 
 
+def _fuse_linears(linears: list, torch: Any) -> Any:
+    """One weight holding ``linears``' weights row-stacked, or None (biases).
+
+    Each module's weight becomes a view into it, so memory does not grow and
+    the original modules (upstream and the exact path) compute as before."""
+    if any(getattr(lin, "bias", None) is not None for lin in linears):
+        return None
+    fused = torch.cat([lin.weight.detach() for lin in linears], dim=0)
+    parts = fused.split([lin.weight.shape[0] for lin in linears], dim=0)
+    for lin, part in zip(linears, parts):
+        lin.weight = torch.nn.Parameter(part, requires_grad=False)
+    return fused
+
+
+class _FusedLayer:
+    """A decoder layer's q/k/v and gate/up projections as single GEMMs.
+
+    Use :meth:`of`: one per layer, shared by every fast decoder over it."""
+
+    @classmethod
+    def of(cls, layer: Any, torch: Any) -> "_FusedLayer":
+        fused = layer.__dict__.get("_muse_fused")
+        if fused is None:
+            fused = layer.__dict__["_muse_fused"] = cls(layer, torch)
+        return fused
+
+    def __init__(self, layer: Any, torch: Any) -> None:
+        attn, mlp = layer.self_attn, layer.mlp
+        projections = [attn.q_proj, attn.k_proj, attn.v_proj]
+        self.sizes = [p.weight.shape[0] for p in projections]
+        self.qkv = _fuse_linears(projections, torch)
+        act = type(getattr(mlp, "act_fn", None)).__name__
+        self.gate_up = (_fuse_linears([mlp.gate_proj, mlp.up_proj], torch)
+                        if act in ("SiLU", "SiLUActivation") else None)
+
+    def project(self, layer: Any, h: Any, torch: Any) -> tuple:
+        if self.qkv is None:
+            attn = layer.self_attn
+            return attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)
+        return torch.nn.functional.linear(h, self.qkv).split(self.sizes, dim=-1)
+
+    def mlp(self, layer: Any, x: Any, torch: Any) -> Any:
+        if self.gate_up is None:
+            return layer.mlp(x)
+        gate, up = torch.nn.functional.linear(x, self.gate_up).chunk(2, dim=-1)
+        return layer.mlp.down_proj(torch.nn.functional.silu(gate) * up)
+
+
 class FastCodePredictor:
     """Drop-in for ``code_predictor.generate`` on the talker's call shape."""
 
@@ -111,6 +159,7 @@ class FastCodePredictor:
         self._rope: dict[tuple, tuple[Any, Any]] = {}
         self._graphs: dict[tuple, tuple[Any, Any, Any]] = {}
         self._pool: Any = None
+        self._fused: list | None = None
         gen_cfg = getattr(code_predictor, "generation_config", None)
         self._defaults = {k: getattr(gen_cfg, k, v) if gen_cfg is not None else v
                           for k, v in _DEFAULTS.items()}
@@ -229,12 +278,15 @@ class FastCodePredictor:
         end = start + n
         c, s = cos[start:end][None, None], sin[start:end][None, None]
         rep = self.heads // self.kv_heads
+        if self._fused is None:
+            self._fused = [_FusedLayer.of(layer, torch) for layer in self.cp.model.layers]
         for i, layer in enumerate(self.cp.model.layers):
-            attn = layer.self_attn
+            attn, fused = layer.self_attn, self._fused[i]
             h = layer.input_layernorm(x)
-            q = attn.q_norm(attn.q_proj(h).view(batch, n, self.heads, self.head_dim))
-            k = attn.k_norm(attn.k_proj(h).view(batch, n, self.kv_heads, self.head_dim))
-            v = attn.v_proj(h).view(batch, n, self.kv_heads, self.head_dim)
+            q, k, v = fused.project(layer, h, torch)
+            q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim))
+            k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim))
+            v = v.view(batch, n, self.kv_heads, self.head_dim)
             q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
             q = q * c + _rotate_half(q, torch) * s
             k = k * c + _rotate_half(k, torch) * s
@@ -247,7 +299,7 @@ class FastCodePredictor:
                 v_all = v_all.repeat_interleave(rep, dim=1)
             out = sdpa(q, k_all, v_all, is_causal=n > 1, scale=attn.scaling)
             x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
+            x = x + fused.mlp(layer, layer.post_attention_layernorm(x), torch)
         return self.cp.model.norm(x)[:, -1]
 
     def _rope_table(self, like: Any) -> tuple[Any, Any]:
@@ -367,6 +419,7 @@ class FastTalker:
         self._graphs: dict[tuple, tuple[Any, Any]] = {}
         self._pool: Any = None
         self._masks: dict[tuple, tuple[Any, Any]] = {}
+        self._fused: list | None = None
         gen_cfg = getattr(talker, "generation_config", None)
         self._defaults = {k: getattr(gen_cfg, k, v) if gen_cfg is not None else v
                           for k, v in _DEFAULTS.items()}
@@ -567,12 +620,18 @@ class FastTalker:
         else:
             end = start + n
             cos, sin = st.cos[start:end][None, None], st.sin[start:end][None, None]
+        if masked and self._fused is None:
+            self._fused = [_FusedLayer.of(layer, torch) for layer in self.talker.model.layers]
         for i, layer in enumerate(self.talker.model.layers):
             attn = layer.self_attn
             h = layer.input_layernorm(x)
-            q = attn.q_norm(attn.q_proj(h).view(batch, n, self.heads, self.head_dim)).transpose(1, 2)
-            k = attn.k_norm(attn.k_proj(h).view(batch, n, self.kv_heads, self.head_dim)).transpose(1, 2)
-            v = attn.v_proj(h).view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
+            if masked:  # graphed path: fused projections
+                q, k, v = self._fused[i].project(layer, h, torch)
+            else:  # exact path: the upstream modules, as upstream calls them
+                q, k, v = attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)
+            q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim)).transpose(1, 2)
+            k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim)).transpose(1, 2)
+            v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
             q = q * cos + _rotate_half(q, torch) * sin
             k = k * cos + _rotate_half(k, torch) * sin
             if masked:
@@ -589,7 +648,8 @@ class FastTalker:
                 out = sdpa(q, st.keys[i][:, :, :end], st.values[i][:, :, :end],
                            is_causal=n > 1, scale=attn.scaling, enable_gqa=rep > 1)
             x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
+            post = layer.post_attention_layernorm(x)
+            x = x + (self._fused[i].mlp(layer, post, torch) if masked else layer.mlp(post))
         return self.talker.model.norm(x)
 
     # -- cache capacity --------------------------------------------------------
