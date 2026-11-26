@@ -363,7 +363,7 @@ def test_manifests_are_well_formed():
     assert d["revision"].startswith("5ecdb673")
     dc, bc = d["capabilities"], b["capabilities"]
     assert dc["mode"] == "design" and bc["mode"] == "clone"
-    assert dc["memory_gb"] == 5.0 and bc["memory_gb"] == 3.0
+    assert dc["memory_gb"] == 5.0 and bc["memory_gb"] == 3.3
     assert dc["supports_instructions"] is True
     assert dc["voices"] == []
     assert not dc.get("supports_saved_voices")

@@ -47,8 +47,9 @@ MANIFEST = {
         # 2026-11-25 with the CUDA-graphed talker + code predictor: peak 2.6 GB
         # (512-token KV cache; +57 MB per further 512 tokens of a long line).
         # 2026-11-26 with the Triton kernels: 2.33 GiB on a short line, 2.80 GiB
-        # (~3.0 GB) on a 25 s paragraph, mostly the speech decoder's full chunk.
-        "memory_gb": 3.0,
+        # (~3.0 GB) on a 25 s paragraph, mostly the speech decoder's full chunk;
+        # 3.3 leaves margin over that.
+        "memory_gb": 3.3,
         "mode": "clone",
         "supports_saved_voices": True,
         "voice_cloning": True,
