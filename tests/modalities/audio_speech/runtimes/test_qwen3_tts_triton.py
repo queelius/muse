@@ -38,3 +38,25 @@ def test_rms_norm_matches_module_on_rows_and_strided_heads(dtype):
             assert got.shape == want.shape
             tol = 1e-2 if dtype == torch.bfloat16 else 1e-5
             assert torch.allclose(got.float(), want.float(), atol=tol, rtol=tol)
+
+
+def _rotate_half(x):
+    a, b = x.chunk(2, dim=-1)
+    return torch.cat((-b, a), dim=-1)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_rms_norm_rope_matches_norm_then_rope(dtype):
+    torch.manual_seed(1)
+    norm = RMSNorm(128).to("cuda", dtype)
+    fused = torch.randn(1, 3, 4096, device="cuda", dtype=dtype)
+    heads = fused[..., 2048:3072].view(1, 3, 8, 128)
+    ang = torch.randn(3, 128, device="cuda")
+    cos, sin = ang.cos().to(dtype), ang.sin().to(dtype)
+    with torch.no_grad():
+        y = norm(heads)
+        want = y * cos[None, :, None] + _rotate_half(y) * sin[None, :, None]
+        got = k.rms_norm_rope(norm, heads, cos, sin)
+    tol = 2e-2 if dtype == torch.bfloat16 else 1e-5
+    assert got.shape == want.shape
+    assert torch.allclose(got.float(), want.float(), atol=tol, rtol=tol)

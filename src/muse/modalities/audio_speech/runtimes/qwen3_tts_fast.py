@@ -130,6 +130,17 @@ def _norm(module: Any, x: Any) -> Any:
     return k.rms_norm(module, x) if k is not None else module(x)
 
 
+def _norm_rope(module: Any, x: Any, cos: Any, sin: Any, torch: Any) -> Any:
+    """Per-head RMSNorm then RoPE: ``x`` ``[batch, tokens, heads, dim]``,
+    ``cos`` / ``sin`` ``[tokens, dim]``; returns ``[batch, heads, tokens, dim]``.
+    One Triton kernel on CUDA."""
+    k = _kernels(x)
+    if k is not None:
+        return k.rms_norm_rope(module, x, cos, sin).transpose(1, 2)
+    y = module(x).transpose(1, 2)
+    return y * cos + _rotate_half(y, torch) * sin
+
+
 class _FusedLayer:
     """A decoder layer's q/k/v and gate/up projections as single GEMMs.
 
@@ -300,7 +311,7 @@ class FastCodePredictor:
         sdpa = torch.nn.functional.scaled_dot_product_attention
         batch, n, _ = x.shape
         end = start + n
-        c, s = cos[start:end][None, None], sin[start:end][None, None]
+        c, s = cos[start:end], sin[start:end]
         rep = self.heads // self.kv_heads
         if self._fused is None:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.cp.model.layers]
@@ -308,12 +319,9 @@ class FastCodePredictor:
             attn, fused = layer.self_attn, self._fused[i]
             h = _norm(layer.input_layernorm, x)
             q, k, v = fused.project(layer, h, torch)
-            q = _norm(attn.q_norm, q.view(batch, n, self.heads, self.head_dim))
-            k = _norm(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim))
-            v = v.view(batch, n, self.kv_heads, self.head_dim)
-            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-            q = q * c + _rotate_half(q, torch) * s
-            k = k * c + _rotate_half(k, torch) * s
+            q = _norm_rope(attn.q_norm, q.view(batch, n, self.heads, self.head_dim), c, s, torch)
+            k = _norm_rope(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim), c, s, torch)
+            v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
             keys[i][:, :, start:end] = k
             values[i][:, :, start:end] = v
             out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
@@ -634,8 +642,8 @@ class FastTalker:
         batch, n, _ = x.shape
         rep = self.heads // self.kv_heads
         if masked:
-            cos = st.cos.index_select(0, st.pos)[None, None]
-            sin = st.sin.index_select(0, st.pos)[None, None]
+            cos = st.cos.index_select(0, st.pos)
+            sin = st.sin.index_select(0, st.pos)
             allowed = (st.positions <= st.pos)[None, None, None]
         else:
             end = start + n
@@ -644,20 +652,21 @@ class FastTalker:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.talker.model.layers]
         for i, layer in enumerate(self.talker.model.layers):
             attn = layer.self_attn
-            if masked:  # graphed path: fused projections and norms
+            if masked:  # graphed path: fused projections, norms and RoPE
                 h = _norm(layer.input_layernorm, x)
                 q, k, v = self._fused[i].project(layer, h, torch)
-                q = _norm(attn.q_norm, q.view(batch, n, self.heads, self.head_dim))
-                k = _norm(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim))
+                q = _norm_rope(attn.q_norm, q.view(batch, n, self.heads, self.head_dim),
+                               cos, sin, torch)
+                k = _norm_rope(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim),
+                               cos, sin, torch)
             else:  # exact path: the upstream modules, as upstream calls them
                 h = layer.input_layernorm(x)
                 q, k, v = attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)
-                q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim))
-                k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim))
-            q, k = q.transpose(1, 2), k.transpose(1, 2)
+                q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim)).transpose(1, 2)
+                k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim)).transpose(1, 2)
+                q = q * cos + _rotate_half(q, torch) * sin
+                k = k * cos + _rotate_half(k, torch) * sin
             v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
-            q = q * cos + _rotate_half(q, torch) * sin
-            k = k * cos + _rotate_half(k, torch) * sin
             if masked:
                 st.keys[i].index_copy_(2, st.pos, k)
                 st.values[i].index_copy_(2, st.pos, v)

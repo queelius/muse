@@ -56,3 +56,47 @@ def rms_norm(module: Any, x: Any) -> Any:
                               float(module.variance_epsilon),
                               BLOCK=triton.next_power_of_2(n))
     return y
+
+
+@triton.jit
+def _rms_norm_rope_kernel(x_ptr, w_ptr, cos_ptr, sin_ptr, y_ptr, heads, tokens,
+                          stride_t, stride_h, n, eps, BLOCK: tl.constexpr):
+    # Per-head RMSNorm then rotary embedding, rounding where upstream does:
+    # norm -> dtype, * weight -> dtype, then (y * cos) and
+    # (rotate_half(y) * sin) each -> dtype, and their sum -> dtype.
+    row = tl.program_id(0)
+    t = row // heads
+    base = t * stride_t + (row % heads) * stride_h
+    cols = tl.arange(0, BLOCK)
+    half = n // 2
+    mask = cols < n
+    perm = tl.where(cols < half, cols + half, cols - half)
+    dt = y_ptr.dtype.element_ty
+    x = tl.load(x_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
+    xp = tl.load(x_ptr + base + perm, mask=mask, other=0.0).to(tl.float32)
+    inv = tl.math.rsqrt(tl.sum(x * x, axis=0) / n + eps)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    wp = tl.load(w_ptr + perm, mask=mask, other=0.0).to(tl.float32)
+    y = (w * (x * inv).to(dt).to(tl.float32)).to(dt).to(tl.float32)
+    yp = (wp * (xp * inv).to(dt).to(tl.float32)).to(dt).to(tl.float32)
+    rot = tl.where(cols < half, -yp, yp)
+    pos = (t % tokens) * n
+    c = tl.load(cos_ptr + pos + cols, mask=mask, other=0.0).to(tl.float32)
+    s = tl.load(sin_ptr + pos + cols, mask=mask, other=0.0).to(tl.float32)
+    out = (y * c).to(dt).to(tl.float32) + (rot * s).to(dt).to(tl.float32)
+    tl.store(y_ptr + row * n + cols, out.to(dt), mask=mask)
+
+
+def rms_norm_rope(module: Any, x: Any, cos: Any, sin: Any) -> Any:
+    """``rope(module(x))`` for per-head ``x`` ``[batch, tokens, heads, n]``
+    (unit last-dim stride) and ``cos`` / ``sin`` ``[tokens, n]``; one kernel.
+    Returns a contiguous ``[batch, tokens, heads, n]``."""
+    batch, tokens, heads, n = x.shape
+    if x.stride(-1) != 1 or (batch != 1 and x.stride(0) != tokens * x.stride(1)):
+        x = x.contiguous()
+    cos, sin = cos.contiguous(), sin.contiguous()
+    y = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    _rms_norm_rope_kernel[(batch * tokens * heads,)](
+        x, module.weight, cos, sin, y, heads, tokens, x.stride(1), x.stride(2), n,
+        float(module.variance_epsilon), BLOCK=triton.next_power_of_2(n))
+    return y
