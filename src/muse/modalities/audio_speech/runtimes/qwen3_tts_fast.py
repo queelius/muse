@@ -106,6 +106,30 @@ def _fuse_linears(linears: list, torch: Any) -> Any:
     return fused
 
 
+_KERNELS: Any = None  # the Triton kernels module, False when unavailable
+
+
+def _kernels(x: Any) -> Any:
+    """:mod:`.qwen3_tts_triton` for a CUDA tensor, or None (CPU, no Triton)."""
+    global _KERNELS
+    if not getattr(x, "is_cuda", False):
+        return None
+    if _KERNELS is None:
+        try:
+            from muse.modalities.audio_speech.runtimes import qwen3_tts_triton
+            _KERNELS = qwen3_tts_triton
+        except Exception:  # no triton, or it failed to import
+            logger.info("Triton unavailable; Qwen3-TTS fast path uses torch ops")
+            _KERNELS = False
+    return _KERNELS or None
+
+
+def _norm(module: Any, x: Any) -> Any:
+    """An RMSNorm module applied to ``x``: one Triton kernel on CUDA."""
+    k = _kernels(x)
+    return k.rms_norm(module, x) if k is not None else module(x)
+
+
 class _FusedLayer:
     """A decoder layer's q/k/v and gate/up projections as single GEMMs.
 
@@ -282,10 +306,10 @@ class FastCodePredictor:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.cp.model.layers]
         for i, layer in enumerate(self.cp.model.layers):
             attn, fused = layer.self_attn, self._fused[i]
-            h = layer.input_layernorm(x)
+            h = _norm(layer.input_layernorm, x)
             q, k, v = fused.project(layer, h, torch)
-            q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim))
-            k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim))
+            q = _norm(attn.q_norm, q.view(batch, n, self.heads, self.head_dim))
+            k = _norm(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim))
             v = v.view(batch, n, self.kv_heads, self.head_dim)
             q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
             q = q * c + _rotate_half(q, torch) * s
@@ -295,8 +319,8 @@ class FastCodePredictor:
             out = sdpa(q, keys[i][:, :, :end], values[i][:, :, :end], is_causal=n > 1,
                        scale=attn.scaling, enable_gqa=rep > 1)
             x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
-            x = x + fused.mlp(layer, layer.post_attention_layernorm(x), torch)
-        return self.cp.model.norm(x)[:, -1]
+            x = x + fused.mlp(layer, _norm(layer.post_attention_layernorm, x), torch)
+        return _norm(self.cp.model.norm, x)[:, -1]
 
     def _rope_table(self, like: Any) -> tuple[Any, Any]:
         """cos / sin for positions 0..length-1 from the model's own rotary module."""
@@ -620,13 +644,17 @@ class FastTalker:
             self._fused = [_FusedLayer.of(layer, torch) for layer in self.talker.model.layers]
         for i, layer in enumerate(self.talker.model.layers):
             attn = layer.self_attn
-            h = layer.input_layernorm(x)
-            if masked:  # graphed path: fused projections
+            if masked:  # graphed path: fused projections and norms
+                h = _norm(layer.input_layernorm, x)
                 q, k, v = self._fused[i].project(layer, h, torch)
+                q = _norm(attn.q_norm, q.view(batch, n, self.heads, self.head_dim))
+                k = _norm(attn.k_norm, k.view(batch, n, self.kv_heads, self.head_dim))
             else:  # exact path: the upstream modules, as upstream calls them
+                h = layer.input_layernorm(x)
                 q, k, v = attn.q_proj(h), attn.k_proj(h), attn.v_proj(h)
-            q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim)).transpose(1, 2)
-            k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim)).transpose(1, 2)
+                q = attn.q_norm(q.view(batch, n, self.heads, self.head_dim))
+                k = attn.k_norm(k.view(batch, n, self.kv_heads, self.head_dim))
+            q, k = q.transpose(1, 2), k.transpose(1, 2)
             v = v.view(batch, n, self.kv_heads, self.head_dim).transpose(1, 2)
             q = q * cos + _rotate_half(q, torch) * sin
             k = k * cos + _rotate_half(k, torch) * sin
@@ -641,9 +669,11 @@ class FastTalker:
                 out = sdpa(q, st.keys[i][:, :, :end], st.values[i][:, :, :end],
                            is_causal=n > 1, scale=attn.scaling, enable_gqa=rep > 1)
             x = x + attn.o_proj(out.transpose(1, 2).reshape(batch, n, -1))
-            post = layer.post_attention_layernorm(x)
-            x = x + (self._fused[i].mlp(layer, post, torch) if masked else layer.mlp(post))
-        return self.talker.model.norm(x)
+            if masked:
+                x = x + self._fused[i].mlp(layer, _norm(layer.post_attention_layernorm, x), torch)
+            else:
+                x = x + layer.mlp(layer.post_attention_layernorm(x))
+        return _norm(self.talker.model.norm, x) if masked else self.talker.model.norm(x)
 
     # -- cache capacity --------------------------------------------------------
 
