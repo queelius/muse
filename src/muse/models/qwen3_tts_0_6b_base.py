@@ -57,8 +57,8 @@ MANIFEST = {
         # UTMOS, blind listening); see docs/MODALITIES.md.
         "int8_weights": True,
         # Streaming chunk schedule in 12 Hz frames (80 ms each): a short
-        # first chunk for a fast start, then larger ones.
-        "stream_first_frames": 4,
+        # first chunk for a fast start, then doubling up to the steady size.
+        "stream_first_frames": 2,
         "stream_chunk_frames": 16,
         "mode": "clone",
         "supports_saved_voices": True,

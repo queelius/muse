@@ -345,7 +345,7 @@ def test_stream_equals_the_one_chunk_audio(make, mode, monkeypatch):
                         lambda self, f: pushed.append(f.clone()) or real_push(self, f))
     want = m.synthesize("A line of speech.").audio
     chunks = _chunks(m)
-    assert [len(c.audio) // UP for c in chunks] == [4, 16, 9]  # default schedule
+    assert [len(c.audio) // UP for c in chunks] == [2, 4, 8, 15]  # default: doubles from 2, up to 16
     got = np.concatenate([c.audio for c in chunks])
     assert len(got) == len(want) == 29 * UP
     np.testing.assert_allclose(got, want, atol=TOL)
@@ -357,7 +357,7 @@ def test_stream_equals_the_one_chunk_audio(make, mode, monkeypatch):
 
 def test_chunk_schedule_comes_from_the_constructor(make):
     m = make("clone", stream_first_frames=2, stream_chunk_frames=5)
-    assert [len(c.audio) // UP for c in _chunks(m)] == [2, 5, 5, 5, 5, 5, 2]
+    assert [len(c.audio) // UP for c in _chunks(m)] == [2, 4, 5, 5, 5, 5, 3]
 
 
 @pytest.mark.parametrize("kw", [{"stream_first_frames": 0}, {"stream_chunk_frames": -1}])
@@ -419,7 +419,7 @@ def test_failure_before_the_first_chunk_falls_back_to_one_chunk(make, monkeypatc
 
 
 def test_failure_after_a_chunk_ends_the_stream(make, monkeypatch):
-    m = make("clone")
+    m = make("clone", stream_first_frames=4)
     ft = _talker_of(m)
     real, calls = ft.step, []
 

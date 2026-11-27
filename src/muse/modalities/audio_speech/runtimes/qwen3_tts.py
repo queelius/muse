@@ -24,8 +24,9 @@ qwen-tts builds the prompt as for :meth:`synthesize` and is unwound at the
 talker call (:meth:`FastTalker.capture`); the talker's frames then come one
 at a time (``start`` / ``step``) and the speech decoder, split into its
 causal front and its conv stack (:mod:`.qwen3_tts_stream`), turns each
-chunk into audio. The first chunk is ``stream_first_frames`` 12 Hz frames,
-later ones ``stream_chunk_frames``. The codes equal the one-call path's and
+chunk into audio (on CUDA as graphs per padded shape). The first chunk is
+``stream_first_frames`` 12 Hz frames, each later one twice the last up to
+``stream_chunk_frames``. The codes equal the one-call path's and
 the audio its one-pass decode within the decoder's bf16 floor. Elsewhere (CPU,
 another qwen-tts, a fast path disabled after a failure) a stream is one chunk.
 
@@ -73,9 +74,11 @@ DEFAULT_INSTRUCTIONS = (
     "speaking at a moderate pace."
 )
 # Streaming chunk schedule, in 12 Hz frames (1920 samples, 80 ms each): a
-# small first chunk for a fast start, then larger ones (generation runs
-# several times faster than playback, so only decode overhead is at stake).
-STREAM_FIRST_FRAMES = 4
+# small first chunk for a fast start, then each chunk twice the last, up to
+# the steady size. Doubling keeps every chunk inside the playback of the audio
+# already sent (a 2-frame first chunk straight to 16 frames underran on the
+# 1.7B: 16 frames take ~170 ms there, the first chunk plays for 160 ms).
+STREAM_FIRST_FRAMES = 2
 STREAM_CHUNK_FRAMES = 16
 
 
@@ -257,7 +260,7 @@ class Qwen3TTSRuntime:
                     if len(audio) or (codes is None and not sent):
                         part = None  # anything thrown in at the yield is not ours
                         yield AudioChunk(audio=audio, sample_rate=SAMPLE_RATE)
-                        sent, target = True, steady
+                        sent, target = True, max(1, min(steady, 2 * target))
                 if codes is None:
                     return
         except Exception as exc:
