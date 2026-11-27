@@ -274,54 +274,65 @@ First audio median / worst (ms), audio s per wall s, smallest chunk margin, peak
 
 Throughput (C) rises with the burst, 2.6x A's at 32 lines on the 0.6B and 3.6x on the 1.7B, at the same GPU ms per second of audio for a lone line. A lone streamed line starts in 52 ms (0.6B) / 62 ms (1.7B), from 87 / 91 in B, because the joining line's prefill is graphed. These D rows are stage 2's doubling schedule, under which bursts of 8 or more simultaneous streams went late at their start; the burst table was not re-run with stage 3's deadline-driven chunks (the HTTP check below covers one simultaneous start).
 
-### NPC capacity (stage 3: deadline-driven chunks)
+### NPC capacity (stages 3 and 3b: deadline-driven chunks)
 
-Stage 2's doubling schedule (2, 4, 8, 16 frames) needs each next chunk generated within the playback of the one before, i.e. an all-in frame under 40 ms; it capped the 0.6B at 8 speakers. Stage 3 replaces it in the engine (`max_batch_size` > 1 only; `max_batch_size` 1 never builds the engine and is unchanged): a line's pending frames go out when one more frame plus a decode would no longer fit in its audio ahead of playback (`emission_due`: lead + `stream_buffer_seconds` - 30 ms safety < the slowest of the last 32 loop iterations + the decode estimate), or at `stream_chunk_frames` (16). The first chunk is `first_chunk_frames`: c1 >= 1.5 f / (80 ms - f) for the measured all-in frame time f, at least `stream_first_frames` (2), at most 16, so chunk sizes grow by themselves with the load. (A first version waited on the average iteration time and left lines 10-30 ms late at 8-16 speakers: iterations in which other lines decode are several times an idle one.)
+Stage 2's doubling schedule (2, 4, 8, 16 frames) needs each next chunk generated within the playback of the one before, i.e. an all-in frame under 40 ms; it capped the 0.6B at 8 speakers. The engine (`max_batch_size` > 1 only; `max_batch_size` 1 never builds it) now emits by deadline:
 
-Workload as in stage 2: N speakers, one of the 24 lines (2.5-6.5 s) each with 1-3 s pauses, starts staggered over 2 s, 20 s per N, all streamed, `warm_rows` 32. ok = no chunk after a line's first arrived after its playback time (the client buffer counted) and the worst first audio < 1 s. "voices" = mean live rows (lines speaking at once). Margin: smallest amount by which a chunk beat its playback time.
+- A playing line's pending frames go out when one more frame plus a decode would not fit in its audio ahead of playback (`emission_due`: lead + `stream_buffer_seconds` - 30 ms < the slowest of the last 32 loop iterations + the decode estimate), or at `stream_chunk_frames` (16).
+- A line already behind its playback waits for at least `least_chunk_frames` = ceil(1.5 f / (T - f)) frames (all 16 past f = 0.9 T), f the mean all-in frame time. Without this, a crowd that fell behind decoded 1-2-frame chunks for every line every frame and never recovered (the "mean" first-chunk variant at 24 speakers: decode share 0.68, 43 ms a decode, all-in 105 ms a frame; no OOM, growth or runaway involved). A version that held back lines not yet late made them underrun (5-13 late lines at 24 speakers).
+- First chunk (`first_chunk_size`): with fewer than `HEAVY_ROWS` (10) live rows and the mean all-in frame under half a frame's audio, the larger of ceil(1.5 f / (T - f)) on the running mean and a floor covering one slow frame plus a decode, ceil((slowest + decode + 30 ms) / T) + 1; otherwise the long chunk, `first_chunk_frames` on the slowest recent frame (stage 3's rule), which kept 24 speakers on time where every mean-based variant tried put 13-17 lines late. A pass that admits several lines at once is sized for the all-in time measured at the bucket it lands in (`bucket_est`), so a burst is not sized for the idle engine it found.
 
-0.6B, client buffer 0 (`stream_buffer_seconds` 0):
+Workload: N speakers, one of the 24 lines (2.5-6.5 s) each with 1-3 s pauses, starts staggered over 2 s, 20 s per N, all streamed. ok = no chunk after a line's first arrived after its playback time (client buffer counted) and the worst first audio < 1 s. "voices" = mean live rows. Margin = the smallest amount by which a chunk beat its playback time. Idle GPU (checked) unless marked.
 
-| N | voices | first audio med / worst (ms) | min margin | late lines | all-in ms / frame | ok |
-| ---: | ---: | --- | ---: | ---: | ---: | --- |
-| 1 | 1.0 | 53 / 151 | +50 | 0 / 4 | 8.6 | yes |
-| 8 | 3.4 | 86 / 353 | +25 | 0 / 50 | 21.0 | yes |
-| 12 | 5.1 | 126 / 698 | +27 | 0 / 69 | 25.4 | yes |
-| 16 | 7.1 | 251 / 810 | -3 | 1 / 86 | 29.7 | no (one line, 3 ms) |
-| 24 | 11.6 | 679 / 1213 | -8 | 1 / 110 | 39.1 | no |
-| 32 | 19.0 | 1634 / 4048 | -7267 | 37 / 79 | 96.9 | no (over real time) |
+0.6B, client buffer 0, `warm_rows` 16, three runs (first audio median / worst ms, min margin, late lines):
 
-0.6B, client buffer 200 ms:
+| N | voices | run 1 | run 2 | run 3 | the coordinator's mean variant | stage 3 rule |
+| ---: | ---: | --- | --- | --- | --- | --- |
+| 8 | 3.4 | 106 / 216, +27, 0 | 103 / 213, +27, 0 | 95 / 219, +25, 0 | 116 / 360, +12, 0 | 96 / 195, +32, 0 |
+| 12 | 5.1-5.4 | 146 / 729, +25, 0 | 114 / 593, +31, 0 | 121 / 681, +11, 0 | 137 / 254, +13, 0 | 159 / 587, +22, 0 |
+| 16 | 7.2-7.4 | 165 / 799, +5, 0 | 157 / 733, +28, 0 | 146 / 737, +1, 0 | 161 / 262, +32, 0 | 537 / 867, -2, 1 |
+| 24 | 12.1-12.8 | 831 / 1346, -20, 6 | 717 / 1190, +10, 0 | 714 / 1125, +12, 0 | 989 / 3493, -5636, 46 | 929 / 1228, +26, 0 |
+| 32 (`warm_rows` 32) | 17.2 | 1119 / 1709, -844, 4 | | | | |
 
-| N | voices | first audio med / worst (ms) | min margin | late lines | all-in ms / frame | ok |
-| ---: | ---: | --- | ---: | ---: | ---: | --- |
-| 8 | 3.3 | 82 / 250 | +36 | 0 / 50 | 19.9 | yes |
-| 12 | 4.9 | 119 / 612 | +30 | 0 / 71 | 24.4 | yes |
-| 16 | 7.2 | 185 / 714 | +7 | 0 / 87 | 29.8 | yes |
-| 24 | 11.5 | 752 / 1148 | +29 | 0 / 110 | 38.2 | first audio only (1.15 s) |
-| 32 | 17.7 | 1110 / 1457 | +1 | 0 / 125 | 52.2 | first audio only (1.46 s) |
+Against the target: N = 8 met on all three runs; N = 24 met on two of three (0 late, first audio no worse than stage 3's rule); N = 12 and 16 match the mean variant on median first audio and lateness, but **not on worst first audio** (593-799 ms against its 254-262). The worst cases are lines sized as part of a multi-line pass (several speakers' next lines landing in the same pass), which the burst rule sizes for the measured all-in time at the bucket they join (long chunks); the mean variant had no burst handling. I did not get both.
 
-**0.6B capacity: 12 speakers (5 voices) with no client buffer, 16 (7 voices) with 200 ms; with 200 ms no line is late up to 32 speakers (18 voices), where first audio reaches 1.1-1.5 s.** Stage 2: 8 speakers. One client: 53 ms first audio (stage 2: 52).
+0.6B, client buffer 200 ms, `warm_rows` 32, one run:
 
-1.7B (a muse-local worker for the 0.6B was resident on the GPU during these runs, idle as far as I can tell):
+| N | voices | first audio med / worst | min margin | late lines |
+| ---: | ---: | --- | ---: | ---: |
+| 8 | 3.4 | 96 / 165 | +38 | 0 / 51 |
+| 12 | 5.0 | 116 / 593 | +34 | 0 / 71 |
+| 16 | 7.3 | 146 / 795 | +28 | 0 / 87 |
+| 24 | 12.7 | 839 / 1310 | +12 | 0 / 108 |
+| 32 | 18.0 | 1268 / 2097 | -1157 | 10 / 111 |
 
-| N | buffer 0: voices, first audio med / worst, margin, late | buffer 200 ms: same |
-| ---: | --- | --- |
-| 1 | 1.0, 64 / 76, +57, 0 | |
-| 8 | 4.2, 131 / 350, +17, 0 | 4.1, 192 / 452, +29, 0 |
-| 12 | 5.8, 227 / 809, +13, 0 | 6.0, 251 / 849, +1, 0 |
-| 16 | 8.8, 361 / 904, +9, 0 | 8.8, 771 / 1015, -16, 1 |
-| 24 | 14.5, 1147 / 3361, -4736, 25 | 13.6, 1021 / 1467, -41, 1 |
+**0.6B capacity, final rule: 16 speakers (7.4 voices) with no client buffer on every run, 24 speakers (12.5 voices) on two of three runs (first audio then 0.7-0.8 s median, 1.1-1.3 s worst); with 200 ms buffer 24 speakers without a late line. 32 speakers is past real time.** One client: 53 ms first audio (stage 3 measurement, unchanged path). The 1.7B was not re-run with the stage 3b rule. Under stage 3's rule (buffer 0, a muse-local 0.6B worker resident and idle): 16 speakers (8.8 voices) with no late line, first audio 361 / 904 ms; 24 speakers 25 lines late.
 
-**1.7B capacity: 16 speakers (9 voices) with no buffer.** The 200 ms run was worse at 16 (one line 16 ms late), within run-to-run variation.
+All-in frame time (engine loop: frame, per-row takes, the decodes due) sets the ceiling, which must stay under 80 ms: 0.6B 8.6 ms alone, 21 ms at 3.4 voices, 25-29 at 5, 31-35 at 7-8, 40-48 at 12-13, 52-57 at 17-18.
 
-All-in frame time (engine loop: frame, per-row takes, the chunk decodes due) sets the ceiling: it must stay under 80 ms. 0.6B: 8.6 ms alone, 21 ms at 3.4 voices, 30 at 7, 39 at 12, 52-97 at 18-19.
+**Quality under deadline chunking (stage 3b).** The 24 lines x 2 seeds streamed one at a time through the engine while a 12-speaker crowd kept it loaded (mean live rows 6.3 on the 0.6B, 8.4 on the 1.7B; every chunk size from 1 to 16 frames occurred). Against the solo takes of stage 1 (same voices, same lines):
+
+| | 0.6B crowd | 0.6B solo | 1.7B crowd | 1.7B solo |
+| --- | --- | --- | --- | --- |
+| ASR word errors / 628 | 2 | 2 | 3 | 4-6 |
+| UTMOS mean (se), min | 4.463 (0.009), 4.23 | 4.473 (0.009) | 4.399 (0.017), 3.92 | 4.418 (0.011) |
+| SNR vs one-pass decode of own codes, min / median | 36.7 / 40.7 dB | 33.8 / 40.6 | 34.8 / 38.3 dB | 34.4 / 38.8 |
+| exact length | 48 / 48 | | 48 / 48 | |
+
+Within noise everywhere; the 1.7B's three errors are two "traveller" spellings and one take heard as "but said" for "I said". (The script aborted at interpreter exit with its crowd threads still inside the engine, after writing every result; a harness artefact.)
 
 **Growth hiccups and warm-up.** A long streamed line plays while 8 more join one per second. Without warm-up the first growth to 2 and to 4 rows (state rebuilt, graphs recaptured) made the playing line 256 ms and 188 ms late; with `warm_rows` 16 no line was late at any join. VRAM after load: 2.51 GiB (no warm-up), 3.12 GiB (8 rows), 3.56 GiB (16 rows). With `warm_rows` 8, the join to 2 rows was still 44 ms late once (not explained).
 
-**Runaway lines.** Twice in these runs a sampled line did not stop (qwen-tts's `max_new_tokens` is 4096 frames) and pushed one row past 512 KV tokens; growing all 32 rows to 1024 needed ~3.5 GiB more and ran out of memory. The new handling held (only that line failed; the engine kept serving), but the attempt stalls every stream for the rebuild. Those runs are excluded above. A per-line frame limit derived from the text length would avoid it; not built.
+**Runaway lines (stage 3b: capped).** Twice in the stage 3 runs a sampled line did not stop (qwen-tts's `max_new_tokens` is 4096 frames), pushed one row past 512 KV tokens, and growing all 32 rows to 1024 ran out of memory (handled: only that line failed, but the rebuild stalled every stream). Every line on every path now gets `max_new_tokens = frame_limit(text)` = 3 frames a character + 40, at most 4096; a line that reaches it ends there, as if it had stopped, with a warning. Measured over 96 takes (24 lines, 2 seeds, both models): at most 1.06 frames a character (0.61-1.06, the highest on the shortest lines); a 750-character paragraph 0.62-0.68. The stage-1 code-equality gate still holds at `max_batch_size` 1 (12/12 takes on each model), so ordinary lines never reach the limit.
 
-**HTTP.** An in-process app (muse's speech router) on a free port, `max_batch_size` 16, `warm_rows` 16. 8 streaming + 8 non-streaming clients + 1 that disconnects after its first chunk, all started together: every request completed with the right lengths, the dropped client's row was freed (0 live rows after, engine not failed), but 17 lines starting at the same instant are over capacity at zero buffer: streams' first audio 522 / 644 ms, min margin -3.3 s, whole lines 5.8 / 8.9 s. 4 + 4 + 1: first audio 238 / 254 ms, min margin -234 ms, whole lines 2.9 / 3.1 s (another GPU process appeared during that run; possibly contaminated). Simultaneous starts are the weak case: the first chunk is sized from the frame time measured before the burst arrives. In the staggered NPC workload this does not arise.
+**HTTP (stage 3b, idle GPU).** An in-process app (muse's speech router) on a free port, `max_batch_size` 16, `warm_rows` 16; all clients start at the same instant; one extra streaming client disconnects after its first chunk.
+
+| clients | stream first audio med / worst | stream min margin | whole lines med / worst | after |
+| --- | --- | ---: | --- | --- |
+| 8 streams + 8 whole + 1 dropped | 417 / 444 ms | -1378 ms | 4.3 / 6.5 s | 0 live rows, engine up |
+| 4 streams + 4 whole + 1 dropped | 273 / 298 ms | -50 ms | 2.7 / 3.3 s | 0 live rows, engine up |
+
+(Stage 3, before burst sizing: 8 + 8 + 1 at 522 / 644 ms and -3.3 s; 4 + 4 + 1 at 238 / 254 ms and -234 ms, the latter possibly contaminated.) Burst sizing cut the lateness by 60-80% but nine or seventeen lines starting in the same instant still go late once at zero buffer: a whole line generates unpaced at full speed beside the streams, and the first frames after a 17-line join run at the 32-row bucket.
 
 **Under contention, no MPS** (the owner's NPC GGUF on `llama-server`, 200-token completions back to back; buffer 0):
 
@@ -334,7 +345,7 @@ All-in frame time (engine loop: frame, per-row takes, the chunk decodes due) set
 
 The language model ran at 370 tok/s alone and a median 286 (min 45) tok/s during these runs. A second run of the same sweep gave N = 16 with 15 late lines (one line went to 2.4 s first audio), so treat 12 as the capacity beside the language model (stage 2: 4).
 
-**MPS: not measured.** `nvidia-cuda-mps-control -d` with a private `CUDA_MPS_PIPE_DIRECTORY` / `CUDA_MPS_LOG_DIRECTORY` under the scratchpad, as the normal user, compute mode Default (driver 580.178.04, kernel 6.17.0-35), exited with a failure status and no message; it created empty `control.log` / `server.log` and no control pipe, and left no `nvidia-cuda-mps-*` process. As instructed, I stopped there and did not try other ways to start it.
+**MPS.** My attempt failed because the daemon's control socket path under the scratchpad exceeds the ~107-character Unix socket limit. The coordinator ran the sweep from `/run/user/$UID/npc-mps/`: clean capacity is 8 speakers with or without MPS; under MPS the heavy end degrades gracefully (N = 24: 14.3 against 6.9 audio-seconds per second) and the language model alone is slower (275 against 361 tok/s).
 
 ### Experiment log (stage 2)
 
