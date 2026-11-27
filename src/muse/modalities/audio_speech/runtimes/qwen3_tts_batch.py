@@ -45,6 +45,10 @@ BUCKETS = (1, 2, 4, 8, 16, 32)
 # dequantize + cuBLAS, the slowest path measured).
 INT8_MAX_ROWS = 2
 CAPACITY = 512  # first KV capacity (tokens); doubles when a row needs more
+# Batched prefill: the prompt padded at the end to a multiple of this many
+# tokens, one CUDA graph per padded length (causal: the real positions are
+# unchanged), on the kept float weights when there are any.
+PREFILL_STEP = 32
 MAX_GRAPHS = 48
 
 
@@ -113,6 +117,14 @@ class _RowView:
         return [self.pos, self.n, self.token, self.hidden, self.unfinished, self.seen]
 
 
+class _Scratch:
+    """Batch-1 K/V for one padded prefill (FastTalker._layers' exact path
+    reads ``keys`` / ``values`` / ``cos`` / ``sin``)."""
+
+    def __init__(self, keys: list, values: list, cos: Any, sin: Any) -> None:
+        self.keys, self.values, self.cos, self.sin = keys, values, cos, sin
+
+
 class _Row:
     """Host bookkeeping for one live row."""
 
@@ -129,7 +141,8 @@ class _Row:
 class BatchedTalker:
     """Rows of up to ``max_rows`` lines sharing each frame (one thread)."""
 
-    def __init__(self, ft: Any, *, max_rows: int, use_cuda_graphs: bool = False) -> None:
+    def __init__(self, ft: Any, *, max_rows: int, use_cuda_graphs: bool = False,
+                 padded_prefill: bool | None = None) -> None:
         if not 1 <= max_rows <= BUCKETS[-1]:
             raise ValueError(f"max_rows must be 1..{BUCKETS[-1]}")
         self.ft = ft
@@ -142,6 +155,8 @@ class BatchedTalker:
         self._graphs: dict[tuple, tuple[Any, Any]] = {}
         self._pool: Any = None
         self._moved: tuple[int, int] | None = None
+        self.padded_prefill = use_cuda_graphs if padded_prefill is None else bool(padded_prefill)
+        self.prefill_lengths: set[int] = set()
 
     # -- rows ----------------------------------------------------------------------
 
@@ -166,8 +181,11 @@ class BatchedTalker:
         torch = self.torch
         embeds, trailing, pad = req.inputs_embeds, req.trailing_text_hidden, req.tts_pad_embed
         length, text = embeds.shape[1], trailing.shape[1]
-        st = self._ready(embeds, max(length, text) + 1)
+        padded = -(-length // PREFILL_STEP) * PREFILL_STEP if self.padded_prefill else length
+        st = self._ready(embeds, max(padded, text + 1, length + 1))
         r = len(self.rows)
+        if r >= st.rows:  # rows grow by bucket, so VRAM follows the live streams
+            st = self._rebuild(bucket_for(r + 1), st.capacity)
         view = st.view(r)
         with torch.no_grad():
             for k, v in zip(view.keys, view.values):
@@ -178,7 +196,7 @@ class BatchedTalker:
             view.seen.zero_()
             view.unfinished.fill_(True)
             view.n.zero_()
-            hidden = self.ft._layers(embeds, view, start=0, masked=False)
+            hidden = self._prefill(embeds, view, padded)
             view.hidden.copy_(hidden[:, -1:])
             view.pos.fill_(length)
             self.ft._choose(self.ft.talker.codec_head(hidden)[:, -1].float(), view, req.params)
@@ -187,6 +205,60 @@ class BatchedTalker:
         row.unfinished = bool(view.unfinished)
         self.rows.append(row)
         return r
+
+    def _prefill(self, embeds: Any, view: Any, padded: int) -> Any:
+        """Upstream's exact layer stack over the prompt, K/V into ``view``'s
+        row; returns the hidden states of the real positions."""
+        length = embeds.shape[1]
+        if padded == length and not self.padded_prefill:
+            return self.ft._layers(embeds, view, start=0, masked=False)
+        self.prefill_lengths.add(padded)
+        st = self.st
+        key = ("prefill", padded, embeds.dtype)
+        entry = self._graphs.get(key)
+        if entry is None:
+            entry = self._graphs[key] = self._prefill_entry(embeds, padded)
+        graph, x, scratch, out = entry
+        x.zero_()
+        x[:, :length] = embeds
+        if graph is not None:
+            graph.replay()
+        else:
+            out = self._prefill_run(x, scratch)
+        for dst, src in zip(view.keys + view.values, scratch.keys + scratch.values):
+            dst[:, :, :length] = src[:, :, :length]
+        return out[:, :length]
+
+    def _prefill_entry(self, like: Any, padded: int) -> tuple:
+        torch, ft, st = self.torch, self.ft, self.st
+        x = like.new_zeros(1, padded, ft.hidden)
+        shape = (1, ft.kv_heads, padded, ft.head_dim)
+        scratch = _Scratch([like.new_zeros(shape) for _ in range(ft.layers)],
+                           [like.new_zeros(shape) for _ in range(ft.layers)], st.cos, st.sin)
+        if not (self.use_cuda_graphs and getattr(like, "is_cuda", False)):
+            return None, x, scratch, None
+        side = torch.cuda.Stream(device=like.device)
+        side.wait_stream(torch.cuda.current_stream(like.device))
+        with torch.cuda.stream(side):
+            for _ in range(2):
+                self._prefill_run(x, scratch)
+        torch.cuda.current_stream(like.device).wait_stream(side)
+        if self._pool is None:
+            self._pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self._pool):
+            out = self._prefill_run(x, scratch)
+        logger.info("captured Qwen3-TTS batched prefill CUDA graph (%d tokens)", padded)
+        return graph, x, scratch, out
+
+    def _prefill_run(self, x: Any, scratch: Any) -> Any:
+        weights = fast.float_weights() if self._has_float() else contextlib.nullcontext()
+        with weights:
+            return self.ft._layers(x, scratch, start=0, masked=False)
+
+    def _has_float(self) -> bool:
+        fused = self.ft._fused
+        return bool(fused) and bool(fused[0].float)
 
     def finished(self, r: int) -> bool:
         row = self.rows[r]
@@ -372,7 +444,7 @@ class BatchedTalker:
             while capacity < need:
                 capacity *= 2
             self._drop_graphs()
-            self.st = _State(self.ft, like, self.max_rows, capacity)
+            self.st = _State(self.ft, like, 1, capacity)
             return self.st
         if st.capacity < need:
             capacity = st.capacity
@@ -382,19 +454,26 @@ class BatchedTalker:
         return st
 
     def _grow(self, capacity: int) -> _State:
+        return self._rebuild(self.st.rows, capacity)
+
+    def _rebuild(self, rows: int, capacity: int) -> _State:
+        """A state with ``rows`` rows and ``capacity`` KV slots holding the
+        current one's contents. Graphs captured the old buffers: dropped."""
         old = self.st
-        new = _State(self.ft, old.trailing, old.rows, capacity)
-        size = old.capacity
+        self._drop_graphs()
+        self.st = None
+        new = _State(self.ft, old.trailing, rows, capacity)
+        size, n = old.capacity, old.rows
         with self.torch.no_grad():
             for dst, src in zip(new.keys + new.values, old.keys + old.values):
-                dst[:, :, :size] = src
-            new.trailing[:, :size] = old.trailing
-            new.trailing[:, size:] = old.trailing[:, size - 1:]
+                dst[:n, :, :size] = src
+            new.trailing[:n, :size] = old.trailing
+            new.trailing[:n, size:] = old.trailing[:, size - 1:]
             for dst, src in zip(new.scalars(), old.scalars()):
-                dst.copy_(src)
-        self._drop_graphs()
+                dst[:n].copy_(src)
+        del old
         self.st = new
-        logger.info("Qwen3-TTS batched talker KV capacity grown to %d tokens", capacity)
+        logger.info("Qwen3-TTS batched talker state: %d rows, KV %d tokens", rows, capacity)
         return new
 
     def _drop_graphs(self) -> None:
@@ -489,6 +568,10 @@ class Engine:
         self.failed = False
         self.frames_run = 0
         self.prefill_seconds = 0.0  # host-measured prefill time (synced), for reports
+        # Wall seconds the engine thread spent per kind of work (each ends in a
+        # host sync, so it approximates GPU time), and rows summed over frames.
+        self.stats = {"prefill_s": 0.0, "frame_s": 0.0, "decode_s": 0.0, "idle_s": 0.0,
+                      "frames": 0, "row_frames": 0}
         self._pending: list[Handle] = []
         self._jobs: list[tuple[Callable[[], Any], queue.Queue]] = []
         self._lines: list[_Line] = []
@@ -559,12 +642,19 @@ class Engine:
                 self._drop_finished()
                 if not self._lines:
                     continue
+                t0 = time.perf_counter()
                 if self._ahead():
+                    self.stats["idle_s"] += time.perf_counter() - t0
                     continue
                 codes = self.talker.frame()
+                t1 = time.perf_counter()
                 self.frames_run += 1
+                self.stats["frames"] += 1
+                self.stats["row_frames"] += len(self._lines)
+                self.stats["frame_s"] += t1 - t0
                 for r, line in enumerate(self._lines):
                     self._take(line, codes[r:r + 1].clone())
+                self.stats["decode_s"] += time.perf_counter() - t1
                 self._drop_finished()
             except Exception as exc:  # noqa: BLE001
                 if type(exc).__name__ == "OutOfMemoryError":
@@ -606,6 +696,7 @@ class Engine:
             if on_cuda:
                 sync.synchronize()
             self.prefill_seconds += time.perf_counter() - t0
+            self.stats["prefill_s"] += time.perf_counter() - t0
             dec = self.decoder.stream(req.ref_codes) if handle.stream else None
             line = _Line(handle, req, dec)
             line.target = self.first_frames

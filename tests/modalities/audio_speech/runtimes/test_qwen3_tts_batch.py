@@ -168,8 +168,24 @@ def test_buckets_round_up(talker):
     bt = batch.BatchedTalker(ft, max_rows=8)
     with torch.no_grad():
         _drive(bt, [_req(ft, s, max_new=4) for s in range(3)])
-    assert bt.buckets_used == {4}
+    assert bt.buckets_used == {4} and bt.st.rows == 4  # rows grow by bucket, not max_rows
     assert batch.bucket_for(1) == 1 and batch.bucket_for(3) == 4 and batch.bucket_for(9) == 16
+
+
+def test_padded_prefill_gives_the_same_lines(talker, monkeypatch):
+    """The CUDA-graph prefill pads the prompt at the end to a step of
+    PREFILL_STEP tokens and copies the real positions' K/V into the row; the
+    talker is causal, so the line is unchanged. Checked eagerly here."""
+    monkeypatch.setattr(batch, "PREFILL_STEP", 8)
+    ft = _fast(talker)
+    reqs = [_req(ft, s, max_new=9, length=l) for s, l in ((1, 5), (2, 3), (3, 7))]
+    with torch.no_grad():
+        solo = [_solo(ft, r) for r in reqs]
+        bt = batch.BatchedTalker(ft, max_rows=4, padded_prefill=True)
+        got = _drive(bt, reqs)
+    for i in range(3):
+        assert _same(got[i], solo[i]), i
+    assert bt.prefill_lengths == {8}
 
 
 def test_different_parameters_cannot_share_a_frame(talker):
