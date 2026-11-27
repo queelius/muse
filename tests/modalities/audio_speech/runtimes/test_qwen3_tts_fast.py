@@ -731,6 +731,39 @@ def test_quantize_stores_a_layer_as_int8_only_and_its_modules_still_compute(cp):
     assert all(fused.int8[n][0] is before[n][0] for n in before)
 
 
+def test_quantize_can_keep_the_float_weights_for_wide_frames(cp):
+    """Wide batches read float weights through cuBLAS (the int8 GEMV stops
+    scaling past ~4 rows); keep_float retains them beside the int8, and the
+    float path is chosen per call with fast.float_weights()."""
+    _with_silu(cp.model)
+    layer = cp.model.layers[0]
+    modules = _projections(layer)
+    floats = [m.weight.detach().clone() for m in modules]
+    torch.manual_seed(4)
+    xs = [torch.randn(3, m.in_features) for m in modules]
+    with torch.no_grad():
+        want = [nn.functional.linear(x, w) for x, w in zip(xs, floats)]
+        fused = fast._FusedLayer.of(layer, torch)
+        fused.quantize(layer, torch, keep_float=True)
+        int8 = [m(x) for m, x in zip(modules, xs)]  # default: the int8 path, as before
+        with fast.float_weights():
+            got = [m(x) for m, x in zip(modules, xs)]
+            q, k, v = fused.project(layer, xs[0], torch)
+            mlp = fused.mlp(layer, xs[4], torch)
+        assert fast.float_weights_active() is False
+    assert set(fused.float) == {"qkv", "gate_up"}
+    for g, w, i in zip(got, want, int8):
+        assert torch.allclose(g, w, atol=1e-5) and not torch.allclose(i, w, atol=1e-5)
+    qkv = [nn.functional.linear(xs[0], w) for w in floats[:3]]
+    assert torch.allclose(torch.cat((q, k, v), -1), torch.cat(qkv, -1), atol=1e-5)
+    gate, up = (nn.functional.linear(xs[4], w) for w in floats[4:6])
+    want_mlp = nn.functional.linear(nn.functional.silu(gate) * up, floats[6])
+    assert torch.allclose(mlp, want_mlp, atol=1e-5)
+    plain = fast._FusedLayer.of(cp.model.layers[1], torch)
+    plain.quantize(cp.model.layers[1], torch)
+    assert plain.float == {} and vars(cp.model.layers[1].self_attn.o_proj).get("_muse_float") is None
+
+
 def test_fused_layers_are_quantized_only_for_an_int8_decoder_with_kernels(cp, monkeypatch):
     _with_silu(cp.model)
     layers = cp.model.layers

@@ -36,6 +36,7 @@ torch is passed in (``torch=``) so the module imports without it.
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib.metadata
 import logging
@@ -174,10 +175,36 @@ def _proj(module: Any, x: Any, torch: Any) -> Any:
     """``module(x)`` for a Linear; bias-free ones go through :func:`_linear`."""
     if not _bias_free(module, torch):
         return module(x)
+    kept = vars(module).get("_muse_float")
+    if kept is not None and float_weights_active():
+        return torch.nn.functional.linear(x, kept)
     return _linear(x, module.weight, torch, vars(module).get("_muse_int8"))
 
 
+_FLOAT = threading.local()  # per thread: wide frames read the kept float weights
+
+
+@contextlib.contextmanager
+def float_weights() -> Any:
+    """Inside, layers quantized with ``keep_float`` compute from their float
+    weights (cuBLAS), which beat the int8 GEMV past ~4 rows; elsewhere, and
+    for layers without kept floats, nothing changes."""
+    before = getattr(_FLOAT, "on", False)
+    _FLOAT.on = True
+    try:
+        yield
+    finally:
+        _FLOAT.on = before
+
+
+def float_weights_active() -> bool:
+    return getattr(_FLOAT, "on", False)
+
+
 def _int8_forward(module: Any, torch: Any, x: Any) -> Any:
+    kept = vars(module).get("_muse_float")
+    if kept is not None and float_weights_active():
+        return torch.nn.functional.linear(x, kept)
     return _linear(x, None, torch, vars(module)["_muse_int8"])
 
 
@@ -231,12 +258,17 @@ class _FusedLayer:
         self.gate_up = (_fuse_linears([mlp.gate_proj, mlp.up_proj], torch)
                         if act in ("SiLU", "SiLUActivation") else None)
         self.int8: dict[str, tuple[Any, Any]] = {}
+        self.float: dict[str, Any] = {}  # fused float weights kept for wide frames
 
-    def quantize(self, layer: Any, torch: Any) -> None:
+    def quantize(self, layer: Any, torch: Any, keep_float: bool = False) -> None:
         """Store the layer's bias-free projections as int8 only
         (:func:`quantize_rows`): the fused matrices here and each module's
         rows of them, with the float weights dropped. Every path over the
-        layer, upstream's included, then computes from the same int8."""
+        layer, upstream's included, then computes from the same int8.
+
+        ``keep_float`` (wide batches) keeps the float weights too, used only
+        inside :func:`float_weights`: the int8 GEMV wins to ~4 rows, cuBLAS
+        on float weights from ~8 (RTX 3060, 0.6B)."""
         if self.int8:
             return
         attn, mlp = layer.self_attn, layer.mlp
@@ -251,14 +283,21 @@ class _FusedLayer:
                     continue
                 weight = modules[0].weight
             q, scale = self.int8[name] = quantize_rows(weight, torch)
+            if keep_float and len(modules) > 1:
+                self.float[name] = weight.detach()
             row = 0
             for module in modules:
                 rows = module.weight.shape[0]
+                kept = module.weight.detach() if keep_float else None
                 _store_int8(module, q[row:row + rows], scale[row:row + rows], torch)
+                if kept is not None:
+                    vars(module)["_muse_float"] = kept
                 row += rows
         self.qkv = self.gate_up = None
 
     def project(self, layer: Any, h: Any, torch: Any) -> tuple:
+        if "qkv" in self.float and float_weights_active():
+            return torch.nn.functional.linear(h, self.float["qkv"]).split(self.sizes, dim=-1)
         quant = self.int8.get("qkv")
         if self.qkv is None and quant is None:
             attn = layer.self_attn
@@ -269,7 +308,10 @@ class _FusedLayer:
         quant = self.int8.get("gate_up")
         if self.gate_up is None and quant is None:
             return layer.mlp(x)
-        gate_up = _linear(x, self.gate_up, torch, quant)
+        if "gate_up" in self.float and float_weights_active():
+            gate_up = torch.nn.functional.linear(x, self.float["gate_up"])
+        else:
+            gate_up = _linear(x, self.gate_up, torch, quant)
         kernels = _kernels(gate_up)
         if kernels is not None:
             return _proj(layer.mlp.down_proj, kernels.silu_mul(gate_up), torch)
@@ -277,14 +319,15 @@ class _FusedLayer:
         return _proj(layer.mlp.down_proj, torch.nn.functional.silu(gate) * up, torch)
 
 
-def _fused_layers(layers: Any, int8: bool, torch: Any) -> list:
+def _fused_layers(layers: Any, int8: bool, torch: Any, keep_float: bool = False) -> list:
     """Each layer's :class:`_FusedLayer`; ``int8`` stores the layers as int8
-    where the int8 GEMV exists (CUDA with Triton)."""
+    where the int8 GEMV exists (CUDA with Triton), ``keep_float`` keeps the
+    float weights beside it (wide batches)."""
     fused = [_FusedLayer.of(layer, torch) for layer in layers]
     like = next(iter(layers[0].parameters()), None)
     if int8 and _kernels(like) is not None:
         for one, layer in zip(fused, layers):
-            one.quantize(layer, torch)
+            one.quantize(layer, torch, keep_float=keep_float)
         if getattr(like, "is_cuda", False):
             torch.cuda.empty_cache()  # hand the float weights' memory back
     return fused
@@ -294,7 +337,7 @@ class FastCodePredictor:
     """Drop-in for ``code_predictor.generate`` on the talker's call shape."""
 
     def __init__(self, code_predictor: Any, *, torch: Any, use_cuda_graphs: bool = False,
-                 upstream: Any = None, int8: bool = False) -> None:
+                 upstream: Any = None, int8: bool = False, keep_float: bool = False) -> None:
         self.cp = code_predictor
         self.int8 = bool(int8)  # the layers are stored as int8 (CUDA with Triton)
         self.torch = torch
@@ -312,7 +355,7 @@ class FastCodePredictor:
         self._pool: Any = None
         self._fused: list | None = None
         if self.int8:  # now, so every call computes from the same weights
-            self._fused = _fused_layers(code_predictor.model.layers, True, torch)
+            self._fused = _fused_layers(code_predictor.model.layers, True, torch, keep_float)
         gen_cfg = getattr(code_predictor, "generation_config", None)
         self._defaults = {k: getattr(gen_cfg, k, v) if gen_cfg is not None else v
                           for k, v in _DEFAULTS.items()}
@@ -611,7 +654,7 @@ class FastTalker:
 
     def __init__(self, talker: Any, code_predictor: FastCodePredictor, *, torch: Any,
                  use_cuda_graphs: bool = False, upstream: Any = None,
-                 int8: bool = False) -> None:
+                 int8: bool = False, keep_float: bool = False) -> None:
         self.talker = talker
         self.int8 = bool(int8)  # the layers are stored as int8 (CUDA with Triton)
         self.cp = code_predictor
@@ -632,7 +675,7 @@ class FastTalker:
         self._masks: dict[tuple, tuple[Any, Any]] = {}
         self._fused: list | None = None
         if self.int8:  # now, so prefill and frames compute from the same weights
-            self._fused = _fused_layers(talker.model.layers, True, torch)
+            self._fused = _fused_layers(talker.model.layers, True, torch, keep_float)
         gen_cfg = getattr(talker, "generation_config", None)
         self._defaults = {k: getattr(gen_cfg, k, v) if gen_cfg is not None else v
                           for k, v in _DEFAULTS.items()}
@@ -1024,7 +1067,7 @@ def _supported_layout(cp: Any) -> bool:
 
 
 def install(tts: Any, *, torch: Any, use_cuda_graphs: bool = False,
-            int8: bool = False) -> bool:
+            int8: bool = False, keep_float: bool = False) -> bool:
     """Patch ``tts.model.talker.code_predictor.generate``; True when active.
     ``int8``: on CUDA with Triton the layers' projections are stored as int8
     only (output heads stay float), for upstream's calls of them too."""
@@ -1043,7 +1086,7 @@ def install(tts: Any, *, torch: Any, use_cuda_graphs: bool = False,
     if isinstance(getattr(current, "__self__", None), FastCodePredictor):
         return True
     fast = FastCodePredictor(cp, torch=torch, use_cuda_graphs=use_cuda_graphs,
-                             upstream=current, int8=int8)
+                             upstream=current, int8=int8, keep_float=keep_float)
     cp.generate = fast.generate
     return True
 
@@ -1075,7 +1118,7 @@ def _supported_talker(talker: Any) -> bool:
 
 
 def install_talker(tts: Any, *, torch: Any, use_cuda_graphs: bool = False,
-                   int8: bool = False) -> bool:
+                   int8: bool = False, keep_float: bool = False) -> bool:
     """Patch ``tts.model.talker.generate``; True when active. Needs the fast
     code predictor (:func:`install`) first. ``int8`` as :func:`install`."""
     version = _qwen_tts_version()
@@ -1097,7 +1140,7 @@ def install_talker(tts: Any, *, torch: Any, use_cuda_graphs: bool = False,
     if isinstance(getattr(current, "__self__", None), FastTalker):
         return True
     fast = FastTalker(talker, cp_fast, torch=torch, use_cuda_graphs=use_cuda_graphs,
-                      upstream=current, int8=int8)
+                      upstream=current, int8=int8, keep_float=keep_float)
     talker.generate = fast.generate
     return True
 
