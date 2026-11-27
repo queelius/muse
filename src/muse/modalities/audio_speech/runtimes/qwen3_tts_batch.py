@@ -62,6 +62,10 @@ MAX_GRAPHS = 48
 SAFETY_SECONDS = 0.03
 FIRST_MARGIN = 1.5
 EMA = 0.2  # weight of the newest sample in the frame / decode time estimates
+# The load estimate (first and least chunk sizes) averages over ~50 loop
+# iterations (~4 s): the fast EMA tracks the cheap iterations between decodes
+# and read 13-22 ms at 24 speakers where the all-in average was ~50 ms.
+LOAD_EMA = 0.02
 # The wait for "one more frame" is the slowest of the last WAIT_WINDOW loop
 # iterations: an iteration in which other lines decode is several times an
 # idle one, and a line that waits must survive it (an average was late by
@@ -700,6 +704,7 @@ class Engine:
         self.decode_est = 0.0  # seconds per chunk decode, EMA
         self._iterations: collections.deque = collections.deque(maxlen=WAIT_WINDOW)
         self.bucket_est: dict[int, float] = {}  # all-in seconds per frame, by bucket (EMA)
+        self.load_est = 0.0  # all-in seconds per loop frame, slow average (LOAD_EMA)
         self.failed = False
         self.frames_run = 0
         self.prefill_seconds = 0.0  # host-measured prefill time (synced), for reports
@@ -811,6 +816,7 @@ class Engine:
                 self.stats["decode_s"] += time.perf_counter() - t1
                 took = self._clock() - c0
                 self.frame_est += EMA * (took - self.frame_est)
+                self.load_est += LOAD_EMA * (took - self.load_est)
                 self._iterations.append(took)
                 b = bucket_for(len(rows))
                 self.bucket_est[b] = self.bucket_est.get(b, took) + EMA * (
@@ -832,7 +838,7 @@ class Engine:
             if joined:
                 # a burst (several joins in one pass) is sized for the bucket
                 # it lands in; a single join from the running mean
-                mean = self.frame_est
+                mean = self.load_est
                 if len(joined) > 1:
                     mean = max(mean, self.bucket_est.get(bucket_for(self.talker.live), 0.0))
                 first = first_chunk_size(mean=mean, wait=max(self.frame_wait, mean),
@@ -953,7 +959,7 @@ class Engine:
             if emission_due(pending=line.decoder.pending, sent=line.first_at is not None,
                             lead=self.lead(line), first=line.first, chunk=self.chunk_frames,
                             frame_est=self.frame_wait, decode_est=self.decode_est,
-                            least=least_chunk_frames(self.frame_est, self.frame_seconds,
+                            least=least_chunk_frames(self.load_est, self.frame_seconds,
                                                      self.chunk_frames)):
                 self._emit(line)
         else:
