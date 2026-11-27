@@ -36,6 +36,15 @@ SUPPORTED_QWEN_TTS = frozenset({"0.1.1"})
 # Frames of left context for the conv stack: 4 reach ~41 dB against the
 # one-pass audio, 6 and more the plateau (41.4 dB, RTX 3060, bf16).
 CONV_CONTEXT = 6
+# Padded shapes (CUDA graphs): the front runs on codes padded at the end to a
+# bucket length (64 frames, doubling, up to MAX_FRONT_FRAMES; eager beyond),
+# the conv stack on widths rounded up to CONV_WIDTH_STEP frames. Both halves
+# are causal, so padding at the end leaves the real frames' outputs alone.
+FRONT_BUCKET = 64
+MAX_FRONT_FRAMES = 2048
+CONV_WIDTH_STEP = 4
+# Distinct graphs kept per decoder; beyond this, decode eagerly.
+MAX_GRAPHS = 24
 
 
 def _qwen_tts_version() -> str | None:
@@ -49,12 +58,20 @@ class SplitDecoder:
     """A 12 Hz speech decoder as its causal front and its conv stack."""
 
     def __init__(self, decoder: Any, *, torch: Any, context: int = CONV_CONTEXT,
-                 device: Any = None) -> None:
+                 device: Any = None, use_cuda_graphs: bool = False,
+                 padded: bool = False) -> None:
         self.decoder = decoder
         self.torch = torch
         self.context = int(context)
         self.upsample = int(decoder.total_upsample)
         self.device = device
+        # Streaming runs each half as a CUDA graph per padded shape (the
+        # front eagerly costs ~23 ms of kernel launches whatever its length,
+        # graphed ~3 ms). ``padded`` alone pads without graphs (tests).
+        self.use_cuda_graphs = bool(use_cuda_graphs)
+        self.padded = bool(padded) or self.use_cuda_graphs
+        self._graphs: dict[tuple, tuple[Any, Any, Any]] = {}
+        self._pool: Any = None
 
     def front(self, codes: Any) -> Any:
         """Codes ``[1, quantizers, frames]`` -> transformer output
@@ -75,20 +92,87 @@ class SplitDecoder:
             wav = block(wav)
         return wav.clamp(min=-1, max=1)
 
-    def window(self, hidden: Any, start: int, end: int) -> np.ndarray:
+    def window(self, hidden: Any, start: int, end: int, *, padded: bool = False) -> np.ndarray:
         """Audio for frames ``[start, end)`` of a front output, decoding
         ``context`` frames before ``start`` and dropping their samples."""
         lo = max(0, start - self.context)
-        wav = self.conv_stack(hidden[..., lo:end])[0, 0][(start - lo) * self.upsample:]
+        part = hidden[..., lo:end]
+        wav = self._conv(part) if padded else self.conv_stack(part)
+        wav = wav[0, 0][(start - lo) * self.upsample:(end - lo) * self.upsample]
         return wav.to(self.torch.float32).cpu().numpy()
 
     def decode(self, codes: Any, *, skip: int = 0) -> np.ndarray:
         """A whole line ``[frames, quantizers]`` in one call, without the
         first ``skip`` frames' audio (the reference clip in clone mode),
-        whose conv stack is not run."""
+        whose conv stack is not run. Eager, unpadded."""
         with self.torch.inference_mode():
             codes = self.torch.clamp(codes, min=0).transpose(0, 1)[None]
             return self.window(self.front(codes), skip, codes.shape[-1])
+
+    def stream_window(self, codes: Any, start: int, end: int) -> np.ndarray:
+        """Streaming: the front over ``codes`` ``[1, quantizers, end]`` (padded
+        and graphed where enabled), then audio for frames ``[start, end)``."""
+        if self.padded and end <= MAX_FRONT_FRAMES:
+            bucket = FRONT_BUCKET
+            while bucket < end:
+                bucket *= 2
+            hidden = self._shaped("front", self.front, codes, bucket)[..., :end]
+        else:
+            hidden = self.front(codes)
+        return self.window(hidden, start, end, padded=self.padded)
+
+    # -- padded shapes and CUDA graphs ----------------------------------------------
+
+    def _conv(self, hidden: Any) -> Any:
+        width = -(-hidden.shape[-1] // CONV_WIDTH_STEP) * CONV_WIDTH_STEP
+        return self._shaped("conv", self.conv_stack, hidden, width)
+
+    def _shaped(self, kind: str, fn: Any, x: Any, size: int) -> Any:
+        """``fn(x)`` with ``x`` zero-padded at the end of its last axis to
+        ``size``; on CUDA one graph per shape. The result is the graph's
+        output buffer: use it before the next call."""
+        if x.shape[-1] < size:
+            x = self.torch.nn.functional.pad(x, (0, size - x.shape[-1]))
+        if not (self.use_cuda_graphs and getattr(x, "is_cuda", False)):
+            return fn(x)
+        key = (kind, tuple(x.shape), x.dtype)
+        entry = self._graphs.get(key)
+        if entry is None:
+            if len(self._graphs) >= MAX_GRAPHS:
+                return fn(x)
+            try:
+                entry = self._capture(fn, x)
+            except Exception as exc:
+                if type(exc).__name__ == "OutOfMemoryError":
+                    raise
+                logger.warning("Qwen3-TTS speech decoder graph capture failed; "
+                               "streaming decodes eagerly", exc_info=True)
+                self.use_cuda_graphs = False
+                self._graphs.clear()
+                self._pool = None
+                return fn(x)
+            self._graphs[key] = entry
+        graph, static_in, static_out = entry
+        static_in.copy_(x)
+        graph.replay()
+        return static_out
+
+    def _capture(self, fn: Any, x: Any) -> tuple[Any, Any, Any]:
+        torch = self.torch
+        static_in = x.clone()
+        side = torch.cuda.Stream(device=x.device)
+        side.wait_stream(torch.cuda.current_stream(x.device))
+        with torch.cuda.stream(side):
+            for _ in range(2):  # warm cuDNN / allocator before capture
+                fn(static_in)
+        torch.cuda.current_stream(x.device).wait_stream(side)
+        if self._pool is None:
+            self._pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self._pool):
+            static_out = fn(static_in)
+        logger.info("captured Qwen3-TTS speech decoder CUDA graph for %s", tuple(x.shape))
+        return graph, static_in, static_out
 
     def stream(self, ref_codes: Any = None) -> "StreamDecoder":
         return StreamDecoder(self, ref_codes)
@@ -129,12 +213,13 @@ class StreamDecoder:
             self._codes = torch.cat([p.to(device) for p in parts], dim=0)
             self._frames = []
             codes = torch.clamp(self._codes, min=0).transpose(0, 1)[None]
-            audio = self.split.window(self.split.front(codes), start, end)
+            audio = self.split.stream_window(codes, start, end)
         self._decoded = end
         return audio
 
 
-def split_decoder(tts: Any, *, torch: Any, context: int = CONV_CONTEXT) -> SplitDecoder | None:
+def split_decoder(tts: Any, *, torch: Any, context: int = CONV_CONTEXT,
+                  use_cuda_graphs: bool = False) -> SplitDecoder | None:
     """A :class:`SplitDecoder` over ``tts``'s 12 Hz speech decoder, or None
     for another qwen-tts version, tokenizer or module layout."""
     version = _qwen_tts_version()
@@ -158,4 +243,5 @@ def split_decoder(tts: Any, *, torch: Any, context: int = CONV_CONTEXT) -> Split
     if not ok:
         logger.warning("unexpected qwen-tts speech decoder layout; streaming not available")
         return None
-    return SplitDecoder(dec, torch=torch, context=context, device=getattr(tokenizer, "device", None))
+    return SplitDecoder(dec, torch=torch, context=context, use_cuda_graphs=use_cuda_graphs,
+                        device=getattr(tokenizer, "device", None))

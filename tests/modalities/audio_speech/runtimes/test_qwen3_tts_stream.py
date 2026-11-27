@@ -182,6 +182,31 @@ def test_decode_with_nothing_pending_is_empty(decoder):
     assert sd.pending == 3 and len(sd.decode()) == 3 * UP
 
 
+@pytest.mark.parametrize("ref_frames", [0, 7], ids=["design", "clone"])
+def test_padded_shapes_stream_the_same_audio(decoder, ref_frames, monkeypatch):
+    """With CUDA graphs the front runs on codes padded at the end to a bucket
+    length and the conv stack on widths rounded up; both halves are causal,
+    so the real frames' audio is unchanged. Checked eagerly here."""
+    split = stream.SplitDecoder(decoder, torch=torch, context=3, padded=True)
+    fronts, convs = [], []
+    real_front, real_conv = split.front, split.conv_stack
+    monkeypatch.setattr(split, "front", lambda c: fronts.append(c.shape[-1]) or real_front(c))
+    monkeypatch.setattr(split, "conv_stack", lambda h: convs.append(h.shape[-1]) or real_conv(h))
+    ref = _codes(ref_frames, seed=2) if ref_frames else None
+    gen = _codes(70)
+    want = _one_pass(decoder, gen if ref is None else torch.cat((ref, gen)))[ref_frames * UP:]
+    sd = split.stream(ref)
+    chunks, at = [], 0
+    for size in (3, 16, 16, 16, 16, 3):
+        sd.push(gen[at:at + size])
+        at += size
+        chunks.append(sd.decode())
+        assert len(chunks[-1]) == size * UP
+    np.testing.assert_allclose(np.concatenate(chunks), want, atol=1e-6)
+    assert all(f in (64, 128) for f in fronts) and fronts[-1] == 128
+    assert all(w % stream.CONV_WIDTH_STEP == 0 for w in convs)
+
+
 def test_whole_line_decode_skips_the_reference_conv_stack(decoder, monkeypatch):
     split = stream.SplitDecoder(decoder, torch=torch, context=3)
     ref, gen = _codes(7, seed=2), _codes(12)

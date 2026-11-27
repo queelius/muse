@@ -172,7 +172,8 @@ class Qwen3TTSRuntime:
         self._device = device_map
         # Streaming needs the fast talker (checked per request) and the split
         # speech decoder; CPU keeps the one-chunk stream.
-        self._split = (qwen3_tts_stream.split_decoder(self._tts, torch=torch)
+        self._split = (qwen3_tts_stream.split_decoder(self._tts, torch=torch,
+                                                      use_cuda_graphs=graphs)
                        if on_cuda else None)
 
     # -- protocol ------------------------------------------------------------
