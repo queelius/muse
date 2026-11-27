@@ -359,19 +359,22 @@ def test_first_chunk_uses_the_mean_with_headroom_and_the_long_chunk_near_real_ti
 
 
 def test_least_chunk_grows_with_the_load():
-    """Behind real time, a deadline must not send 1-2-frame chunks for every
-    line every frame (each costs a full decode): the smallest chunk a
-    deadline may send grows with the mean all-in frame time."""
+    """A line already behind its playback must not send 1-2-frame chunks every
+    frame (each costs a full decode, which keeps every line behind): once
+    late, the smallest chunk grows with the mean all-in frame time. A line
+    not yet late goes out on its deadline whatever it has."""
     least = batch.least_chunk_frames
     assert least(0.010, 0.08, 16) == 1
     assert least(0.060, 0.08, 16) == 5
     assert least(0.075, 0.08, 16) == 16
     assert least(0.200, 0.08, 16) == 16
     due = batch.emission_due
-    assert not due(pending=3, sent=True, lead=0.0, first=2, chunk=16, frame_est=0.06,
+    assert not due(pending=3, sent=True, lead=-0.1, first=2, chunk=16, frame_est=0.06,
                    decode_est=0.01, least=5)
-    assert due(pending=5, sent=True, lead=0.0, first=2, chunk=16, frame_est=0.06,
+    assert due(pending=5, sent=True, lead=-0.1, first=2, chunk=16, frame_est=0.06,
                decode_est=0.01, least=5)
+    assert due(pending=3, sent=True, lead=0.02, first=2, chunk=16, frame_est=0.06,
+               decode_est=0.01, least=5)  # not late yet: the deadline wins
 
 
 def test_a_burst_sizes_first_chunks_for_the_bucket_after_its_joins(talker):
@@ -385,6 +388,11 @@ def test_a_burst_sizes_first_chunks_for_the_bucket_after_its_joins(talker):
         assert firsts == [batch.first_chunk_frames(0.07, 0.08, 2, 16)] * 3  # 11, not 2
         for h in handles:
             h.cancel()
+        # a single join is sized from the running mean, not the bucket's estimate
+        eng.bucket_est[1] = 0.07
+        one = eng.submit(lambda: _req(ft, 9, max_new=40), stream=True)
+        assert len(next(iter(one))) // 3 == 2
+        one.cancel()
     finally:
         eng.close()
 

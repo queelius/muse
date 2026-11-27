@@ -101,10 +101,11 @@ def first_chunk_size(*, mean: float, wait: float, decode: float, frame_seconds: 
 
 
 def least_chunk_frames(mean: float, frame_seconds: float, chunk: int) -> int:
-    """The smallest chunk a deadline may send at mean all-in frame time
-    ``mean``: behind real time every line is due every frame, and 1-2-frame
-    chunks (each a full decode) keep the engine there; c >= 1.5 f / (T - f)
-    lets the next chunk be generated while this one plays."""
+    """The smallest chunk a line already behind its playback may send at mean
+    all-in frame time ``mean``: behind real time every line is due every
+    frame, and 1-2-frame chunks (each a full decode) keep the engine there;
+    c >= 1.5 f / (T - f) lets the next chunk be generated while this one
+    plays. Lines not yet late go out on their deadline whatever they have."""
     if mean >= 0.9 * frame_seconds:
         return chunk
     return max(1, min(chunk, math.ceil(FIRST_MARGIN * mean / (frame_seconds - mean) - 1e-9)))
@@ -123,7 +124,9 @@ def emission_due(*, pending: int, sent: bool, lead: float, first: int, chunk: in
         return True
     if not sent:
         return pending >= first
-    return pending >= least and lead - safety < frame_est + decode_est
+    if lead < 0:  # already behind: a bigger chunk, not one decode per frame
+        return pending >= least
+    return lead - safety < frame_est + decode_est
 
 
 class GrowthRefused(RuntimeError):
@@ -826,9 +829,12 @@ class Engine:
         try:
             self._admit_pass(joined)
         finally:
-            if joined:  # size first chunks for the bucket after this pass's joins
-                mean = max(self.frame_est,
-                           self.bucket_est.get(bucket_for(self.talker.live), 0.0))
+            if joined:
+                # a burst (several joins in one pass) is sized for the bucket
+                # it lands in; a single join from the running mean
+                mean = self.frame_est
+                if len(joined) > 1:
+                    mean = max(mean, self.bucket_est.get(bucket_for(self.talker.live), 0.0))
                 first = first_chunk_size(mean=mean, wait=max(self.frame_wait, mean),
                                          decode=self.decode_est, frame_seconds=self.frame_seconds,
                                          first=self.first_frames, chunk=self.chunk_frames)
