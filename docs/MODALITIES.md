@@ -61,7 +61,14 @@ every later chunk ahead of its playback by >= 106 ms; streaming costs ~5%
 more GPU per second of audio. In clone mode qwen-tts's one-call audio is one
 sample longer for ~5% of line lengths (its float cut keeps one reference
 sample); the stream is exactly the generated frames. A stream holds the
-model until it ends, as before. On CPU, with another
+model until it ends, unless the hidden capability `max_batch_size` is above 1
+(default 1, today's path): then one engine thread
+(`audio_speech/runtimes/qwen3_tts_batch.py`) shares each 12 Hz frame among up
+to that many requests (lines join at a frame boundary and leave at their own
+EOS; wide frames read float layer weights kept beside the int8), paces
+streams to `stream_lead_seconds` (1.5) ahead of playback, and the route's lock
+admits that many requests; after an engine failure the model serves one at a
+time. Measured capacity and costs: the streaming / batching plan. On CPU, with another
 qwen-tts or after the fast talker or the split decoder has failed (a failure
 before the first chunk falls back for that request) a stream is one chunk.
 On CUDA both load
