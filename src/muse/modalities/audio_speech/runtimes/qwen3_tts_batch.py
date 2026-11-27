@@ -37,14 +37,18 @@ import threading
 import time
 from typing import Any, Callable
 
+import numpy as np
+
 from muse.modalities.audio_speech.runtimes import qwen3_tts_fast as fast
 
 logger = logging.getLogger(__name__)
 
 BUCKETS = (1, 2, 4, 8, 16, 32)
-# Widest bucket on the int8 GEMV: the predictor's first step has 2 positions
-# per row, and the GEMV takes at most 4 rows (wider falls back to
-# dequantize + cuBLAS, the slowest path measured).
+# Widest bucket that never reads the kept float weights. Wider buckets run in
+# fast.float_weights(), where each product of more than fast.GEMV_ROWS rows
+# reads float weights (cuBLAS) and smaller ones stay on the int8 GEMV: at 4
+# rows the talker and most predictor steps are int8, the predictor's first
+# step (2 positions a row, 8 rows) is float.
 INT8_MAX_ROWS = 2
 CAPACITY = 512  # first KV capacity (tokens); doubles when a row needs more
 # Batched prefill: the prompt padded at the end to a multiple of this many
@@ -631,6 +635,7 @@ class _Line:
         self.request = request
         self.decoder = decoder
         self.frames: list = []
+        self.parts: list = []    # a whole line's audio, decoded chunk by chunk
         self.first = 0           # frames in this line's first chunk (load-aware)
         self.audio_s = 0.0       # audio handed out so far
         self.first_at: float | None = None
@@ -827,7 +832,9 @@ class Engine:
                 sync.synchronize()
             self.prefill_seconds += time.perf_counter() - t0
             self.stats["prefill_s"] += time.perf_counter() - t0
-            dec = self.decoder.stream(req.ref_codes) if handle.stream else None
+            # whole lines decode chunk by chunk too: one long decode at their
+            # end would stall every stream (8 at once: ~1 s on the 0.6B)
+            dec = self.decoder.stream(req.ref_codes) if self.decoder is not None else None
             line = _Line(handle, req, dec)
             line.first = first_chunk_frames(self.frame_wait, self.frame_seconds,
                                             self.first_frames, self.chunk_frames)
@@ -883,6 +890,11 @@ class Engine:
         return line.audio_s - (now - line.first_at) + self.buffer_seconds
 
     def _take(self, line: _Line, frame: Any) -> None:
+        if not line.handle.stream and line.decoder is not None:
+            line.decoder.push(frame)
+            if line.decoder.pending >= self.chunk_frames:
+                line.parts.append(self._decode(line))
+            return
         if line.handle.stream:
             line.decoder.push(frame)
             if emission_due(pending=line.decoder.pending, sent=line.first_at is not None,
@@ -892,11 +904,15 @@ class Engine:
         else:
             line.frames.append(frame)
 
-    def _emit(self, line: _Line) -> None:
-        frames = line.decoder.pending
+    def _decode(self, line: _Line) -> Any:
         c0 = self._clock()
         audio = line.decoder.decode()
         self.decode_est += EMA * ((self._clock() - c0) - self.decode_est)
+        return audio
+
+    def _emit(self, line: _Line) -> None:
+        frames = line.decoder.pending
+        audio = self._decode(line)
         if len(audio):
             if line.first_at is None:
                 line.first_at = self._clock()
@@ -931,6 +947,12 @@ class Engine:
             if line.decoder.pending:
                 self._emit(line)
             handle._put(_DONE)
+            return
+        if line.decoder is not None:
+            if line.decoder.pending:
+                line.parts.append(self._decode(line))
+            parts = [p for p in line.parts if len(p)]
+            handle._put(np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32))
             return
         torch = self.torch
         groups = line.request.inputs_embeds.new_zeros(0).long()

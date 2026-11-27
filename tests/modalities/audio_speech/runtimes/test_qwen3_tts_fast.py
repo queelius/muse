@@ -740,7 +740,7 @@ def test_quantize_can_keep_the_float_weights_for_wide_frames(cp):
     modules = _projections(layer)
     floats = [m.weight.detach().clone() for m in modules]
     torch.manual_seed(4)
-    xs = [torch.randn(3, m.in_features) for m in modules]
+    xs = [torch.randn(8, m.in_features) for m in modules]
     with torch.no_grad():
         want = [nn.functional.linear(x, w) for x, w in zip(xs, floats)]
         fused = fast._FusedLayer.of(layer, torch)
@@ -750,7 +750,11 @@ def test_quantize_can_keep_the_float_weights_for_wide_frames(cp):
             got = [m(x) for m, x in zip(modules, xs)]
             q, k, v = fused.project(layer, xs[0], torch)
             mlp = fused.mlp(layer, xs[4], torch)
+            # up to 4 rows the int8 GEMV still wins: those products stay int8
+            narrow = [m(x[:4]) for m, x in zip(modules, xs)]
         assert fast.float_weights_active() is False
+    for n, i in zip(narrow, int8):
+        assert torch.allclose(n, i[:4], atol=1e-6)
     assert set(fused.float) == {"qkv", "gate_up"}
     for g, w, i in zip(got, want, int8):
         assert torch.allclose(g, w, atol=1e-5) and not torch.allclose(i, w, atol=1e-5)

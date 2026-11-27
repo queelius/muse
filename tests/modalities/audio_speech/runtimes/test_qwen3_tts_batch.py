@@ -417,6 +417,20 @@ def test_buffer_seconds_extends_every_deadline(talker):
     assert sizes[0] == 2 and all(s == 6 for s in sizes[1:-1])  # the buffer covers the wait
 
 
+def test_whole_lines_decode_in_chunks_as_they_go(talker):
+    """A non-streamed line's audio is decoded chunk_frames at a time while it
+    generates, not in one long call at its end that would stall every stream."""
+    ft = _fast(talker)
+    eng = _engine(ft)  # chunk_frames 4
+    try:
+        h = eng.submit(lambda: _req(ft, 1, max_new=12), stream=False)
+        audio = h.result(timeout=30)
+        assert len(audio) == 11 * 3
+        assert eng.decoder.calls == [4, 4, 3]
+    finally:
+        eng.close()
+
+
 # -- growth out of memory -------------------------------------------------------------
 
 

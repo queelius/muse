@@ -176,7 +176,7 @@ def _proj(module: Any, x: Any, torch: Any) -> Any:
     if not _bias_free(module, torch):
         return module(x)
     kept = vars(module).get("_muse_float")
-    if kept is not None and float_weights_active():
+    if kept is not None and _wide(x):
         return torch.nn.functional.linear(x, kept)
     return _linear(x, module.weight, torch, vars(module).get("_muse_int8"))
 
@@ -201,9 +201,20 @@ def float_weights_active() -> bool:
     return getattr(_FLOAT, "on", False)
 
 
+# The int8 GEMV's row limit: products of up to this many rows stay on it even
+# inside float_weights() (5.6-12.1 ms a frame against cuBLAS's 11.8-13.0 at
+# 1-4 rows, RTX 3060, 0.6B).
+GEMV_ROWS = 4
+
+
+def _wide(x: Any) -> bool:
+    """Inside float_weights() and more than GEMV_ROWS rows of ``x``."""
+    return float_weights_active() and x.numel() // max(x.shape[-1], 1) > GEMV_ROWS
+
+
 def _int8_forward(module: Any, torch: Any, x: Any) -> Any:
     kept = vars(module).get("_muse_float")
-    if kept is not None and float_weights_active():
+    if kept is not None and _wide(x):
         return torch.nn.functional.linear(x, kept)
     return _linear(x, None, torch, vars(module)["_muse_int8"])
 
@@ -267,8 +278,9 @@ class _FusedLayer:
         layer, upstream's included, then computes from the same int8.
 
         ``keep_float`` (wide batches) keeps the float weights too, used only
-        inside :func:`float_weights`: the int8 GEMV wins to ~4 rows, cuBLAS
-        on float weights from ~8 (RTX 3060, 0.6B)."""
+        inside :func:`float_weights` and for products of more than
+        ``GEMV_ROWS`` rows: the int8 GEMV wins to 4 rows, cuBLAS on float
+        weights from ~8 (RTX 3060, 0.6B)."""
         if self.int8:
             return
         attn, mlp = layer.self_attn, layer.mlp
@@ -296,7 +308,7 @@ class _FusedLayer:
         self.qkv = self.gate_up = None
 
     def project(self, layer: Any, h: Any, torch: Any) -> tuple:
-        if "qkv" in self.float and float_weights_active():
+        if "qkv" in self.float and _wide(h):
             return torch.nn.functional.linear(h, self.float["qkv"]).split(self.sizes, dim=-1)
         quant = self.int8.get("qkv")
         if self.qkv is None and quant is None:
@@ -308,7 +320,7 @@ class _FusedLayer:
         quant = self.int8.get("gate_up")
         if self.gate_up is None and quant is None:
             return layer.mlp(x)
-        if "gate_up" in self.float and float_weights_active():
+        if "gate_up" in self.float and _wide(x):
             gate_up = torch.nn.functional.linear(x, self.float["gate_up"])
         else:
             gate_up = _linear(x, self.gate_up, torch, quant)
