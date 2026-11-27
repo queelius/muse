@@ -28,6 +28,7 @@ torch is passed in (``torch=``) so the module imports without it.
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import logging
 import math
@@ -54,9 +55,14 @@ MAX_GRAPHS = 48
 # Deadline-driven chunks: a playing line's pending frames are sent once one
 # more frame plus a decode would not fit in its remaining audio (minus this);
 # its first chunk is sized so the second can be at least as long.
-SAFETY_SECONDS = 0.02
+SAFETY_SECONDS = 0.03
 FIRST_MARGIN = 1.5
 EMA = 0.2  # weight of the newest sample in the frame / decode time estimates
+# The wait for "one more frame" is the slowest of the last WAIT_WINDOW loop
+# iterations: an iteration in which other lines decode is several times an
+# idle one, and a line that waits must survive it (an average was late by
+# 10-30 ms at 8-16 speakers).
+WAIT_WINDOW = 32
 
 
 def first_chunk_frames(frame_est: float, frame_seconds: float, first_frames: int,
@@ -655,6 +661,7 @@ class Engine:
         self._clock = clock
         self.frame_est = 0.0   # all-in seconds per loop frame (frame + takes), EMA
         self.decode_est = 0.0  # seconds per chunk decode, EMA
+        self._iterations: collections.deque = collections.deque(maxlen=WAIT_WINDOW)
         self.failed = False
         self.frames_run = 0
         self.prefill_seconds = 0.0  # host-measured prefill time (synced), for reports
@@ -764,7 +771,9 @@ class Engine:
                 for r, line in enumerate(self._lines):
                     self._take(line, rows[r:r + 1])
                 self.stats["decode_s"] += time.perf_counter() - t1
-                self.frame_est += EMA * ((self._clock() - c0) - self.frame_est)
+                took = self._clock() - c0
+                self.frame_est += EMA * (took - self.frame_est)
+                self._iterations.append(took)
                 self._drop_finished()
             except Exception as exc:  # noqa: BLE001
                 if type(exc).__name__ == "OutOfMemoryError":
@@ -820,7 +829,7 @@ class Engine:
             self.stats["prefill_s"] += time.perf_counter() - t0
             dec = self.decoder.stream(req.ref_codes) if handle.stream else None
             line = _Line(handle, req, dec)
-            line.first = first_chunk_frames(self.frame_est, self.frame_seconds,
+            line.first = first_chunk_frames(self.frame_wait, self.frame_seconds,
                                             self.first_frames, self.chunk_frames)
             self._lines.append(line)
 
@@ -860,6 +869,11 @@ class Engine:
                 self._cv.wait(timeout=min(spare, 0.05))
         return True
 
+    @property
+    def frame_wait(self) -> float:
+        """Seconds one more frame may take: the slowest recent loop iteration."""
+        return max(self._iterations) if self._iterations else self.frame_est
+
     def lead(self, line: _Line, now: float | None = None) -> float:
         """Seconds of audio this line has handed out beyond its playback
         position, client buffer included (0 before its first chunk)."""
@@ -873,7 +887,7 @@ class Engine:
             line.decoder.push(frame)
             if emission_due(pending=line.decoder.pending, sent=line.first_at is not None,
                             lead=self.lead(line), first=line.first, chunk=self.chunk_frames,
-                            frame_est=self.frame_est, decode_est=self.decode_est):
+                            frame_est=self.frame_wait, decode_est=self.decode_est):
                 self._emit(line)
         else:
             line.frames.append(frame)
