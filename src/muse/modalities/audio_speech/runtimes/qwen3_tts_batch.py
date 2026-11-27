@@ -89,15 +89,21 @@ def first_chunk_frames(frame_est: float, frame_seconds: float, first_frames: int
 # chunk is sized for the slowest recent frame (fewest decodes) instead of the
 # mean (fastest first audio). Below it there is headroom for small chunks.
 HEADROOM = 0.5
+# Live rows from which a first chunk is always the long one (sized on the
+# slowest recent frame): measured on the 0.6B, the mean-based sizing held to
+# 16 speakers (7-8 live rows) and put 13-17 lines late at 24 (12-13 rows),
+# where the long first chunk had none.
+HEAVY_ROWS = 10
 
 
 def first_chunk_size(*, mean: float, wait: float, decode: float, frame_seconds: float,
-                     first: int, chunk: int, safety: float = SAFETY_SECONDS) -> int:
+                     first: int, chunk: int, safety: float = SAFETY_SECONDS,
+                     heavy: bool = False) -> int:
     """A line's first chunk, in frames. With headroom (mean all-in frame time
     under HEADROOM of a frame's audio): the larger of the growth term on the
     mean and a floor that covers one slow frame plus a decode; near real
     time: :func:`first_chunk_frames` on the slowest recent frame."""
-    if mean >= HEADROOM * frame_seconds:
+    if heavy or mean >= HEADROOM * frame_seconds:
         return first_chunk_frames(max(wait, mean), frame_seconds, first, chunk)
     grow = math.ceil(FIRST_MARGIN * mean / (frame_seconds - mean) - 1e-9)
     floor = math.ceil((wait + decode + safety) / frame_seconds - 1e-9) + 1
@@ -838,12 +844,13 @@ class Engine:
             if joined:
                 # a burst (several joins in one pass) is sized for the bucket
                 # it lands in; a single join from the running mean
-                mean = self.load_est
+                mean = self.frame_est
                 if len(joined) > 1:
                     mean = max(mean, self.bucket_est.get(bucket_for(self.talker.live), 0.0))
                 first = first_chunk_size(mean=mean, wait=max(self.frame_wait, mean),
                                          decode=self.decode_est, frame_seconds=self.frame_seconds,
-                                         first=self.first_frames, chunk=self.chunk_frames)
+                                         first=self.first_frames, chunk=self.chunk_frames,
+                                         heavy=self.talker.live >= HEAVY_ROWS)
                 for line in joined:
                     line.first = first
 

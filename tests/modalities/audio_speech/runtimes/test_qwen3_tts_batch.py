@@ -356,6 +356,9 @@ def test_first_chunk_uses_the_mean_with_headroom_and_the_long_chunk_near_real_ti
     assert size(mean=0.050, wait=0.100, decode=0.015, frame_seconds=0.08, first=2, chunk=16) == 16
     assert size(mean=0.045, wait=0.050, decode=0.015, frame_seconds=0.08, first=2, chunk=16) == (
         batch.first_chunk_frames(0.050, 0.08, 2, 16))
+    # a heavily loaded engine (many live rows) always takes the long first chunk
+    assert size(mean=0.010, wait=0.090, decode=0.015, frame_seconds=0.08, first=2, chunk=16,
+                heavy=True) == 16
 
 
 def test_least_chunk_grows_with_the_load():
