@@ -19,9 +19,18 @@ one Triton kernel each (``fast_decoder``), bit-identical to upstream.
 code-predictor layer weights as int8 only: about 40% less frame time and less
 VRAM, for a small, measured change in the token distributions.
 
-qwen-tts has no speed control (``speed`` is ignored) and no streaming
-(``synthesize_stream`` yields one chunk). ``language=None`` is qwen-tts's
-"Auto" detection.
+``synthesize_stream`` streams real chunks where the fast talker runs (CUDA):
+qwen-tts builds the prompt as for :meth:`synthesize` and is unwound at the
+talker call (:meth:`FastTalker.capture`); the talker's frames then come one
+at a time (``start`` / ``step``) and the speech decoder, split into its
+causal front and its conv stack (:mod:`.qwen3_tts_stream`), turns each
+chunk into audio. The first chunk is ``stream_first_frames`` 12 Hz frames,
+later ones ``stream_chunk_frames``. The codes equal the one-call path's and
+the audio its one-pass decode within the decoder's bf16 floor. Elsewhere (CPU,
+another qwen-tts, a fast path disabled after a failure) a stream is one chunk.
+
+qwen-tts has no speed control (``speed`` is ignored). ``language=None`` is
+qwen-tts's "Auto" detection.
 
 Heavy deps (torch, qwen_tts) load in ``_ensure_deps``; tests replace the
 ``torch`` / ``QwenTTS`` sentinels.
@@ -42,7 +51,7 @@ from muse.core.runtime_helpers import (
     select_device,
     set_inference_mode,
 )
-from muse.modalities.audio_speech.runtimes import qwen3_tts_fast
+from muse.modalities.audio_speech.runtimes import qwen3_tts_fast, qwen3_tts_stream
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, VoiceError
 from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES, VoiceEntry
 from muse.modalities.audio_speech.voices import (
@@ -63,6 +72,11 @@ DEFAULT_INSTRUCTIONS = (
     "A clear, neutral adult narrator with an even, friendly tone, "
     "speaking at a moderate pace."
 )
+# Streaming chunk schedule, in 12 Hz frames (1920 samples, 80 ms each): a
+# small first chunk for a fast start, then larger ones (generation runs
+# several times faster than playback, so only decode overhead is at stake).
+STREAM_FIRST_FRAMES = 4
+STREAM_CHUNK_FRAMES = 16
 
 
 def _ensure_deps() -> None:
@@ -105,10 +119,15 @@ class Qwen3TTSRuntime:
         fast_decoder: bool = True,
         int8_weights: bool = False,
         cuda_graphs: bool = True,
+        stream_first_frames: int = STREAM_FIRST_FRAMES,
+        stream_chunk_frames: int = STREAM_CHUNK_FRAMES,
         **_: Any,
     ) -> None:
         if mode not in ("design", "clone"):
             raise ValueError(f"mode must be 'design' or 'clone', got {mode!r}")
+        if int(stream_first_frames) < 1 or int(stream_chunk_frames) < 1:
+            raise ValueError("stream_first_frames and stream_chunk_frames must be >= 1")
+        self._schedule = (int(stream_first_frames), int(stream_chunk_frames))
         _ensure_deps()
         self._model_id = model_id
         self._default_instructions = default_instructions or DEFAULT_INSTRUCTIONS
@@ -151,6 +170,10 @@ class Qwen3TTSRuntime:
         if fast_decoder:
             qwen3_tts_fast.install_decoder(self._tts, torch=torch)
         self._device = device_map
+        # Streaming needs the fast talker (checked per request) and the split
+        # speech decoder; CPU keeps the one-chunk stream.
+        self._split = (qwen3_tts_stream.split_decoder(self._tts, torch=torch)
+                       if on_cuda else None)
 
     # -- protocol ------------------------------------------------------------
 
@@ -191,9 +214,62 @@ class Qwen3TTSRuntime:
         audio = np.clip(np.asarray(wavs[0], dtype=np.float32).reshape(-1), -1.0, 1.0)
         return AudioResult(audio=audio, sample_rate=int(sr), metadata={"voice": used})
 
-    def synthesize_stream(self, text: str, **kwargs: Any) -> Iterator[AudioChunk]:
+    def synthesize_stream(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        instructions: str | None = None,
+        **kwargs: Any,
+    ) -> Iterator[AudioChunk]:
+        """Audio as it is generated: upstream's prompt building (captured at
+        the talker call), then the fast talker's frames from a loop here,
+        decoded in chunks by the split speech decoder. The codes are the
+        one-call path's; the audio is its one-pass decode to within the
+        decoder's own bf16 floor. Without the fast talker or the split
+        decoder (CPU, another qwen-tts, either disabled after a failure), and
+        after a failure before the first chunk, the line streams as one chunk."""
+        kwargs.update(voice=voice, instructions=instructions)
+        talker = self._stream_talker()
+        if talker is None:
+            yield self._one_chunk(text, **kwargs)
+            return
+        entry, ref_codes = self._entry(text, voice, instructions)
+        req = talker.request(talker.capture(entry), ref_codes=ref_codes)
+        if req is None:
+            yield self._one_chunk(text, **kwargs)
+            return
+        first, steady = self._schedule
+        sent, part = False, "talker"
+        try:
+            run = talker.start(req)
+            decoder = self._split.stream(req.ref_codes)
+            target = first
+            while True:
+                part = "talker"
+                codes = talker.step(run)
+                if codes is not None:
+                    decoder.push(codes)
+                if codes is None or decoder.pending >= target:
+                    part = "decoder"
+                    audio = decoder.decode()
+                    if len(audio) or (codes is None and not sent):
+                        part = None  # anything thrown in at the yield is not ours
+                        yield AudioChunk(audio=audio, sample_rate=SAMPLE_RATE)
+                        sent, target = True, steady
+                if codes is None:
+                    return
+        except Exception as exc:
+            if part is None or type(exc).__name__ == "OutOfMemoryError":
+                raise
+            self._stream_failed(part, talker)
+            if sent:
+                raise
+        yield self._one_chunk(text, **kwargs)
+
+    def _one_chunk(self, text: str, **kwargs: Any) -> AudioChunk:
         result = self.synthesize(text, **kwargs)
-        yield AudioChunk(audio=result.audio, sample_rate=result.sample_rate)
+        return AudioChunk(audio=result.audio, sample_rate=result.sample_rate)
 
     # -- saved voices (clone mode) -------------------------------------------
 
@@ -261,6 +337,38 @@ class Qwen3TTSRuntime:
             while len(self._prompts) > self._prompt_cache_size:
                 self._prompts.popitem(last=False)
         return prompt
+
+    def _stream_talker(self) -> Any:
+        """The active fast talker when streaming is possible, else None."""
+        if self._split is None:
+            return None
+        talker = getattr(getattr(self._tts, "model", None), "talker", None)
+        fast = getattr(getattr(talker, "generate", None), "__self__", None)
+        if isinstance(fast, qwen3_tts_fast.FastTalker) and not fast.disabled:
+            return fast
+        return None
+
+    def _entry(self, text: str, voice: str | None,
+               instructions: str | None) -> tuple[Any, Any]:
+        """The qwen-tts call :meth:`synthesize` makes, unrun, and the clone
+        prompt's reference codes (None in design mode)."""
+        if self._store is None:
+            instruct = (instructions or "").strip() or self._default_instructions
+            return (lambda: self._tts.generate_voice_design(
+                text=text, instruct=instruct, language=None)), None
+        prompt = self._clone_prompt(voice or NARRATOR)
+        ref = getattr(prompt[0], "ref_code", None) if isinstance(prompt, list) and prompt else None
+        return (lambda: self._tts.generate_voice_clone(
+            text=text, language=None, voice_clone_prompt=prompt)), ref
+
+    def _stream_failed(self, part: str, talker: Any) -> None:
+        if part == "talker":
+            talker.disable("fast Qwen3-TTS talker failed while streaming; using qwen-tts "
+                           "generate() for the rest of this process")
+        else:
+            logger.warning("Qwen3-TTS streaming decode failed; streams are one chunk "
+                           "for the rest of this process", exc_info=True)
+            self._split = None
 
     def _evict(self, name: str) -> None:
         with self._prompts_lock:

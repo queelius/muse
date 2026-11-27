@@ -372,6 +372,12 @@ def test_manifests_are_well_formed():
             assert classify(key) is not None, key
         assert classify("mode") == "hidden"
         assert classify("default_instructions") == "hidden"
+        # the streaming chunk schedule, in 12 Hz frames
+        assert classify("stream_first_frames") == "hidden"
+        assert classify("stream_chunk_frames") == "hidden"
+        assert caps["stream_first_frames"] == rt.STREAM_FIRST_FRAMES
+        assert caps["stream_chunk_frames"] == rt.STREAM_CHUNK_FRAMES
+        assert "no streaming" not in " ".join(m["limits"])
     assert d["revision"].startswith("5ecdb673")
     dc, bc = d["capabilities"], b["capabilities"]
     assert dc["mode"] == "design" and bc["mode"] == "clone"

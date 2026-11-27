@@ -28,7 +28,7 @@ MANIFEST = {
     "limits": [
         "The same description gives a somewhat different voice each call; save a take "
         "to qwen3-tts-0.6b-base to keep a character consistent",
-        "No word timestamps, no speed control (`speed` is ignored), `voice` is ignored (describe the voice in `instructions`), no streaming (one chunk)",
+        "No word timestamps, no speed control (`speed` is ignored), `voice` is ignored (describe the voice in `instructions`); `stream: true` streams in chunks on CUDA only (one chunk on CPU)",
         "About 0.5 s per short line on a 12 GB GPU (RTF ~0.15); much slower on CPU",
     ],
     "quality_tier": "good",
@@ -54,6 +54,10 @@ MANIFEST = {
         # frame time, 1.4 GiB less VRAM in use, speech measured unchanged
         # (ASR, UTMOS, blind listening); see docs/MODALITIES.md.
         "int8_weights": True,
+        # Streaming chunk schedule in 12 Hz frames (80 ms each): a short
+        # first chunk for a fast start, then larger ones.
+        "stream_first_frames": 4,
+        "stream_chunk_frames": 16,
         "mode": "design",
         "default_instructions": DEFAULT_INSTRUCTIONS,
         "supports_instructions": True,

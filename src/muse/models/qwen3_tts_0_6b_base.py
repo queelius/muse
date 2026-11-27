@@ -25,7 +25,7 @@ MANIFEST = {
     ],
     "limits": [
         "Clone quality follows the reference: noisy or wrongly transcribed clips clone poorly",
-        "No word timestamps, no speed control (`speed` is ignored), no streaming (one chunk)",
+        "No word timestamps, no speed control (`speed` is ignored); `stream: true` streams in chunks on CUDA only (one chunk on CPU)",
         "About 0.4 s per short line on a 12 GB GPU (RTF ~0.12); much slower on CPU",
     ],
     "quality_tier": "good",
@@ -56,6 +56,10 @@ MANIFEST = {
         # frame time, 0.5 GiB less VRAM, speech measured unchanged (ASR,
         # UTMOS, blind listening); see docs/MODALITIES.md.
         "int8_weights": True,
+        # Streaming chunk schedule in 12 Hz frames (80 ms each): a short
+        # first chunk for a fast start, then larger ones.
+        "stream_first_frames": 4,
+        "stream_chunk_frames": 16,
         "mode": "clone",
         "supports_saved_voices": True,
         "voice_cloning": True,

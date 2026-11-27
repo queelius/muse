@@ -40,9 +40,9 @@ class CausalConv(nn.Module):
 
 
 class Quantizer(nn.Module):
-    def __init__(self):
+    def __init__(self, quantizers=Q, bins=BINS):
         super().__init__()
-        self.books = nn.ModuleList([nn.Embedding(BINS, DIM) for _ in range(Q)])
+        self.books = nn.ModuleList([nn.Embedding(bins, DIM) for _ in range(quantizers)])
 
     def decode(self, codes):  # [1, Q, T] -> [1, DIM, T]
         return sum(book(codes[:, i]) for i, book in enumerate(self.books)).transpose(1, 2)
@@ -71,11 +71,11 @@ class Upsample(nn.Module):
 
 
 class FakeSpeechDecoder(nn.Module):
-    def __init__(self):
+    def __init__(self, quantizers=Q, bins=BINS):
         super().__init__()
-        self.config = SimpleNamespace(num_quantizers=Q)
+        self.config = SimpleNamespace(num_quantizers=quantizers)
         self.total_upsample = UP
-        self.quantizer = Quantizer()
+        self.quantizer = Quantizer(quantizers, bins)
         self.pre_conv = CausalConv(DIM, LATENT, 3)
         self.pre_transformer = RunningMean()
         self.upsample = nn.ModuleList([nn.ModuleList([Upsample(), CausalConv(LATENT, LATENT, 4)])])
@@ -97,9 +97,9 @@ class FakeSpeechDecoder(nn.Module):
 
 
 class FakeTokenizerModel(nn.Module):
-    def __init__(self, kind="qwen3_tts_tokenizer_12hz"):
+    def __init__(self, kind="qwen3_tts_tokenizer_12hz", **decoder):
         super().__init__()
-        self.decoder = FakeSpeechDecoder()
+        self.decoder = FakeSpeechDecoder(**decoder)
         self.kind = kind
 
     def get_model_type(self):
@@ -121,9 +121,9 @@ def decoder():
     return dec
 
 
-def _codes(frames, seed=1):
+def _codes(frames, seed=1, quantizers=Q, bins=BINS):
     g = torch.Generator().manual_seed(seed)
-    return torch.randint(0, BINS, (frames, Q), generator=g)
+    return torch.randint(0, bins, (frames, quantizers), generator=g)
 
 
 def _one_pass(dec, codes):
@@ -208,3 +208,238 @@ def test_split_decoder_installs_only_on_the_checked_layout(monkeypatch):
     assert stream.split_decoder(SimpleNamespace(), torch=torch) is None
     monkeypatch.setattr(stream, "_qwen_tts_version", lambda: "0.2.0")
     assert stream.split_decoder(_tts(), torch=torch) is None
+
+
+# -- Qwen3TTSRuntime.synthesize_stream ------------------------------------------------
+
+from muse.modalities.audio_speech.protocol import AudioChunk  # noqa: E402
+from muse.modalities.audio_speech.runtimes import qwen3_tts as rt  # noqa: E402
+from muse.modalities.audio_speech.runtimes import qwen3_tts_fast as fast  # noqa: E402
+
+from .test_qwen3_tts_fast import (  # noqa: E402
+    EMBED, EOS, GROUPS, TVOCAB, FakeTalker, _talker_kwargs,
+)
+
+REF_FRAMES = 7
+MAX_NEW = 30  # 29 frames: the fake talker never picks EOS greedily
+TOL = 1e-5  # fp32 rounding of the prefix-length running mean
+
+
+class FakeQwen:
+    """qwen_tts.Qwen3TTSModel over the fake talker and speech decoder: builds
+    the talker's kwargs, calls ``talker.generate``, keeps the frames before
+    the first EOS, prepends the reference codes in clone mode, decodes in one
+    pass and cuts the reference's share of the audio, as qwen-tts 0.1.1 does."""
+
+    instances: list = []
+
+    def __init__(self):
+        torch.manual_seed(5)
+        talker = FakeTalker()
+        torch.manual_seed(0)
+        speech = FakeTokenizerModel(quantizers=GROUPS, bins=TVOCAB)
+        with torch.no_grad():
+            for p in [*talker.parameters(), *speech.parameters()]:
+                p.mul_(3.0)
+        self.model = SimpleNamespace(talker=talker, speech_tokenizer=SimpleNamespace(
+            model=speech, device="cpu"))
+        self.ref_codes = _codes(REF_FRAMES, seed=2, quantizers=GROUPS, bins=TVOCAB)
+        self.decoded: list = []
+
+    @classmethod
+    def from_pretrained(cls, path, **kwargs):
+        cls.instances.append(cls())
+        return cls.instances[-1]
+
+    def create_voice_clone_prompt(self, ref_audio, ref_text):
+        return [SimpleNamespace(ref_code=self.ref_codes, icl_mode=True)]
+
+    def _kwargs(self, text, salt):
+        g = torch.Generator().manual_seed(len(text) * 7 + salt)
+        return _talker_kwargs(dict(inputs_embeds=torch.randn(1, 5, EMBED, generator=g),
+                                   trailing_text_hidden=torch.randn(1, 3, EMBED, generator=g),
+                                   tts_pad_embed=torch.randn(1, 1, EMBED, generator=g)),
+                              max_new_tokens=MAX_NEW)
+
+    def _run(self, kwargs, ref):
+        result = self.model.talker.generate(**kwargs)
+        frames = [h[-1] for h in result.hidden_states if h[-1] is not None]
+        codes = torch.cat(frames) if frames else torch.zeros(0, GROUPS, dtype=torch.long)
+        stop = (codes[:, 0] == EOS).nonzero()
+        if len(stop):
+            codes = codes[:int(stop[0, 0])]
+        self.decoded.append(codes)
+        full = codes if ref is None else torch.cat((ref, codes))
+        with torch.inference_mode():
+            wav = self.model.speech_tokenizer.model.decoder(full.T[None].clamp(min=0))
+        wav = wav[0, 0].float().numpy()
+        if ref is not None:
+            wav = wav[int(len(ref) / max(len(full), 1) * len(wav)):]
+        return [wav], 24000
+
+    def generate_voice_clone(self, text, language, voice_clone_prompt):
+        return self._run(self._kwargs(text, 0), voice_clone_prompt[0].ref_code)
+
+    def generate_voice_design(self, text, instruct, language):
+        return self._run(self._kwargs(text, len(instruct)), None)
+
+
+@pytest.fixture
+def make(monkeypatch, tmp_path):
+    monkeypatch.setattr(fast, "_qwen_tts_version", lambda: "0.1.1")
+    monkeypatch.setattr(stream, "_qwen_tts_version", lambda: "0.1.1")
+    monkeypatch.setenv("MUSE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(rt, "QwenTTS", FakeQwen)
+    monkeypatch.setattr(rt, "torch", torch)
+    FakeQwen.instances = []
+
+    def build(mode, device="cuda", **kw):
+        model_id = "qwen3-tts-0.6b-base" if mode == "clone" else "qwen3-tts-1.7b-voicedesign"
+        return rt.Qwen3TTSRuntime(hf_repo="Qwen/x", device=device, model_id=model_id,
+                                  mode=mode, **kw)
+    return build
+
+
+def _talker_of(m):
+    return m._tts.model.talker.generate.__self__
+
+
+def _chunks(m, text="A line of speech.", **kw):
+    chunks = list(m.synthesize_stream(text, **kw))
+    assert chunks and all(isinstance(c, AudioChunk) and c.sample_rate == 24000 for c in chunks)
+    assert all(c.audio.dtype == np.float32 for c in chunks)
+    return chunks
+
+
+@pytest.mark.parametrize("mode", ["clone", "design"])
+def test_stream_equals_the_one_chunk_audio(make, mode, monkeypatch):
+    m = make(mode)
+    pushed = []
+    real_push = stream.StreamDecoder.push
+    monkeypatch.setattr(stream.StreamDecoder, "push",
+                        lambda self, f: pushed.append(f.clone()) or real_push(self, f))
+    want = m.synthesize("A line of speech.").audio
+    chunks = _chunks(m)
+    assert [len(c.audio) // UP for c in chunks] == [4, 16, 9]  # default schedule
+    got = np.concatenate([c.audio for c in chunks])
+    assert len(got) == len(want) == 29 * UP
+    np.testing.assert_allclose(got, want, atol=TOL)
+    codes = FakeQwen.instances[0].decoded
+    assert len(codes) == 1  # streaming never ran upstream's decode
+    assert torch.equal(torch.cat(pushed), codes[0])  # the same codes, token for token
+    assert m._tts.model.talker.upstream_calls == []
+
+
+def test_chunk_schedule_comes_from_the_constructor(make):
+    m = make("clone", stream_first_frames=2, stream_chunk_frames=5)
+    assert [len(c.audio) // UP for c in _chunks(m)] == [2, 5, 5, 5, 5, 5, 2]
+
+
+@pytest.mark.parametrize("kw", [{"stream_first_frames": 0}, {"stream_chunk_frames": -1}])
+def test_chunk_schedule_must_be_positive(make, kw):
+    with pytest.raises(ValueError):
+        make("clone", **kw)
+
+
+def test_instructions_reach_the_stream(make):
+    m = make("design")
+    a = np.concatenate([c.audio for c in _chunks(m, instructions="A gravelly old wizard.")])
+    b = np.concatenate([c.audio for c in _chunks(m, instructions="   ")])
+    want_a = m.synthesize("A line of speech.", instructions="A gravelly old wizard.").audio
+    want_b = m.synthesize("A line of speech.").audio  # blank: the default instructions
+    np.testing.assert_allclose(a, want_a, atol=TOL)
+    np.testing.assert_allclose(b, want_b, atol=TOL)
+    assert not np.allclose(want_a, want_b)
+
+
+def test_unknown_voice_raises_before_any_audio(make):
+    from muse.modalities.audio_speech.protocol import UnknownVoiceError
+
+    with pytest.raises(UnknownVoiceError):
+        next(make("clone").synthesize_stream("Hi.", voice="nobody"))
+
+
+def test_cpu_streams_one_chunk(make):
+    m = make("clone", device="cpu")
+    chunks = _chunks(m)
+    assert len(chunks) == 1
+    np.testing.assert_array_equal(chunks[0].audio, m.synthesize("A line of speech.").audio)
+
+
+def test_disabled_or_unhandled_talker_streams_one_chunk(make, monkeypatch):
+    m = make("clone")
+    with monkeypatch.context() as patch:
+        patch.setattr(fast.FastTalker, "request", lambda self, kw, ref_codes=None: None)
+        assert len(_chunks(m)) == 1
+    _talker_of(m).disabled = True
+    assert len(_chunks(m)) == 1
+
+
+def test_without_the_fast_talker_streams_one_chunk(make):
+    m = make("clone", fast_talker=False)
+    assert len(_chunks(m)) == 1
+
+
+def _boom(*a, **k):
+    raise RuntimeError("boom")
+
+
+def test_failure_before_the_first_chunk_falls_back_to_one_chunk(make, monkeypatch):
+    m = make("clone")
+    ft = _talker_of(m)
+    monkeypatch.setattr(ft, "step", _boom)
+    chunks = list(m.synthesize_stream("A line of speech."))
+    assert len(chunks) == 1 and ft.disabled  # the rest of the process uses upstream
+    assert len(m._tts.model.talker.upstream_calls) == 1
+
+
+def test_failure_after_a_chunk_ends_the_stream(make, monkeypatch):
+    m = make("clone")
+    ft = _talker_of(m)
+    real, calls = ft.step, []
+
+    def flaky(run):
+        calls.append(1)
+        if len(calls) > 6:
+            raise RuntimeError("boom")
+        return real(run)
+    monkeypatch.setattr(ft, "step", flaky)
+    gen = m.synthesize_stream("A line of speech.")
+    assert len(next(gen).audio) == 4 * UP
+    with pytest.raises(RuntimeError, match="boom"):
+        next(gen)
+    assert ft.disabled
+
+
+def test_decoder_failure_falls_back_and_turns_streaming_off(make, monkeypatch):
+    m = make("clone")
+    with monkeypatch.context() as patch:
+        patch.setattr(stream.StreamDecoder, "decode", _boom)
+        assert len(_chunks(m)) == 1
+    assert len(_chunks(m)) == 1  # off for the process
+    assert not _talker_of(m).disabled  # the talker itself was fine
+
+
+def test_oom_is_not_swallowed(make, monkeypatch):
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    def oom(run):
+        raise OutOfMemoryError()
+    m = make("clone")
+    ft = _talker_of(m)
+    monkeypatch.setattr(ft, "step", oom)
+    with pytest.raises(OutOfMemoryError):
+        list(m.synthesize_stream("A line of speech."))
+    assert not ft.disabled
+
+
+def test_a_closed_stream_leaves_the_model_usable(make):
+    m = make("clone")
+    want = m.synthesize("A line of speech.").audio
+    gen = m.synthesize_stream("A line of speech.")
+    next(gen)
+    gen.close()  # the client went away
+    got = np.concatenate([c.audio for c in _chunks(m)])
+    np.testing.assert_allclose(got, want, atol=TOL)
+    np.testing.assert_allclose(m.synthesize("A line of speech.").audio, want, atol=TOL)
