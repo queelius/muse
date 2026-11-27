@@ -814,3 +814,185 @@ def test_installs_pass_int8_to_the_decoders(talker, monkeypatch):
     fast.install_talker(tts, torch=torch)
     assert other.code_predictor.generate.__self__.int8 is False
     assert other.generate.__self__.int8 is False
+
+
+# -- prepare (capture) and stepper -------------------------------------------------
+
+
+def _stepped(ft, kwargs, ref_codes=None):
+    """Frames from start / step, as a streaming caller drives them."""
+    req = ft.request(kwargs, ref_codes=ref_codes)
+    assert req is not None
+    run = ft.start(req)
+    frames = []
+    while (codes := ft.step(run)) is not None:
+        frames.append(codes)
+    return req, run, frames
+
+
+@pytest.mark.parametrize("masked", [False, True], ids=["exact", "masked"])
+def test_stepper_frames_equal_generate(talker, prompt, masked, monkeypatch):
+    ft = _fast_talker(talker, masked=masked, monkeypatch=monkeypatch)
+    with torch.no_grad():
+        want = _split(ft.generate(**_talker_kwargs(prompt)))[0]
+        _, run, got = _stepped(ft, _talker_kwargs(prompt))
+        ref = reference_talker(talker, **prompt, max_new=12)[0]
+    assert len(got) == len(want) == len(ref) == 11 and run.done
+    for a, b, c in zip(got, want, ref):
+        assert torch.equal(a, b) and torch.equal(a, c)
+    assert ft.step(run) is None  # finished runs stay finished
+    assert talker.upstream_calls == []
+
+
+@pytest.mark.parametrize("masked", [False, True], ids=["exact", "masked"])
+def test_stepper_grows_the_cache_mid_line(talker, prompt, masked, monkeypatch):
+    monkeypatch.setattr(fast, "TALKER_CAPACITY", 4)
+    ft = _fast_talker(talker, masked=masked, monkeypatch=monkeypatch)
+    with torch.no_grad():
+        _, run, got = _stepped(ft, _talker_kwargs(prompt, max_new_tokens=10))
+        ref = reference_talker(talker, **prompt, max_new=10)[0]
+    assert len(got) == len(ref) and all(torch.equal(a, b) for a, b in zip(got, ref))
+    assert ft._state.capacity == 16 and run.state is ft._state
+
+
+def test_stepper_frames_are_copies(talker, prompt, monkeypatch):
+    """A graphed frame returns its static output buffer; step must clone it."""
+    ft = _fast_talker(talker)
+    buffer = torch.zeros(1, GROUPS, dtype=torch.long)
+
+    def fake_step(st, p, pos):
+        ft._frame(st, p, start=pos, masked=False)
+        buffer.fill_(pos)
+        return buffer
+    monkeypatch.setattr(ft, "_step", fake_step)
+    with torch.no_grad():
+        _, _, got = _stepped(ft, _talker_kwargs(prompt, max_new_tokens=4))
+    assert [int(c[0, 0]) for c in got] == [5, 6, 7]
+
+
+def test_stepper_stops_at_eos_like_generate(talker, prompt):
+    with torch.no_grad():
+        talker.codec_head.weight[EOS] = 50 * talker.codec_head.weight[0].sign()
+        talker.model.norm.weight.abs_()
+    ft = _fast_talker(talker)
+    with torch.no_grad():
+        want = _split(ft.generate(**_talker_kwargs(prompt, min_new_tokens=3)))[0]
+        _, run, got = _stepped(ft, _talker_kwargs(prompt, min_new_tokens=3))
+    assert len(got) == len(want) == 3 and run.done
+    assert all(torch.equal(a, b) for a, b in zip(got, want))
+    assert all(int(c[0, 0]) != EOS for c in got)
+
+
+def test_starting_a_run_retires_the_previous_one(talker, prompt):
+    ft = _fast_talker(talker)
+    with torch.no_grad():
+        first = ft.start(ft.request(_talker_kwargs(prompt)))
+        ft.step(first)
+        second = ft.start(ft.request(_talker_kwargs(prompt)))
+        with pytest.raises(RuntimeError, match="retired"):
+            ft.step(first)
+        assert ft.step(second) is not None
+        ft.generate(**_talker_kwargs(prompt))  # the one-call path retires runs too
+        with pytest.raises(RuntimeError, match="retired"):
+            ft.step(second)
+
+
+def test_request_is_plain_data_and_none_for_unhandled_calls(talker, prompt):
+    ft = _fast_talker(talker)
+    ref = torch.zeros(3, GROUPS, dtype=torch.long)
+    req = ft.request(_talker_kwargs(prompt, max_new_tokens=7), ref_codes=ref)
+    assert req.inputs_embeds is prompt["inputs_embeds"]
+    assert req.trailing_text_hidden is prompt["trailing_text_hidden"]
+    assert req.tts_pad_embed is prompt["tts_pad_embed"]
+    assert req.max_new_tokens == 7 and req.ref_codes is ref
+    assert req.params.eos == EOS and req.params.suppress == SUPPRESS
+    assert ft.request(_talker_kwargs(prompt, streamer=object())) is None
+    ft.disabled = True
+    assert ft.request(_talker_kwargs(prompt)) is None
+
+
+def _upstream_entry(talker, kwargs, after):
+    """Stand-in for qwen-tts's generate_voice_*: builds the talker's kwargs,
+    calls talker.generate, then post-processes (``after``)."""
+    talker.generate(**kwargs)
+    after.append("post-processed")
+    return "wavs"
+
+
+def test_capture_returns_the_talker_kwargs_and_skips_the_rest(talker, prompt, monkeypatch):
+    monkeypatch.setattr(fast, "_qwen_tts_version", lambda: "0.1.1")
+    tts = _talker_tts(talker)
+    fast.install(tts, torch=torch)
+    fast.install_talker(tts, torch=torch)
+    ft = talker.generate.__self__
+    after = []
+    kwargs = _talker_kwargs(prompt)
+    with torch.no_grad():
+        got = ft.capture(lambda: _upstream_entry(talker, kwargs, after))
+        assert got == kwargs and after == []
+        assert ft._state is None  # nothing ran on the GPU
+        # outside capture the same entry point generates as before
+        assert _upstream_entry(talker, kwargs, after) == "wavs" and after == ["post-processed"]
+    assert talker.upstream_calls == []
+
+
+def test_capture_unwinds_through_broad_except_clauses(talker, prompt):
+    """The unwind is not an Exception, so an ``except Exception`` between the
+    entry point and talker.generate cannot swallow it."""
+    ft = _fast_talker(talker)
+    kwargs = _talker_kwargs(prompt)
+
+    def guarded():
+        try:
+            ft.generate(**kwargs)
+        except Exception:  # noqa: BLE001
+            return "swallowed"
+    assert ft.capture(guarded) == kwargs
+
+
+def test_capture_is_per_thread(talker, prompt):
+    import threading
+
+    ft = _fast_talker(talker)
+    kwargs = _talker_kwargs(prompt)
+    other: dict = {}
+    entered, release = threading.Event(), threading.Event()
+
+    def inside():
+        entered.set()
+        release.wait(5)
+        ft.generate(**kwargs)
+
+    def elsewhere():
+        entered.wait(5)
+        with torch.no_grad():
+            other["result"] = ft.generate(**kwargs)
+        release.set()
+
+    worker = threading.Thread(target=elsewhere)
+    worker.start()
+    with torch.no_grad():
+        got = ft.capture(inside)
+    worker.join(5)
+    assert got == kwargs
+    assert len(other["result"].hidden_states) == 12  # generated, not captured
+
+
+def test_capture_without_a_talker_call_raises_and_clears(talker, prompt):
+    ft = _fast_talker(talker)
+    with pytest.raises(RuntimeError, match="talker.generate"):
+        ft.capture(lambda: None)
+    with pytest.raises(ValueError):
+        ft.capture(lambda: (_ for _ in ()).throw(ValueError("upstream refused")))
+    with torch.no_grad():  # not left in capture mode
+        assert len(ft.generate(**_talker_kwargs(prompt)).hidden_states) == 12
+
+
+def test_disable_drops_state_and_graphs(talker, prompt):
+    ft = _fast_talker(talker)
+    with torch.no_grad():
+        ft.generate(**_talker_kwargs(prompt))
+    ft._graphs[("k",)] = ("graph", None)
+    ft.disable("test")
+    assert ft.disabled and ft._state is None and ft._graphs == {}
+    assert ft.request(_talker_kwargs(prompt)) is None

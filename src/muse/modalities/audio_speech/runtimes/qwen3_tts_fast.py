@@ -39,6 +39,8 @@ from __future__ import annotations
 import functools
 import importlib.metadata
 import logging
+import threading
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, NamedTuple
 
@@ -516,6 +518,47 @@ class _TalkerParams(NamedTuple):
     sub: tuple             # code predictor's (do_sample, temperature, top_k, top_p)
 
 
+@dataclass(frozen=True, eq=False)
+class TalkerRequest:
+    """One line for the talker, as plain data: what qwen-tts passes to
+    ``talker.generate`` (prompt embeddings, trailing text, pad embedding,
+    decoding parameters, token budget), plus the reference clip's codec
+    frames ``[frames, groups]`` in clone mode (unused by the talker; the
+    speech decoder needs them). Built by :meth:`FastTalker.request`."""
+
+    inputs_embeds: Any
+    trailing_text_hidden: Any
+    tts_pad_embed: Any
+    params: _TalkerParams
+    max_new_tokens: int
+    ref_codes: Any = None
+
+
+class TalkerRun:
+    """One request's progress through :meth:`FastTalker.start` /
+    :meth:`FastTalker.step`. Batch 1: it shares the talker's single decode
+    state, so a later start (or a one-call ``generate``) retires it."""
+
+    def __init__(self, request: TalkerRequest, state: "_TalkerState", serial: int) -> None:
+        self.request = request
+        self.state = state
+        self.serial = serial
+        self.pos = int(request.inputs_embeds.shape[1])  # next KV slot
+        self.produced = 1  # talker tokens chosen, the prefill's included
+        self.done = False
+
+
+class _Captured(BaseException):
+    """Unwinds qwen-tts's entry point from inside ``talker.generate``.
+
+    Not an ``Exception``, so no broad ``except Exception`` between the entry
+    point and the talker can swallow it (qwen-tts 0.1.1 has none)."""
+
+    def __init__(self, kwargs: dict) -> None:
+        super().__init__("talker.generate captured")
+        self.kwargs = kwargs
+
+
 class _TalkerState:
     """Preallocated decode state for batch 1. CUDA graphs capture these
     tensors' addresses, so a request resets them in place."""
@@ -593,10 +636,14 @@ class FastTalker:
         gen_cfg = getattr(talker, "generation_config", None)
         self._defaults = {k: getattr(gen_cfg, k, v) if gen_cfg is not None else v
                           for k, v in _DEFAULTS.items()}
+        self._capturing = threading.local()
+        self._serial = 0  # bumped by every start; a run with an older one is retired
 
     # -- entry point -----------------------------------------------------------
 
     def generate(self, **kwargs: Any) -> Any:
+        if getattr(self._capturing, "on", False):
+            raise _Captured(kwargs)
         params = self._params(kwargs)
         if params is None:
             return self.upstream(**kwargs)
@@ -608,14 +655,60 @@ class FastTalker:
         except Exception as exc:
             if type(exc).__name__ == "OutOfMemoryError":
                 raise
-            logger.warning(
-                "fast Qwen3-TTS talker failed; using qwen-tts generate() "
-                "for the rest of this process", exc_info=True)
-            self.disabled = True
-            self._state = None
-            self._drop_graphs()
+            self.disable("fast Qwen3-TTS talker failed; using qwen-tts generate() "
+                         "for the rest of this process")
             return self.upstream(**kwargs)
         return SimpleNamespace(hidden_states=tuple(entries))
+
+    def disable(self, message: str) -> None:
+        """Switch the fast path off for the process (logged once, with the
+        exception being handled, if any) and free its state and graphs."""
+        logger.warning(message, exc_info=True)
+        self.disabled = True
+        self._state = None
+        self._drop_graphs()
+
+    # -- prepare and step (a caller-owned loop) ---------------------------------
+
+    def capture(self, call: Any) -> dict:
+        """Run ``call`` (a qwen-tts entry point such as ``generate_voice_clone``)
+        until it reaches ``talker.generate``, and return that call's kwargs
+        instead of generating: upstream's prompt building, unchanged, with
+        nothing after it run. Per thread. Raises RuntimeError if ``call``
+        returns without reaching the talker; upstream's own errors propagate."""
+        self._capturing.on = True
+        try:
+            call()
+        except _Captured as captured:
+            return captured.kwargs
+        finally:
+            self._capturing.on = False
+        raise RuntimeError("the qwen-tts entry point returned without calling talker.generate")
+
+    def request(self, kwargs: dict, *, ref_codes: Any = None) -> TalkerRequest | None:
+        """``talker.generate`` kwargs as a :class:`TalkerRequest`, or None when
+        the fast path does not handle the call (or is disabled)."""
+        params = self._params(kwargs)
+        if params is None:
+            return None
+        return TalkerRequest(kwargs["inputs_embeds"], kwargs["trailing_text_hidden"],
+                             kwargs["tts_pad_embed"], params, int(kwargs["max_new_tokens"]),
+                             ref_codes)
+
+    def start(self, req: TalkerRequest) -> TalkerRun:
+        """Prefill ``req`` and choose its first talker token. Retires any
+        earlier run (one decode state per talker)."""
+        with self.torch.no_grad():
+            return self._start(req.inputs_embeds, req.trailing_text_hidden, req.tts_pad_embed,
+                               req.params, req.max_new_tokens, req)
+
+    def step(self, run: TalkerRun) -> Any:
+        """The run's next frame of codec codes ``[1, groups]`` (a copy), or None
+        once it has finished: the frames are upstream's, those before the
+        first EOS, at most ``max_new_tokens - 1`` of them."""
+        with self.torch.no_grad():
+            codes = self._advance(run)
+            return None if codes is None else codes.clone()
 
     def _params(self, kw: dict) -> _TalkerParams | None:
         """Decoding parameters, or None when the call is not the one handled."""
@@ -663,6 +756,15 @@ class FastTalker:
         """The ``hidden_states`` tuple HF generate returns, as qwen-tts reads
         it: entry 0 is ``((prefill hidden,), None)``, entry k is
         ``((hidden_k,), codec ids of frame k-1)``."""
+        run = self._start(embeds, trailing, pad, p, max_new)
+        entries = [((run.state.hidden.clone(),), None)]
+        while (codes := self._advance(run)) is not None:
+            entries.append(((run.state.hidden.clone(),), codes.clone()))
+        return entries
+
+    def _start(self, embeds: Any, trailing: Any, pad: Any, p: _TalkerParams,
+               max_new: int, req: TalkerRequest | None = None) -> TalkerRun:
+        self._serial += 1
         length, text = embeds.shape[1], trailing.shape[1]
         st = self._ready_state(embeds, max(length, text) + 1)
         st.trailing[:, :text] = trailing
@@ -674,15 +776,26 @@ class FastTalker:
         st.hidden.copy_(hidden[:, -1:])
         st.pos.fill_(length)
         self._choose(self.talker.codec_head(hidden)[:, -1].float(), st, p)
-        entries = [((st.hidden.clone(),), None)]
-        pos, produced = length, 1
-        while produced < max_new and bool(st.unfinished):
-            if pos >= st.capacity:
-                st = self._grow(st, 2 * st.capacity)
-            codes = self._step(st, p, pos)
-            entries.append(((st.hidden.clone(),), codes.clone()))
-            pos, produced = pos + 1, produced + 1
-        return entries
+        if req is None:
+            req = TalkerRequest(embeds, trailing, pad, p, max_new)
+        return TalkerRun(req, st, self._serial)
+
+    def _advance(self, run: TalkerRun) -> Any:
+        """One frame of ``run``: its codes (the graph's output buffer when
+        graphed), or None when the run has finished."""
+        if run.serial != self._serial:
+            raise RuntimeError("this talker run was retired by a later start")
+        if run.done:
+            return None
+        st = run.state
+        if not (run.produced < run.request.max_new_tokens and bool(st.unfinished)):
+            run.done = True
+            return None
+        if run.pos >= st.capacity:
+            st = run.state = self._grow(st, 2 * st.capacity)
+        codes = self._step(st, run.request.params, run.pos)
+        run.pos, run.produced = run.pos + 1, run.produced + 1
+        return codes
 
     def _step(self, st: _TalkerState, p: _TalkerParams, pos: int) -> Any:
         if not (self.use_cuda_graphs and st.trailing.is_cuda):
