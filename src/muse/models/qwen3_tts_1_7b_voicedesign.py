@@ -28,7 +28,7 @@ MANIFEST = {
     "limits": [
         "The same description gives a somewhat different voice each call; save a take "
         "to qwen3-tts-0.6b-base to keep a character consistent",
-        "No word timestamps, no speed control (`speed` is ignored), `voice` is ignored (describe the voice in `instructions`); `stream: true` streams in chunks on CUDA only (one chunk on CPU)",
+        "No word timestamps, no speed control (`speed` is ignored), `voice` is ignored (describe the voice in `instructions`); `stream: true` streams on CUDA only (first audio ~90 ms on a 12 GB GPU; one chunk on CPU)",
         "About 0.5 s per short line on a 12 GB GPU (RTF ~0.15); much slower on CPU",
     ],
     "quality_tier": "good",

@@ -74,8 +74,9 @@ class SplitDecoder:
         self._pool: Any = None
 
     def front(self, codes: Any) -> Any:
-        """Codes ``[1, quantizers, frames]`` -> transformer output
-        ``[1, channels, frames]``: upstream's forward up to the conv stack."""
+        """Codes ``[streams, quantizers, frames]`` -> transformer output
+        ``[streams, channels, frames]``: upstream's forward up to the conv
+        stack. Rows are independent (one length; pad shorter rows at the end)."""
         dec = self.decoder
         hidden = dec.quantizer.decode(codes)
         hidden = dec.pre_conv(hidden).transpose(1, 2)
@@ -83,7 +84,8 @@ class SplitDecoder:
         return hidden.permute(0, 2, 1)
 
     def conv_stack(self, hidden: Any) -> Any:
-        """Front output ``[1, channels, frames]`` -> audio ``[1, 1, samples]``."""
+        """Front output ``[streams, channels, frames]`` -> audio
+        ``[streams, 1, samples]``; rows independent."""
         for blocks in self.decoder.upsample:
             for block in blocks:
                 hidden = block(hidden)

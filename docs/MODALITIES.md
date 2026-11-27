@@ -39,8 +39,32 @@ speaks from that description (a neutral default when omitted) and ignores
 `voice`, so the response reports no voice. `qwen3-tts-0.6b-base`
 (`supports_saved_voices`) clones a saved voice named by `voice`, defaults to
 the bundled read-only `narrator` (about 4 s, package data under
-`audio_speech/data/`), and refuses `instructions`. Both ignore `speed`, have
-no word timestamps and stream the whole line as one chunk. On CUDA both load
+`audio_speech/data/`), and refuses `instructions`. Both ignore `speed` and
+have no word timestamps. With `stream: true` on CUDA a line streams as it is
+generated (spec `docs/plans/2026-11-26-qwen3-tts-streaming-batching.md`):
+qwen-tts builds the prompt exactly as for the one-call path and is unwound at
+the talker call (`FastTalker.capture`), the talker's 12 Hz frames come one at
+a time from a loop the runtime owns (`FastTalker.start` / `step`), and the
+speech decoder runs split into its causal front (quantizer, `pre_conv`,
+transformer; over every frame so far, the clone reference's included) and
+its conv stack (over the new frames plus 6 frames of context;
+`audio_speech/runtimes/qwen3_tts_stream.py`), on CUDA each half as a CUDA
+graph per padded shape (codes padded at the end to 64, 128, ... frames; conv
+widths rounded up to 4 frames; both causal). The first chunk is
+`stream_first_frames` (2, 0.16 s of audio), each later one twice the last up
+to `stream_chunk_frames` (16); both are hidden capabilities. Same seed, the
+streamed codes equal the one-call codes token for token and the audio sits
+at the decoder's own bf16 floor against the one-pass decode (34-44 dB SNR,
+median ~39). On an RTX 3060 the first audio arrives ~90 ms after the request
+on both models (from ~560 ms / ~800 ms for a short line in one chunk) and
+every later chunk ahead of its playback by >= 106 ms; streaming costs ~5%
+more GPU per second of audio. In clone mode qwen-tts's one-call audio is one
+sample longer for ~5% of line lengths (its float cut keeps one reference
+sample); the stream is exactly the generated frames. A stream holds the
+model until it ends, as before. On CPU, with another
+qwen-tts or after the fast talker or the split decoder has failed (a failure
+before the first chunk falls back for that request) a stream is one chunk.
+On CUDA both load
 with SDPA attention, and qwen-tts's two nested HF `generate()` loops (the
 talker's, and the 15-token code predictor it runs per 12 Hz frame) are
 replaced by static-KV decoders (`audio_speech/runtimes/qwen3_tts_fast.py`).

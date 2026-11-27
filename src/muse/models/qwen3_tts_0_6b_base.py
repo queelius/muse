@@ -25,7 +25,7 @@ MANIFEST = {
     ],
     "limits": [
         "Clone quality follows the reference: noisy or wrongly transcribed clips clone poorly",
-        "No word timestamps, no speed control (`speed` is ignored); `stream: true` streams in chunks on CUDA only (one chunk on CPU)",
+        "No word timestamps, no speed control (`speed` is ignored); `stream: true` streams on CUDA only (first audio ~90 ms on a 12 GB GPU; one chunk on CPU)",
         "About 0.4 s per short line on a 12 GB GPU (RTF ~0.12); much slower on CPU",
     ],
     "quality_tier": "good",

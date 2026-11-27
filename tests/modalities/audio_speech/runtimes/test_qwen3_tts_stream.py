@@ -139,6 +139,25 @@ def test_front_then_conv_stack_is_the_decoder(decoder):
     assert split.upsample == UP
 
 
+@pytest.mark.parametrize("padded", [False, True])
+def test_front_and_conv_stack_take_several_streams_at_once(decoder, padded):
+    """A leading batch dimension: row b of a batched call is that stream's
+    own call (stage 2 decodes the streams that are due together)."""
+    split = stream.SplitDecoder(decoder, torch=torch, padded=padded)
+    rows = torch.stack([_codes(20, seed=s).T for s in (1, 2, 3)])  # [3, Q, 20]
+    with torch.no_grad():
+        front = split.front(rows)
+        wav = split.conv_stack(front)
+        assert front.shape[0] == 3 and wav.shape[:2] == (3, 1)
+        for b in range(3):
+            one = split.front(rows[b:b + 1])
+            assert torch.allclose(front[b:b + 1], one, atol=1e-6)
+            assert torch.allclose(wav[b:b + 1], split.conv_stack(one), atol=1e-6)
+        shaped = split._shaped("front", split.front, rows, 64)
+        assert shaped.shape == (3, front.shape[1], 64)
+        assert torch.allclose(shaped[..., :20], front, atol=1e-6)
+
+
 @pytest.mark.parametrize("ref_frames", [0, 7], ids=["design", "clone"])
 @pytest.mark.parametrize("schedule", [[1] * 30, [4, 8, 8, 8, 2], [30]])
 def test_streamed_chunks_equal_the_one_pass_decode(decoder, ref_frames, schedule):
