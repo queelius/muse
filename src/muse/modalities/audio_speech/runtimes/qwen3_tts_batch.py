@@ -81,8 +81,37 @@ def first_chunk_frames(frame_est: float, frame_seconds: float, first_frames: int
     return max(first_frames, min(chunk_frames, need))
 
 
+# Mean all-in frame time, as a share of a frame's audio, from which a first
+# chunk is sized for the slowest recent frame (fewest decodes) instead of the
+# mean (fastest first audio). Below it there is headroom for small chunks.
+HEADROOM = 0.5
+
+
+def first_chunk_size(*, mean: float, wait: float, decode: float, frame_seconds: float,
+                     first: int, chunk: int, safety: float = SAFETY_SECONDS) -> int:
+    """A line's first chunk, in frames. With headroom (mean all-in frame time
+    under HEADROOM of a frame's audio): the larger of the growth term on the
+    mean and a floor that covers one slow frame plus a decode; near real
+    time: :func:`first_chunk_frames` on the slowest recent frame."""
+    if mean >= HEADROOM * frame_seconds:
+        return first_chunk_frames(max(wait, mean), frame_seconds, first, chunk)
+    grow = math.ceil(FIRST_MARGIN * mean / (frame_seconds - mean) - 1e-9)
+    floor = math.ceil((wait + decode + safety) / frame_seconds - 1e-9) + 1
+    return max(first, min(chunk, max(grow, floor)))
+
+
+def least_chunk_frames(mean: float, frame_seconds: float, chunk: int) -> int:
+    """The smallest chunk a deadline may send at mean all-in frame time
+    ``mean``: behind real time every line is due every frame, and 1-2-frame
+    chunks (each a full decode) keep the engine there; c >= 1.5 f / (T - f)
+    lets the next chunk be generated while this one plays."""
+    if mean >= 0.9 * frame_seconds:
+        return chunk
+    return max(1, min(chunk, math.ceil(FIRST_MARGIN * mean / (frame_seconds - mean) - 1e-9)))
+
+
 def emission_due(*, pending: int, sent: bool, lead: float, first: int, chunk: int,
-                 frame_est: float, decode_est: float,
+                 frame_est: float, decode_est: float, least: int = 1,
                  safety: float = SAFETY_SECONDS) -> bool:
     """Whether a streaming line should decode and send its pending frames now:
     at ``chunk`` frames; before its first chunk, at ``first`` frames; after
@@ -94,7 +123,7 @@ def emission_due(*, pending: int, sent: bool, lead: float, first: int, chunk: in
         return True
     if not sent:
         return pending >= first
-    return lead - safety < frame_est + decode_est
+    return pending >= least and lead - safety < frame_est + decode_est
 
 
 class GrowthRefused(RuntimeError):
@@ -667,6 +696,7 @@ class Engine:
         self.frame_est = 0.0   # all-in seconds per loop frame (frame + takes), EMA
         self.decode_est = 0.0  # seconds per chunk decode, EMA
         self._iterations: collections.deque = collections.deque(maxlen=WAIT_WINDOW)
+        self.bucket_est: dict[int, float] = {}  # all-in seconds per frame, by bucket (EMA)
         self.failed = False
         self.frames_run = 0
         self.prefill_seconds = 0.0  # host-measured prefill time (synced), for reports
@@ -779,6 +809,9 @@ class Engine:
                 took = self._clock() - c0
                 self.frame_est += EMA * (took - self.frame_est)
                 self._iterations.append(took)
+                b = bucket_for(len(rows))
+                self.bucket_est[b] = self.bucket_est.get(b, took) + EMA * (
+                    took - self.bucket_est.get(b, took))
                 self._drop_finished()
             except Exception as exc:  # noqa: BLE001
                 if type(exc).__name__ == "OutOfMemoryError":
@@ -789,6 +822,20 @@ class Engine:
                 self._fail_all(exc)
 
     def _admit(self) -> None:
+        joined: list[_Line] = []
+        try:
+            self._admit_pass(joined)
+        finally:
+            if joined:  # size first chunks for the bucket after this pass's joins
+                mean = max(self.frame_est,
+                           self.bucket_est.get(bucket_for(self.talker.live), 0.0))
+                first = first_chunk_size(mean=mean, wait=max(self.frame_wait, mean),
+                                         decode=self.decode_est, frame_seconds=self.frame_seconds,
+                                         first=self.first_frames, chunk=self.chunk_frames)
+                for line in joined:
+                    line.first = first
+
+    def _admit_pass(self, joined: list) -> None:
         with self._cv:
             pending = list(self._pending)
         for handle in pending:
@@ -836,9 +883,9 @@ class Engine:
             # end would stall every stream (8 at once: ~1 s on the 0.6B)
             dec = self.decoder.stream(req.ref_codes) if self.decoder is not None else None
             line = _Line(handle, req, dec)
-            line.first = first_chunk_frames(self.frame_wait, self.frame_seconds,
-                                            self.first_frames, self.chunk_frames)
+            line.first = self.first_frames
             self._lines.append(line)
+            joined.append(line)
 
     def _overflow(self, refused: GrowthRefused) -> None:
         """A live line needs more KV than memory allows: fail just the lines
@@ -899,7 +946,9 @@ class Engine:
             line.decoder.push(frame)
             if emission_due(pending=line.decoder.pending, sent=line.first_at is not None,
                             lead=self.lead(line), first=line.first, chunk=self.chunk_frames,
-                            frame_est=self.frame_wait, decode_est=self.decode_est):
+                            frame_est=self.frame_wait, decode_est=self.decode_est,
+                            least=least_chunk_frames(self.frame_est, self.frame_seconds,
+                                                     self.chunk_frames)):
                 self._emit(line)
         else:
             line.frames.append(frame)
@@ -931,6 +980,9 @@ class Engine:
             if line.error is not None:
                 line.handle._put(line.error)
             elif not cancelled:
+                if talker.rows[r].unfinished:
+                    logger.warning("Qwen3-TTS line reached its frame limit (%d) without "
+                                   "ending; stopped there", line.request.max_new_tokens - 1)
                 self._finish(line)
             elif line.handle.stream:
                 line.handle._put(_DONE)

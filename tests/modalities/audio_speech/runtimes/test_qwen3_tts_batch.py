@@ -346,6 +346,49 @@ def test_first_chunk_grows_with_the_load():
     assert first(0.090, 0.08, 2, 16) == 16     # slower than real time: the cap
 
 
+def test_first_chunk_uses_the_mean_with_headroom_and_the_long_chunk_near_real_time():
+    size = batch.first_chunk_size
+    # headroom (mean all-in frame under half of a frame's audio): the larger of
+    # the growth term on the mean and a floor covering one slow frame + decode
+    assert size(mean=0.010, wait=0.030, decode=0.010, frame_seconds=0.08, first=2, chunk=16) == 2
+    assert size(mean=0.030, wait=0.060, decode=0.015, frame_seconds=0.08, first=2, chunk=16) == 3
+    # near real time: the conservative rule on the slowest recent frame
+    assert size(mean=0.050, wait=0.100, decode=0.015, frame_seconds=0.08, first=2, chunk=16) == 16
+    assert size(mean=0.045, wait=0.050, decode=0.015, frame_seconds=0.08, first=2, chunk=16) == (
+        batch.first_chunk_frames(0.050, 0.08, 2, 16))
+
+
+def test_least_chunk_grows_with_the_load():
+    """Behind real time, a deadline must not send 1-2-frame chunks for every
+    line every frame (each costs a full decode): the smallest chunk a
+    deadline may send grows with the mean all-in frame time."""
+    least = batch.least_chunk_frames
+    assert least(0.010, 0.08, 16) == 1
+    assert least(0.060, 0.08, 16) == 5
+    assert least(0.075, 0.08, 16) == 16
+    assert least(0.200, 0.08, 16) == 16
+    due = batch.emission_due
+    assert not due(pending=3, sent=True, lead=0.0, first=2, chunk=16, frame_est=0.06,
+                   decode_est=0.01, least=5)
+    assert due(pending=5, sent=True, lead=0.0, first=2, chunk=16, frame_est=0.06,
+               decode_est=0.01, least=5)
+
+
+def test_a_burst_sizes_first_chunks_for_the_bucket_after_its_joins(talker):
+    ft = _fast(talker)
+    eng = _engine(ft, clock=lambda: 0.0, frame_seconds=0.08, chunk_frames=16, max_rows=8)
+    try:
+        eng.bucket_est[4] = 0.07  # the engine has seen 4-row frames take 70 ms
+        handles = eng.run_on_engine(lambda: [
+            eng.submit(lambda s=s: _req(ft, s, max_new=40), stream=True) for s in range(3)])
+        firsts = [len(next(iter(h))) // 3 for h in handles]
+        assert firsts == [batch.first_chunk_frames(0.07, 0.08, 2, 16)] * 3  # 11, not 2
+        for h in handles:
+            h.cancel()
+    finally:
+        eng.close()
+
+
 def test_emission_is_due_at_the_cap_or_the_deadline():
     due = batch.emission_due
     # pending reached chunk_frames
@@ -386,8 +429,8 @@ def test_engine_emits_early_when_the_listener_is_about_to_run_dry(talker):
     eng = _engine(ft, clock=lambda: clock["t"], frame_seconds=1.0, chunk_frames=6)
     real_frame = eng.talker.frame
 
-    def frame():  # each frame takes 0.9 s of (fake) time: under 1 s of audio, barely
-        clock["t"] += 0.9
+    def frame():  # each frame takes 0.5 s of (fake) time: under real time, no cap needed
+        clock["t"] += 0.5
         return real_frame()
     eng.talker.frame = frame
     try:
@@ -395,7 +438,9 @@ def test_engine_emits_early_when_the_listener_is_about_to_run_dry(talker):
         sizes = [len(c) // 3 for c in h]
     finally:
         eng.close()
-    assert sum(sizes) == 19 and max(sizes[1:]) < 6  # deadline-driven, not waiting for the cap
+    # the second chunk goes out on its deadline, before the cap; later ones
+    # reach the cap as the engine (2x real time here) gets ahead
+    assert sum(sizes) == 19 and sizes[1] < 6 and sizes[2] >= sizes[1]
 
 
 def test_buffer_seconds_extends_every_deadline(talker):
@@ -539,6 +584,8 @@ def test_prepare_runs_on_the_engine_thread(talker):
 
 # -- Qwen3TTSRuntime with max_batch_size --------------------------------------------
 
+from muse.modalities.audio_speech.runtimes import qwen3_tts as rt  # noqa: E402
+
 from .test_qwen3_tts_stream import FakeQwen, TOL, make  # noqa: E402,F401 (fixture)
 
 TEXTS = ["A line of speech.", "Another, longer line of speech here.", "Short.",
@@ -615,6 +662,22 @@ def test_batched_runtime_falls_back_after_an_engine_failure(make, monkeypatch):
 def test_batched_runtime_on_cpu_has_no_engine(make):
     m = make("clone", device="cpu", max_batch_size=4)
     assert m._engine is None and isinstance(m._inference_lock, type(threading.Lock()))
+
+
+@pytest.mark.parametrize("mbs", [1, 4])
+def test_a_line_at_its_frame_limit_ends_there_with_a_warning(make, monkeypatch, caplog, mbs):
+    monkeypatch.setattr(rt, "FRAMES_PER_CHAR", 0.0)
+    monkeypatch.setattr(rt, "FRAME_SLACK", 10)  # 10 tokens: 9 frames
+    m = make("clone", max_batch_size=mbs)
+    try:
+        with caplog.at_level("WARNING"):
+            whole = m.synthesize(TEXTS[0]).audio
+            streamed = np.concatenate([c.audio for c in m.synthesize_stream(TEXTS[0])])
+        assert len(whole) == len(streamed) == 9 * 3
+        assert caplog.text.count("frame limit") >= 2
+    finally:
+        if m._engine is not None:
+            m._engine.close()
 
 
 def test_batch_capability_keys_are_hidden():

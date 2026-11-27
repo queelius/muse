@@ -87,6 +87,22 @@ STREAM_CHUNK_FRAMES = 16
 # Batched engine (max_batch_size > 1): streams are paced to stay this far
 # ahead of their playback, so the GPU idles instead of racing ahead.
 STREAM_LEAD_SECONDS = 1.5
+# Each line's frame budget (qwen-tts's max_new_tokens), from its text: a
+# sampled line that never emits EOS would otherwise run to 4096 frames
+# (5.5 min) and, batched, grow every row's KV cache. Measured over 96 takes
+# (24 lines, 2 seeds, both models) and a 750-character paragraph: at most
+# 1.06 frames a character (short lines; 0.62-0.68 on the paragraph).
+FRAMES_PER_CHAR = 3.0
+FRAME_SLACK = 40
+MAX_FRAMES = 4096
+
+
+def frame_limit(text: str) -> int:
+    """max_new_tokens for ``text``: FRAMES_PER_CHAR per character plus slack,
+    at most qwen-tts's own 4096. A line that reaches it ends there."""
+    return min(MAX_FRAMES, int(FRAMES_PER_CHAR * len(text)) + FRAME_SLACK)
+
+
 # Padded prefill lengths captured by a warm-up (tokens, the batched prefill's step).
 WARM_PREFILL_LENGTHS = tuple(range(32, 257, 32))
 WARM_TEXT = "The lanterns stay lit until dawn."
@@ -263,17 +279,20 @@ class Qwen3TTSRuntime:
         voice: str | None = None,
         instructions: str | None = None,
     ) -> AudioResult:
+        limit = frame_limit(text)
         if self._store is None:
             instruct = (instructions or "").strip() or self._default_instructions
             wavs, sr = self._tts.generate_voice_design(
-                text=text, instruct=instruct, language=None)
+                text=text, instruct=instruct, language=None, max_new_tokens=limit)
             used = None
         else:
             used = voice or NARRATOR
             prompt = self._clone_prompt(used)
             wavs, sr = self._tts.generate_voice_clone(
-                text=text, language=None, voice_clone_prompt=prompt)
+                text=text, language=None, voice_clone_prompt=prompt, max_new_tokens=limit)
         audio = np.clip(np.asarray(wavs[0], dtype=np.float32).reshape(-1), -1.0, 1.0)
+        if len(audio) // self._samples_per_frame() >= limit - 1:
+            self._warn_limit(limit)
         return AudioResult(audio=audio, sample_rate=int(sr), metadata={"voice": used})
 
     def synthesize_stream(
@@ -323,6 +342,9 @@ class Qwen3TTSRuntime:
                         yield AudioChunk(audio=audio, sample_rate=SAMPLE_RATE)
                         sent, target = True, max(1, min(steady, 2 * target))
                 if codes is None:
+                    if (run.produced >= run.request.max_new_tokens
+                            and bool(run.state.unfinished)):
+                        self._warn_limit(run.request.max_new_tokens)
                     return
         except Exception as exc:
             if part is None or type(exc).__name__ == "OutOfMemoryError":
@@ -386,6 +408,14 @@ class Qwen3TTSRuntime:
             ref, total = int(ref_codes.shape[0]), int(full.shape[0])
             wav = wav[int(ref / max(total, 1) * wav.shape[0]):]
         return np.clip(np.asarray(wav, dtype=np.float32).reshape(-1), -1.0, 1.0)
+
+    def _samples_per_frame(self) -> int:
+        split = getattr(self, "_split", None)
+        return int(split.upsample) if split is not None else 1920
+
+    def _warn_limit(self, limit: int) -> None:
+        logger.warning("Qwen3-TTS line reached its frame limit (%d) without ending; "
+                       "stopped there", limit - 1)
 
     def _one_chunk(self, text: str, **kwargs: Any) -> AudioChunk:
         result = self.synthesize(text, **kwargs)
@@ -472,14 +502,15 @@ class Qwen3TTSRuntime:
                instructions: str | None) -> tuple[Any, Any]:
         """The qwen-tts call :meth:`synthesize` makes, unrun, and the clone
         prompt's reference codes (None in design mode)."""
+        limit = frame_limit(text)
         if self._store is None:
             instruct = (instructions or "").strip() or self._default_instructions
             return (lambda: self._tts.generate_voice_design(
-                text=text, instruct=instruct, language=None)), None
+                text=text, instruct=instruct, language=None, max_new_tokens=limit)), None
         prompt = self._clone_prompt(voice or NARRATOR)
         ref = getattr(prompt[0], "ref_code", None) if isinstance(prompt, list) and prompt else None
         return (lambda: self._tts.generate_voice_clone(
-            text=text, language=None, voice_clone_prompt=prompt)), ref
+            text=text, language=None, voice_clone_prompt=prompt, max_new_tokens=limit)), ref
 
     def _stream_failed(self, part: str, talker: Any) -> None:
         if part == "talker":

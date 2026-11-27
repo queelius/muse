@@ -228,6 +228,24 @@ def test_clone_defaults_to_narrator_and_passes_tuple():
     assert m.default_voice == "narrator"
 
 
+def test_every_line_has_a_frame_limit_from_its_text(caplog):
+    """A sampled line that never emits EOS would run to qwen-tts's 4096
+    frames; the runtime caps each line at FRAMES_PER_CHAR * chars + slack
+    (measured: at most 1.06 frames a character over 96 takes)."""
+    _design().synthesize("Hello there.")
+    _clone().synthesize("The inn is warm.")
+    (d,) = FakeQwenTTS.instances[0].named("design")
+    (c,) = FakeQwenTTS.instances[1].named("clone")
+    assert d["max_new_tokens"] == rt.frame_limit("Hello there.")
+    assert c["max_new_tokens"] == rt.frame_limit("The inn is warm.")
+    assert rt.frame_limit("x" * 10) == int(rt.FRAMES_PER_CHAR * 10) + rt.FRAME_SLACK
+    assert rt.frame_limit("x" * 5000) == 4096  # qwen-tts's own ceiling
+    FakeQwenTTS.output = np.zeros(1920 * rt.frame_limit("Hi.") - 1920, "float32")
+    with caplog.at_level("WARNING"):
+        _design().synthesize("Hi.")
+    assert "frame limit" in caplog.text
+
+
 def test_clone_unknown_voice_raises():
     m = _clone()
     with pytest.raises(UnknownVoiceError) as exc:

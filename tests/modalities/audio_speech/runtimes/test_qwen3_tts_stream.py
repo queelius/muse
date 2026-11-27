@@ -327,11 +327,17 @@ class FakeQwen:
             wav = wav[int(len(ref) / max(len(full), 1) * len(wav)):]
         return [wav], 24000
 
-    def generate_voice_clone(self, text, language, voice_clone_prompt):
-        return self._run(self._kwargs(text, 0), voice_clone_prompt[0].ref_code)
+    def _limited(self, kwargs, max_new_tokens):
+        if max_new_tokens is not None:  # qwen-tts passes it through to the talker
+            kwargs["max_new_tokens"] = min(MAX_NEW, int(max_new_tokens))
+        return kwargs
 
-    def generate_voice_design(self, text, instruct, language):
-        return self._run(self._kwargs(text, len(instruct)), None)
+    def generate_voice_clone(self, text, language, voice_clone_prompt, max_new_tokens=None):
+        return self._run(self._limited(self._kwargs(text, 0), max_new_tokens),
+                         voice_clone_prompt[0].ref_code)
+
+    def generate_voice_design(self, text, instruct, language, max_new_tokens=None):
+        return self._run(self._limited(self._kwargs(text, len(instruct)), max_new_tokens), None)
 
 
 @pytest.fixture
