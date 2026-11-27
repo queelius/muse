@@ -286,7 +286,7 @@ class FakeQwen:
             for p in [*talker.parameters(), *speech.parameters()]:
                 p.mul_(3.0)
         self.model = SimpleNamespace(talker=talker, speech_tokenizer=SimpleNamespace(
-            model=speech, device="cpu"))
+            model=speech, device="cpu", decode=self._decode))
         self.ref_codes = _codes(REF_FRAMES, seed=2, quantizers=GROUPS, bins=TVOCAB)
         self.decoded: list = []
 
@@ -305,6 +305,14 @@ class FakeQwen:
                                    tts_pad_embed=torch.randn(1, 1, EMBED, generator=g)),
                               max_new_tokens=MAX_NEW)
 
+    def _decode(self, items):
+        """qwen-tts's speech_tokenizer.decode: [{audio_codes: [frames, groups]}]
+        -> ([float32 audio], sample rate), one pass."""
+        full = items[0]["audio_codes"]
+        with torch.inference_mode():
+            wav = self.model.speech_tokenizer.model.decoder(full.T[None].clamp(min=0))
+        return [wav[0, 0].float().numpy()], 24000
+
     def _run(self, kwargs, ref):
         result = self.model.talker.generate(**kwargs)
         frames = [h[-1] for h in result.hidden_states if h[-1] is not None]
@@ -314,9 +322,7 @@ class FakeQwen:
             codes = codes[:int(stop[0, 0])]
         self.decoded.append(codes)
         full = codes if ref is None else torch.cat((ref, codes))
-        with torch.inference_mode():
-            wav = self.model.speech_tokenizer.model.decoder(full.T[None].clamp(min=0))
-        wav = wav[0, 0].float().numpy()
+        wav = self.model.speech_tokenizer.decode([{"audio_codes": full}])[0][0]
         if ref is not None:
             wav = wav[int(len(ref) / max(len(full), 1) * len(wav)):]
         return [wav], 24000

@@ -336,3 +336,90 @@ def test_prepare_runs_on_the_engine_thread(talker):
         assert eng.run_on_engine(lambda: threading.current_thread().name) == eng.thread_name
     finally:
         eng.close()
+
+
+# -- Qwen3TTSRuntime with max_batch_size --------------------------------------------
+
+from .test_qwen3_tts_stream import FakeQwen, TOL, make  # noqa: E402,F401 (fixture)
+
+TEXTS = ["A line of speech.", "Another, longer line of speech here.", "Short.",
+         "The fourth line, which is the longest of them all by far."]
+
+
+def _run_threads(fn, items):
+    out = [None] * len(items)
+    errors = []
+
+    def work(i, item):
+        try:
+            out[i] = fn(item)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+    threads = [threading.Thread(target=work, args=(i, it)) for i, it in enumerate(items)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors, errors
+    return out
+
+
+def test_max_batch_size_one_is_todays_runtime(make):
+    m = make("clone")
+    assert isinstance(m._inference_lock, type(threading.Lock())) and m._engine is None
+
+
+@pytest.mark.parametrize("mode", ["clone", "design"])
+def test_batched_runtime_matches_solo_lines(make, mode):
+    solo = make(mode)
+    want = [solo.synthesize(t).audio for t in TEXTS]
+    want_stream = [np.concatenate([c.audio for c in solo.synthesize_stream(t)]) for t in TEXTS]
+    m = make(mode, max_batch_size=4)
+    try:
+        assert isinstance(m._inference_lock, threading.Semaphore) and m._engine is not None
+
+        def one(t):
+            with m._inference_lock:
+                return m.synthesize(t).audio
+        got = _run_threads(one, TEXTS)
+        for g, w in zip(got, want):
+            assert len(g) == len(w)
+            np.testing.assert_allclose(g, w, atol=TOL)
+
+        def stream(t):
+            with m._inference_lock:
+                return [c.audio for c in m.synthesize_stream(t)]
+        chunks = _run_threads(stream, TEXTS)
+        for c, w in zip(chunks, want_stream):
+            assert len(c) > 1
+            np.testing.assert_allclose(np.concatenate(c), w, atol=TOL)
+        assert m._engine.frames_run > 0
+    finally:
+        m._engine.close()
+
+
+def test_batched_runtime_falls_back_after_an_engine_failure(make, monkeypatch):
+    m = make("clone", max_batch_size=4)
+    want = make("clone").synthesize(TEXTS[0]).audio
+    try:
+        monkeypatch.setattr(m._engine.talker, "frame",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError, match="boom"):
+            m.synthesize(TEXTS[0])
+        assert m._engine.failed
+        np.testing.assert_allclose(m.synthesize(TEXTS[0]).audio, want, atol=TOL)  # one at a time
+        assert len(list(m.synthesize_stream(TEXTS[0]))) >= 1
+    finally:
+        m._engine.close()
+
+
+def test_batched_runtime_on_cpu_has_no_engine(make):
+    m = make("clone", device="cpu", max_batch_size=4)
+    assert m._engine is None and isinstance(m._inference_lock, type(threading.Lock()))
+
+
+def test_batch_capability_keys_are_hidden():
+    from muse.core.capability_keys import classify
+
+    assert classify("max_batch_size") == "hidden"
+    assert classify("stream_lead_seconds") == "hidden"

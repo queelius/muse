@@ -52,7 +52,11 @@ from muse.core.runtime_helpers import (
     select_device,
     set_inference_mode,
 )
-from muse.modalities.audio_speech.runtimes import qwen3_tts_fast, qwen3_tts_stream
+from muse.modalities.audio_speech.runtimes import (
+    qwen3_tts_batch,
+    qwen3_tts_fast,
+    qwen3_tts_stream,
+)
 from muse.modalities.audio_speech.protocol import AudioChunk, AudioResult, VoiceError
 from muse.modalities.audio_speech.voice_catalog import BUNDLED_VOICES, VoiceEntry
 from muse.modalities.audio_speech.voices import (
@@ -80,6 +84,9 @@ DEFAULT_INSTRUCTIONS = (
 # 1.7B: 16 frames take ~170 ms there, the first chunk plays for 160 ms).
 STREAM_FIRST_FRAMES = 2
 STREAM_CHUNK_FRAMES = 16
+# Batched engine (max_batch_size > 1): streams are paced to stay this far
+# ahead of their playback, so the GPU idles instead of racing ahead.
+STREAM_LEAD_SECONDS = 1.5
 
 
 def _ensure_deps() -> None:
@@ -124,6 +131,8 @@ class Qwen3TTSRuntime:
         cuda_graphs: bool = True,
         stream_first_frames: int = STREAM_FIRST_FRAMES,
         stream_chunk_frames: int = STREAM_CHUNK_FRAMES,
+        max_batch_size: int = 1,
+        stream_lead_seconds: float = STREAM_LEAD_SECONDS,
         **_: Any,
     ) -> None:
         if mode not in ("design", "clone"):
@@ -131,6 +140,10 @@ class Qwen3TTSRuntime:
         if int(stream_first_frames) < 1 or int(stream_chunk_frames) < 1:
             raise ValueError("stream_first_frames and stream_chunk_frames must be >= 1")
         self._schedule = (int(stream_first_frames), int(stream_chunk_frames))
+        max_batch_size = int(max_batch_size)
+        if not 1 <= max_batch_size <= qwen3_tts_batch.BUCKETS[-1]:
+            raise ValueError(f"max_batch_size must be 1..{qwen3_tts_batch.BUCKETS[-1]}")
+        self._engine: Any = None
         _ensure_deps()
         self._model_id = model_id
         self._default_instructions = default_instructions or DEFAULT_INSTRUCTIONS
@@ -164,12 +177,15 @@ class Qwen3TTSRuntime:
             self._tts = QwenTTS.from_pretrained(src, **load_kwargs)
         set_inference_mode(getattr(self._tts, "model", None))
         graphs = bool(cuda_graphs) and on_cuda
+        wide = {}  # float weights beside the int8, for frames past INT8_MAX_ROWS rows
+        if on_cuda and max_batch_size > qwen3_tts_batch.INT8_MAX_ROWS:
+            wide["keep_float"] = True
         if fast_code_predictor:
             qwen3_tts_fast.install(self._tts, torch=torch, use_cuda_graphs=graphs,
-                                   int8=bool(int8_weights))
+                                   int8=bool(int8_weights), **wide)
             if fast_talker:
                 qwen3_tts_fast.install_talker(self._tts, torch=torch, use_cuda_graphs=graphs,
-                                              int8=bool(int8_weights))
+                                              int8=bool(int8_weights), **wide)
         if fast_decoder:
             qwen3_tts_fast.install_decoder(self._tts, torch=torch)
         self._device = device_map
@@ -178,6 +194,17 @@ class Qwen3TTSRuntime:
         self._split = (qwen3_tts_stream.split_decoder(self._tts, torch=torch,
                                                       use_cuda_graphs=graphs)
                        if on_cuda else None)
+        talker = self._stream_talker()
+        if max_batch_size > 1 and talker is not None:
+            # One engine thread owns the GPU; up to max_batch_size requests
+            # share its frames, so the route's lock admits that many.
+            self._gpu_lock = threading.Lock()  # one-at-a-time after an engine failure
+            self._engine = qwen3_tts_batch.Engine(
+                talker, decoder=self._split, decode_whole=self._decode_whole, torch=torch,
+                max_rows=max_batch_size, first_frames=self._schedule[0],
+                chunk_frames=self._schedule[1], lead_seconds=float(stream_lead_seconds),
+                use_cuda_graphs=graphs)
+            self._inference_lock = threading.Semaphore(max_batch_size)
 
     # -- protocol ------------------------------------------------------------
 
@@ -204,6 +231,26 @@ class Qwen3TTSRuntime:
         voice: str | None = None,
         instructions: str | None = None,
         **_: Any,
+    ) -> AudioResult:
+        engine = self._engine
+        if engine is not None:
+            try:
+                handle = engine.submit(lambda: self._prepare(text, voice, instructions),
+                                       stream=False)
+                audio = handle.result()
+                used = None if self._store is None else voice or NARRATOR
+                return AudioResult(audio=audio, sample_rate=SAMPLE_RATE, metadata={"voice": used})
+            except qwen3_tts_batch.EngineUnavailable:
+                return self._one_at_a_time(
+                    lambda: self._synthesize_one(text, voice=voice, instructions=instructions))
+        return self._synthesize_one(text, voice=voice, instructions=instructions)
+
+    def _synthesize_one(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        instructions: str | None = None,
     ) -> AudioResult:
         if self._store is None:
             instruct = (instructions or "").strip() or self._default_instructions
@@ -234,6 +281,9 @@ class Qwen3TTSRuntime:
         decoder (CPU, another qwen-tts, either disabled after a failure), and
         after a failure before the first chunk, the line streams as one chunk."""
         kwargs.update(voice=voice, instructions=instructions)
+        if self._engine is not None:
+            yield from self._engine_stream(text, voice, instructions)
+            return
         talker = self._stream_talker()
         if talker is None:
             yield self._one_chunk(text, **kwargs)
@@ -270,6 +320,61 @@ class Qwen3TTSRuntime:
             if sent:
                 raise
         yield self._one_chunk(text, **kwargs)
+
+    def _engine_stream(self, text: str, voice: str | None,
+                       instructions: str | None) -> Iterator[AudioChunk]:
+        try:
+            handle = self._engine.submit(lambda: self._prepare(text, voice, instructions),
+                                         stream=True)
+        except qwen3_tts_batch.EngineUnavailable:
+            handle = None
+        sent = False
+        if handle is not None:
+            try:
+                for audio in handle:
+                    sent = True
+                    yield AudioChunk(audio=audio, sample_rate=SAMPLE_RATE)
+                return
+            except qwen3_tts_batch.EngineUnavailable:
+                if sent:
+                    raise
+            finally:
+                handle.cancel()  # a client that left frees its row at the next frame
+        result = self._one_at_a_time(
+            lambda: self._synthesize_one(text, voice=voice, instructions=instructions))
+        yield AudioChunk(audio=result.audio, sample_rate=result.sample_rate)
+
+    def _one_at_a_time(self, call: Any) -> Any:
+        """The one-at-a-time path beside a batched engine: on the engine's
+        thread while it runs (its GPU work must not overlap), else serialized."""
+        engine = self._engine
+        if engine is not None and not engine.failed:
+            try:
+                return engine.run_on_engine(call)
+            except qwen3_tts_batch.EngineUnavailable:
+                pass
+        with self._gpu_lock:
+            return call()
+
+    def _prepare(self, text: str, voice: str | None, instructions: str | None) -> Any:
+        """This line as a TalkerRequest (on the engine thread), or None when
+        the fast talker does not handle it."""
+        talker = self._stream_talker()
+        if talker is None:
+            return None
+        entry, ref_codes = self._entry(text, voice, instructions)
+        return talker.request(talker.capture(entry), ref_codes=ref_codes)
+
+    def _decode_whole(self, codes: Any, ref_codes: Any) -> np.ndarray:
+        """A finished line's audio as qwen-tts's one-call path decodes it: the
+        reference's codes in front, one decode, the reference's share cut."""
+        tok = self._tts.model.speech_tokenizer
+        full = codes if ref_codes is None else torch.cat((ref_codes.to(codes.device), codes))
+        wav = tok.decode([{"audio_codes": full}])[0][0]
+        if ref_codes is not None:
+            ref, total = int(ref_codes.shape[0]), int(full.shape[0])
+            wav = wav[int(ref / max(total, 1) * wav.shape[0]):]
+        return np.clip(np.asarray(wav, dtype=np.float32).reshape(-1), -1.0, 1.0)
 
     def _one_chunk(self, text: str, **kwargs: Any) -> AudioChunk:
         result = self.synthesize(text, **kwargs)
