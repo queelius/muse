@@ -247,8 +247,9 @@ def _whole(codes, ref):
 
 def _engine(ft, **kw):
     kw.setdefault("max_rows", 4)
+    kw.setdefault("chunk_frames", 4)
     return batch.Engine(ft, decoder=_Decoder(), decode_whole=_whole, torch=torch,
-                        first_frames=2, chunk_frames=4, **kw)
+                        first_frames=2, **kw)
 
 
 def test_engine_streams_and_finishes_many_requests_like_solo_runs(talker):
@@ -263,7 +264,8 @@ def test_engine_streams_and_finishes_many_requests_like_solo_runs(talker):
         for i, h in enumerate(handles):
             if i % 2 == 0:
                 chunks = list(h)
-                assert [len(c) // 3 for c in chunks][:2] == [2, 4]
+                sizes = [len(c) // 3 for c in chunks]
+                assert sizes[0] == 2 and max(sizes) <= 4  # light load: first_frames, cap chunk_frames
                 got = np.concatenate(chunks)
             else:
                 got = h.result(timeout=30)
@@ -326,6 +328,173 @@ def test_engine_paces_streams_to_a_lead(talker):
         time.sleep(0.3)
         assert eng.frames_run == frames  # paced: ~2 s ahead, nothing generated
         h.cancel()
+    finally:
+        eng.close()
+
+
+# -- deadline-driven emission -------------------------------------------------------
+
+
+def test_first_chunk_grows_with_the_load():
+    """c1 >= f / (T - f) (with margin): the second chunk, generated during
+    the first one's playback, can then be at least as long as the first."""
+    first = batch.first_chunk_frames
+    assert first(0.007, 0.08, 2, 16) == 2      # light: the configured first chunk
+    assert first(0.040, 0.08, 2, 16) == 2      # 1.0 * 1.5 -> 2
+    assert first(0.060, 0.08, 2, 16) == 5      # 3.0 * 1.5 -> 5
+    assert first(0.075, 0.08, 2, 16) == 16     # capped at chunk_frames
+    assert first(0.090, 0.08, 2, 16) == 16     # slower than real time: the cap
+
+
+def test_emission_is_due_at_the_cap_or_the_deadline():
+    due = batch.emission_due
+    # pending reached chunk_frames
+    assert due(pending=8, sent=True, lead=5.0, first=2, chunk=8, frame_est=0.01, decode_est=0.01)
+    # first chunk: when pending reaches the load-aware first size
+    assert not due(pending=1, sent=False, lead=0.0, first=2, chunk=8, frame_est=0.01, decode_est=0.01)
+    assert due(pending=2, sent=False, lead=0.0, first=2, chunk=8, frame_est=0.01, decode_est=0.01)
+    # playing: wait while one more frame plus a decode fits in the lead (with safety)
+    assert not due(pending=3, sent=True, lead=0.5, first=2, chunk=8, frame_est=0.02, decode_est=0.01)
+    assert due(pending=3, sent=True, lead=0.045, first=2, chunk=8, frame_est=0.02, decode_est=0.01)
+    assert not due(pending=0, sent=True, lead=0.0, first=2, chunk=8, frame_est=0.02, decode_est=0.01)
+
+
+def test_engine_emits_by_deadline_on_a_fake_clock(talker):
+    """With a fake clock the listener's playback position is known exactly:
+    chunks stay small while the lead is short and grow to the cap once the
+    engine is far ahead; the client buffer adds to every deadline."""
+    ft = _fast(talker)
+    clock = {"t": 0.0}
+
+    def now():
+        return clock["t"]
+
+    eng = _engine(ft, clock=now, frame_seconds=1.0, chunk_frames=6)
+    try:
+        h = eng.submit(lambda: _req(ft, 1, max_new=40), stream=True)
+        sizes = [len(c) // 3 for c in h]
+    finally:
+        eng.close()
+    # the fake clock never moves: after the first chunk the lead only grows,
+    # so every later chunk waits for the cap
+    assert sizes[0] == 2 and all(s == 6 for s in sizes[1:-1]) and sum(sizes) == 39
+
+
+def test_engine_emits_early_when_the_listener_is_about_to_run_dry(talker):
+    ft = _fast(talker)
+    clock = {"t": 0.0}
+    eng = _engine(ft, clock=lambda: clock["t"], frame_seconds=1.0, chunk_frames=6)
+    real_frame = eng.talker.frame
+
+    def frame():  # each frame takes 0.9 s of (fake) time: under 1 s of audio, barely
+        clock["t"] += 0.9
+        return real_frame()
+    eng.talker.frame = frame
+    try:
+        h = eng.submit(lambda: _req(ft, 1, max_new=20), stream=True)
+        sizes = [len(c) // 3 for c in h]
+    finally:
+        eng.close()
+    assert sum(sizes) == 19 and max(sizes[1:]) < 6  # deadline-driven, not waiting for the cap
+
+
+def test_buffer_seconds_extends_every_deadline(talker):
+    ft = _fast(talker)
+    clock = {"t": 0.0}
+    eng = _engine(ft, clock=lambda: clock["t"], frame_seconds=1.0, chunk_frames=6,
+                  buffer_seconds=100.0)
+    real_frame = eng.talker.frame
+
+    def frame():
+        clock["t"] += 0.9
+        return real_frame()
+    eng.talker.frame = frame
+    try:
+        h = eng.submit(lambda: _req(ft, 1, max_new=20), stream=True)
+        sizes = [len(c) // 3 for c in h]
+    finally:
+        eng.close()
+    assert sizes[0] == 2 and all(s == 6 for s in sizes[1:-1])  # the buffer covers the wait
+
+
+# -- growth out of memory -------------------------------------------------------------
+
+
+class OutOfMemoryError(RuntimeError):
+    """Named like torch's, which the engine recognises by name."""
+
+
+def _oom_past(monkeypatch, rows):
+    real = batch._State
+
+    def state(ft, like, n, capacity):
+        if n > rows:
+            raise OutOfMemoryError("CUDA out of memory (fake)")
+        return real(ft, like, n, capacity)
+    monkeypatch.setattr(batch, "_State", state)
+
+
+def test_row_growth_oom_keeps_live_lines_and_caps_the_rows(talker, monkeypatch):
+    ft = _fast(talker)
+    _oom_past(monkeypatch, 2)
+    eng = _engine(ft, max_rows=8)
+    try:
+        hs = [eng.submit(lambda s=s: _req(ft, s, max_new=10), stream=False) for s in range(4)]
+        out = [h.result(timeout=60) for h in hs]  # the 3rd and 4th wait for a free row
+        assert all(len(o) == 9 * 3 for o in out)
+        assert not eng.failed and eng.talker.max_rows == 2
+    finally:
+        eng.close()
+
+
+def test_kv_growth_oom_fails_only_the_line_that_needed_it(talker, monkeypatch):
+    monkeypatch.setattr(batch, "CAPACITY", 8)
+    ft = _fast(talker)
+    real = batch._State
+
+    def state(ft_, like, n, capacity):
+        if capacity > 8:
+            raise OutOfMemoryError("CUDA out of memory (fake)")
+        return real(ft_, like, n, capacity)
+    monkeypatch.setattr(batch, "_State", state)
+    eng = _engine(ft, max_rows=2)
+    try:
+        long = eng.submit(lambda: _req(ft, 1, max_new=30, length=3), stream=False)
+        short = eng.submit(lambda: _req(ft, 2, max_new=3, length=3), stream=False)
+        assert len(short.result(timeout=60)) == 2 * 3
+        with pytest.raises(OutOfMemoryError):
+            long.result(timeout=60)
+        assert not eng.failed
+        after = eng.submit(lambda: _req(ft, 3, max_new=3, length=3), stream=False)
+        assert len(after.result(timeout=60)) == 2 * 3
+    finally:
+        eng.close()
+
+
+def test_other_frame_errors_still_turn_the_engine_off(talker, monkeypatch):
+    ft = _fast(talker)
+    eng = _engine(ft)
+    try:
+        monkeypatch.setattr(eng.talker, "frame", lambda: (_ for _ in ()).throw(ValueError("x")))
+        with pytest.raises(ValueError):
+            eng.submit(lambda: _req(ft, 1), stream=False).result(timeout=30)
+        assert eng.failed
+    finally:
+        eng.close()
+
+
+# -- warm-up ------------------------------------------------------------------------------
+
+
+def test_warm_allocates_the_rows_and_leaves_no_lines(talker):
+    ft = _fast(talker)
+    eng = _engine(ft, max_rows=8)
+    try:
+        eng.warm(5, prepare=lambda: _req(ft, 1, max_new=6))
+        assert eng.talker.st.rows == 8 and eng.talker.live == 0
+        assert {1, 2, 4, 8} <= eng.talker.buckets_used
+        h = eng.submit(lambda: _req(ft, 2, max_new=4), stream=False)
+        assert len(h.result(timeout=30)) == 3 * 3
     finally:
         eng.close()
 
@@ -439,3 +608,20 @@ def test_batch_capability_keys_are_hidden():
 
     assert classify("max_batch_size") == "hidden"
     assert classify("stream_lead_seconds") == "hidden"
+    assert classify("stream_buffer_seconds") == "hidden"
+    assert classify("warm_rows") == "hidden"
+
+
+def test_runtime_warms_and_passes_the_client_buffer(make):
+    m = make("clone", max_batch_size=8, warm_rows=3, stream_buffer_seconds=0.2)
+    try:
+        assert m._engine.talker.st.rows == 4 and m._engine.talker.live == 0
+        assert m._engine.buffer_seconds == 0.2
+        assert len(m.synthesize("A line of speech.").audio) > 0
+    finally:
+        m._engine.close()
+    cold = make("clone", max_batch_size=8)
+    try:
+        assert cold._engine.talker.st is None  # default: no warm-up, nothing allocated
+    finally:
+        cold._engine.close()

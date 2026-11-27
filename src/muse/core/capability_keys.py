@@ -41,6 +41,7 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "revision", "adapter_model_subdir", "base_model_revision", "base_model_subdir", "dtype",
     "mode", "default_instructions", "input_size", "format", "int8_weights",
     "stream_first_frames", "stream_chunk_frames", "max_batch_size", "stream_lead_seconds",
+    "stream_buffer_seconds", "warm_rows",
 })
 
 

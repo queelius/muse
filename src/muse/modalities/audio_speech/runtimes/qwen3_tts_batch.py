@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import queue
 import threading
 import time
@@ -50,6 +51,53 @@ CAPACITY = 512  # first KV capacity (tokens); doubles when a row needs more
 # unchanged), on the kept float weights when there are any.
 PREFILL_STEP = 32
 MAX_GRAPHS = 48
+# Deadline-driven chunks: a playing line's pending frames are sent once one
+# more frame plus a decode would not fit in its remaining audio (minus this);
+# its first chunk is sized so the second can be at least as long.
+SAFETY_SECONDS = 0.02
+FIRST_MARGIN = 1.5
+EMA = 0.2  # weight of the newest sample in the frame / decode time estimates
+
+
+def first_chunk_frames(frame_est: float, frame_seconds: float, first_frames: int,
+                       chunk_frames: int) -> int:
+    """A first chunk of c frames plays for c * T; the next one needs f per
+    frame to generate, so it can be as long as the first when
+    c >= f / (T - f). With FIRST_MARGIN, at least ``first_frames``, at most
+    ``chunk_frames`` (and the cap once the engine is slower than real time)."""
+    if frame_est >= frame_seconds:
+        return chunk_frames
+    need = math.ceil(FIRST_MARGIN * frame_est / (frame_seconds - frame_est) - 1e-9)
+    return max(first_frames, min(chunk_frames, need))
+
+
+def emission_due(*, pending: int, sent: bool, lead: float, first: int, chunk: int,
+                 frame_est: float, decode_est: float,
+                 safety: float = SAFETY_SECONDS) -> bool:
+    """Whether a streaming line should decode and send its pending frames now:
+    at ``chunk`` frames; before its first chunk, at ``first`` frames; after
+    it, when its audio ahead of playback (``lead``, client buffer included)
+    would not outlast one more frame plus a decode."""
+    if pending <= 0:
+        return False
+    if pending >= chunk:
+        return True
+    if not sent:
+        return pending >= first
+    return lead - safety < frame_est + decode_est
+
+
+class GrowthRefused(RuntimeError):
+    """Growing the decode state (``kind``: "rows" or "capacity") ran out of
+    memory; the state and its rows are unchanged."""
+
+    def __init__(self, kind: str, cause: BaseException) -> None:
+        super().__init__(f"Qwen3-TTS batched talker could not grow its {kind}: {cause}")
+        self.kind, self.cause = kind, cause
+
+
+def _is_oom(exc: BaseException) -> bool:
+    return type(exc).__name__ == "OutOfMemoryError"
 
 
 def bucket_for(rows: int) -> int:
@@ -444,7 +492,13 @@ class BatchedTalker:
             while capacity < need:
                 capacity *= 2
             self._drop_graphs()
-            self.st = _State(self.ft, like, 1, capacity)
+            try:
+                self.st = _State(self.ft, like, 1, capacity)
+            except Exception as exc:
+                if not _is_oom(exc):
+                    raise
+                self._empty_cache(like)
+                raise GrowthRefused("capacity", exc) from exc
             return self.st
         if st.capacity < need:
             capacity = st.capacity
@@ -461,8 +515,14 @@ class BatchedTalker:
         current one's contents. Graphs captured the old buffers: dropped."""
         old = self.st
         self._drop_graphs()
+        try:
+            new = _State(self.ft, old.trailing, rows, capacity)
+        except Exception as exc:
+            if not _is_oom(exc):
+                raise
+            self._empty_cache(old.trailing)
+            raise GrowthRefused("rows" if rows > old.rows else "capacity", exc) from exc
         self.st = None
-        new = _State(self.ft, old.trailing, rows, capacity)
         size, n = old.capacity, old.rows
         with self.torch.no_grad():
             for dst, src in zip(new.keys + new.values, old.keys + old.values):
@@ -479,6 +539,30 @@ class BatchedTalker:
     def _drop_graphs(self) -> None:
         self._graphs.clear()
         self._pool = None
+
+    def _empty_cache(self, like: Any) -> None:
+        if getattr(like, "is_cuda", False):
+            self.torch.cuda.empty_cache()
+
+    def warm(self, req: Any, rows: int, prefill_lengths: tuple = ()) -> None:
+        """Allocate the state for ``rows`` rows (its bucket) and capture the
+        frame graph of every bucket up to it, by joining ``req`` ``rows``
+        times; then capture the padded prefill for ``prefill_lengths``. Leaves
+        no rows. Only with no live rows."""
+        if self.rows:
+            raise RuntimeError("warm() needs an idle talker")
+        with self.torch.no_grad():
+            for _ in range(min(rows, self.max_rows)):
+                self.join(req)
+                self.frame()
+                self.frame()
+            while self.rows:
+                self.leave(len(self.rows) - 1)
+            for length in prefill_lengths:
+                key = ("prefill", length, req.inputs_embeds.dtype)
+                if self.padded_prefill and key not in self._graphs:
+                    self._ready(req.inputs_embeds, length)
+                    self._graphs[key] = self._prefill_entry(req.inputs_embeds, length)
 
     def reset(self) -> None:
         """Forget every row and graph (after a failure)."""
@@ -541,9 +625,10 @@ class _Line:
         self.request = request
         self.decoder = decoder
         self.frames: list = []
-        self.target = 0
+        self.first = 0           # frames in this line's first chunk (load-aware)
         self.audio_s = 0.0       # audio handed out so far
         self.first_at: float | None = None
+        self.error: BaseException | None = None
 
 
 class Engine:
@@ -556,7 +641,8 @@ class Engine:
     def __init__(self, ft: Any, *, decoder: Any, decode_whole: Callable[[Any, Any], Any],
                  torch: Any, max_rows: int, first_frames: int = 2, chunk_frames: int = 16,
                  lead_seconds: float | None = None, frame_seconds: float = 0.08,
-                 use_cuda_graphs: bool = False) -> None:
+                 use_cuda_graphs: bool = False, buffer_seconds: float = 0.0,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
         self.talker = BatchedTalker(ft, max_rows=max_rows, use_cuda_graphs=use_cuda_graphs)
         self.ft = ft
         self.torch = torch
@@ -565,6 +651,10 @@ class Engine:
         self.first_frames, self.chunk_frames = int(first_frames), int(chunk_frames)
         self.lead_seconds = lead_seconds
         self.frame_seconds = float(frame_seconds)
+        self.buffer_seconds = float(buffer_seconds)
+        self._clock = clock
+        self.frame_est = 0.0   # all-in seconds per loop frame (frame + takes), EMA
+        self.decode_est = 0.0  # seconds per chunk decode, EMA
         self.failed = False
         self.frames_run = 0
         self.prefill_seconds = 0.0  # host-measured prefill time (synced), for reports
@@ -610,6 +700,19 @@ class Engine:
             raise value
         return value
 
+    def warm(self, rows: int, prepare: Callable[[], Any],
+             prefill_lengths: tuple = (), timeout: float | None = None) -> None:
+        """Allocate ``rows`` rows and capture the frame graphs up to their
+        bucket (and the padded prefill for ``prefill_lengths``) now, instead of
+        on the first joins, which would stall live lines. ``prepare()`` gives
+        a representative request (sampling parameters key the graphs)."""
+        def work():
+            req = prepare()
+            if req is None:
+                raise EngineUnavailable("warm-up request not handled by the fast talker")
+            self.talker.warm(req, rows, prefill_lengths)
+        self.run_on_engine(work, timeout=timeout)
+
     def close(self) -> None:
         with self._cv:
             self._closed = True
@@ -646,15 +749,22 @@ class Engine:
                 if self._ahead():
                     self.stats["idle_s"] += time.perf_counter() - t0
                     continue
-                codes = self.talker.frame()
+                c0 = self._clock()
+                try:
+                    codes = self.talker.frame()
+                except GrowthRefused as refused:
+                    self._overflow(refused)
+                    continue
                 t1 = time.perf_counter()
                 self.frames_run += 1
                 self.stats["frames"] += 1
                 self.stats["row_frames"] += len(self._lines)
                 self.stats["frame_s"] += t1 - t0
+                rows = codes.clone()  # one copy for every row's frame
                 for r, line in enumerate(self._lines):
-                    self._take(line, codes[r:r + 1].clone())
+                    self._take(line, rows[r:r + 1])
                 self.stats["decode_s"] += time.perf_counter() - t1
+                self.frame_est += EMA * ((self._clock() - c0) - self.frame_est)
                 self._drop_finished()
             except Exception as exc:  # noqa: BLE001
                 if type(exc).__name__ == "OutOfMemoryError":
@@ -688,19 +798,42 @@ class Engine:
                     continue
             if not self.talker.accepts(req):
                 continue  # other parameters: waits for the live rows to drain
-            self._unqueue(handle)
             sync = getattr(self.torch, "cuda", None)
             on_cuda = getattr(req.inputs_embeds, "is_cuda", False)
             t0 = time.perf_counter()
-            self.talker.join(req)
+            try:
+                self.talker.join(req)
+            except GrowthRefused as refused:
+                if refused.kind == "rows" and self.talker.live:
+                    # no memory for more rows: cap here; the line waits for a free row
+                    self.talker.max_rows = self.talker.live
+                    logger.warning("Qwen3-TTS batched engine capped at %d rows (out of "
+                                   "memory growing the state)", self.talker.live)
+                    return
+                self._unqueue(handle)
+                handle._put(refused.cause)
+                continue
+            self._unqueue(handle)
             if on_cuda:
                 sync.synchronize()
             self.prefill_seconds += time.perf_counter() - t0
             self.stats["prefill_s"] += time.perf_counter() - t0
             dec = self.decoder.stream(req.ref_codes) if handle.stream else None
             line = _Line(handle, req, dec)
-            line.target = self.first_frames
+            line.first = first_chunk_frames(self.frame_est, self.frame_seconds,
+                                            self.first_frames, self.chunk_frames)
             self._lines.append(line)
+
+    def _overflow(self, refused: GrowthRefused) -> None:
+        """A live line needs more KV than memory allows: fail just the lines
+        at the end of the cache, keep the rest."""
+        talker = self.talker
+        logger.warning("Qwen3-TTS batched engine: out of memory growing the KV cache; "
+                       "failing the lines that need it", exc_info=refused.cause)
+        for r, line in enumerate(self._lines):
+            if talker.rows[r].pos >= talker.capacity:
+                line.error = refused.cause
+        self._drop_finished()
 
     def _unqueue(self, handle: Handle) -> None:
         with self._cv:
@@ -712,7 +845,7 @@ class Engine:
         ahead of its playback. Waits a little and returns True if so."""
         if self.lead_seconds is None:
             return False
-        now = time.perf_counter()
+        now = self._clock()
         leads = []
         for line in self._lines:
             if line.first_at is None or not line.handle.stream:
@@ -727,23 +860,34 @@ class Engine:
                 self._cv.wait(timeout=min(spare, 0.05))
         return True
 
+    def lead(self, line: _Line, now: float | None = None) -> float:
+        """Seconds of audio this line has handed out beyond its playback
+        position, client buffer included (0 before its first chunk)."""
+        if line.first_at is None:
+            return 0.0
+        now = self._clock() if now is None else now
+        return line.audio_s - (now - line.first_at) + self.buffer_seconds
+
     def _take(self, line: _Line, frame: Any) -> None:
         if line.handle.stream:
             line.decoder.push(frame)
-            if line.decoder.pending >= line.target:
+            if emission_due(pending=line.decoder.pending, sent=line.first_at is not None,
+                            lead=self.lead(line), first=line.first, chunk=self.chunk_frames,
+                            frame_est=self.frame_est, decode_est=self.decode_est):
                 self._emit(line)
         else:
             line.frames.append(frame)
 
     def _emit(self, line: _Line) -> None:
         frames = line.decoder.pending
+        c0 = self._clock()
         audio = line.decoder.decode()
+        self.decode_est += EMA * ((self._clock() - c0) - self.decode_est)
         if len(audio):
             if line.first_at is None:
-                line.first_at = time.perf_counter()
+                line.first_at = self._clock()
             line.audio_s += frames * self.frame_seconds
             line.handle._put(audio)
-        line.target = max(1, min(self.chunk_frames, 2 * line.target))
 
     def _drop_finished(self) -> None:
         talker = self.talker
@@ -751,10 +895,12 @@ class Engine:
         while r < len(self._lines):
             line = self._lines[r]
             cancelled = line.handle.cancelled.is_set()
-            if not (cancelled or talker.finished(r)):
+            if not (cancelled or line.error is not None or talker.finished(r)):
                 r += 1
                 continue
-            if not cancelled:
+            if line.error is not None:
+                line.handle._put(line.error)
+            elif not cancelled:
                 self._finish(line)
             elif line.handle.stream:
                 line.handle._put(_DONE)

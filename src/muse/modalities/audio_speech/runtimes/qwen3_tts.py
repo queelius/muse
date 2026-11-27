@@ -87,6 +87,9 @@ STREAM_CHUNK_FRAMES = 16
 # Batched engine (max_batch_size > 1): streams are paced to stay this far
 # ahead of their playback, so the GPU idles instead of racing ahead.
 STREAM_LEAD_SECONDS = 1.5
+# Padded prefill lengths captured by a warm-up (tokens, the batched prefill's step).
+WARM_PREFILL_LENGTHS = tuple(range(32, 257, 32))
+WARM_TEXT = "The lanterns stay lit until dawn."
 
 
 def _ensure_deps() -> None:
@@ -133,6 +136,8 @@ class Qwen3TTSRuntime:
         stream_chunk_frames: int = STREAM_CHUNK_FRAMES,
         max_batch_size: int = 1,
         stream_lead_seconds: float = STREAM_LEAD_SECONDS,
+        stream_buffer_seconds: float = 0.0,
+        warm_rows: int = 0,
         **_: Any,
     ) -> None:
         if mode not in ("design", "clone"):
@@ -203,8 +208,14 @@ class Qwen3TTSRuntime:
                 talker, decoder=self._split, decode_whole=self._decode_whole, torch=torch,
                 max_rows=max_batch_size, first_frames=self._schedule[0],
                 chunk_frames=self._schedule[1], lead_seconds=float(stream_lead_seconds),
-                use_cuda_graphs=graphs)
+                buffer_seconds=float(stream_buffer_seconds), use_cuda_graphs=graphs)
             self._inference_lock = threading.Semaphore(max_batch_size)
+            if int(warm_rows) > 0:
+                # Allocate the rows and capture the graphs now: on the first
+                # joins at each new bucket they would stall live lines.
+                self._engine.warm(int(warm_rows),
+                                  prepare=lambda: self._prepare(WARM_TEXT, None, None),
+                                  prefill_lengths=WARM_PREFILL_LENGTHS if graphs else ())
 
     # -- protocol ------------------------------------------------------------
 
