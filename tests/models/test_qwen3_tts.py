@@ -231,7 +231,8 @@ def test_clone_defaults_to_narrator_and_passes_tuple():
 def test_every_line_has_a_frame_limit_from_its_text(caplog):
     """A sampled line that never emits EOS would run to qwen-tts's 4096
     frames; the runtime caps each line at FRAMES_PER_CHAR * chars + slack
-    (measured: at most 1.06 frames a character over 96 takes)."""
+    (measured: at most 1.06 frames a character of English prose over 96
+    takes; digits, prices and dates up to 5.5)."""
     _design().synthesize("Hello there.")
     _clone().synthesize("The inn is warm.")
     (d,) = FakeQwenTTS.instances[0].named("design")
@@ -240,6 +241,9 @@ def test_every_line_has_a_frame_limit_from_its_text(caplog):
     assert c["max_new_tokens"] == rt.frame_limit("The inn is warm.")
     assert rt.frame_limit("x" * 10) == int(rt.FRAMES_PER_CHAR * 10) + rt.FRAME_SLACK
     assert rt.frame_limit("x" * 5000) == 4096  # qwen-tts's own ceiling
+    # text spoken longer than it is written (measured frames on the 0.6B)
+    assert rt.frame_limit("Dr. Smith paid £3,499.99 on 03/04/2025.") > 2 * 174
+    assert rt.frame_limit("1234567890") > 2 * 55
     FakeQwenTTS.output = np.zeros(1920 * rt.frame_limit("Hi.") - 1920, "float32")
     with caplog.at_level("WARNING"):
         _design().synthesize("Hi.")

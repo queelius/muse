@@ -91,8 +91,11 @@ STREAM_LEAD_SECONDS = 1.5
 # sampled line that never emits EOS would otherwise run to 4096 frames
 # (5.5 min) and, batched, grow every row's KV cache. Measured over 96 takes
 # (24 lines, 2 seeds, both models) and a 750-character paragraph: at most
-# 1.06 frames a character (short lines; 0.62-0.68 on the paragraph).
-FRAMES_PER_CHAR = 3.0
+# 1.06 frames a character of English prose (0.62-0.68 on the paragraph).
+# Text that is spoken longer than it is written needs far more: Chinese and
+# Japanese 2.3-2.5, a price and a date 4.5, a bare digit string 5.5 (0.6B,
+# 3 takes each); at 3 a character one such line in three was cut short.
+FRAMES_PER_CHAR = 10.0
 FRAME_SLACK = 40
 MAX_FRAMES = 4096
 

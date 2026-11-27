@@ -85,8 +85,9 @@ without it the first growth to each bucket recaptures graphs mid-stream
 memory while growing the state keeps the live lines (more rows: the engine
 caps itself there; more KV: only the line that needed it fails); any other
 engine failure makes the model serve one request at a time. On every path
-each line's frames are capped at 3 a character + 40 (at most qwen-tts's 4096;
-measured lines use at most 1.06 a character): a sampled line that never
+each line's frames are capped at 10 a character + 40 (at most qwen-tts's 4096;
+measured: English prose uses at most 1.06 a character, Chinese and Japanese
+2.5, digit strings 5.5): a sampled line that never
 emits EOS ends there with a warning instead of running for minutes. Measured
 capacity and costs: the streaming / batching plan. On CPU, with another
 qwen-tts or after the fast talker or the split decoder has failed (a failure
