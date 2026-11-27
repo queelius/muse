@@ -245,7 +245,7 @@ The 32.8 dB stream is the decoder's own floor on those codes (the per-stream dec
 
 ### Frames and VRAM
 
-Graphed frame GPU ms (per line) by bucket: 0.6B 7.01 (7.01), 12.19 (6.09), 19.01 (4.75), 21.39 (2.67), 27.19 (1.70), 40.69 (1.27); 1.7B 9.93, 15.99, 26.04, 28.54, 34.57, 48.27 (1.51 at 32). Decode state: 55 MB per row at 512 KV tokens (both models), 1.75 GiB at 32 rows. Buckets 2 and 4 are poor: the masked frame's torch ops (per-row RMSNorm and RoPE, K/V index_put, SDPA over the whole cache) cost ~5 ms over the one-row kernels.
+Graphed frame GPU ms (per line) by bucket: 0.6B 7.01 (7.01), 12.19 (6.09), 19.01 (4.75), 21.39 (2.67), 27.19 (1.70), 40.69 (1.27); 1.7B 9.93, 15.99, 26.04, 28.54, 34.57, 48.27 (1.51 at 32). Decode state: 55 MB per row at 512 KV tokens (both models), 1.75 GiB at 32 rows. Where a graphed frame's GPU time goes (torch.profiler over graph replays, 0.6B, stage 3, after narrow products moved back to the int8 GEMV): bucket 1 7.3 ms (int8 GEMV 6.0, norm / RoPE 0.6, attention 0.3, sampling 0.2); bucket 4 18.9 ms (GEMV 11.7, cuBLAS 4.3 for the predictor's 8-row first step, index / copy 1.1, elementwise 1.1, norm / RoPE 0.6); bucket 8 21.9 ms (cuBLAS 18.7, index / copy 1.3, elementwise 1.1); bucket 16 27.8 ms (cuBLAS 24.2, index / copy 1.4, elementwise 1.2). The frame is weight-bound: attention, sampling and torch-op overhead are under 3 ms at every bucket, and the engine's host work per frame (one clone, per-row slices, the stop-flag sync) is 65-125 us. Bucket 4 was 19.6 ms with all its products on float weights.
 
 ### Comparison A-D (in process, median of 5 runs, `max_batch_size` 32 for C / D)
 
@@ -272,37 +272,69 @@ First audio median / worst (ms), audio s per wall s, smallest chunk margin, peak
 | burst32 | | | 4711 / 8950, 24.3, 8.0 GiB | 969 / 1625, **-1702**, 8.0 GiB |
 | short among 3 long: short line's last audio | | 8053 | 940 (solo 427) | 1025 (solo 1292 paced) |
 
-Throughput (C) rises with the burst, 2.6x A's at 32 lines on the 0.6B and 3.6x on the 1.7B, at the same GPU ms per second of audio for a lone line. A lone streamed line starts in 52 ms (0.6B) / 62 ms (1.7B), from 87 / 91 in B, because the joining line's prefill is graphed. Bursts of 8 or more simultaneous streams go late at their start: every stream ramps its chunks (2, 4, 8 frames) at once and each chunk's conv stack is decoded separately (7-10 ms each, see step 5 below).
+Throughput (C) rises with the burst, 2.6x A's at 32 lines on the 0.6B and 3.6x on the 1.7B, at the same GPU ms per second of audio for a lone line. A lone streamed line starts in 52 ms (0.6B) / 62 ms (1.7B), from 87 / 91 in B, because the joining line's prefill is graphed. These D rows are stage 2's doubling schedule, under which bursts of 8 or more simultaneous streams went late at their start; the burst table was not re-run with stage 3's deadline-driven chunks (the HTTP check below covers one simultaneous start).
 
-### NPC capacity (0.6B, step 4)
+### NPC capacity (stage 3: deadline-driven chunks)
 
-N speakers, each saying one of the 24 lines (2.5-6.5 s) with 1-3 s pauses, starts staggered over 2 s, 20 s per run, all streamed. ok = every chunk after a line's first arrived before its playback time and the worst first audio < 1 s.
+Stage 2's doubling schedule (2, 4, 8, 16 frames) needs each next chunk generated within the playback of the one before, i.e. an all-in frame under 40 ms; it capped the 0.6B at 8 speakers. Stage 3 replaces it in the engine (`max_batch_size` > 1 only; `max_batch_size` 1 never builds the engine and is unchanged): a line's pending frames go out when one more frame plus a decode would no longer fit in its audio ahead of playback (`emission_due`: lead + `stream_buffer_seconds` - 30 ms safety < the slowest of the last 32 loop iterations + the decode estimate), or at `stream_chunk_frames` (16). The first chunk is `first_chunk_frames`: c1 >= 1.5 f / (80 ms - f) for the measured all-in frame time f, at least `stream_first_frames` (2), at most 16, so chunk sizes grow by themselves with the load. (A first version waited on the average iteration time and left lines 10-30 ms late at 8-16 speakers: iterations in which other lines decode are several times an idle one.)
 
-| N | B: first audio med / worst | B ok | D: first audio med / worst | D min margin | late lines | D busy ms per audio s (prefill / decode share) | mean live rows | ok |
-| ---: | --- | --- | --- | ---: | ---: | --- | ---: | --- |
-| 1 | 89 / 105 | yes | 49 / 53 | +120 | 0 | 111 (2% / 14%) | 1.0 | yes |
-| 2 | 89 / 353 | yes | 62 / 80 | +85 | 0 | 103 | 1.3 | yes |
-| 4 | 157 / 867 | yes | 63 / 93 | +55 | 0 | 98 | 1.9 | yes |
-| 8 | | | 82 / 141 | +5 | 0 | 82 (3% / 19%) | 3.4 | yes (barely) |
-| 12 | | | 95 / 187 | -58 | 9 / 69 | 68 (3% / 22%) | 5.0 | no |
-| 16 | | | 111 / 207 | -200 | 60 / 87 | 56 (4% / 27%) | 7.5 | no |
-| 24 | | | 166 / 313 | -1039 | 102 / 106 | 49 (5% / 34%) | 13.1 | no |
-| 32 | | | 232 / 391 | -1531 | 109 / 109 | 43 (6% / 38%) | 18.7 | no |
+Workload as in stage 2: N speakers, one of the 24 lines (2.5-6.5 s) each with 1-3 s pauses, starts staggered over 2 s, 20 s per N, all streamed, `warm_rows` 32. ok = no chunk after a line's first arrived after its playback time (the client buffer counted) and the worst first audio < 1 s. "voices" = mean live rows (lines speaking at once). Margin: smallest amount by which a chunk beat its playback time.
 
-A repeat of the 0.6B D run gave N = 8 at -3 ms (1 late line of 51): **capacity is 8 speakers, at the edge**. B passed at 4, the largest N measured for it, with first audio already waiting up to 0.9 s. 1.7B D: N = 4 ok (+16 ms), 8 not (-53 ms). VRAM at 32 speakers: 4.35 GiB peak on the 0.6B, 6.2 GiB on the 1.7B, about 55 MB per added row plus graph pools. Prefill is 2-6% of the engine's busy time (graphed); the decode share grows to 38% at 32 speakers, and the frames at 5-8 live rows cost 4-4.7 ms per line. Where the GPU goes at 12+ speakers: per line-frame, bucket 8 with 5 live rows is 4.3 ms (padding rows still compute), plus one conv-stack call per stream chunk.
+0.6B, client buffer 0 (`stream_buffer_seconds` 0):
 
-### Under contention (step 7)
+| N | voices | first audio med / worst (ms) | min margin | late lines | all-in ms / frame | ok |
+| ---: | ---: | --- | ---: | ---: | ---: | --- |
+| 1 | 1.0 | 53 / 151 | +50 | 0 / 4 | 8.6 | yes |
+| 8 | 3.4 | 86 / 353 | +25 | 0 / 50 | 21.0 | yes |
+| 12 | 5.1 | 126 / 698 | +27 | 0 / 69 | 25.4 | yes |
+| 16 | 7.1 | 251 / 810 | -3 | 1 / 86 | 29.7 | no (one line, 3 ms) |
+| 24 | 11.6 | 679 / 1213 | -8 | 1 / 110 | 39.1 | no |
+| 32 | 19.0 | 1634 / 4048 | -7267 | 37 / 79 | 96.9 | no (over real time) |
 
-The owner's NPC model (`borrowed-stars-npc-qwen3.5-0.8b-32k` Q4_K_M) on muse's own `llama-server` build (`~/.muse/bin/llama-server-b12728-cuda`, all layers on the GPU, port 8131, read-only use, started and stopped by the script) generating 200-token completions back to back; no MPS. (A first attempt through llama-cpp-python from another venv failed to load the GGUF, so that run had no contention; it is discarded.) The language model alone ran at ~370 tok/s and at a median 278 (min 43) tok/s while the TTS ran.
+0.6B, client buffer 200 ms:
 
-| N (0.6B, D) | first audio med / worst | min margin | late lines | ok |
-| ---: | --- | ---: | ---: | --- |
-| 1 | 55 / 61 | +101 | 0 | yes |
-| 4 | 69 / 133 | +21 | 0 | yes |
-| 8 | 114 / 188 | -103 | 18 / 46 | no |
-| 12 | 138 / 191 | -469 | 45 / 58 | no |
+| N | voices | first audio med / worst (ms) | min margin | late lines | all-in ms / frame | ok |
+| ---: | ---: | --- | ---: | ---: | ---: | --- |
+| 8 | 3.3 | 82 / 250 | +36 | 0 / 50 | 19.9 | yes |
+| 12 | 4.9 | 119 / 612 | +30 | 0 / 71 | 24.4 | yes |
+| 16 | 7.2 | 185 / 714 | +7 | 0 / 87 | 29.8 | yes |
+| 24 | 11.5 | 752 / 1148 | +29 | 0 / 110 | 38.2 | first audio only (1.15 s) |
+| 32 | 17.7 | 1110 / 1457 | +1 | 0 / 125 | 52.2 | first audio only (1.46 s) |
 
-Capacity with a language model generating beside it: **4 speakers** (8 alone).
+**0.6B capacity: 12 speakers (5 voices) with no client buffer, 16 (7 voices) with 200 ms; with 200 ms no line is late up to 32 speakers (18 voices), where first audio reaches 1.1-1.5 s.** Stage 2: 8 speakers. One client: 53 ms first audio (stage 2: 52).
+
+1.7B (a muse-local worker for the 0.6B was resident on the GPU during these runs, idle as far as I can tell):
+
+| N | buffer 0: voices, first audio med / worst, margin, late | buffer 200 ms: same |
+| ---: | --- | --- |
+| 1 | 1.0, 64 / 76, +57, 0 | |
+| 8 | 4.2, 131 / 350, +17, 0 | 4.1, 192 / 452, +29, 0 |
+| 12 | 5.8, 227 / 809, +13, 0 | 6.0, 251 / 849, +1, 0 |
+| 16 | 8.8, 361 / 904, +9, 0 | 8.8, 771 / 1015, -16, 1 |
+| 24 | 14.5, 1147 / 3361, -4736, 25 | 13.6, 1021 / 1467, -41, 1 |
+
+**1.7B capacity: 16 speakers (9 voices) with no buffer.** The 200 ms run was worse at 16 (one line 16 ms late), within run-to-run variation.
+
+All-in frame time (engine loop: frame, per-row takes, the chunk decodes due) sets the ceiling: it must stay under 80 ms. 0.6B: 8.6 ms alone, 21 ms at 3.4 voices, 30 at 7, 39 at 12, 52-97 at 18-19.
+
+**Growth hiccups and warm-up.** A long streamed line plays while 8 more join one per second. Without warm-up the first growth to 2 and to 4 rows (state rebuilt, graphs recaptured) made the playing line 256 ms and 188 ms late; with `warm_rows` 16 no line was late at any join. VRAM after load: 2.51 GiB (no warm-up), 3.12 GiB (8 rows), 3.56 GiB (16 rows). With `warm_rows` 8, the join to 2 rows was still 44 ms late once (not explained).
+
+**Runaway lines.** Twice in these runs a sampled line did not stop (qwen-tts's `max_new_tokens` is 4096 frames) and pushed one row past 512 KV tokens; growing all 32 rows to 1024 needed ~3.5 GiB more and ran out of memory. The new handling held (only that line failed; the engine kept serving), but the attempt stalls every stream for the rebuild. Those runs are excluded above. A per-line frame limit derived from the text length would avoid it; not built.
+
+**HTTP.** An in-process app (muse's speech router) on a free port, `max_batch_size` 16, `warm_rows` 16. 8 streaming + 8 non-streaming clients + 1 that disconnects after its first chunk, all started together: every request completed with the right lengths, the dropped client's row was freed (0 live rows after, engine not failed), but 17 lines starting at the same instant are over capacity at zero buffer: streams' first audio 522 / 644 ms, min margin -3.3 s, whole lines 5.8 / 8.9 s. 4 + 4 + 1: first audio 238 / 254 ms, min margin -234 ms, whole lines 2.9 / 3.1 s (another GPU process appeared during that run; possibly contaminated). Simultaneous starts are the weak case: the first chunk is sized from the frame time measured before the burst arrives. In the staggered NPC workload this does not arise.
+
+**Under contention, no MPS** (the owner's NPC GGUF on `llama-server`, 200-token completions back to back; buffer 0):
+
+| N | voices | first audio med / worst | min margin | late lines | ok |
+| ---: | ---: | --- | ---: | ---: | --- |
+| 4 | 1.9 | 81 / 187 | +31 | 0 / 22 | yes |
+| 8 | 3.9 | 157 / 613 | +17 | 0 / 45 | yes |
+| 12 | 5.8 | 350 / 880 | +13 | 0 / 61 | yes |
+| 16 | 8.5 | 750 / 1290 | +9 | 0 / 71 | first audio only |
+
+The language model ran at 370 tok/s alone and a median 286 (min 45) tok/s during these runs. A second run of the same sweep gave N = 16 with 15 late lines (one line went to 2.4 s first audio), so treat 12 as the capacity beside the language model (stage 2: 4).
+
+**MPS: not measured.** `nvidia-cuda-mps-control -d` with a private `CUDA_MPS_PIPE_DIRECTORY` / `CUDA_MPS_LOG_DIRECTORY` under the scratchpad, as the normal user, compute mode Default (driver 580.178.04, kernel 6.17.0-35), exited with a failure status and no message; it created empty `control.log` / `server.log` and no control pipe, and left no `nvidia-cuda-mps-*` process. As instructed, I stopped there and did not try other ways to start it.
 
 ### Experiment log (stage 2)
 
@@ -313,8 +345,10 @@ Capacity with a language model generating beside it: **4 speakers** (8 alone).
 | the same on int8 only (`max_batch_size` 2) | 12.3 ms | (the path used at 2) |
 | `INT8_MAX_ROWS` 4 instead of 2 | not tried: at 4 rows the predictor's first step has 8 positions, past the GEMV's 4-row limit, which falls back to dequantize + cuBLAS (the slowest path measured) | |
 
-### Not done in this stage
+### Not done
 
-- **Step 5, decoding the due streams together, was not built.** Streams are paced (step 5's second half is done: `stream_lead_seconds`), but each stream's chunks are still decoded on their own. At 12 or more speakers decode is 22-38% of the engine's time, and simultaneous starts overload it: every new stream wants 2-, 4- and 8-frame chunks whose conv stacks cost 7-10 ms each regardless of width. Batching the conv stack over the streams that are due (measured in stage 1: 13.6 ms for one 24-frame window, 45 ms for four, 168 ms for sixteen, so the saving is in the small first chunks and the per-call fixed cost) and staggering the ramp are the next levers.
-- **The masked frame for 2-8 rows** costs ~5 ms more than the one-row kernels (per-row torch RMSNorm, RoPE and K/V writes, SDPA over the whole cache). Batched Triton versions of `rms_norm_rope`, `norm_rope_store` and `decode_attention` (per-row positions) would cut bucket 2-8 frames, where a crowded scene spends most of its time (5-8 live rows at 12-16 speakers).
-- The RNG offset from graph capture (above) is not fixed.
+- **Batched decode of the due chunks** (decoding several streams' conv stacks in one call). The conv stack is close to linear in streams (stage 1: 13.6 ms for one 24-frame window, 45 ms for four, 168 ms for sixteen), and with deadline-driven chunks most chunks are long, so the per-call saving is small; decode is 13-28% of the engine's time up to 12 voices. Not built.
+- **Frames for a subset of rows** (a narrow frame for the rows behind while the rest are ahead). Feasible in principle: the graphs already run rows [0, k) of a state whose live rows are compacted to the front, so a "behind" subset would have to be packed to the front (row swaps cost one K/V copy per layer, ~29 MB a row at 512 tokens) or the frame given a per-row active mask (every state update - KV write, position, text cursor, repetition set - would need gating, and the frame would still cost its full bucket). The gain is for a line joining a busy engine; with prefill at 8 ms and the first chunk sized to the load, I don't think it pays.
+- **The KV cache grows for all rows together**, so one runaway line costs every row 2x the KV (see above); a per-line frame limit is the simple fix.
+- **The first chunk under a burst** is sized from the frame time measured before the burst; predicting it from the rows about to join would make simultaneous starts safe.
+- The RNG offset from graph capture (stage 1 review follow-ups) is not fixed.

@@ -65,10 +65,23 @@ model until it ends, unless the hidden capability `max_batch_size` is above 1
 (default 1, today's path): then one engine thread
 (`audio_speech/runtimes/qwen3_tts_batch.py`) shares each 12 Hz frame among up
 to that many requests (lines join at a frame boundary and leave at their own
-EOS; wide frames read float layer weights kept beside the int8), paces
-streams to `stream_lead_seconds` (1.5) ahead of playback, and the route's lock
-admits that many requests; after an engine failure the model serves one at a
-time. Measured capacity and costs: the streaming / batching plan. On CPU, with another
+EOS; products of more than 4 rows read float layer weights kept beside the
+int8), paces streams to `stream_lead_seconds` (1.5) ahead of playback, and the
+route's lock admits that many requests. There a stream's chunks are
+deadline-driven instead of the doubling schedule: a line's pending frames go
+out when one more frame plus a decode would no longer fit in its audio ahead
+of playback (plus the hidden `stream_buffer_seconds`, the client's jitter
+buffer, default 0), or at `stream_chunk_frames`; its first chunk grows with
+the engine's measured frame time so the second can be as long. Whole lines
+decode chunk by chunk as they generate. `warm_rows` (hidden, default 0)
+allocates that many rows and captures their frame graphs and the padded
+prefill lengths at load (0.6B: 2.5 -> 3.1 GiB at 8 rows, 3.6 GiB at 16);
+without it the first growth to each bucket recaptures graphs mid-stream
+(measured: up to 256 ms late on lines already playing). Running out of
+memory while growing the state keeps the live lines (more rows: the engine
+caps itself there; more KV: only the line that needed it fails); any other
+engine failure makes the model serve one request at a time. Measured
+capacity and costs: the streaming / batching plan. On CPU, with another
 qwen-tts or after the fast talker or the split decoder has failed (a failure
 before the first chunk falls back for that request) a stream is one chunk.
 On CUDA both load

@@ -258,7 +258,7 @@ def test_engine_streams_and_finishes_many_requests_like_solo_runs(talker):
     reqs = [_req(ft, s, max_new=m) for s, m in specs]
     with torch.no_grad():
         want = [np.repeat([float(c[0, 0]) for c in _solo(ft, r)], 3) for r in reqs]
-    eng = _engine(ft)
+    eng = _engine(ft, clock=lambda: 0.0)  # a frozen clock: no load, deterministic chunks
     try:
         handles = [eng.submit(lambda r=r: r, stream=(i % 2 == 0)) for i, r in enumerate(reqs)]
         for i, h in enumerate(handles):
